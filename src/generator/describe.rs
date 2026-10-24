@@ -238,6 +238,23 @@ fn not_null<DB: DatabaseLike>(table: &TableId, column: &ColumnName, db: &DB) -> 
     Guard::NotNull(column_read(table, column, db))
 }
 
+/// Guards `column` against NULL and carries it into the record context under `key`.
+fn carry_context_column<DB: DatabaseLike>(
+    table: &TableId,
+    column: &ColumnName,
+    key: &str,
+    db: &DB,
+    guards: &mut Vec<Guard>,
+    entries: &mut Vec<RecordContextEntry>,
+) {
+    guards.push(not_null(table, column, db));
+    entries.push(RecordContextEntry {
+        key: key.to_string(),
+        value: value_column(table, column, db),
+        rendering: ContextRendering::Json,
+    });
+}
+
 fn is_true<DB: DatabaseLike>(table: &TableId, column: &ColumnName, db: &DB) -> Guard {
     Guard::IsTrue(column_read(table, column, db))
 }
@@ -478,12 +495,14 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             );
             let mut entries = Vec::with_capacity(gate.context.len());
             for column in &gate.context {
-                guards.push(not_null(join_table, &column.column, db));
-                entries.push(RecordContextEntry {
-                    key: column.parameter.clone(),
-                    value: value_column(join_table, &column.column, db),
-                    rendering: ContextRendering::Json,
-                });
+                carry_context_column(
+                    join_table,
+                    &column.column,
+                    &column.parameter,
+                    db,
+                    &mut guards,
+                    &mut entries,
+                );
             }
             Some(described(
                 join_table,
@@ -799,12 +818,14 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                         .filter_map(|guard| guard_from_residual(join_table, guard, db)),
                 );
                 for gate in temporal_context {
-                    guards.push(not_null(join_table, &gate.column, db));
-                    entries.push(RecordContextEntry {
-                        key: gate.parameter.clone(),
-                        value: value_column(join_table, &gate.column, db),
-                        rendering: ContextRendering::Json,
-                    });
+                    carry_context_column(
+                        join_table,
+                        &gate.column,
+                        &gate.parameter,
+                        db,
+                        &mut guards,
+                        &mut entries,
+                    );
                 }
             }
             Some(described(
@@ -845,12 +866,14 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             );
             let mut entries = Vec::with_capacity(context.len());
             for gate in context {
-                guards.push(not_null(join_table, &gate.column, db));
-                entries.push(RecordContextEntry {
-                    key: gate.parameter.clone(),
-                    value: value_column(join_table, &gate.column, db),
-                    rendering: ContextRendering::Json,
-                });
+                carry_context_column(
+                    join_table,
+                    &gate.column,
+                    &gate.parameter,
+                    db,
+                    &mut guards,
+                    &mut entries,
+                );
             }
             Some(described(
                 join_table,
@@ -1026,12 +1049,14 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             );
             let mut entries = Vec::with_capacity(gate.context.len());
             for column in &gate.context {
-                guards.push(not_null(member_table, &column.column, db));
-                entries.push(RecordContextEntry {
-                    key: column.parameter.clone(),
-                    value: value_column(member_table, &column.column, db),
-                    rendering: ContextRendering::Json,
-                });
+                carry_context_column(
+                    member_table,
+                    &column.column,
+                    &column.parameter,
+                    db,
+                    &mut guards,
+                    &mut entries,
+                );
             }
             Some(described(
                 member_table,

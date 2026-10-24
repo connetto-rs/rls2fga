@@ -414,16 +414,19 @@ impl TryFrom<String> for RelationName {
     type Error = RelationNameError;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
-        if name.is_empty() {
-            return Err(RelationNameError::Empty);
-        }
-        if name.len() > MAX_MODEL_NAME_LEN {
-            return Err(RelationNameError::TooLong { name });
-        }
-        if !is_model_name(&name) {
-            return Err(RelationNameError::Invalid { name });
-        }
-        Ok(Self(name))
+        validated_model_name(name).map(Self)
+    }
+}
+
+impl ModelNameRefusal for RelationNameError {
+    const EMPTY: Self = Self::Empty;
+
+    fn too_long(name: String) -> Self {
+        Self::TooLong { name }
+    }
+
+    fn invalid(name: String) -> Self {
+        Self::Invalid { name }
     }
 }
 
@@ -474,16 +477,19 @@ impl TryFrom<String> for ConditionName {
     type Error = ConditionNameError;
 
     fn try_from(name: String) -> Result<Self, Self::Error> {
-        if name.is_empty() {
-            return Err(ConditionNameError::Empty);
-        }
-        if name.len() > MAX_MODEL_NAME_LEN {
-            return Err(ConditionNameError::TooLong { name });
-        }
-        if !is_model_name(&name) {
-            return Err(ConditionNameError::Invalid { name });
-        }
-        Ok(Self(name))
+        validated_model_name(name).map(Self)
+    }
+}
+
+impl ModelNameRefusal for ConditionNameError {
+    const EMPTY: Self = Self::Empty;
+
+    fn too_long(name: String) -> Self {
+        Self::TooLong { name }
+    }
+
+    fn invalid(name: String) -> Self {
+        Self::Invalid { name }
     }
 }
 
@@ -528,6 +534,28 @@ fn clamped_model_name(original: &str, fallback: &str) -> String {
 fn is_model_name(name: &str) -> bool {
     name.chars()
         .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+}
+
+/// The refusals a relation or condition name error carries, one per way a name can fail
+/// [`validated_model_name`].
+trait ModelNameRefusal {
+    const EMPTY: Self;
+    fn too_long(name: String) -> Self;
+    fn invalid(name: String) -> Self;
+}
+
+/// `name` when `OpenFGA` accepts it as a relation or condition name.
+fn validated_model_name<E: ModelNameRefusal>(name: String) -> Result<String, E> {
+    if name.is_empty() {
+        return Err(E::EMPTY);
+    }
+    if name.len() > MAX_MODEL_NAME_LEN {
+        return Err(E::too_long(name));
+    }
+    if !is_model_name(&name) {
+        return Err(E::invalid(name));
+    }
+    Ok(name)
 }
 
 /// A condition parameter that can be referenced by a `CEL` expression.

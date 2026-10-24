@@ -14,8 +14,8 @@ use rls2fga::types::ConfidenceLevel;
 mod support;
 
 use support::footgun::{
-    assert_model_is_internally_consistent, db_of, is_structural_type, relation_definition,
-    relation_definitions, translator, tuples_reading_from, type_names,
+    assert_model_is_internally_consistent, db_of, docs_read_definition, is_structural_type,
+    relation_definition, relation_definitions, translator, tuples_reading_from, type_names,
 };
 
 const COLLIDING_SCHEMAS: &str = r"
@@ -203,14 +203,7 @@ fn policies_compose_however_each_one_spells_the_table() {
                USING (reviewer_id = current_user);\n"
         )
     };
-    let read_of = |restrictive_on: &str| {
-        let dsl = translator(ConfidenceLevel::A)
-            .translate(&db_of(&schema(restrictive_on)))
-            .expect("translation should plan")
-            .outputs_accepting_gaps()
-            .model();
-        relation_definition(&dsl, "docs", "can_select")
-    };
+    let read_of = |restrictive_on: &str| docs_read_definition(&schema(restrictive_on));
 
     assert_eq!(
         read_of("docs").as_deref(),

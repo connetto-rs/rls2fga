@@ -9,15 +9,15 @@ use core::time::Duration;
 
 use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::TranslatorBuilder;
-use rls2fga::types::{
-    records_from_row, ActionStatement, ConfidenceLevel, RequestComparison, RequestPredicate,
-    RowDecision,
-};
+use rls2fga::types::{records_from_row, ActionStatement, ConfidenceLevel, RowDecision};
 
 mod support;
 
 use support::footgun::{db_of, gated_tables};
-use support::parity::{assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal};
+use support::parity::{
+    assert_agrees, assert_postgres, request_predicate_holds, Cluster, Mutations, ParityCase,
+    Principal,
+};
 use support::JsonRowValues;
 
 const ATTRIBUTES: &str = r#"[
@@ -122,29 +122,9 @@ fn recipe_allows(
                         .expect("the link resolves from the row")
                         .is_empty()
                 })
-                && predicate_holds(predicate, context)
+                && request_predicate_holds(predicate, context)
         }
         other => panic!("a recipe shape this gate does not produce: {other:?}"),
-    }
-}
-
-fn predicate_holds(predicate: &RequestPredicate, context: &serde_json::Value) -> bool {
-    match predicate {
-        RequestPredicate::Holds(atom) => {
-            let supplied = &context[atom.request_parameter.as_str()];
-            match atom.comparison {
-                RequestComparison::CallerSetHolds => supplied
-                    .as_array()
-                    .is_some_and(|set| set.iter().any(|entry| entry == atom.value.as_str())),
-                RequestComparison::CallerValueEquals => supplied == atom.value.as_str(),
-            }
-        }
-        RequestPredicate::Any(children) => {
-            children.iter().any(|child| predicate_holds(child, context))
-        }
-        RequestPredicate::All(children) => {
-            children.iter().all(|child| predicate_holds(child, context))
-        }
     }
 }
 

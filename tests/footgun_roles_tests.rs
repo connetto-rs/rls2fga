@@ -442,6 +442,20 @@ fn a_role_that_bypasses_row_level_security_is_reported() {
     );
 }
 
+/// The messages of the exemption notes translating `sql` produces.
+fn exempt_notes(sql: &str) -> Vec<String> {
+    let db = db_of(sql);
+    translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .notes()
+        .iter()
+        .filter(|note| note.severity() == NoteSeverity::Exempt)
+        .map(TranslationNote::message)
+        .collect()
+}
+
 /// Without `FORCE ROW LEVEL SECURITY` the table's owner is exempt from every policy on
 /// it, so the model is stricter than the database for them. With it, nobody is.
 #[test]
@@ -454,19 +468,6 @@ fn a_table_that_does_not_force_row_level_security_is_reported() {
              CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n"
         )
     };
-    let exempt_notes = |sql: &str| -> Vec<String> {
-        let db = db_of(sql);
-        translator(ConfidenceLevel::B)
-            .translate(&db)
-            .expect("translation should plan")
-            .outputs_accepting_gaps()
-            .notes()
-            .iter()
-            .filter(|note| note.severity() == NoteSeverity::Exempt)
-            .map(TranslationNote::message)
-            .collect()
-    };
-
     let unforced = exempt_notes(&schema(""));
     assert_eq!(
         unforced.len(),
@@ -498,19 +499,6 @@ fn the_exempt_table_owner_is_named_when_the_schema_says_who_it_is() {
     let unowned = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                    ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                    CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n";
-    let exempt_notes = |sql: &str| -> Vec<String> {
-        let db = db_of(sql);
-        translator(ConfidenceLevel::B)
-            .translate(&db)
-            .expect("translation should plan")
-            .outputs_accepting_gaps()
-            .notes()
-            .iter()
-            .filter(|note| note.severity() == NoteSeverity::Exempt)
-            .map(TranslationNote::message)
-            .collect()
-    };
-
     let named = exempt_notes(owned);
     assert_eq!(named.len(), 1, "one table, one owner bypass: {named:?}");
     assert!(

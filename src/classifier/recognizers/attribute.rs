@@ -536,6 +536,18 @@ fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
     }
 }
 
+/// The non-user column one operand names when the other is a literal or temporal value,
+/// trying `left` as the column first.
+fn attribute_beside_value(left: &Expr, right: &Expr) -> Option<ColumnName> {
+    [(left, right), (right, left)]
+        .into_iter()
+        .find_map(|(column, value)| {
+            extract_column_name(column).filter(|col| {
+                is_literal_or_temporal(value) && !is_user_related_column_name(col.as_str())
+            })
+        })
+}
+
 /// Column name compared in a non-user attribute guard, if `expr` is one.
 pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     // A dump parenthesizes every conjunct, and the parentheses are not part
@@ -551,15 +563,8 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
                 | BinaryOperator::Gt
                 | BinaryOperator::Lt
         ) {
-            if let Some(col) = extract_column_name(left) {
-                if is_literal_or_temporal(right) && !is_user_related_column_name(col.as_str()) {
-                    return Some(col);
-                }
-            }
-            if let Some(col) = extract_column_name(right) {
-                if is_literal_or_temporal(left) && !is_user_related_column_name(col.as_str()) {
-                    return Some(col);
-                }
+            if let Some(col) = attribute_beside_value(left, right) {
+                return Some(col);
             }
         }
     }
@@ -575,15 +580,8 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     }
     // `col IS NOT DISTINCT FROM value` / `col IS DISTINCT FROM value`
     if let Expr::IsNotDistinctFrom(left, right) | Expr::IsDistinctFrom(left, right) = expr {
-        if let Some(col) = extract_column_name(left) {
-            if is_literal_or_temporal(right) && !is_user_related_column_name(col.as_str()) {
-                return Some(col);
-            }
-        }
-        if let Some(col) = extract_column_name(right) {
-            if is_literal_or_temporal(left) && !is_user_related_column_name(col.as_str()) {
-                return Some(col);
-            }
+        if let Some(col) = attribute_beside_value(left, right) {
+            return Some(col);
         }
     }
     // `col BETWEEN low AND high` (non-negated, both bounds literal or temporal).
