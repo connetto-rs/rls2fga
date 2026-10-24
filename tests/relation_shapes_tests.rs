@@ -2027,7 +2027,7 @@ CREATE FUNCTION auth_current_user_id() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.current_user_id'')';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT
-    USING (owner_id = auth_current_user_id() AND status IN ('open', 'draft'));
+    USING (owner_id = auth_current_user_id() AND status LIKE 'open%');
 ";
 
 /// Phase 1, test 1. A permissive arm the threshold dropped makes the emitted

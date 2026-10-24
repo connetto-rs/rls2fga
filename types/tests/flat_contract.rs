@@ -1,13 +1,13 @@
 use rls2fga_types::{
     records_from_row, ActionAnswer, ActionJudgement, ActionRelations, ActionStatement,
-    AttributeLiteral, AttributeOperator, AttributePredicate, BoundQuery, BoundQueryError,
-    ColumnKind, ColumnName, ColumnRead, ConditionParameterName, ConditionParameterNameError,
-    ConfidenceLevel, ContextRendering, ContextWitness, Guard, NoteSeverity, ObjectKey, Record,
-    RecordContext, RecordContextEntry, RecordContextValue, RecordDerivation, RecordDescription,
-    RecordError, RecordTemplate, RelationName, RelationNameError, RelationShapes, ReplayScope,
-    RequestComparison, RolePrivilege, RowCell, RowDecision, RowList, RowNaming, RowValues,
-    RowVersion, SubjectKey, TableId, TableRef, TranslationNote, TypeName, TypeNameError,
-    UnrestrictedTable, ValueSource,
+    AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, BoundQuery,
+    BoundQueryError, ColumnKind, ColumnName, ColumnRead, ConditionParameterName,
+    ConditionParameterNameError, ConfidenceLevel, ContextRendering, ContextWitness, Guard,
+    NoteSeverity, ObjectKey, Record, RecordContext, RecordContextEntry, RecordContextValue,
+    RecordDerivation, RecordDescription, RecordError, RecordTemplate, RelationName,
+    RelationNameError, RelationShapes, ReplayScope, RequestComparison, RolePrivilege, RowCell,
+    RowDecision, RowList, RowNaming, RowValues, RowVersion, SubjectKey, TableId, TableRef,
+    TranslationNote, TypeName, TypeNameError, UnrestrictedTable, ValueSource,
 };
 
 struct EmptyRow;
@@ -37,6 +37,7 @@ fn every_contract_is_flat() {
     assert_type::<AttributeLiteral>();
     assert_type::<AttributeOperator>();
     assert_type::<AttributePredicate>();
+    assert_type::<AttributeTest>();
     assert_type::<BoundQuery>();
     assert_type::<BoundQueryError>();
     assert_type::<ColumnKind>();

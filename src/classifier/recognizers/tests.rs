@@ -4432,6 +4432,34 @@ fn residual_predicate_keeps_a_literal_conjunct_as_a_row_guard() {
 }
 
 #[test]
+fn residual_predicate_keeps_a_literal_list_as_a_row_guard() {
+    let conjunct = residual_predicate(&parse_expr("role IN ('editor', 'admin')"));
+    let Some(ResidualGuard::Compare(predicate)) = conjunct.guard else {
+        panic!("a literal list is row data, got {:?}", conjunct.guard);
+    };
+    assert_eq!(
+        predicate.test,
+        AttributeTest::In(vec![
+            AttributeLiteral::Text("admin".to_string()),
+            AttributeLiteral::Text("editor".to_string()),
+        ])
+    );
+}
+
+#[test]
+fn a_list_no_gate_may_carry_yields_no_literal_predicate() {
+    for sql in [
+        "owner_id IN ('alice', 'bob')",
+        "status = ANY (ARRAY[]::text[])",
+    ] {
+        assert!(
+            attribute_literal_predicate(&parse_expr(sql)).is_none(),
+            "`{sql}`"
+        );
+    }
+}
+
+#[test]
 fn residual_predicates_split_requests_from_the_where_they_leave_behind() {
     let residual = ResidualPredicates::new(vec![
         residual_predicate(&parse_expr("role = 'admin'")),

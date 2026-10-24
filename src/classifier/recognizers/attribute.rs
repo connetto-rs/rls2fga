@@ -175,7 +175,7 @@ fn cel_duration(seconds: i64) -> String {
     }
 }
 
-/// The guard as structure, but only when the compared value is a literal constant.
+/// The guard as structure, but only when every compared value is a literal constant.
 ///
 /// [`is_attribute_check`] deliberately also accepts a well-known temporal function,
 /// so `expires_at > now()` is an attribute guard too. That one is not decided by the
@@ -183,7 +183,11 @@ fn cel_duration(seconds: i64) -> String {
 /// So this returns `None` for it, and only a literal constant reaches the emission
 /// that turns a guard into tuples.
 pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
-    let Expr::BinaryOp { left, op, right } = unparenthesize(expr) else {
+    let expr = unparenthesize(expr);
+    if let Some((column, list)) = constant_in_list(expr) {
+        return literal_list_predicate(column, list);
+    }
+    let Expr::BinaryOp { left, op, right } = expr else {
         return None;
     };
     let operator = attribute_operator(op)?;
@@ -194,8 +198,7 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
             if !is_user_related_column_name(column.as_str()) {
                 return Some(AttributePredicate {
                     column,
-                    operator,
-                    value,
+                    test: AttributeTest::Compare { operator, value },
                 });
             }
         }
@@ -207,9 +210,35 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     }
     Some(AttributePredicate {
         column,
-        operator: mirrored(operator),
-        value,
+        test: AttributeTest::Compare {
+            operator: mirrored(operator),
+            value,
+        },
     })
+}
+
+/// A literal list in one spelling per set of values: sorted, without repeats, and a
+/// single value as the equality it means, so every spelling of one guard mints one gate.
+fn literal_list_predicate(column: &Expr, list: &[Expr]) -> Option<AttributePredicate> {
+    let column = extract_column_name(column)?;
+    if is_user_related_column_name(column.as_str()) {
+        return None;
+    }
+    let mut values = list
+        .iter()
+        .map(attribute_literal)
+        .collect::<Option<Vec<_>>>()?;
+    values.sort();
+    values.dedup();
+    let test = match <[AttributeLiteral; 1]>::try_from(values) {
+        Ok([value]) => AttributeTest::Compare {
+            operator: AttributeOperator::Eq,
+            value,
+        },
+        Err(values) if !values.is_empty() => AttributeTest::In(values),
+        Err(_) => return None,
+    };
+    Some(AttributePredicate { column, test })
 }
 
 /// The residual conjunct paired with its structure, where a row image alone

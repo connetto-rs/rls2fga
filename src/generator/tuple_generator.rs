@@ -1,4 +1,4 @@
-use crate::classifier::patterns::AttributeLiteral;
+use crate::classifier::patterns::{AttributeLiteral, AttributeTest};
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 
@@ -1519,19 +1519,15 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             let (table_sql, object_sql, key_not_null) =
                 owner_object_sql(owner_type, table, identity_cols, only_own_rows, names);
             let column_sql = quote_sql_identifier(predicate.column.as_str());
-            let operator = predicate.operator.sql();
-            let value_sql = render_attribute_literal(&predicate.value)?;
+            let test_sql = render_attribute_test(&predicate.test)?;
             Some(TupleQuery {
-                comment: format!(
-                    "-- Attribute gate ({} {operator} {value_sql})",
-                    predicate.column
-                ),
+                comment: format!("-- Attribute gate ({} {test_sql})", predicate.column),
                 sql: format!(
                     "SELECT {object_sql} AS object, '{relation}' AS relation, \
                      {wildcard_subject} AS subject\n\
                      FROM {table_sql}\n\
                      WHERE {key_not_null}\n\
-                     AND {column_sql} {operator} {value_sql};"
+                     AND {column_sql} {test_sql};"
                 ),
                 description: None,
                 condition: None,
@@ -1768,6 +1764,25 @@ fn quote_sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
+/// SQL spelling of what an attribute guard asks of its column, after the column.
+pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
+    match test {
+        AttributeTest::Compare { operator, value } => Some(format!(
+            "{} {}",
+            operator.sql(),
+            render_attribute_literal(value)?
+        )),
+        AttributeTest::In(values) if !values.is_empty() => {
+            let rendered = values
+                .iter()
+                .map(render_attribute_literal)
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("IN ({})", rendered.join(", ")))
+        }
+        AttributeTest::In(_) => None,
+    }
+}
+
 /// SQL spelling of the literal an attribute guard compares against.
 ///
 /// A number keeps its source spelling, so `priority >= 3` compares against `3` rather
@@ -1857,6 +1872,11 @@ mod tests {
         .outputs_accepting_gaps()
         .tuple_queries()
         .to_vec()
+    }
+
+    #[test]
+    fn an_empty_list_renders_no_sql() {
+        assert_eq!(render_attribute_test(&AttributeTest::In(Vec::new())), None);
     }
 
     fn role_threshold_registry() -> FunctionRegistry {

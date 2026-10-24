@@ -14,7 +14,7 @@ use crate::identity::WILDCARD_SUBJECT_ID;
 use crate::identity::{
     encode_identity, encode_part, hex_digit, object_name_fits, subject_name_fits,
 };
-use crate::{AttributeLiteral, AttributeOperator, AttributePredicate};
+use crate::{AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest};
 use crate::{ColumnName, ConditionName, RelationName, TableId, TypeName};
 use serde::{Deserialize, Serialize};
 
@@ -254,7 +254,7 @@ pub enum Guard {
     NotNull(ColumnRead),
     /// The boolean column is true.
     IsTrue(ColumnRead),
-    /// The column compares as stated against a literal constant.
+    /// The column satisfies a test against literal constants.
     Compare {
         /// The column being tested.
         column: ColumnRead,
@@ -1119,33 +1119,53 @@ fn compare_holds<R: RowValues + ?Sized>(
         Eval::Value(cell) => cell,
         Eval::Refuse(error) => return Eval::Refuse(error),
     };
-    let ordering = match (&cell, &predicate.value) {
-        (RowCell::Bool(actual), AttributeLiteral::Boolean(expected)) => actual.cmp(expected),
+    let undecided = || Eval::Refuse(RecordError::ComparisonNeedsQuery(column.to_string()));
+    match &predicate.test {
+        AttributeTest::Compare { operator, value } => {
+            // Text orders by collation, which only the database knows.
+            let ordered = matches!(value, AttributeLiteral::Text(_))
+                && !matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq);
+            match literal_ordering(&cell, value) {
+                Some(ordering) if !ordered => {
+                    if ordering_matches(*operator, ordering) {
+                        Eval::Value(())
+                    } else {
+                        Eval::Empty
+                    }
+                }
+                _ => undecided(),
+            }
+        }
+        AttributeTest::In(values) => {
+            let mut decided = true;
+            for value in values {
+                match literal_ordering(&cell, value) {
+                    Some(ordering) if ordering.is_eq() => return Eval::Value(()),
+                    Some(_) => {}
+                    None => decided = false,
+                }
+            }
+            if decided {
+                Eval::Empty
+            } else {
+                undecided()
+            }
+        }
+    }
+}
+
+/// How the row's value orders against one literal, absent where only SQL can tell.
+fn literal_ordering(cell: &RowCell<'_>, value: &AttributeLiteral) -> Option<core::cmp::Ordering> {
+    match (cell, value) {
+        (RowCell::Bool(actual), AttributeLiteral::Boolean(expected)) => Some(actual.cmp(expected)),
         (
             RowCell::Integer(actual) | RowCell::Decimal(actual),
             AttributeLiteral::Number(expected),
-        ) => {
-            let Some(ordering) = compare_decimals(actual.as_ref(), expected) else {
-                return Eval::Refuse(RecordError::ComparisonNeedsQuery(column.to_string()));
-            };
-            ordering
-        }
+        ) => compare_decimals(actual.as_ref(), expected),
         (RowCell::Text(actual), AttributeLiteral::Text(expected)) => {
-            if !matches!(
-                predicate.operator,
-                AttributeOperator::Eq | AttributeOperator::NotEq
-            ) {
-                return Eval::Refuse(RecordError::ComparisonNeedsQuery(column.to_string()));
-            }
-            actual.as_ref().cmp(expected.as_str())
+            Some(actual.as_ref().cmp(expected.as_str()))
         }
-        _ => return Eval::Refuse(RecordError::ComparisonNeedsQuery(column.to_string())),
-    };
-
-    if ordering_matches(predicate.operator, ordering) {
-        Eval::Value(())
-    } else {
-        Eval::Empty
+        _ => None,
     }
 }
 
@@ -1890,8 +1910,7 @@ mod tests {
     ) -> AttributePredicate {
         AttributePredicate {
             column: ColumnName::from_stored(column),
-            operator,
-            value,
+            test: AttributeTest::Compare { operator, value },
         }
     }
 
@@ -2237,6 +2256,85 @@ mod tests {
                 &active_bool
             ),
             Eval::Value(())
+        ));
+    }
+
+    fn listed(column: &str, kind: ColumnKind, values: &[AttributeLiteral]) -> Guard {
+        Guard::Compare {
+            column: read(column, kind),
+            predicate: AttributePredicate {
+                column: ColumnName::from_stored(column),
+                test: AttributeTest::In(values.to_vec()),
+            },
+        }
+    }
+
+    #[test]
+    fn an_in_list_guard_admits_only_the_values_it_lists() {
+        let text = |value: &str| AttributeLiteral::Text(value.to_string());
+        let number = |value: &str| AttributeLiteral::Number(value.to_string());
+        let status = listed(
+            "status",
+            ColumnKind::Text,
+            &[text("active"), text("pending")],
+        );
+        let status_row = |cell: RowCell<'static>| FullRow::default().with_cell("status", cell);
+
+        assert!(matches!(
+            guard_holds(
+                &status,
+                &status_row(RowCell::Text(Cow::Borrowed("pending")))
+            ),
+            Eval::Value(())
+        ));
+        assert!(matches!(
+            guard_holds(
+                &status,
+                &status_row(RowCell::Text(Cow::Borrowed("archived")))
+            ),
+            Eval::Empty
+        ));
+        assert!(matches!(
+            guard_holds(&status, &status_row(RowCell::Null)),
+            Eval::Empty
+        ));
+        assert!(matches!(
+            guard_holds(&status, &FullRow::default()),
+            Eval::Refuse(RecordError::ColumnAbsent(_))
+        ));
+        assert!(matches!(
+            guard_holds(
+                &listed("status", ColumnKind::Text, &[number("1")]),
+                &status_row(RowCell::Text(Cow::Borrowed("1")))
+            ),
+            Eval::Refuse(RecordError::ComparisonNeedsQuery(_))
+        ));
+
+        let priority = listed(
+            "priority",
+            ColumnKind::Decimal,
+            &[number("1e1"), number("2.0")],
+        );
+        let priority_row = |value: &'static str| {
+            FullRow::default().with_cell("priority", RowCell::Decimal(Cow::Borrowed(value)))
+        };
+        assert!(
+            matches!(guard_holds(&priority, &priority_row("2")), Eval::Value(())),
+            "one decidable match settles the list whatever the other members are"
+        );
+        assert!(
+            matches!(
+                guard_holds(&priority, &priority_row("3")),
+                Eval::Refuse(RecordError::ComparisonNeedsQuery(_))
+            ),
+            "no match and an undecidable member leave the answer to SQL"
+        );
+        assert!(matches!(
+            guard_holds(
+                &listed("priority", ColumnKind::Decimal, &[number("2.0")]),
+                &priority_row("3")
+            ),
+            Eval::Empty
         ));
     }
 

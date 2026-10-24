@@ -11,9 +11,6 @@ Each `USING` and `WITH CHECK` expression is classified against the patterns belo
 > [!WARNING]
 > Not on crates.io yet, pending a `sqlparser` release with `no_std` fixes.
 
-> [!WARNING]
-> An `IN` list guard beside a relationship check (`owner_id = current_user AND status IN ('active', 'pending')`) translates only its relationship half. The guard becomes a `-- TODO` for your application. A single-value guard beside a relationship (`owner_id = current_user AND status = 'published'`) and a guard standing on its own both translate.
-
 ## Usage
 
 Parse a schema, plan a translation, then ask it for each output. The plan is built once and every output is rendered from it.
@@ -124,7 +121,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P6 | `BooleanFlag` | `is_public = TRUE` | `[user:*]` |
 | P7 | `AbacAnd` | Relationship check `AND` attribute guard | Relationship half only, guard as a TODO |
 | P8 | `Composite` | `expr OR expr`, `expr AND expr` | Union, intersection |
-| P9 | `AttributeCondition` | `status = 'published'`, `expires_at > now()` | A row-decided value guards the tuple query, a clock-decided one becomes a condition |
+| P9 | `AttributeCondition` | `status IN ('active', 'pending')`, `expires_at > now()` | A row-decided value guards the tuple query, a clock-decided one becomes a condition |
 | P10 | `ConstantBool` | `TRUE`, `FALSE` | `[user:*]`, or no access |
 | P11 | `ArrayMembership` | `current_user = ANY (editors)` | Relation named after the column, one tuple per element |
 | P12 | `JsonbFieldOwnership` | `data ->> 'owner' = current_user` | `owner: [user]`, read from the field |

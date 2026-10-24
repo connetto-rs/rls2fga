@@ -636,11 +636,10 @@ fn a_parenthesized_attribute_conjunct_classifies_as_the_bare_one() {
     );
 }
 
-/// The same pair with an attribute half the tuples cannot carry (a literal
-/// IN-list): both spellings must fall to the same partial classification, and
-/// the dumped list spelling is `= ANY (ARRAY[...])` with cast elements.
+/// The same pair with a literal IN-list guard: both spellings must reach the same
+/// model, and the dumped list spelling is `= ANY (ARRAY[...])` with cast elements.
 #[test]
-fn a_parenthesized_opaque_attribute_conjunct_classifies_as_the_bare_one() {
+fn a_parenthesized_list_attribute_conjunct_classifies_as_the_bare_one() {
     let registry = std::fs::read_to_string("tests/fixtures/abac_status/function_registry.json")
         .expect("fixture registry should be readable");
     let schema = |using: &str| {
@@ -670,10 +669,11 @@ fn a_parenthesized_opaque_attribute_conjunct_classifies_as_the_bare_one() {
         "[]",
         ConfidenceLevel::C,
     );
-    assert_eq!(
-        relation_definition(&plain, "ownables", "can_update_without_reading").as_deref(),
-        Some("role_editor from owner_id"),
-        "the pair keeps its relationship half and drops the guard with a note:\n{plain}"
+    assert!(
+        relation_definition(&plain, "ownables", "can_update_without_reading").is_some_and(|body| {
+            body.starts_with("role_editor from owner_id and public_where_status_")
+        }),
+        "the pair keeps its relationship half and gates it by the list:\n{plain}"
     );
     assert_eq!(
         plain, dumped,

@@ -10,6 +10,7 @@ use crate::classifier::patterns::{
     ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
     UnclassifiedExpr, UncorrelatedMembership,
 };
+use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
 
 /// Remove Markdown table control characters and escape pipes.
@@ -209,10 +210,15 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         PatternClass::P9AttributeCondition(AttributeCondition {
             column,
             value_description,
+            predicate,
             ..
-        }) => {
-            format!("P9 ({column} = {value_description})")
-        }
+        }) => match predicate
+            .as_ref()
+            .and_then(|predicate| render_attribute_test(&predicate.test))
+        {
+            Some(test) => format!("P9 ({column} {test})"),
+            None => format!("P9 ({column} = {value_description})"),
+        },
         PatternClass::P10ConstantBool(ConstantBool { value }) => {
             format!("P10 (constant {value})")
         }
