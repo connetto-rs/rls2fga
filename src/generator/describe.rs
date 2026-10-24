@@ -249,7 +249,7 @@ fn carry_context_column<DB: DatabaseLike>(
 ) {
     guards.push(not_null(table, column, db));
     entries.push(RecordContextEntry {
-        key: key.to_owned(),
+        key: key.to_string(),
         value: value_column(table, column, db),
         rendering: ContextRendering::Json,
     });
