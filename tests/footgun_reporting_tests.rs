@@ -267,15 +267,15 @@ CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
 /// `FOR UPDATE` covers two phases, so one untranslatable clause is translated
 /// twice. The operator should still be told once: a doubled list inflates the
 /// apparent amount of manual work and hides how many policies really need review.
-/// The guard is an IN-list, the attribute shape the tuples cannot carry.
+/// The guard is a `LIKE`, a shape the translator leaves to the application.
 #[test]
 fn one_clause_is_reported_once_even_when_it_covers_two_phases() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user AND status IN ('live', 'draft'));
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user AND status IN ('live', 'draft'));
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user AND status LIKE 'live%');
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user AND status LIKE 'live%');
 ",
     );
     let model = translator(ConfidenceLevel::D)
@@ -573,12 +573,12 @@ fn each_outcome_carries_its_own_severity() {
         "a clause the caller chose to drop is not an unhandled expression"
     );
 
-    // A hybrid whose guard the tuples cannot carry (an IN-list) leaves that half
-    // to the application, which is neither a gap nor complete.
+    // A hybrid whose guard the translator leaves to the application (a `LIKE`)
+    // keeps that half out, which is neither a gap nor complete.
     let hybrid = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, status TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT \
-                  USING (owner_id = current_user AND status IN ('active', 'draft'));\n";
+                  USING (owner_id = current_user AND status LIKE 'live%');\n";
     let hybrid_db = db_of(hybrid);
     let hybrid_outputs = translator(ConfidenceLevel::C)
         .translate(&hybrid_db)

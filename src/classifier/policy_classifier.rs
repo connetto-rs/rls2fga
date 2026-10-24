@@ -933,6 +933,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
         for expr_sql in [
             "status = 'published' AND owner_id = current_user",
             "owner_id = current_user AND status = 'published'",
+            "owner_id = current_user AND status IN ('active', 'pending')",
         ] {
             let expr = parse_expr(expr_sql);
             let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
@@ -953,26 +954,6 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
             );
             assert_eq!(classified.confidence, ConfidenceLevel::B);
         }
-    }
-
-    #[test]
-    fn classify_and_with_in_list_attribute_guard_maps_to_p7() {
-        // Phase 3g: `status IN ('active', 'pending')` is an attribute check so
-        // `owner_id = current_user AND status IN ('active', 'pending')` maps to P7.
-        let db = docs_db();
-        let registry = FunctionRegistry::new();
-
-        let expr = parse_expr("owner_id = current_user AND status IN ('active', 'pending')");
-        let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
-        assert!(
-            matches!(
-                &classified.pattern,
-                PatternClass::P7AbacAnd(AbacAnd { attribute_part, .. }) if attribute_part == "status"
-            ),
-            "IN-list attribute guard should produce P7, got: {:?}",
-            classified.pattern
-        );
-        assert_eq!(classified.confidence, ConfidenceLevel::C);
     }
 
     #[test]

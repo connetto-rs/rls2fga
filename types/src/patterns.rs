@@ -171,15 +171,27 @@ pub enum AttributeLiteral {
     Boolean(bool),
 }
 
-/// A column compared against a literal constant, which the row alone decides.
+/// What an attribute guard asks of its column, against literal constants only.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub enum AttributeTest {
+    /// The column compares as stated against one literal.
+    Compare {
+        /// Comparison applied, oriented with the column on the left.
+        operator: AttributeOperator,
+        /// The literal the column is compared against.
+        value: AttributeLiteral,
+    },
+    /// The column equals one of the literals, as SQL `IN` decides it.
+    In(Vec<AttributeLiteral>),
+}
+
+/// A column tested against literal constants, which the row alone decides.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AttributePredicate {
     /// Column the guard reads, folded to its stored name.
     pub column: ColumnName,
-    /// Comparison applied, oriented with the column on the left.
-    pub operator: AttributeOperator,
-    /// The literal the column is compared against.
-    pub value: AttributeLiteral,
+    /// What the column must satisfy.
+    pub test: AttributeTest,
 }
 
 /// Confidence level for a classification.

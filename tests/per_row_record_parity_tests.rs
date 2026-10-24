@@ -683,10 +683,18 @@ CREATE POLICY notes_reviewers ON notes FOR SELECT
         WHERE note_reviewers.note_id = notes.id
           AND note_reviewers.user_id = auth_current_user_id()
           AND note_reviewers.role = 'editor'));
+-- A literal list residual, which the row image decides as it does one literal.
+CREATE POLICY notes_triagers ON notes FOR SELECT
+    USING (EXISTS (
+        SELECT 1 FROM note_reviewers
+        WHERE note_reviewers.note_id = notes.id
+          AND note_reviewers.user_id = auth_current_user_id()
+          AND note_reviewers.role IN ('viewer', 'owner')));
 -- P9 attribute guards over literal constants, which the row decides just as the
 -- boolean flag does.
 CREATE POLICY notes_published ON notes FOR SELECT USING (status = 'published');
 CREATE POLICY notes_priority ON notes FOR SELECT USING (priority >= 3);
+CREATE POLICY notes_listed ON notes FOR SELECT USING (status IN ('draft', 'archived'));
 -- P10 constant TRUE.
 CREATE POLICY announcements_all ON announcements FOR SELECT USING (TRUE);
 -- A role-scoped policy, which mints the pg_role scope.
@@ -763,6 +771,21 @@ async fn every_row_shape_description_matches_its_own_sql() {
     assert!(
         pure >= 11,
         "the schema must exercise every row-decidable shape, saw {pure}"
+    );
+    let listed = queries
+        .iter()
+        .find(|query| query.sql.contains("\"status\" IN ("))
+        .expect("the literal list gate is loaded");
+    assert!(
+        listed
+            .description
+            .as_ref()
+            .is_some_and(|description| matches!(
+                description.derivation,
+                RecordDerivation::FromRow { .. }
+            )),
+        "the row alone decides the list, so it is evaluated rather than joined:\n{}",
+        listed.sql
     );
     assert_eq!(
         joined, 0,

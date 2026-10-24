@@ -10,7 +10,8 @@ use crate::no_std_prelude::*;
 use alloc::collections::BTreeSet;
 
 use crate::classifier::patterns::{
-    AttributeLiteral, AttributeOperator, AttributePredicate, ResidualGuard, ResidualPredicates,
+    AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ResidualGuard,
+    ResidualPredicates,
 };
 use crate::generator::db_lookup::{column_kind, list_element_kind};
 use crate::generator::identity::encode_part;
@@ -1089,23 +1090,32 @@ fn compare_guard<DB: DatabaseLike>(
     db: &DB,
 ) -> Option<Guard> {
     let column = column_read(table, &predicate.column, db);
-    let row_decides = matches!(
-        (column.kind(), &predicate.value),
+    let kind = column.kind();
+    let row_decides = match &predicate.test {
+        AttributeTest::Compare { operator, value } => {
+            literal_row_decides(kind, value)
+                && (!matches!(value, AttributeLiteral::Text(_))
+                    || matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq))
+        }
+        AttributeTest::In(values) => {
+            !values.is_empty() && values.iter().all(|value| literal_row_decides(kind, value))
+        }
+    };
+    row_decides.then_some(Guard::Compare {
+        column,
+        predicate: predicate.clone(),
+    })
+}
+
+/// Whether the evaluator compares a cell of `kind` against `value` as `PostgreSQL` does.
+fn literal_row_decides(kind: ColumnKind, value: &AttributeLiteral) -> bool {
+    matches!(
+        (kind, value),
         (ColumnKind::Bool, AttributeLiteral::Boolean(_))
             | (
                 ColumnKind::Integer | ColumnKind::Decimal,
                 AttributeLiteral::Number(_)
             )
-    ) || matches!(
-        (column.kind(), &predicate.value, predicate.operator),
-        (
-            ColumnKind::Text,
-            AttributeLiteral::Text(_),
-            AttributeOperator::Eq | AttributeOperator::NotEq
-        )
-    );
-    row_decides.then_some(Guard::Compare {
-        column,
-        predicate: predicate.clone(),
-    })
+            | (ColumnKind::Text, AttributeLiteral::Text(_))
+    )
 }

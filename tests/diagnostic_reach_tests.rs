@@ -312,8 +312,8 @@ CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_user, owner_id)
 }
 
 /// An attribute the model hands to the application, which only appears below the default
-/// threshold, so it is the one family that needs a lower one to be seen at all. A literal
-/// IN-list guard beside the threshold is the shape the tuples cannot carry.
+/// threshold, so it is the one family that needs a lower one to be seen at all. A `LIKE`
+/// guard beside the threshold is a shape the translator leaves to the application.
 #[test]
 fn an_attribute_left_to_the_application_is_reported_and_skipped() {
     let (classified, db, registry) = support::classify_sql(
@@ -322,7 +322,7 @@ fn an_attribute_left_to_the_application_is_reported_and_skipped() {
 CREATE TABLE ownables(id TEXT PRIMARY KEY, owner_id TEXT, status TEXT);
 ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
 CREATE POLICY ownables_update ON ownables FOR UPDATE
-    USING (get_owner_role(current_user, owner_id) >= 3 AND status IN ('active', 'draft'));"
+    USING (get_owner_role(current_user, owner_id) >= 3 AND status LIKE 'live%');"
         ),
         Some(GRANTS),
     );

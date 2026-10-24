@@ -65,14 +65,29 @@ fn flag_gate_key(column: &ColumnName) -> String {
 /// than minting a gate whose key could collide with another predicate's.
 fn attribute_gate_key(predicate: &AttributePredicate) -> Option<String> {
     let column = predicate.column.as_str();
-    let value = match &predicate.value {
+    let test = match &predicate.test {
+        AttributeTest::Compare { operator, value } => {
+            format!("{}:{}", operator.gate_token(), literal_gate_key(value)?)
+        }
+        AttributeTest::In(values) => {
+            let mut key = format!("in:{}:", values.len());
+            for value in values {
+                key.push_str(&literal_gate_key(value)?);
+            }
+            key
+        }
+    };
+    Some(format!("attr:{}:{column}:{test}", column.len()))
+}
+
+/// One literal, length-prefixed so a list of them concatenates without ambiguity.
+fn literal_gate_key(value: &AttributeLiteral) -> Option<String> {
+    Some(match value {
         AttributeLiteral::Text(text) => format!("t{}:{text}", text.len()),
         AttributeLiteral::Number(number) => format!("n{}:{number}", number.len()),
         AttributeLiteral::Boolean(value) => format!("b:{value}"),
         _ => return None,
-    };
-    let operator = predicate.operator.gate_token();
-    Some(format!("attr:{}:{column}:{operator}:{value}", column.len()))
+    })
 }
 
 /// The wildcard a boolean flag opens, gated by its own relation, and the tuples that

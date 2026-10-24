@@ -9,8 +9,8 @@ use crate::classifier::function_registry::SessionAttribute;
 use crate::parser::names::{stored_ident_name, table_identity};
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
 pub(crate) use crate::types::{
-    AttributeLiteral, AttributeOperator, AttributePredicate, ColumnName, ConfidenceLevel,
-    RolePrivilege, TableId,
+    AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ColumnName,
+    ConfidenceLevel, RolePrivilege, TableId,
 };
 
 /// The command a policy applies to.
@@ -147,7 +147,7 @@ pub enum ResidualGuard {
     IsTrue(ColumnName),
     /// `IS NOT NULL` on a column.
     NotNull(ColumnName),
-    /// A column compared against a literal constant.
+    /// A column tested against literal constants.
     Compare(AttributePredicate),
 }
 
