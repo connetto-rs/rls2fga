@@ -18,7 +18,8 @@ use testcontainers::{ContainerAsync, GenericImage};
 
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ConfidenceLevel,
-    NoteSeverity, RowNaming, RowVersion, TableId, TranslationNote, ValueSource,
+    NoteSeverity, RequestComparison, RequestPredicate, RowNaming, RowVersion, TableId,
+    TranslationNote, ValueSource,
 };
 
 use super::openfga;
@@ -62,6 +63,19 @@ impl Principal {
         }
     }
 
+    /// An `app_reader` caller identified by `app.user_id`, whose `app.bot_list` holds
+    /// `keys`, or who set none. The request context carries the same list.
+    pub(crate) fn with_bot_list(subject: &str, keys: Option<&[&str]>) -> Self {
+        let mut principal = Self::with_setting(subject, "app_reader", "app.user_id", subject)
+            .with_context(serde_json::json!({ "app_bot_list": keys.unwrap_or_default() }));
+        if let Some(keys) = keys {
+            principal
+                .session
+                .push(("app.bot_list".into(), keys.join(",")));
+        }
+        principal
+    }
+
     /// A caller identified by its database role alone.
     pub(crate) fn as_role(subject: &str, login_role: &str) -> Self {
         Self {
@@ -103,6 +117,30 @@ impl Principal {
     pub(crate) fn reading_an_unset_setting(mut self) -> Self {
         self.reads_an_unset_setting = true;
         self
+    }
+}
+
+/// Whether the caller's `context` satisfies a predicate the request alone decides.
+pub(crate) fn request_predicate_holds(
+    predicate: &RequestPredicate,
+    context: &serde_json::Value,
+) -> bool {
+    match predicate {
+        RequestPredicate::Holds(atom) => {
+            let supplied = &context[atom.request_parameter.as_str()];
+            match atom.comparison {
+                RequestComparison::CallerSetHolds => supplied
+                    .as_array()
+                    .is_some_and(|set| set.iter().any(|entry| entry == atom.value.as_str())),
+                RequestComparison::CallerValueEquals => supplied == atom.value.as_str(),
+            }
+        }
+        RequestPredicate::Any(children) => children
+            .iter()
+            .any(|child| request_predicate_holds(child, context)),
+        RequestPredicate::All(children) => children
+            .iter()
+            .all(|child| request_predicate_holds(child, context)),
     }
 }
 

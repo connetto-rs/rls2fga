@@ -793,8 +793,7 @@ CREATE POLICY pd ON docs FOR SELECT USING (
 /// `docs`, for every spelling below.
 #[test]
 fn a_membership_read_policy_that_cannot_admit_a_row_denies_the_guarded_table() {
-    let mut complaints = Vec::new();
-    for policy in [
+    assert_membership_table_denied(&[
         "CREATE POLICY pm ON m FOR SELECT USING (false);",
         // Parenthesised the way pg_dump writes it back.
         "CREATE POLICY pm ON m FOR SELECT USING ((false));",
@@ -809,7 +808,14 @@ fn a_membership_read_policy_that_cannot_admit_a_row_denies_the_guarded_table() {
          CREATE POLICY pm2 ON m FOR SELECT USING (false AND m.user_id = current_user);",
         // FOR ALL applies its USING to reads too.
         "CREATE POLICY pm ON m FOR ALL USING (false);",
-    ] {
+    ]);
+}
+
+/// Every policy set in `policies` must leave the guarded table without reads, stop loading
+/// membership rows, and say why.
+fn assert_membership_table_denied(policies: &[&str]) {
+    let mut complaints = Vec::new();
+    for policy in policies {
         let (select, loads_m, notes) = membership_readability(policy);
         if select != "no_access" {
             complaints.push(format!("`{policy}` left can_select as `{select}`"));
@@ -832,8 +838,7 @@ fn a_membership_read_policy_that_cannot_admit_a_row_denies_the_guarded_table() {
 /// `USING (true)` beside a restrictive `USING (false)` returns 0 rows.
 #[test]
 fn a_restrictive_kill_switch_on_a_membership_table_denies_the_guarded_table() {
-    let mut complaints = Vec::new();
-    for policy in [
+    assert_membership_table_denied(&[
         "CREATE POLICY pm ON m FOR SELECT USING (true);\n\
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT USING (false);",
         // The permissive side being a real rule changes nothing: the barrier still closes.
@@ -841,22 +846,7 @@ fn a_restrictive_kill_switch_on_a_membership_table_denies_the_guarded_table() {
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT USING (false);",
         "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_user);\n\
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR ALL USING (false);",
-    ] {
-        let (select, loads_m, notes) = membership_readability(policy);
-        if select != "no_access" {
-            complaints.push(format!("`{policy}` left can_select as `{select}`"));
-        }
-        if loads_m {
-            complaints.push(format!("`{policy}` still loads membership rows"));
-        }
-        if !notes
-            .iter()
-            .any(|note| note.contains("'m' grants no reads"))
-        {
-            complaints.push(format!("`{policy}` reported no reason: {notes:?}"));
-        }
-    }
-    assert!(complaints.is_empty(), "{}", complaints.join("\n"));
+    ]);
 }
 
 /// The guard must not over-fire. Anything whose emptiness depends on the data, or that the

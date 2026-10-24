@@ -41,17 +41,6 @@ CREATE POLICY team_members_cap_read ON team_members AS RESTRICTIVE FOR SELECT US
     OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
 ";
 
-fn reader(subject: &str, keys: Option<&[&str]>) -> Principal {
-    let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", subject)
-        .with_context(serde_json::json!({ "app_bot_list": keys.unwrap_or_default() }));
-    if let Some(keys) = keys {
-        principal
-            .session
-            .push(("app.bot_list".into(), keys.join(",")));
-    }
-    principal
-}
-
 fn docs_case(name: &str, policies: &str, principals: Vec<Principal>) -> ParityCase {
     ParityCase::reading(
         name,
@@ -100,11 +89,11 @@ async fn gated_membership_parity() {
     let cluster = Cluster::start().await;
     let matrix = || {
         vec![
-            reader("wild", Some(&["*"])),
-            reader("token", Some(&["docs:read", "team_members:read"])),
-            reader("missing", Some(&["docs:read"])),
-            reader("unset", None),
-            reader("nonmember", Some(&["*"])),
+            Principal::with_bot_list("wild", Some(&["*"])),
+            Principal::with_bot_list("token", Some(&["docs:read", "team_members:read"])),
+            Principal::with_bot_list("missing", Some(&["docs:read"])),
+            Principal::with_bot_list("unset", None),
+            Principal::with_bot_list("nonmember", Some(&["*"])),
         ]
     };
 
@@ -133,7 +122,7 @@ async fn gated_membership_parity() {
     .await;
 
     let mode_reader = |subject, keys: &[&str], mode: &str| {
-        let mut principal = reader(subject, Some(keys));
+        let mut principal = Principal::with_bot_list(subject, Some(keys));
         principal.session.push(("app.mode".into(), mode.into()));
         principal.context["app_mode"] = serde_json::json!(mode);
         principal
@@ -198,7 +187,7 @@ async fn gated_membership_parity() {
     .await;
 
     let set_reader = |subject, members: &[&str], keys: &[&str]| {
-        let mut principal = reader(subject, Some(keys));
+        let mut principal = Principal::with_bot_list(subject, Some(keys));
         principal
             .session
             .push(("app.members".into(), members.join(",")));
@@ -255,10 +244,10 @@ async fn gated_membership_parity() {
                 "CREATE ROLE app_reader LOGIN; GRANT SELECT ON memos, staff TO app_reader",
             ],
             vec![
-                reader("token", Some(&["staff:read"])).with_clock(),
-                reader("missing", Some(&["docs:read"])).with_clock(),
-                reader("expired", Some(&["staff:read"])).with_clock(),
-                reader("nonmember", Some(&["staff:read"])).with_clock(),
+                Principal::with_bot_list("token", Some(&["staff:read"])).with_clock(),
+                Principal::with_bot_list("missing", Some(&["docs:read"])).with_clock(),
+                Principal::with_bot_list("expired", Some(&["staff:read"])).with_clock(),
+                Principal::with_bot_list("nonmember", Some(&["staff:read"])).with_clock(),
             ],
         ).with_attributes(ATTRIBUTES);
         assert_exact(
@@ -289,10 +278,10 @@ async fn gated_membership_parity() {
                     EXISTS (SELECT 1 FROM other_members m WHERE m.team = docs.team
                         AND m.user_id = current_setting('app.user_id', true)));"),
             vec![
-                reader("token", Some(&["team_members:read"])),
-                reader("missing", Some(&["other_members:read"])),
-                reader("other", Some(&["other_members:read"])),
-                reader("wrong", Some(&["team_members:read"])),
+                Principal::with_bot_list("token", Some(&["team_members:read"])),
+                Principal::with_bot_list("missing", Some(&["other_members:read"])),
+                Principal::with_bot_list("other", Some(&["other_members:read"])),
+                Principal::with_bot_list("wrong", Some(&["team_members:read"])),
             ],
         );
     names_case.seed.push(
@@ -363,7 +352,7 @@ async fn gated_membership_parity() {
             ],
             ["alice", "bob", "carol", "dave"]
                 .into_iter()
-                .map(|user| reader(user, Some(&["members:read"])))
+                .map(|user| Principal::with_bot_list(user, Some(&["members:read"])))
                 .collect(),
         )
         .with_attributes(ATTRIBUTES);
@@ -397,7 +386,7 @@ async fn gated_membership_parity() {
         let principals = ["alice", "carol"]
             .into_iter()
             .map(|user| {
-                let mut principal = reader(user, Some(&["members:read"]))
+                let mut principal = Principal::with_bot_list(user, Some(&["members:read"]))
                     .with_clock()
                     .with_context(serde_json::json!({
                         "app_bot_list": ["members:read"], "app_mode": "other"
@@ -468,7 +457,7 @@ async fn gated_membership_parity() {
         let principals = ["alice", "carol"]
             .into_iter()
             .map(|user| {
-                let mut principal = reader(user, Some(&["members:read"]))
+                let mut principal = Principal::with_bot_list(user, Some(&["members:read"]))
                     .with_clock()
                     .with_context(serde_json::json!({
                         "app_bot_list": ["members:read"],

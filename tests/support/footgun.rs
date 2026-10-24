@@ -86,6 +86,16 @@ pub(crate) fn relation_definition(dsl: &str, type_name: &str, relation: &str) ->
         .map(|(_, body)| body.to_string())
 }
 
+/// The `docs#can_select` definition translating `sql` at confidence A produces.
+pub(crate) fn docs_read_definition(sql: &str) -> Option<String> {
+    let dsl = translator(ConfidenceLevel::A)
+        .translate(&db_of(sql))
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .model();
+    relation_definition(&dsl, "docs", "can_select")
+}
+
 /// Whether a relation of `type_name` grants nobody, resolving the body through the
 /// operators the DSL spells: a name stands for its own definition, an intersection denies
 /// as soon as one part does, a union only when every part does, and a subtraction follows

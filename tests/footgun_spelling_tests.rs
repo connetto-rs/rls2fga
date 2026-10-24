@@ -9,7 +9,7 @@ use rls2fga::types::TranslationNote;
 
 mod support;
 
-use support::footgun::{db_of, relation_definition, translator, type_names};
+use support::footgun::{db_of, docs_read_definition, relation_definition, translator, type_names};
 
 /// A quoted identifier may contain a dot. Treating it as a schema separator names
 /// the type after a fragment of the table name.
@@ -49,14 +49,7 @@ fn a_quoted_parent_reference_still_inherits() {
                WHERE p.id = docs.parent_id AND p.owner_id = current_user));\n"
         )
     };
-    let read_of = |parent_ref: &str| {
-        let dsl = translator(ConfidenceLevel::A)
-            .translate(&db_of(&schema(parent_ref)))
-            .expect("translation should plan")
-            .outputs_accepting_gaps()
-            .model();
-        relation_definition(&dsl, "docs", "can_select")
-    };
+    let read_of = |parent_ref: &str| docs_read_definition(&schema(parent_ref));
 
     assert_eq!(
         read_of("parents").as_deref(),

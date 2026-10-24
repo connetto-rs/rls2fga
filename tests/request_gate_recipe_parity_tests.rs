@@ -8,12 +8,14 @@ use std::collections::BTreeMap;
 
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionStatement, ConfidenceLevel, RelationShapes,
-    RequestComparison, RequestPredicate, RowDecision,
+    RequestComparison, RowDecision,
 };
 
 mod support;
 
-use support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
+use support::parity::{
+    assert_agrees, assert_postgres, request_predicate_holds, Cluster, ParityCase, Principal,
+};
 use support::JsonRowValues;
 
 const ATTRIBUTES: &str = r#"[
@@ -99,18 +101,6 @@ INSERT INTO flagged VALUES (1, true), (2, false);
 INSERT INTO notes VALUES (1, 'entry'), (2, 'wild'), (3, 'neither'), (4, 'unset'), (5, NULL);
 ";
 
-/// A caller whose list holds `keys`, or who set none.
-fn caller(subject: &str, keys: Option<&[&str]>) -> Principal {
-    let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", subject)
-        .with_context(serde_json::json!({ "app_bot_list": keys.unwrap_or_default() }));
-    if let Some(keys) = keys {
-        principal
-            .session
-            .push(("app.bot_list".into(), keys.join(",")));
-    }
-    principal
-}
-
 fn callers() -> Vec<Principal> {
     let entries = [
         "orders:read",
@@ -123,10 +113,10 @@ fn callers() -> Vec<Principal> {
         "flagged:delete",
     ];
     vec![
-        caller("entry", Some(&entries)),
-        caller("wild", Some(&["*"])),
-        caller("neither", Some(&["orders:insert", "notes:update"])),
-        caller("unset", None),
+        Principal::with_bot_list("entry", Some(&entries)),
+        Principal::with_bot_list("wild", Some(&["*"])),
+        Principal::with_bot_list("neither", Some(&["orders:insert", "notes:update"])),
+        Principal::with_bot_list("unset", None),
     ]
 }
 
@@ -180,7 +170,7 @@ fn grants(
         } => {
             subject_type.as_str() == "user"
                 && !records(shapes).is_empty()
-                && holds(predicate, context)
+                && request_predicate_holds(predicate, context)
         }
         RowDecision::Any(children) => children
             .iter()
@@ -188,23 +178,6 @@ fn grants(
         RowDecision::All(children) => children
             .iter()
             .all(|child| grants(child, row, subject, context)),
-    }
-}
-
-/// Whether the caller's `context` satisfies a predicate the request alone decides.
-fn holds(predicate: &RequestPredicate, context: &serde_json::Value) -> bool {
-    match predicate {
-        RequestPredicate::Holds(atom) => {
-            let caller_side = &context[atom.request_parameter.as_str()];
-            match atom.comparison {
-                RequestComparison::CallerSetHolds => caller_side
-                    .as_array()
-                    .is_some_and(|held| held.iter().any(|value| value == atom.value.as_str())),
-                RequestComparison::CallerValueEquals => caller_side == atom.value.as_str(),
-            }
-        }
-        RequestPredicate::Any(children) => children.iter().any(|child| holds(child, context)),
-        RequestPredicate::All(children) => children.iter().all(|child| holds(child, context)),
     }
 }
 
