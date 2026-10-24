@@ -362,14 +362,7 @@ pub(crate) fn table_id_has_column<DB>(db: &DB, table: &TableId, column: &str) ->
 where
     DB: sql_traits::prelude::DatabaseLike,
 {
-    lookup_table_id(db, table).is_some_and(|table| {
-        use sql_traits::prelude::{ColumnLike, TableLike};
-        table
-            .columns(db)
-            .into_iter()
-            .flatten()
-            .any(|declared| declared.stored_column_name() == column)
-    })
+    lookup_table_id(db, table).is_some_and(|table| declares_column(db, table, column))
 }
 
 /// Whether `table` declares a column named `column`.
@@ -380,14 +373,19 @@ pub fn table_has_column<DB>(db: &DB, table: &str, column: &str) -> bool
 where
     DB: sql_traits::prelude::DatabaseLike,
 {
-    lookup_table(db, table).is_some_and(|table| {
-        use sql_traits::prelude::{ColumnLike, TableLike};
-        table
-            .columns(db)
-            .into_iter()
-            .flatten()
-            .any(|declared| declared.stored_column_name() == column)
-    })
+    lookup_table(db, table).is_some_and(|table| declares_column(db, table, column))
+}
+
+fn declares_column<DB>(db: &DB, table: &DB::Table, column: &str) -> bool
+where
+    DB: sql_traits::prelude::DatabaseLike,
+{
+    use sql_traits::prelude::{ColumnLike, TableLike};
+    table
+        .columns(db)
+        .into_iter()
+        .flatten()
+        .any(|declared| declared.stored_column_name() == column)
 }
 
 #[cfg(test)]

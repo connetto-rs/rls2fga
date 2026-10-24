@@ -354,6 +354,20 @@ fn foreign_of<'s>(
         .then_some((qualifier, side.1.as_str()))
 }
 
+/// The parent's column `side` names. A bare name in this scope is the parent's own,
+/// which is what every other reader here assumes and what the classifier's column gate
+/// then verifies.
+fn parent_of(
+    side: &(Option<String>, String),
+    parent_table: &str,
+    parent_alias: Option<&str>,
+) -> Option<ColumnName> {
+    side.0
+        .as_deref()
+        .is_none_or(|found| qualifier_matches_table(found, parent_table, parent_alias))
+        .then(|| ColumnName::from_stored(side.1.as_str()))
+}
+
 impl JoinEquality {
     /// The parent's column this equality ties `qualifier`.`column` to, if it does.
     fn parent_side(
@@ -369,19 +383,11 @@ impl JoinEquality {
                 .is_some_and(|found| qualifier_matches_table(found, q, None))
                 && side.1 == c
         };
-        // A bare name in this scope is the parent's own, which is what every other
-        // reader here assumes and what the classifier's column gate then verifies.
-        let parent_of = |side: &(Option<String>, String)| {
-            side.0
-                .as_deref()
-                .is_none_or(|found| qualifier_matches_table(found, parent_table, parent_alias))
-                .then(|| ColumnName::from_stored(side.1.as_str()))
-        };
         if names(&self.left, qualifier, column) {
-            return parent_of(&self.right);
+            return parent_of(&self.right, parent_table, parent_alias);
         }
         if names(&self.right, qualifier, column) {
-            return parent_of(&self.left);
+            return parent_of(&self.left, parent_table, parent_alias);
         }
         None
     }
@@ -393,20 +399,14 @@ impl JoinEquality {
         parent_table: &str,
         parent_alias: Option<&str>,
     ) -> Option<(ColumnName, &str, &str)> {
-        let parent_of = |side: &(Option<String>, String)| {
-            side.0
-                .as_deref()
-                .is_none_or(|found| qualifier_matches_table(found, parent_table, parent_alias))
-                .then(|| ColumnName::from_stored(side.1.as_str()))
-        };
         if let (Some(parent), Some((qualifier, column))) = (
-            parent_of(&self.left),
+            parent_of(&self.left, parent_table, parent_alias),
             foreign_of(&self.right, parent_table, parent_alias),
         ) {
             return Some((parent, qualifier, column));
         }
         if let (Some(parent), Some((qualifier, column))) = (
-            parent_of(&self.right),
+            parent_of(&self.right, parent_table, parent_alias),
             foreign_of(&self.left, parent_table, parent_alias),
         ) {
             return Some((parent, qualifier, column));
