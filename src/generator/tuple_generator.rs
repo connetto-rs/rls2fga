@@ -1874,6 +1874,11 @@ mod tests {
         .to_vec()
     }
 
+    #[test]
+    fn an_empty_list_renders_no_sql() {
+        assert_eq!(render_attribute_test(&AttributeTest::In(Vec::new())), None);
+    }
+
     fn role_threshold_registry() -> FunctionRegistry {
         let mut registry = FunctionRegistry::new();
         registry
