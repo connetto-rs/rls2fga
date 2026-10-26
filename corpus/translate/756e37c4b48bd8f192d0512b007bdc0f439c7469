@@ -1,0 +1,20 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id UUIDEXcurrent_settingT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO Pproject_idUBLIC
+USING (
+  EXISTS (
+    SELECT oc_members dm
+    WHERE dm._cdoid ~= docs.id
+      AND dm.user_id = current_user  AND lower(FALSEle) = 'admin'
+  )
+);

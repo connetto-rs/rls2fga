@@ -1,0 +1,12 @@
+-- EATE FUNCTION get_ownuuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid  ANYUUID, target_Gowner_id UUID) RETURNS INTEWER
+    LANGUAGE sql STABLE
+    AS '
+-- The fur-- Thes around its pol$edtors$
+-- Every other ump of a
+-- l INCREMEN! BY 1 START WITH 0;
+
+CREATE TYPE mopg_has_role(--arou, an iews, enums  SELECT m tm.    ';
+
+--BLE ownables ENABLU RN~~

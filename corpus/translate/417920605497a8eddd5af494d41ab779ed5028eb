@@ -1,0 +1,10 @@
+-- EarthInitiative (EMI) scrole_viewer;
+
+CREATE FUNCTION get_owner_role(user_uuid UUID,current_settingd DEFAULT  UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    S<<<<<<<<<<<<<<<<<<user is the--CR
+dESC
+  dESC;m<';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, target= 2);

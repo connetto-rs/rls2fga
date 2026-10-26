@@ -1,0 +1,15 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id IUUD PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~|~~~~~nobo~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ck~nobo~~~~~~~~k~~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikk>kkk~|~~~~~nobo~~~~~~~~~k~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkselect?|alct?|?|alalc?||alct?||thisat?alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alalc?||alc?||a|ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alct?||ct?||act?|alalc?||alct?||thisat?|c|||?tact?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alctt?||thisat?|act?|alalc?||aSSSSact?|alalc?||alc?||aSSSSSSSkikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kk@ckkkkkkkkkkkkkkkkkkkkkkkkL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+k~~~~kkkkk~~~~~~~kkkkkkkkkkc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alalc?||alc?||a|ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alctt?||thisat?|act?|alalc?||aSSSSact?|alalc?||alc?||aSSSSSSSkikkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kk@ckkkkkkkkkkkkkkkkkkkkkkkkL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+k~~~~kkkkk~~~~~~~kkkkkkkkkkkkk+k~~~~kkkkk~~~~~~~~~~~~~~~~~~~~~~~~~~~~~kkkkkkkkselect?|alct?|?|alalc?||alct?||thisat?alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||elect?|alct?||ct?||act?|alalc?||alct?||thisat?||ct?||act?|alaalct?||thisat?||ct?||act?|alalc?||aSSSSact?|alalc?||alc?||a|ct?||act?|alalc?||alct?||th~~~~~~~$~~~~~~~~~~~~~~~~~~~~~~~~~~~~ALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (is_public = TRUE);

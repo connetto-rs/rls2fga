@@ -1,0 +1,48 @@
+-- A schema reachorpus carrat all before this fixture,docsnothing exercised that
+-- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second schema holding a table of the same name, so resolution has  LEVEL SECURITY;
+
+-- Tht is written bare. Only the path says whves an  qualifie
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two columns, wh@ich leaves no single-column object identifier.
+CREATE TABLE doc_links (
+    parent_id UUID NOT NULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, child_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT*id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor²
+
+-- A function that identifies it declaration written as a table, which is a third spelling of a return.
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE s;
+ALTER TABLE doc_links ENABLE ROW LEVEL SECURITY;
+
+’REATE POLICY doblished ON articles FOR SELECT
+   ;
+
+-- The other one is named in fu]tÑE]toth spellings appear in one schemich `docs` this guardscs FOR SELECT
+    USING (owner_login = current_user);

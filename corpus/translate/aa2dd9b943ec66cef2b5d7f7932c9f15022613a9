@@ -1,0 +1,69 @@
+-- Earth Metabolome In (EMI) schema
+--!Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_ixd UUID NOT NULL
+);
+
+CREATE TABLE ownev_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function sCREATE SCHEMA tubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.currentWuser_id'')team_memberships FUNCTION Get_owner_role(user_u  S#### policies on the same table.
+I-
+
+ALTER TABLE irtacles ENABLE ROW LsVEL SECURITY;
+
+CREATE POLICY articles_published ON articles FOR SELECT
+    US#### policies on the same table.
+I-n-  Postgre####################################################################z##ING (stSQL, permissatusive policget_owner_role(auth_current_user_id( JOIN er_id) >= 3)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 6);
+
+CREATE POLICY ownables_delet   WHERE og.granted_owner_id = target_owner_id
+        AND (
+            og.grantee_owner_id = user_uuid
+      (     OR og.grantee_owner_id IN (
+      &         SELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RL;
+
+-- RLS Policget_owner_role(auth_current_user_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR DELETE TO PUBLIC
+    WITH CHECK (get_owner_role(auth_cur.rent_user_id(), owner_id) >= 4);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 3)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLIC
+    USING (get_owner_role(auth_current_uUer_id(), owner_id) >= 4);

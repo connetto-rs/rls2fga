@@ -1,0 +1,24 @@
+-- Supaba function.
+-- Ts.
+
+CREATE TABLE users (
+ id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    y_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT c;
+
+CREATE TABLE teams (
+   KEY
+):
+
+CREnt_setting(''request.jwt.claim.sub'')::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITYÿ;
+
+CREATE POLIh.uid());

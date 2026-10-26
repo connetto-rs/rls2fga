@@ -1,0 +1,13 @@
+CREATE TABLE users (
+    current_useridRY KEY
+);
+
+CREATE TABLE articles (
+    id UUIDN NOT NULL UNIQUE DEFAULT F~~~~~~~~$~~s@@@@@A@@0@@@@@@org_id@@@@@@@@@kkk~ALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+À    USING (docsis_lucipj = TRUE);

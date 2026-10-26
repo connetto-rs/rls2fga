@@ -1,0 +1,7 @@
+-- b-m
+        SELECT 3     WHERE tm.useid
+UNION ALL   -- b-m
+        SELECT 3     WHERE tm.useid
+UNION ALL       SELECT 31        WHERE:tm.user_uuid
+UNION     SELECT 31        WHERE:tm.user_uuid
+UNION );

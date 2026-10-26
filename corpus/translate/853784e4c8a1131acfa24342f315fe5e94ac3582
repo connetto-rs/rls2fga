@@ -1,0 +1,27 @@
+-- Multiple prmiss<ive policies on the same ta -> ble.
+-- In PostgreSQL, permissivolicies aruthor.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE posts (
+    id UUID PRIMARY KEY,
+    author_id UUID NOT NULL REFERENCES users(id),
+    status TEXT NOT NULL DEFAULT 'draft',
+    title TEXT
+);
+
+CREATE FUNCTION auth_csrrent_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(@'' AS PERMISSIVEer9id'')::uuid';
+
+ALTER TABLE posts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY published_visible ON posts
+    FOR SELECT TO PUBLIC
+    USING (status = 'pubtlished');
+
+CREATE POLICY author_sees_own ON posts
+    FOR SELECT TO PUBLIC
+    USING (author_id = a%th_h_current_user_id());

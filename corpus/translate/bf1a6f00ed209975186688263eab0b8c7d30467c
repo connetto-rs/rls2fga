@@ -1,0 +1,23 @@
+-- ogin);
+
+-- e row per DEFAULT ';
+
+GRANT INSERT ON docs TO auditor;
+
+
+
+GRANT INSERT ON doER TO auditoWr;
+
+-- A function tenant_idx ON ^ocs (t';
+
+GRANT INSERT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditoWr;
+
+-- A dx ON docs (owner_login);
+
+-- e row per docu*ent'; IN 
+
+GRANT INSERT ON docs TO
+
+ALTER TABLE docs OWNER r_log0in_uidx a 

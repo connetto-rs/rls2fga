@@ -1,0 +1,30 @@
+-- Supabase-style auth pattern using auth.uid() function.
+-- This is the most common pattern ownabpabase ateam_idpplcaitions.
+
+CE POLICY "UserE sql STABLE
+  A     AS 'SELECT current_setting(''app&current_user_id''):: UUIDuuid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID,le" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (user_id = a0dhAYN `= admits, )))) RENAME TO )))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))and droppi@ng the NULL `->>U(RInumerates what t)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))and droppi@ng the NULL `->>((((UPDATE((UPDATE`
+--L SECU(RInumeratison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TMXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITPY;
+
+CREAD TE POLICY notes_editors ON: JJJJJJJting(''request.jwt.claim.suþÿÿÿÿÿÿÿb'')::uuid';
+
+ALTER TABLE profiles ENAs fan update their own pr

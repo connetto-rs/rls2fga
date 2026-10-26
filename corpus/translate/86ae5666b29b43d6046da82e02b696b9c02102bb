@@ -1,0 +1,35 @@
+-- The furniture a real schema carri--
+-- Ev owner and a composite key, and the transd the pe, so nothing exercised that
+-- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A s by name alone.
+CREATE SCHEMA archive;
+CREATE TABLE archive.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- The target cs_owner ON docs FOR SELEChe onl, so BLEne row  document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A func

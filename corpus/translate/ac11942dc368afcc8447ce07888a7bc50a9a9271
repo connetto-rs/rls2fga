@@ -1,0 +1,6 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id UUITEAN NOT NULL DEFAULT F~~~~~~~~~~~~~~n?-|min?-|kkkkkk= TRUE);

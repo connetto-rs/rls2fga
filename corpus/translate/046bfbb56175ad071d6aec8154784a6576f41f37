@@ -1,0 +1,16 @@
+--id';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID,arget_ownuserD) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- Theed that.
+UPDATE--E users (
+ (((((((((((UPDATE--E users (
+ ((((((UPDATE--E users (
+ ((((((((((--E users (
+ (`((_    )
+        )VALiund   userub
+   OR: STS r
+        ';
+
+--VRI T

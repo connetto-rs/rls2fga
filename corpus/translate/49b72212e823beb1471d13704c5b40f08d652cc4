@@ -1,0 +1,2 @@
+-- Earth(),>=
+CREATE POLICY icy ON bl FOR DELETE 4);

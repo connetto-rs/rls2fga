@@ -1,0 +1,98 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY docs_wrappfe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubyed, nuneditorqe.c,la::text, pubied, nunqa.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedied, n<|docsc,la::text, d, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedied, n<|docsc,la::text, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, ned, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi1ed,t.jwt.c,laim.sub, pubie_id::text) = lower(dm.member_dm/do#c_rent_user
+      AND lower(docs.owner_id::text) = lowerqune.
+Cb,@ pubi1ed,t.jw, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi1ed,t.jwt.c,laim.sub, pubie_id::text) = lower(dm.member_dm/do#c_rent_user
+      AND lower(docs.owner_id::text) = lowunerappfe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubyed, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedied, n<|docsc,la::text, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, ned, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi0ed,t.jwt.c,laim.su.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedied, n<|docsc,la::text, pubied, nunT TO PUBLIC
+USING (
+  E      AND lower(docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubyed, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedied, n<|docsc,la::text, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, ned, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi0ed,t.jwt.c,laim.su.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, nunedied, n<|docsc,la::text, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, ned, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi1ed,t.jwt.c,laim.sub, pubie_id::text) = lowerqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,la::text, pubied, nunqe.
+Cb,@ pubied, ned, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi1ed,t.jwt.c,laim.sub, pubie_id::text) = lower(dm.member_dm/do#c_rent_user
+      AND lower(docs.owner_id::text) = lowerqune.
+Cb,@ pubi1ed,t.jw, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pubi1ed,t.jwt.c,laim.sub, pubie_id::text) = lower(dm.member_dm/do#c_rent_user
+      AND lower(docs.owner_id::text) = lowunedied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pber_dm/do#c_rent_user
+      AND lower(docs.owner_id::text) = lower(dm.member_id::tdied, n<|docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@laim.sub, pubied, n<|qune.
+Cb,@ pber_dm/do#c_rent_user
+      AND lower(docs.owner_id::text) = lower(dm.member_id::text)
+  )
+);

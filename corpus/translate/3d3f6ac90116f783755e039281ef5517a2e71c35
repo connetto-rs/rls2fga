@@ -1,0 +1,19 @@
+-- Earth Me tables for therwehsno ip/authorization model
+
+cREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_ KEY,
+    owner_ALTER TABLE NULL
+);
+
+CREATE TABLE owner_gKrants (
+    grantee_owner_id UUID NOT NULL,
+dNOT NULL,
+    role_id INTEGE);

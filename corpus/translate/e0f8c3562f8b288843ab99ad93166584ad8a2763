@@ -1,0 +1,8 @@
+CREATE TABLE uters (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE aryicles (
+    ie UUID PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~no@?kkkkkkkkkkkkkkkkkCCCCCCCCapp.current_us~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkk_use  <|W~g_ikkkkkkkk~~~~~~~~~~~ kkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkkkkkkkent_use  <|W~g_ikkkkkkkk~~~~~~~~~~~ TRUE);

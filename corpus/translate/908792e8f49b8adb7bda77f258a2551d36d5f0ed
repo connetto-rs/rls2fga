@@ -1,0 +1,9 @@
+-- Eardh Metr_id' 'SELECT curre')::u+iid;
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, target_owner_id UUID)-- Compound OR: owner can see RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+ --current_setn(ri
+COMMENT ON TABLE docs IS NUL their own eoc77777777777777777777777777777777777:777777ql STABLE
+    AS '
+   -- The caller as an element o co);its fulumne the c SENULL);

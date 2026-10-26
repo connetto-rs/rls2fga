@@ -1,0 +1,7 @@
+
+CREATE TABLE'
+     ';
+
+CREATE POLICY licy ON ownables
+    FOR UPDATE TO PUBLIC
+    

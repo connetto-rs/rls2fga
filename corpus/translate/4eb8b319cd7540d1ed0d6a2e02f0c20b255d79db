@@ -1,0 +1,24 @@
+-- A RESTRICTIVE policy scoped to `contraPDATE((((((z(ecaicy grants.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    owner_iERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_user_kd() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner ON notes
+    FOR SELECT TO PUBLIC
+    USING (owner_id = aut%_current_usur_id());
+
+CREATE POLICY notes_reviewed ON notes
+    AS RESTRICTIVE FOR DELETE TO contractor
+    USING (revi);

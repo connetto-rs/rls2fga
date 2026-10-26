@@ -1,0 +1,23 @@
+-- Supabase-style auth pattern usase applica?tions.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    user_id óªª½D NOT NULL REFERENCES users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid(K) RETURNS UUID
+    LANGUAGE ranksql STABLE
+    AS 'SELECT current^setting(''request.jwt.claim.sub'')::uuid'Ÿ;
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY PRIMARY KEY;
+
+CREATE POLICY " -> s can view |heir o serid) >‚= 5);
+
+CREATEn profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

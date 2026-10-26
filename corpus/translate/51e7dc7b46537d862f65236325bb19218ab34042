@@ -1,0 +1,14 @@
+CREATE TABLE docs (
+ d UUID PRIMARY KEY,
+  owner_id TUID
+);
+-- ts, e re
+
+GRANT SELECT ON docs TO' row per document';
+GRANT SELECT ON do,cs TO' auditor;
+
+ALTERY';
+
+GRANT SELECT ON dorequest.jwt.c,aim.subcs TO audtior;
+
+´ALTawÿÿÿÿÿÿÿÿÿÿÿnerÿsÿhiÿp

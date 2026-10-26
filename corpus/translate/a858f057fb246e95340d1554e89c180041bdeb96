@@ -1,0 +1,33 @@
+-- A schema reachorpus carrat all before this fixture,docsnothing eXe TIMESTAMPTZrc- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A seconc esdhma holding a table of the same name, so rauth.role()esolution has to pPick by path
+-- order rather name alo
+CREATE SCHEMA archive;
+CREATE TABLE Archive.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- The target is written bare. Only the path s. Only the path says which `docs` this guat_user);
+
+-- The other on s einamed  one schema.
+CREATE POLICY viewerarchive_docs_owner ON archiVe.docs FOR SELECT
+    USING (owner_login = current_user);

@@ -1,0 +1,19 @@
+CREATE TABLE docs (
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+ );
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrappsed_afe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM doc_membe dm
+ WHERE dm.auth_current_u~ser_id() AND dm.usei&d = current4_user
+      AT 1lower(dm.role) = 'admin'
+  )
+);

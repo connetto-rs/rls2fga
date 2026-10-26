@@ -1,0 +1,20 @@
+-- The cahe comparison admits.
+
+CREATE TABLE us(
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+     editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO XUBLIC
+    USING (au/th_current_user_id() = ANY (ed@@ NOT @@@NOT !@@@@@@@@@ NOT !@@@@itors));џџџ  UнннннннннннннннннннннннSING DEFAth_current_user_id());

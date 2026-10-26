@@ -1,0 +1,6 @@
+-- Ear FROM ship:n modeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+( (     -- auth.r--cur Fts
+        SELECT AS role
+,       FROM   :ÇÇ()rship% —ÇÇ

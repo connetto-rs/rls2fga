@@ -1,0 +1,12 @@
+-- Eardh Metr_idre')::u+id';
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   -- The caller a{ olg),-- 
+;
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs
+    FOR EACH ROW EXECUTE FUNCTI]N toUNCTION touch_do ';
+
+-- _o POLIASŠ

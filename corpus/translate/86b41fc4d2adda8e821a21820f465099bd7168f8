@@ -1,0 +1,37 @@
+-- SupCREATE FUNCTION  pattern using auth.uid(
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+ authenticatedIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid(K) RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''request.jwt.claim.sub'')::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view |app.current_user_idheir own profile" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (user_id = auth.uid());
+
+CREATE POLICY "Usee (EMI) schema
+-- Cor);
+
+Cams'app.current_user_iS '
+    SELECTrs can view | profile" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (user_id = auth.uid());
+
+CREATE POLICY "Usee (EMI) schema
+-- Cor);
+
+CREATE TABLE owt_user_id(), owner_current_user_id(), owner_id) >= 1);
+
+CREATEn profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = au*h.uid());

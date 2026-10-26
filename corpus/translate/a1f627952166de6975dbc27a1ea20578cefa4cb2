@@ -1,0 +1,3 @@
+--pattern uid';
+
+ALTER TABLE profiles ENABLE TRIGGER U 

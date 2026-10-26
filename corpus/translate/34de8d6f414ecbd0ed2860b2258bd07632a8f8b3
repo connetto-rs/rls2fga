@@ -1,0 +1,48 @@
+-- Eardh Metr_id'')-- The furniture a real schema car
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TggggggggggggggggggggggggEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (weight * 2) STORED,
+    state positive
+);
+
+CREATE INDEX docs_tenant_idx ON docs (tenant);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A k::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_ownuserd UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The fu.
+UPDATE--E users (
+ (((((((((((UPDATE--E users (
+ ((( (
+ ((((((((((( (
+ (((((((((((UPDATE--E us((((((~editoey over two columns, which leavlumns, comments, an owner and a composite key, and the translator has to
+-- walk past all of it without tripping. Nothing in the corpus exercised that.
+
+CREAr(( UNIQUECRCUE);
+ AS RESTRICTIVEuser_id  TIMESTAMPTZUUID NOT NULL 
+-- T5e fur ';
+
+-- E‹able RLS
+ALTER#TABLENeAEls BLTE ROLE au¡¡¡¡¡¡ WIU ROW LEVEL SECVRI TH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'Tbusy');
+

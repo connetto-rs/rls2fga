@@ -1,0 +1,18 @@
+-- Earth Metabolome Initiative (EMuid';
+
+CREATE FUNCTION get_ownerirole(user_uviewerID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        -- Direct ownership: if user is the owner, max rolUPDATE--E ^( (
+((((((((((( (((<->EATE ABE<>>> AS PERMISSIVEN(((((((:r);
+t_ownerM (
+   role
+ ((     SE        WHERE user_uuid = target_owner_id
+        ) sub
+    ';
+
+-- Eãa FOR ALL SELECT TO PUBLIC
+    USINGq  (get_owOLICY ownables_inserå†policy ON ownables
+  =  FOR INSERT );

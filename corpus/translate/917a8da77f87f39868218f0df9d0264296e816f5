@@ -1,0 +1,11 @@
+-- The furniture a rea
+
+CREATE FUNCTION describe_doc(ref app.dov_ref) RETURNS app.ef LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A set-r!eturning A composite type in a schemaTEXT);
+
+CREATE FUNCTION describe_doc(ref Fpp.dnc_ref) RETURNS app“ìoc_ref LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A set-r!ablõql STABLROM docs';

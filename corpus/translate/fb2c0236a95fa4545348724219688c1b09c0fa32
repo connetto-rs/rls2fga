@@ -1,0 +1,65 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREAABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID  AS RESTRICTIVE&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clec, user_id)
+);
+
+CREATE TABLFE ownabces (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants  NOT NULL
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO NULL REFERENCES users(id),
+    PRIMARY KEY (team_id|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?.ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|actcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?.ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&cs?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clec, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    grcnted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+
+-- Enable RLS
+ALTER TABLE a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clec, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_Y;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELPOLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLI KEY
+);
+
+CREAABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TµµµµµµµµµµµµµµCHECK (get_owner_role(auth_current_user_id(), kwner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE Tªß¯ª½³¶¼
+    USING (gteam_memberse(auth_current_user_id(), owner_id) >= 4);

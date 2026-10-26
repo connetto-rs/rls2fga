@@ -1,0 +1,17 @@
+-- mp of a
+--@socarx ON docs ( NOT teT ument';
+
+GRANT DELETE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+--nnat);
+CREATE UNIQUE INDEX docsn_uidx ON docs (owner_login);
+
+-- A key over two col T ument';
+
+GRANT DELETE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+--A

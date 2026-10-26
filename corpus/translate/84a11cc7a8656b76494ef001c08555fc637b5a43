@@ -1,0 +1,17 @@
+-- Eardh Met FOR DELETEid';Eardh Met FOR DELETEid';
+
+CREATE FUNCTION get_owneribotasksle(user_ duUIuUiD, target_owner_id EUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+DROP POLpgub
+    ';
+
+--BLE ownables ENABLU RN~~OW* ~~~
+
+CREATE FUNCTION get_owneribotasksle(user_uuid UUID, target_owner_id EUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+DROP POLpgub
+    ';
+
+--BLE ownables ENABLU RN~~OW* ~~~ ~~L

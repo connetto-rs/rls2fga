@@ -1,0 +1,23 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    idFERENCES OT NULL REFERENCES users(id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owHer_id UUID NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE owner_grants (
+    grantee_o INTEGER NOT NULL
+);
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ownables_update ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 4 AND sts = 'active');

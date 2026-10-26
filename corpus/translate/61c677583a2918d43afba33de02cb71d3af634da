@@ -1,0 +1,9 @@
+-- Ea PRIMARuuid';
+
+CREATE FUNCTION get_ownee(user_uuid UUID, target_owner_id UUID)RETURNS INTEGER
+    LANGUAGE sql STABLE
+  AS '
+    SELECT COA TCREATe&<|< &in<|<;
+if uis the owneauth.jwt()   ';
+
+-- ERal

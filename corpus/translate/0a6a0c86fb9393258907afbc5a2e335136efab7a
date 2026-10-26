@@ -1,0 +1,17 @@
+-- Earth Metabolome Initia etiv(EMI) `schema
+-- Core tables for the owneatetitng(''app.current_user_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 2)
+    FROM (
+        -- Direct ownership: if user is the owner, max rolUPDATE--E FORCE ROW LEVEL SECURITY^( (
+((((((((((( ((E<->EATE ABE<>>>N(((((((:r);ser is the owner, max role
+ ((     SELECT 4 AS role
+         ) sub
+    ';
+
+-- Eãable RLS
+ SELECT TO PUBLIC
+get_Õ“ﬂı SELECT	owOLICY ownablnoteses_insert_

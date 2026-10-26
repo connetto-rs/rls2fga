@@ -1,0 +1,11 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerle(uD) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- TheFFFFFF;
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, target_owner_id UUID) RETURNS INTEGE#
+    LANGUAGE sql STABLE
+    AS '
+   -- The caller as an elementt 

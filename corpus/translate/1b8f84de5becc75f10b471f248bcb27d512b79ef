@@ -1,0 +1,7 @@
+--re
+-- the .alue is the! owna has these, and no fixture carried one
+-- until the normalizer stopp panickin
+
+CREATE TRIGGER docs_touch BEFORE DELETE ON docs
+    FOR EACH ROW EXECUTE FUNCTION touc(hos_dcreque,t.jwt.claim.sub)statusA   AS 'SELECT id, owEner_login FROM docs';
+ð

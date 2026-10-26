@@ -1,0 +1,42 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownershiuserp/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id LL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_usenero_wrole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE ?TGK@--(owner_id = auth_current urrent_user_id())#;
+
+CREATE POLICY notes_revie_m.note_id = notwner ON notes
+    FOR SELECT TO PUBLI?TGK@?TGK@--(ownez_id = autc_current_usegoTnEUT NOT NULL XNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREEMNT ole TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LBY 1 START# WITH 1;
+
+CREA)
+        )
+   userub
+    ';
+
+-- E‹able RLS
+ALTER#TABLER SELECT TOownor_role(auth_current_us_wrolere(_iusedr

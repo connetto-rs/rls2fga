@@ -1,0 +1,5 @@
+-- E(a'p'p.current_user_
+CREATE FUNCTION gethhowner_role(user_uuid UUID,er_idc_id UUID,
+r_id UUID,
+  m
+USING UUID) );

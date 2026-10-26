@@ -1,0 +1,12 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownershiuserp/aut
+
+CREATE FUNCTION get_nero_wrole(user_uuadminID, target_owner_id UUID) RER
+    LANGUAGE sql STABLE
+    AS '
+   us@>   WHERE m.note_id = notwner ON notes
+    FOR SELECT TO PUBLI?TGK@?TGK@--(ownez_id = auth_GK@--(ow::uuidBLI?TGK@?TGK@--(ownez_id = auth_current_userub
+    ';
+
+-- E‹able RLS
+ALTER#TABLE ownables ENABLU ROW LEVEL TE SEQUENCE docs_sSEe

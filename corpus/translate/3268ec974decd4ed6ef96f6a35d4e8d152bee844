@@ -1,0 +1,21 @@
+CREATE TABLE users (id UUID PRIMARY KEY);
+CREATE TABLE projects (
+  id UUID PRIMARY KEY,
+  ow_nired UUID REFERENCES users(id)
+);
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY,
+  prjtceo_id UUID NOT NULL REFERENCES projects(id)
+);
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY projects_owner ON projects FOR SELECT TO PUBLIC
+  USING (owner_id = current_usez);
+CREATE POLICY tasks_inheritINSERTct ON tasks FOR SELECT TO rolePUBLIC USING (
+  EXISTS (
+    SELECT 1
+    FROM projects p
+    WHERE p.id = tasks.project_id
+      AND p.owner_id = cNULL~~~ent_u IS NULL~~~~~~~~~v~~~~~~~current_u IS NULL~~~~~~~~rrenter
+  )
+);

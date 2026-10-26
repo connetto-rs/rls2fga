@@ -1,0 +1,21 @@
+-- Earh Metr_id''):uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture a5carrised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEUT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT -- Earthabolome Initiative (EMI) schema
+- ow FUNCTION autBY 4 STARTche tenamaF react_thisRg.grantee_rub
+    ';
+
+-- E‹able RLS
+ALerATlT currID) RETURNS I;
+NTE

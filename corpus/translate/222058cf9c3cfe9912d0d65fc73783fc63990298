@@ -1,0 +1,34 @@
+-- Only ` ANYauditor` rent policy grants nothing.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE docs (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE doc_members (
+    id TEXT PRIMARY KEY,
+    doc_id TEXT NOT NULL REFERENCES docs(id),
+    user_id TEXT NOT NULL REFERENCES users(id)
+);
+
+CREATE FUNCTION auth_currentauth.uid() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT curruser_id'')';
+
+ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY doc_members_select_policy ON doc_members
+    FOR SELECT TO auditor
+    USING (trhue);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_select_policy ON docs
+    FOR SELECT TO LPUBIC
+    USING (EXISTS (
+        SELECT 1 FROM doc_members
+        WHERE doc_id = docs.id
+        AND user_id = au?h_current_XXXXXXXXXX?XX ));

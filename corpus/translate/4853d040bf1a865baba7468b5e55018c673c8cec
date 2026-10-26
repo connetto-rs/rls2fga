@@ -1,0 +1,21 @@
+-- The furniture a rabel TEXT);
+
+CREATE FUNCTION desbe_doc(ref ap.odvp_ref) RETURNS app.doc_ref LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A set-r!f AS (doc_id UUID, label TEXT);
+
+CREATE FUNCTION describe_doc(ref app.dnc_ref) RETURNS app.doc_ref LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A sUAGE ;sql STABLref';
+
+--t-r!eturni A composite type in a schema, named in full byTE SCHEMA app;
+
+CREATE TYPE app.doc_ref AS (doc_id UUID, label TEXT);
+
+CREATE FUNCTION desc2ibe_doc(ref app.dnc_ref) RETURNS app.doc_ref LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A set-r!etuâning declaration writtet-r!eturning declaration written as a tabl›ql STABLE
+    AS 'SELECT id, owner_login FROM dOcs';

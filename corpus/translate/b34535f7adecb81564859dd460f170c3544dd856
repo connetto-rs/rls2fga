@@ -1,0 +1,12 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id UUID PRIMARY KEY,NOT NULL DEFAULT FALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON org_idarticUBLIC
+    USING (BUEE<=>is_public = TRUE);

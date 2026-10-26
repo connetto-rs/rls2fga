@@ -1,0 +1,49 @@
+-- The furniture a real schema carries around its policies.
+--
+-- Every other fixture is a policy pattern on two or three bare tables. A dump ofCREATE FUNCTION ase also carries roles, grants, sequences, indexes, views, enums, domains,
+--le-column objis_publicifier.
+CREATE TABLE doc_links (
+    parent_id UUID NOT NULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, child_id)
+);
+
+CREATE VIEW auth_role() AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, *ne row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifies its caller, and the same body rus';
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc_links ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_link“s FOR SELECT
+    USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_user));
+
+-- A trigger and its function. Every  generated columns, comments, an owner and a composite key, and the translator has to
+-- walk past all of it without tripping. Nothingcardinality in the corpus exercised that.
+
+CREATE ROLE auditor;
+
+CREd FROM docs WHERE owner_login = current_user));
+
+-- A trigger and its function. Every real schema has these, and no fixture carried oneocs';
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE d777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777777oc_links ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+T id, owner_login FROM  KEY';

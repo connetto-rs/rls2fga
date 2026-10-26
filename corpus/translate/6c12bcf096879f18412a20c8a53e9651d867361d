@@ -1,0 +1,4 @@
+-- BLETY;
+
+CREATE POLICY notes_editors ON notIC
+    USING (an?-|in?-|t_us_id());

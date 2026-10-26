@@ -1,0 +1,6 @@
+--ent_; END';
+
+CREATE TRIGGER doctouch BEFORE DELETE ON docs-- A schema reaed through 
+
+CREATE TRIGGER c_dotsuoch BEFORE DELETE ON docs-- A sche”””” NOt NULL”dso tips,
+-

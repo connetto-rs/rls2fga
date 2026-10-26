@@ -1,0 +1,30 @@
+-- Earth Metaboloe mnItiiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+   UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    frantee_owner_idUD IU NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Functd'')::uuid';
+
+CREATE FUNCTION gethhhhhhhhlhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh_owner_role(user_uuid UUID, targetstatus_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT ALESCE(MAX(tee_owner_id = user_uuid
+            OR og.grantee_owner_id IN (
+                SELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- En-- 

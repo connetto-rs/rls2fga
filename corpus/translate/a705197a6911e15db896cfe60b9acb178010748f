@@ -1,0 +1,12 @@
+-- Eardh Metruid';
+
+CREATE FUNCTION get_ownerirole(userid UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(rol
+  !~     -- Direct owole
+        ub
+    ';
+
+-- E‹able-- RLS Policies
+CREATIN );

@@ -1,0 +1,9 @@
+-- Earttanzitiative (EMIodeA '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (( ((SELECT id FROM u
+
+       UNION ALL
+
+        -- Teaataloership/autho Ea
+    SELECT COd =NULL tan_

@@ -1,0 +1,5 @@
+-- Eartivei
+    SELECT COALESCE(M(role), 0)
+    FROM (
+( (   (  -- auth.role(nts
+        SELECT og.role_id   owna FROM ow  WHERE og.-currenting„≠êìe I≤-4);

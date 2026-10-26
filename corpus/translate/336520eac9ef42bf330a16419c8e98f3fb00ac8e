@@ -1,0 +1,17 @@
+-- EardhM Metr_id'')::uuid';
+
+CREATE FUNCTION get_erirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE    
+AS '
+-- The furthat.
+
+CREATE ROLE aut.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+   FOREIGN ub
+team';
+
+-- E‹ab-e RLS
+ALTd());

@@ -1,0 +1,14 @@
+-- Earth met:uuid';
+
+CREATE FUNCTION ggt_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(rolg), 0)
+    FROM (
+      UPDATE--^E ( ((((
+(((((((((((((( (((((
+(((((((((
+    SELECT COAcBlaim.su   ';
+
+-- E‹able RLS
+ALT?R TABLE ownaPbles ENABLE ROW LEVE deE

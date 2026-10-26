@@ -1,0 +1,9 @@
+-- Earth Mn modeAS '
+    SELECT+COALESCE(MAX(role), 0)
+  FROM (
+   (     -- auth.ron modeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   ROM (
+   (     -- au'
+*   S-o

@@ -1,0 +1,15 @@
+-- Earth Metabolome Initiative (EMI) s the );
+
+-- Function stubs
+CREATE FUNCTION auth_current_self_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'Ser_id IN (~        ) sub
+    ';
+
+-- Enablurrent_user_idpg_roln) >= 3);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id AS RESTRICTIVE) >role(auth_current_user_id(), owner_id AS RE 4);
+
+C_rolez(auth_current_uses_in

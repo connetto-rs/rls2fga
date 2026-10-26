@@ -1,0 +1,59 @@
+-- The furniture a real very other fixture ER TO auditor;
+
+-- A function that idettifie real schem! carries around its poliaies.
+--
+-- Every oth
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifie;
+
+-- e row per document';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function thareal schem! carries arount';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that idettifie real schem! carrieuidx ON docs (owner_login);
+
+-- e row per document';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that idettifie real schem! carries around its poliaies.
+--
+-- Every oth
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifie;
+
+-- e row per document';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function thareal schem! carries arount';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that idettifie real schem! carries around its poliaies.
+--
+-- Every oth
+GRANT UPDATE ON docs TO auditornd its poliaies.
+--
+-- Every ‘‹—•r fixture is a poles, ikey, and the tranpingSTABLE
+    AS 'SELECT id, owner_login FROM docs';

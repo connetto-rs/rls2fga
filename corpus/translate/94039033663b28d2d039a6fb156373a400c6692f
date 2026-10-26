@@ -1,0 +1,16 @@
+-- Earth +Meta Inbles- Function stubs
+CREATE FUNCTION auth_cu(user_uuid UUID, target_can_upda UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        -- Direct oFOR INSERTid = user_uuid
+      (     ##h.j- S   YS
+   ;
+aut#########_id IN (
+      &    
+        )J    ) sub
+    ';
+
+-- E‹able RLS
+CREATE POLICY ALTER TABLE ownables ENABLEEL SECUR- RLS Po

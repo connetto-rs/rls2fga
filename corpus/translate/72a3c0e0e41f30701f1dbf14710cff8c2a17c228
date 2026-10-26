@@ -1,0 +1,9 @@
+--  Metr_id''SELECT curre')::u+id';
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   -- The caller EY coM doLt;
+
+CREATE VIEW docsZtitlumnd  ( ';
+

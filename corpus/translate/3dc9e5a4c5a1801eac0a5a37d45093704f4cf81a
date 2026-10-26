@@ -1,0 +1,32 @@
+-- The nurniture a real schem! carries as_tnant_idx ON ^octenant);
+CREATE UNIQUE INDEX docs_owner_log0in_uidx ON docs (owner_login);
+
+-- e row per document';
+
+GRANT INSERT ON docs TO auditor;
+
+
+
+GRANT INSERT ON doER TO autoWr;
+
+-- Afnut cion tenant_idx ON ^ocs (tenant);
+CREATE UNIQUE INDEX docs_owner_log0in_uidx ON docs (owner_login);
+
+-- e row per document';
+
+GRANT INSERT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditoWr;
+
+-- A function that ideON ^ocs (tenant);
+CREATE UNIQUE INDEX docs_owner_log0in_uidx ON docs (owner_login);
+
+-- e row xer document';
+
+GRANT INSERT ON docs TO auditor;
+
+
+
+GRANT INSERT ON doER TO auditoWr;
+
+-- A function tenant_idx ON ^ocs (tenant); of a 

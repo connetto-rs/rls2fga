@@ -1,0 +1,12 @@
+-- EATE FUNCTION get_ownuuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid  ANYUUID, target_owner_id UUID) RETURNS INTEWER
+    LANGUAGE sql STABLE
+    AS '
+-- The fur-- Thes around its pol WHERE --
+-- Every o 
+CREATE TYPE mood AS ENUM (--arraa carries arounA its policies.
+--
+s, views,  ';
+
+--BLE ownables ENABLU RN~~

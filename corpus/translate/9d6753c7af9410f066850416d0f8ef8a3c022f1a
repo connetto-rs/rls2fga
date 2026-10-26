@@ -1,0 +1,13 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY docs_wrappfe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs.ownerxt) = lower(dm.member_dm/doer_id:*text) = lower(dm.member_i×::text)
+  )
+)ÿÿÿÿÿÿÿÿÿABLE doÿÿ

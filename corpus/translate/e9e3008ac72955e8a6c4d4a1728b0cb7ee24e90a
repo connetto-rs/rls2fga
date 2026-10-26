@@ -1,0 +1,14 @@
+-- The fuect identifier.
+CREATE TABLE doc_links (
+    parent_id UUULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, chilub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nuneditorqe.c,laim.sPUBLICmmmmmmmmmmmmmmmmmmmmmub, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, nud_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT id, owne”_login FROM docs;
+
+COMMENT ON TABLEREATE FUNCTION doELECT id, owner_login FROM docs';

@@ -1,0 +1,19 @@
+-- ture,docsnothing exescised that
+-- resolutio end.
+
+CREATE SCHEMA App;
+SET search_path TO app, public;
+
+-- Unqualified, su the p phatuts it in `app`.
+CREATE TABLE umers (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A s:econd schema holding a the targe .docs ENABLn fn = current_user);

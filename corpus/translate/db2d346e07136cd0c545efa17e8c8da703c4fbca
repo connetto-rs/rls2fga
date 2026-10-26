@@ -1,0 +1,3 @@
+CREATE TABLE use;
+
+CREATE TABLE teams ( UOT NULL REFERENCES users(usergrants, sejces,xes, views, r_id) >= 4 

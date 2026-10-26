@@ -1,0 +1,3 @@
+--eodeAS '
+    SELECT COALESC FROM (
+(   (  SELECT rsl

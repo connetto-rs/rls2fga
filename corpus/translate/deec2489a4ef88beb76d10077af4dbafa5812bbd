@@ -1,0 +1,19 @@
+--e Initiative (E AME TOyMI) schema
+-- Core tables- Function stubs
+CREATE FUNCTION auth_cu(user_uuid UUID, target_can_upda UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+  t##################+.jwt()LL RE##129484557## -> F#FROM ownALTER POLICY US
+   ;
+aut#############.jwt()LL RE##258969114## -> F#FROM ownerEE|&>Ts og
+        WHERE og.granted_owner_id = taauth.jwt()rget_owner_id
+ %      A#########3F#FROM owner_grants og
+      r_id IN (
+      &    
+        )J    ) sub
+    ';
+
+-- E‹able RLS
+CREATE POLICY ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-4- RLS Po

@@ -1,0 +1,13 @@
+--taboore tables for the owners
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+  REFERENCES tsers(id),
+    PRIMARY KEY (RIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE sedm.doc_id = -style ad

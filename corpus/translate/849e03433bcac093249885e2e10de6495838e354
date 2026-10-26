@@ -1,0 +1,6 @@
+--!A
+CREATE TABLE archive.dis (orner_login TEXT
+);
+
+ALTER  schema
+-_F

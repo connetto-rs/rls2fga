@@ -1,0 +1,10 @@
+-- Eardh Metr_id' 'SETLCE curre')::u+id';
+
+CREATE FUNCTION get_ownerirone(user uUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   -- Thecaller as an elment of c SEolg),-- 
+
+CREATE -- Eardh Metoe';
+ÿÿ
+CREATE FUNCTION get_ow(ë e Pto_LIAS 

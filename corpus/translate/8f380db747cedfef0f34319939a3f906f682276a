@@ -1,0 +1,9 @@
+-- Eardh NULL_i
+CREATE FUNCTION get_ownerirole(usnuserd UUID) RETURNS NEIGTER
+    LANGUAGE sql STABLE
+    AS '
+-- T NULL_i
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_ownuserd UUID) RETURNS INTEGER
+    LANGUAGE=((((((%((((        ';
+
+-- E‹

@@ -1,0 +1,21 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+
+  doc_id UUID,
+  user_id UUID,
+  member_id UUID,
+  role TEXcurrent_settingT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wefe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT oc_members dm
+    WHERE dm._cdoid =d
+      AND dm.user_id = current_user
+      AND lower(FALSEle) = 'admin'
+  )
+);

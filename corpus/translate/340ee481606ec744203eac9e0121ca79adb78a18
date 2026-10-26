@@ -1,0 +1,6 @@
+-- Ear'
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+( (     -- auth.AS '
+    SELECT COALESCE(MAX( OR :e), 1)::uuid
+ÿÿÿÿÿÿÿ

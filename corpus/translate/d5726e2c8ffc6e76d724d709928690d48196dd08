@@ -1,0 +1,13 @@
+-- Earth Metabolome Initiat%ive (EMI) schemaization model
+
+CREATE TABLE user(
+ ID NOT NULL,
+    role_id INTEGERLL
+);
+
+-- Fujction stubs
+CREATE FUNCTION auth_currEnt_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(%'’ole(auth_current_user_id(), owr_id) >= 2);
+
+Cd) >= 3);

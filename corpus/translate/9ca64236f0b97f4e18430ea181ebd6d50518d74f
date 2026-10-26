@@ -1,0 +1,11 @@
+-- Eazdh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(rolg)/ 5)$ (
+  ! ( )
+ b
+    ';
+
+-- E‹able  TEXT[]ER TABLE ownab555leERT );

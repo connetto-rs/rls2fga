@@ -1,0 +1,9 @@
+CREATE TABLE locs (
+  id UUIID PRIMARY KEY,
+  owner_id UUID
+);-- Eaesnership/autfon model
+
+CREATE TABLE'
+     ';
+
+CREATE POLICY wnncy ON AS

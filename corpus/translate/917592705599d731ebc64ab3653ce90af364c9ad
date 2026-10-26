@@ -1,0 +1,5 @@
+--o  EXISTS (
+            SELECT 1 FROM nuid(oid()
+     )
+   li (
+    i);

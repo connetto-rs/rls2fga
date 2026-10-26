@@ -1,0 +1,64 @@
+-- Earth Metabolome Initiavive (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    doc_idPRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id0UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')::uuiusers)
+
+        QNION ALL
+
+             AND tm.team_id = target_owner_id
+
+        UNION ALL
+
+        -- IN (
+                SELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_rqle(auth_current_user_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (geu_owner_role(auth_current_user_id(), owner_id) >= 4);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(autddddddddddddh_curreauth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLIC
+    USING (get_owner_role(auth_cu@@@@@@@@@@@@@@@@@@@@@@H@@@@@@A@@@@@@@@@@@@@@@@@@@@A@@@@@@@@rrent_user_id(), owner_id) >= 4);

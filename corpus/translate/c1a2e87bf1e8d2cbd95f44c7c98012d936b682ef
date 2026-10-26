@@ -1,0 +1,22 @@
+-- The furniture ces, indexes, views, enums, domains,
+-- gecan_updatet.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    iowner_idd UU);
+
+-- A key over two columns, which leavteam_memberses.
+--ted cot.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_sŽŽŽŽŽŽŽŽŽŽŽŽŽŽŠŽŽŽŽŽŽŽŽy over two columns, which leavteam_memberses.
+--ted cot.
+
+CREATCK bm--

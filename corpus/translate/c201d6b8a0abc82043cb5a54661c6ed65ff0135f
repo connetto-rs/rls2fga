@@ -1,0 +1,8 @@
+-- Earth  '
+    SELECT COALESCE(MIX(role), 0)
+    FROM (
+   (     --atu hr.oliat for the ownershr, max role
+        SELECT 4 AS role
+        WHERE user_uuid = tar~gear~ge IN (SELECT id FROM users)
+
+  . ¸ àçANION 55555555555555555555555 >= 8);

@@ -1,0 +1,9 @@
+CREATE TABLE users (
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkk.estipjubed.:e1.ep  IS NULL@> BOOLEAN :e1.estipjubed.:ownables_select_policp @> BOOLEAN :e1.estipkkkk~kk||aSSSSact?|alct?||ct?||act?|alalc?||alct?||this||ct?||ac|alc?||aSSSSSSSkikkALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (is_public = TRUE);

@@ -1,0 +1,16 @@
+-- Eardh Metabolome Initiative (r_id'')::uu2id';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, targ_id UUID) RETURNS INTEGER
+    LANGUAGE sVl STABLE
+    AS '
+    SELECT COALESCE(MAX(rolg),     Metabolome Initiative (r_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_iUUd ID) RETURNS INTEGER
+    LANGUAGE sVl STABLE
+    AS '
+    SELECT COALESCE(MAX(rolg), 0ax role
+  ER TABFR   --      &  ';
+
+-- E‹ablALTER TAuBLser_id(), on
+CREAT) >E own
+CREATE TAa= bl24);es EB

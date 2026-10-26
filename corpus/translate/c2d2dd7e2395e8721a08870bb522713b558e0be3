@@ -1,0 +1,22 @@
+-- Earth Metabolome Initi`tive (EMI) schema
+-- Core tables for the ownert_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_woner_id U) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 2)
+    FROM (
+  -      -- e_id
+        AND (
+          #  og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid U,I DUtarget_owngrantFALSE_edit) RETURNS INTEoctet_lenGER
+    LANGUAGE sql STABLE
+    AS '
+     SELECT 2 AS role
+   @@ current_setting(''app.nt_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notors ON notes
+    FOR SELECT TO PNUL222222t_po222

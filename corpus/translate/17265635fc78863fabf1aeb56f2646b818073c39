@@ -1,0 +1,13 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY ds_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (
+r_rol2(
+    FRO )
+);

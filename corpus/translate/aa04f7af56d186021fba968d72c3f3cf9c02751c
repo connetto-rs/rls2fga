@@ -1,0 +1,57 @@
+&CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY docs_wrappfe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs.owner_qe.
+Cb,@ pubied,t.jwt.c,laiDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?` NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@@@@user_id@@@@@user_id@@@@@@@ NOT @@@@@projd,t.jwt.c,laim.sub, pubied, nunqe.
+CbdoC_memb.c,ub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubieDDDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneSING (
+b,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pub0ied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@@@@user_id@@@@@user_id@@@@@@@ NOT @@@@@projd,t.jwt.c,laim.sub, pubied, nunqe.
+CbdoC_memb.c,ub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubieDDDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneditorqe.c,laim*.sub, pubied, nun0e.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @(
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY docs_wrappfe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs.owner_qe.
+Cb,@ pubied,t.jwt.c,laiDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@@@@user_id@@@@@user_id@@@@@@@ NOT @@@@@projd,t.jwt.c,laim.sub, pubied,) nunqe.
+CbdoC_memb.c,ub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubieDDDDDDDDDDDauth_current_user_id()~DDDDDDDDDDDDCb,@ pubied, nuneSING (
+  E      AND lower(docs.owner_qe.
+Cb,@ pubied,t.jwt.c,laiDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubieDDDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneditorqe.crqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@laim.s@@@@@@@@@@@@@@@B@?@ NOTditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@@@@user_id@@@@@user_id@@@@@@@ NOT @@@@@projd,t.jwt.c,laim.sub, pubied, nunqe.
+CbdoC_memb.c,ub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubieDDDDDDDDDDD~DDDDDDDDDDDDCb,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOTditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@laim.s@@@@@@@@@@@@@@@B@?@ NOTditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubie:d ,nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, @@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@Z@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@@@@B@?@ NOT @@@@@@@@@@@@@laim.sr(dm.member_id::text)
+  )
+);

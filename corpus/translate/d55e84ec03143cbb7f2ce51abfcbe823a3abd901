@@ -1,0 +1,13 @@
+-- Eardh Metr_ocd';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID,Vtarget_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SEOM (
+  >>>>>> DATE>>>>>>>>>>>>>>>>0>>>>s
+    FRser_id(), owner_id) >';
+
+-- E‹able RLSTY;
+
+-er_id(), owes5_
+er

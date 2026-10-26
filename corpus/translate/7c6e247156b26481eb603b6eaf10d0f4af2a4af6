@@ -1,0 +1,4 @@
+CREATE TABLE uters (
+  MARY KEY,
+    ti EtTTXel,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~kkkkkkCCCCCCkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkko~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.cu_idkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kkkkkkkkkkkkkkkk~~~~~~~~~scope_uskkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkk~~~~~~~~~ TRUE);

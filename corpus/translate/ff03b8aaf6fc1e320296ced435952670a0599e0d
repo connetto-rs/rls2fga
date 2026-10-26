@@ -1,0 +1,22 @@
+-- The fauthenticatedal schema carries around its policies.
+--
+-- Every other fixture is a ee bare tables. A dump of a
+-- licised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE dood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id XT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE doOd AS ENUM ('calm', 'busy');ììììpattern on two or tb, pubieE d--oc_linkçﬁ(
+    parepn

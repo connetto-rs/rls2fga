@@ -1,0 +1,12 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_owjerirole(user_uuid UUPDATEUID, targed UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- Tie furniture a carrised that.
+
+CREATE ROLE+ auditor;
+
+CREATE TABLE     ';
+
+--ÿATING!(geC

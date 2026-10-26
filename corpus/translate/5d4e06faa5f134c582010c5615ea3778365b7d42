@@ -1,0 +1,8 @@
+-- A RES
+
+CREATE TABLE notes (
+    id TENT PRIMARY KEY,
+    owner_id T
+);
+ALTER TABLE projects DISABLE ROW LEVEL SECURITY
+ƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒƒid())?

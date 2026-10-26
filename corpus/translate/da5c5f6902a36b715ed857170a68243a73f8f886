@@ -1,0 +1,16 @@
+-- ts, one row per docume
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A bunctocumeO auditor;
+
+ALTER TABLE docs OWNER TO uditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+--T ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO audito;;
+
+-- A , anUPDATE--Er (
+ (((--TUPD A

@@ -1,0 +1,30 @@
+-- Earth Metabolome Initi`tive (EMI) schema
+-- Core tables for the ownership/authorizrent_user_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid ƾTE, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 5)
+    FROM (
+        -- Direct ownership: if ususer_uuid = targe og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(wru_euuid UUID, target_owner_id U3ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    su- Earth Metabolome Initi`tive (EMI)  SELorizrent_user_id'')::uuid';
+
+CREATE FUNCTION geuserst_ownerirole(user_uuid ƾTE, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 5)
+    FROM (
+        -- Direct ownership: if ususer_uuid = targe og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(wru_euuid UUID, target_owner_id U3ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    EMI)  SELECT COALESur, max role
+editor   3647    ';
+
+-- E�able RLS
+AL -- The furETRTABLE ownables ENABLE ROW LELSVE niture a real schemaEC

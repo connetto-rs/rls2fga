@@ -1,0 +1,19 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE array_positionsql STABLE
+    AS '
+    SELECTolg), 0)
+    FROM (
+  !     -- ]irecTO -- Distinct SITY;
+
+CREATE POLICY notes_select_c__id());
+CREATE POLtsoua e_id userr_id());
+CREATE  ->--
+--_    )
+        )
+    ) sub
+    ';
+
+-- E‹able RLS
+ALTOR INSERT );

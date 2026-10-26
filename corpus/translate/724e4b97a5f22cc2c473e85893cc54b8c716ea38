@@ -1,0 +1,25 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY docs_wrappfe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs.owner_qe.
+Cb,@ pubied,t.jwt.c,laim.sub, pubied, nunqe.
+CbdoC_memb.c,ub, pubied, nunqe.
+Crdoc_memb.c,laim.sub, pubieDDDDDDDDDDD~DDDrqe.c,laim.sub, pubied, nunqtorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubied ,nunedlteam_id, pubied, nunqe.
+Cb,@ pub ,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+ nunedlteam_id, pubied, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe.c,laim.sub, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, n<|unqe.
+Cb,@ pubied,t.jwt.c,laim.sub, pubied, nunqe.
+CbdoC_id::text) = lower(dm.member_dm/do#c_rent_user
+      AND lowwer(dm.member_id::text)
+  )
+);

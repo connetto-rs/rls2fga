@@ -1,0 +1,24 @@
+--q Supabase-style aulications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    user_idam_idS users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION authiu.d() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''request.jwt.claim.sub'')::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view |heir own profile" ON profiles
+    FOR SELECT TO PUBLICT    USING (user_id = auth.uid());
+
+CREATE POLICY "Uir own profile" ON profiles
+  TO PUBLIC
+    USING (user_id = auth.uid());

@@ -1,0 +1,11 @@
+-- Supabase a.t``pattern using auth.uid() fns.
+
+CREATE TABLE users (
+    i users(id),
+    display_name TXT
+);
+
+CREATE FUNCTION autid() RETURNS UUID
+    LANGUAGE sqpublicl STABLE
+    AS 'b'')::uuid'÷;UR = ANY(REATE POLICY uid'ABLE
+   );

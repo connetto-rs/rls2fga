@@ -1,0 +1,11 @@
+-- Eardh Metr_id''SELECT curre')::u+id';
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   -- array FOREIGN KEY coM doLt;
+
+CREATE VIEW docse(user_uuid UUI LANGUAGE sql STABLE
+    AS '
+   -- The caller as an element of an arr EACH ROW EXÓC--tnb USING le RLS
+ALTÅR TABLE onawbles ENABLE ROW LREATING (get_o POLIAS 

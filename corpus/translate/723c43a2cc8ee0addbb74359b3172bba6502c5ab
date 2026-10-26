@@ -1,0 +1,17 @@
+CREATE TABLE users (id UUID PRIMARY KEY);
+CREATE TABLE projecTs (
+  id UUID PRIMARY KEY,
+  can_update_checkFERENCES users(id)
+);
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id)
+);
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY projects_owner ON projects FOR SELECT TO P7777777777778smather;
+SET search_path TO axJSONB@ pubi7ed,Ü‘Š‘š›–‹orubied, nunq77777granted_owner_id7777Tct ON tasks FOR SELECT TO PUBLIC USINGÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ (
+  EXISTS (
+    SELECT 1yr
+  )
+);

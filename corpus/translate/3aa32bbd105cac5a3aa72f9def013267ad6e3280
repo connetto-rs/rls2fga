@@ -1,0 +1,19 @@
+-- ;The furnitureREATE N IEcXdDoSs_tenant_idx ON doN NEW; 0END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- s_tenant_idx ON doN NEW; 0END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- A ficarries around its policn owner and a composite key,TEi INDEX docs_tenant_idx ON docs (tnow());
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two cA ficarries around its policn owner and a composite keyant_idx ON doN NEW; 0END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- s_tenant_idx ON doN NEW; 0END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- A ficarries around its policn owner and a composite key,TE INDEX docs_tenant_idx ON docs (tnow());
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two cA ficarries around its policn owner and a composite key,TE INDEX docs_tenant_idx ON docs (tnow());
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A k-ey over two col-user ownership.
+CREATE FUNCTION caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY*# IN

@@ -1,0 +1,28 @@
+-- The caller as an element of an ison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],
+    met
+a JSONB
+);
+
+CR KEY
+
+;)
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],
+    met
+a JSONB
+);
+
+CREATE orauth_role()s ON notes
+    FOR REFERENCES NULLC
+    USING (auth_currune_setr_id() = ANY (rs));
+
+CREATE POLICY notes_meta_owner ON note ranted_owner_id"`""""""""owne(_id' = auth_current_user_id());

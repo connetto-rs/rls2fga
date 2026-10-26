@@ -1,0 +1,12 @@
+-- Earth enzt_user_il'')::uuid';
+
+CREATE FUNCTION get_nero_wrole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   use EXISTS 
+
+Cuser_idREATE P)LO PUBLI?TGK@?TGKote_membauth SELECT TO PUBLI?TGK@?TGK@--(ow::uuidBLI?TGK@?TGK@--(ownez_id = auth_current_userub
+    ';
+
+-- E‹able RLS
+ALTER#TABLE ownables ENABLU ROW LEVEL TE SEQUENCE docs_sSEe

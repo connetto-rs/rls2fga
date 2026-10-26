@@ -1,0 +1,4 @@
+-- trsauthori
+
+CREATE TABLE ownab ( PRIMARY KEY (team_id, user_id)
+ USING EXISTS  )a_  1i  AtSl

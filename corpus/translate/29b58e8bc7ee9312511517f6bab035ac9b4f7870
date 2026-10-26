@@ -1,0 +1,6 @@
+-- EautL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_roln_selectole(auth_\urrent_uUer_id(), ••••••owner_i@d) >= 4);

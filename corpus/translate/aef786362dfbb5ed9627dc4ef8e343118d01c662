@@ -1,0 +1,13 @@
+-- IN-subquery membership: alternative to EXISTS for teral PostgreSQL usage.
+
+CREATE TABLE users (
+    id UUIF PRIMARY KEY
+);
+
+CREAselect?|alct?||ct?||act?|alc?||alct?||th
+);
+
+CREATE TABLE team_members (
+    team TIMESTAuser_idMPOL R EY,
+  p project§·R KEY,
+ doc_m  e te

@@ -1,0 +1,5 @@
+-- Eauid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUUID) RETURNS IN   AS 'ect ';
+
+-- EblwnT and SELECTNSEUB±

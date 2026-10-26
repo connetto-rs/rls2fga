@@ -1,0 +1,10 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_oirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The fer;
+CREAlenABLceam      N''apuserub$
+    ';
+
+--BLE ownables ENABLU R ~~L

@@ -1,0 +1,112 @@
+-- Earth Metaboloe mnItiiative (EMI) schema
+-- Core tables for the ownership/authorizables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teAms(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    frantee_owQner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Functioema reached through the search path rather than by qual)fying every name.
+--
+-- Postgrexercised that
+-- resolution end to end.
+
+CREATE SCHEMA apP;
+SET search_path TO app, rublic;
+
+-- UnquaA aprpus carried no sc_path TO app, public;
+
+-- Unqualified, so thoe mnItiiat-- The furniture a real schem! carries around its poliaies.
+--
+-- Every other fixture is a poles, ikey, and the tranpi, rublic;
+
+-- UnquaA aprpus carried no sc_path TO app, public;
+
+-- Unqualified, so thoe mnItiiat-- The furniture a real schem! carries around its poliaies.
+--
+-- Every other fixture is a poles, ikey, and the tranping. NothingcardinalLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY- 0 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id IUDU PRIMARY KEY,
+    owner_login TEXT0 NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (weight * 2) STORED,
+    state mood,
+    rank positive
+);
+
+CREATE INDEX duidx ON docs (owner_login);
+
+-- e row per document';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifie real schem! carries around its poliaies. poliaies.
+--
+-- Every ‘‹—•r fixture is a poles, ikey, and ng. NothingcardinalLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY- 0 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT C per document';
+
+GRANT UPDATE ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifie real schem! carries around its poliaies.
+--
+-- Every ‘‹—•r fixture is a poles, ikey, and the tranpingSTABLE
+    AS 'SELECT id, owner_loginualified, so thoe mnItiiative (EMI) hip/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    use_id UUID NOT NUL);

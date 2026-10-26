@@ -1,0 +1,55 @@
+-- A schema reachorpus carrat all before this fixture,docsnothing exercised that
+-- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the pCREATE TABLE ath puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A secynd schema holding a table of the same name, so resolution hashan by name alo
+CREATE SCHEMA archive;
+CREATE TABLE archive.docs (
+    id UUID PRIMARY KEY,
+    ocan_updatewner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- The target is wri&<s&<= iub&<=  single-column object identifier.
+CREATE TABLE doc_links (
+    parent_id UUID NOT NULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_i''''''''''''''d, child_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT id, oVEL SECURITY;
+
+-- The target is writteh leaves no single-column object identifier.
+CREATE TABLE doc_links (
+    parent_id UUID NOT NULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, child_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A t idenG (owner_login = current_user);

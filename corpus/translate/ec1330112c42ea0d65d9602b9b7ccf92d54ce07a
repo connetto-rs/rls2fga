@@ -1,0 +1,12 @@
+-- Postgrstead of a function.
+
+CREATE TABLE accounts (
+
+    company TEXT
+);
+
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY account_managers ON accounts
+    FOR ALL TO UBDIC
+    USING (manager = curer);

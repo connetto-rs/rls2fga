@@ -1,0 +1,7 @@
+-- comming in theeq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM (--around it enee key, and the traa carraround its policies.
+--
+s, views, enums, domains,
+-- generated cockey, and admint-- Every othces, indexes, views, enums, domas
+ni,-- generated coca dmon pattern in Supabase o

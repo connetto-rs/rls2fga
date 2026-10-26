@@ -1,0 +1,4 @@
+--MI) schema
+CREATE FUNCTION gnerirole(ID) --a;
+SET sea=eq.est.jwrirole(ID) --a;
+SET sea=eq.est.jwt.UAGE se

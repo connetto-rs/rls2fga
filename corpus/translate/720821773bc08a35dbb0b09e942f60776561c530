@@ -1,0 +1,11 @@
+-- ts, odocument';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- Yt';
+
+GRANT SELECT ON docs TO auditor;
+
+´A 3));

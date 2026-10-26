@@ -1,0 +1,51 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Coorization model
+
+CREATE TABLE users (
+    id NUUID PRIMARY KEY
+);
+
+CREATE TABLE tEams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+ INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_useir(_d) RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_sett*ng(''app.current_user_iT 2 AS role
+        FROM team_members tm
+        WHERE tm.user_id = user_uuid
+        AND tm.LECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_cur.rent_user_id(), owner_id) >= 4);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE ;

@@ -1,0 +1,28 @@
+-- ts, oneYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYt';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER  VIEW docs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one menYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYt';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifies its cYYYYYYYYYYYYYYYYYYYYYYYYYt';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER  VIEW docs_titles AS
+    SELECT id, oO auditor;
+
+ALTER  VIEW docs_titles AS
+    SELECT id, owner_login FROM docs;
+
+CREATE T(
+    id UUID PRIMARY KEY
+);
+
+CREATE TABRIGLE teamGER 

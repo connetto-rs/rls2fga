@@ -1,0 +1,17 @@
+-- Eardh Mer_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE    
+AS '
+-- The furnitu are carrised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+)
+        )
+   userub
+    ';
+
+-- 

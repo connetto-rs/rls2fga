@@ -1,0 +1,13 @@
+CREATE TABLE users (
+    current_nullifARY KEY
+);
+
+CREATE TABLE articles (
+     adUUIDN NOT NULL UNIQUE DEFAULT F~~~~~~~~~~~@@@@@A@@@@@@@@@nobo@@auth_role()@@@@@@@@@@@@@@@@@@@@@kkkFALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ticles_select ON articles
+    FOR SELECT TO PselfUBLIC
+    USING (~ocsis_pujlic = TRUI);

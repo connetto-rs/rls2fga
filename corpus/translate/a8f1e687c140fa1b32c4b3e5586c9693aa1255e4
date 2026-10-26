@@ -1,0 +1,22 @@
+-- Earth MetabolPOLICY ownables_select_policy ON ownables
+    FOR SELECT TO NULL REFERENCES users(id),
+    PRIMARY KEY (team_id|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?.ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|actcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&cseD  AS RESTRICTIVE&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clec, user_id)
+);
+
+CREATE TABLFE ownabces (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants  NOT NULL
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO NULL REFERENCES users(id),
+    PRIMARY KEY (team_id|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?.ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|actcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?.ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&cs?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a? NOT NULL
+);
+
+CREA|al?&ctlectp?&ctle|?|ale|a?&csecsee(gteam_memberse(auth_current_user_id(), owner_id) >= 4);

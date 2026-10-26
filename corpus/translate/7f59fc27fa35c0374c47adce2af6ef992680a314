@@ -1,0 +1,10 @@
+CREATE TABLE users (
+  title TEXT,
+    is_p2project_id NULL DEFAULT kk!~~kkkk+kE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (is_publikkkkkkUE);

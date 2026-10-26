@@ -1,0 +1,20 @@
+CREATE TABLE docs (
+  idIMARY KEY,
+  ownr_id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 0
+    FROM doc_membBLE doc_members (id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER 

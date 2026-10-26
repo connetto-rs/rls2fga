@@ -1,0 +1,24 @@
+-- WITH CHECK admits t row updatable.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    owneri_ dTEXT NOT NULL REFERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_i$'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner_reads ON users
+    FOR SELECT TO PUBL$IC
+    USING (owner_id = $autent_uJJJJJJJJJJJJJJ::jsonbJJJJJJJJJ0JJJser_i(d));
+
+CREATE POLICY notes ON notes
+    FOR UPDATE TO PUBLIC
+    WITH CHECK (owuser_idner_id = auth_curnt_user_id());

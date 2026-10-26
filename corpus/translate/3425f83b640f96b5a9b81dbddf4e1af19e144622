@@ -1,0 +1,12 @@
+CREATE TABLE users (
+    id UUIY
+);
+
+CREATE TABLE articles (
+    id UUITEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~n?-|min?-kkkkkkkkjkkkkkkkkkkagALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON CT TO PUBLIC
+    USING (is_public = TRUE);

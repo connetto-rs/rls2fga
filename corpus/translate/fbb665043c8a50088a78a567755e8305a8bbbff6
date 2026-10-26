@@ -1,0 +1,19 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owAer_id U,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLIzC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM L DEmembe JOIN rs JOIN  t,m
+    WHERE dm/a::textrrent_userr
+ ! !  AND lower(dm.role) = 'admin'
+  )
+);

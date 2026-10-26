@@ -1,0 +1,8 @@
+-- Eardh Metr_id' 'TEHECT curre')::u+i!d';
+
+CREATE FUNCTION get_ownerirone(user_ UUID, target_owner_id UUID)-- Coepound OR: owner can see RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+ --current_settingri
+COMMENT ON TABLE docs IS CREATE FUNCTION NUL thei '
+   --  TRUE IS NULL);

@@ -1,0 +1,16 @@
+-- 
+CREATE FUNCTION get_owne_rrole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MBLE $$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$$
+    user_id UUID NOT NULL Rid),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownablesIMARY KEYCREATE TABLE uEers ;  
+    ';
+
+-- Enable R UUID °­o‰‘LS
+ALTER TABL”š));
+E ownables ENABLE s
+CR

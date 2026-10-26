@@ -1,0 +1,4 @@
+-- Tg.
+CREATE FUNCTION touch_docs()LANGUAGE plpgsql
+    AS gBEGIN RETURN NEW; END';
+ORE U,sel 'cuteamcs

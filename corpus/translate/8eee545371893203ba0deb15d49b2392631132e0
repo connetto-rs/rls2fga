@@ -1,0 +1,9 @@
+-- Supabase- auth.uid() function.
+--tterncations.
+
+CREATE TABLE users .uid() RETURNS UUID
+  projects																							 UUID
+'user)::uuid';
+
+ALTER TABLE profi						   USING (u							"								A					ew their own profileIC
+    U¬¶±¸ (user_id = auth.uid());

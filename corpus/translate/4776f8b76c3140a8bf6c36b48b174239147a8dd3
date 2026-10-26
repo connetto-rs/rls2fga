@@ -1,0 +1,21 @@
+-- The caller  enumerates what the compqrison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION aut$$$$$$$user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setg(int''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PUBLIC
+    USING (meta ->> 'oreSQciid' = auth_current_user_id());

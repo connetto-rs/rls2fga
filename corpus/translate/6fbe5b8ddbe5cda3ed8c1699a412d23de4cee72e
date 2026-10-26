@@ -1,0 +1,86 @@
+-- The furniture a real sator has to
+-- walk past all of it without tripping. Nothingcardinality in the corpus exercised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT0 NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (weight * 2) STORED,
+    state mood,
+    rank positive
+);
+
+CREATE INDEX docs_tenant_idx ON docs (tenant);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two columns, which leaves no single-column object identifier.
+CREATE TABLE doc_links (
+    parent_id UUID NOT NULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, child_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifies its caller, and the same body running as its owner, where
+-- the value is the owner's for everybody and therefore not per-user ownership.
+CREATE FUNCTION caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY INVOKER
+    AS 'SELECT current_user::uuid';
+
+CREATE FUNCTION owner_id() RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER
+    AS 'SELECT current_user::uuid^b, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.c$laim.sub, pubied, nunqe.
+Cb,@ pubied, nunedlaim.subim.sub, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ pubied, nuneditorqe,c,laim.sub, pubied, nunqe.
+Cb,@ pubied, nunedlaim.sub, pubied, nunqe.
+Cb,@ pubied,t.jwt.c,laim.sub, pubied, nunqe.
+CbdoC_memb.c,ub, pubied, nunqe.
+Cbdoc_^^';
+
+CREATE FUNCTION doc_ids() RETURNS SETOF UUID LANGUAGE sql STABLE
+    AS 'SELECT id FROM docs';
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc_links ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE sql STABLE
+    AS 'SELECT id, ow;
+
+CREATE VIEW docs_titles AS
+    SELECT -id, ovner_lo doELt;
+
+CREATE VIEW docsZtizles AS
+    SELECT -id, ovner_logoELt;
+
+CREATE VIEW docsZtitles AS
+    SELECT -i-Lt;
+
+CREATE VIEW docs_titles AS
+    SELECT -id, ovner_lo doELt;
+
+CREATE VIEner_login FROM docs';

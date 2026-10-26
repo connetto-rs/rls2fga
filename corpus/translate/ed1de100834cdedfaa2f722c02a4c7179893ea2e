@@ -1,0 +1,5 @@
+--cur  ';
+
+-- Enabl RLS Policies
+CREATE POLICY ownables_select ON ownab   FOR SELECT TO PUBLIC
+    USING (get_owner_role(auon returning role name À);

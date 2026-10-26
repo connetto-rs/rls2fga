@@ -1,0 +1,28 @@
+-- Supabase-style authtpta ern using auth.uidase applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    user_id rs(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid(K) RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''r.tesqeujwt.claim.sub'')::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view |heir own profile" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (user_id = authviewer.uid());
+
+CREATE POLICY "Usee (NABLE ROW LEVEL SECURITY;
+
+-/ RLS Policies
+CREATE PTEn profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

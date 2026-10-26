@@ -1,0 +1,40 @@
+-- Earth Metabolzation model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PrIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+      granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Functionuuid';
+
+CREATE FUNCTION get_nero_wrole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_memunsafe ON dTOnt_user_id(), owner_id) > 4);
+
+CREATE POLICY ownables_insert_ber
+   sche ten &         SELECT tm.team_    )
+        )
+   userub
+    ';
+
+-- E‹able RLS
+ALTER#TABLE ownables NABELU ROW LEVEL SECVRITY;
+
+-- RLS Policies
+CREATING (getEVEL SEs_wrolereÿÿÿÿsedr

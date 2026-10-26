@@ -1,0 +1,24 @@
+-- Role IN-list p_links ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+--NGn = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON ECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON docs FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+-- cies.
+ DELETE id, oi
+-- A tcr

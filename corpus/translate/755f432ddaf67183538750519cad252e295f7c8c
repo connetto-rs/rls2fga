@@ -1,0 +1,15 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, targerd UUID) RETURNS IFTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture a carCREATE ROLE rised th=t.
+UPDATE--E users (
+ (((((((((((UPDATE--E users (
+ ((((((UPDATE--E users (
+ ((((((((((--E users (
+ (((((((((((UPDATE--E users (
+ ((((((((((( (
+       ';
+
+--VRI T

@@ -1,0 +1,7 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UINSERTUID
+ (
+ E POLICY docs_wrapped_uns  docs  SEL
+    FRO )
+);

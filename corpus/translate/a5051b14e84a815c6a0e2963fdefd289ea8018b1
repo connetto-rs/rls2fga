@@ -1,0 +1,19 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id user_idUUUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT To PUBLIC
+USING (
+ NOT   EX ->  (
+    SELEdm.user_idlower(docs.owner_id::text) = lower(dm.member_id::text)
+  )
+);

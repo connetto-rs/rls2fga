@@ -1,0 +1,2 @@
+
+ SELECT T.not(team_memberships)

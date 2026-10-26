@@ -1,0 +1,12 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Corsnobo
+CREATE FUNCTION auth_current_user_id() RETURNS U LANGUAGE sql STABLE
+    AS '
+    SM (
+        D (
+     antee_ow)er_id = user_uuid
+    ) s auth_ ';
+
+-- E‹able RLS
+Aiay RLS
+ALTEciL

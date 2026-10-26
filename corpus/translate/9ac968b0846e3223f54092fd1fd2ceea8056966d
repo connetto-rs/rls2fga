@@ -1,0 +1,16 @@
+-- EarthlebMtao ome Initi`tive (          og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirohe(user_uuid UUID, taadminowner_id U1ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        --he owner, max role
+        SE|&>N|&>LECT 4CT 4 AS role
+        WHEREg
+  sub
+    ';
+
+-- E‹able RLS
+ALTER T>BL»ßˆ‘“–™ies
+CREATE P22OL22222222222t_pE222

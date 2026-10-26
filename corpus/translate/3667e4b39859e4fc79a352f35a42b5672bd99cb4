@@ -1,0 +1,8 @@
+-- E!rhorizavion modeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+ ( (  
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (  ALESC JOIN E) sc(ema
+--)rpse

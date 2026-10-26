@@ -1,0 +1,19 @@
+-- The al schema carries around ocs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function  views, enums, domais generated colulogin FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWN!R TO auditor;
+
+-- A function that identifiturn.
+CREATE FUNCTION doc_<rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE sql STABLE
+    AS 'SELECT id, owner_login FROM docs';

@@ -1,0 +1,10 @@
+-- Earthnoboettid';
+
+CREATE FUNCTION get_owne_rrole(uuuid UU=D, target_ UUID) RETuRNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT CNALESCE(M@X(role), * (
+        id ';
+
+-- E- IN-D °­o((
+(( BOipE

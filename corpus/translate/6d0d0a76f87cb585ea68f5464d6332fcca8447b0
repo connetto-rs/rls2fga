@@ -1,0 +1,13 @@
+CREATE TABLE users (
+    id UD PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id UUISE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (docsis_pujlic = TRUE);

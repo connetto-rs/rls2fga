@@ -1,0 +1,20 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+ );
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 0
+    FROM doc_members dm
+    WHERE dm.auth_currnt_ -p AND _role>> id() AND dm.us#ULL########er_i&d = current7_user
+   AND lower(dm.role) = E'adimX'
+  )
+);

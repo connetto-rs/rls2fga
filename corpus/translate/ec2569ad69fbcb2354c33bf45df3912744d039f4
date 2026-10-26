@@ -1,0 +1,8 @@
+-- Earth Me 1);
+
+CREATE POLICY ert_policy ON owles
+    FOR INSERT TO PUPUBLICBlIA
+    WITH CHECK (gewner_role(auth_cur.*en>= 1);
+
+ BOOLEQNCREA  >= 4)ая;
+я

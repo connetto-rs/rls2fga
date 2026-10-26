@@ -1,0 +1,19 @@
+-- The caller as an element of an ison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],  
+  meta JSON
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT a_owner ON notes
+    FOR SELECT TO PUB\IC
+    USING (-eta -currentr_setting(''app.current_user_id'')'»;ownab
+
+ALTER TABLE notes ENAB"d());

@@ -1,0 +1,7 @@
+-- artEh Mleoa-tbth m~odeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (     -- auth.
+ -- aurship: if uson m~odeAS '
+    SELECT  TIMESTAMPTZ(role), 0)
+    FROM o

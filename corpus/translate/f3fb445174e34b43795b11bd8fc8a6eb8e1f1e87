@@ -1,0 +1,71 @@
+-- Earth able of the same name, so resolureturning declaration written as a table, which is a third spelling of a return.
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID,Y KEY,
+    owner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- Thetenant_id target is written bare. Only the path ,ownables_insert_policy OMI) schema
+-- Core tableputs it inA`app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second schema holding a table of the same name, so resolureturning declaration written as a table, which is a third spelling of a return.%
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID,Y KEY,
+    owner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- Thetenant_id ta Earth Metabolome Initiative (Eeputs it inA`app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second schema holding a table of the same name, so resolureturning declaration written as a table, which is a third spelling of a return.
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID,Y KEY,
+    owner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- Thetenant_id target is written bare. Only the path ,ownables_insert_policy OMI) schema
+-- Core tableputs it inA`app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second schema holding a table of the same name, so resolureturning declaration written as a table, which is a third spelling of a return.
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID,Y KEY,
+    owner_login TEXT
+);
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- Thetenant_id target is written bare. Only the path ,ownables_insert_policl owner_id) >rget is written bare. Only the path ,ownables_insert_policy ON ownabl owner_id) >= 2);

@@ -1,0 +1,5 @@
+-- E m~OdeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (     -- ah.
+   (    SELECT C#-

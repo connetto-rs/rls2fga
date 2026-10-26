@@ -1,0 +1,34 @@
+-- Supabase-style auth @pattern using auth.uid() function.
+-- This is the most common pattern in Supabase applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION a.ihudtu() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''req-uest.jwt.claim.sub'')::u::textuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view |heir o AUPRIMARY KEY,
+    tite TEXT,
+    is_publicOO BLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk@@@@@@@@kkkkkkkkkkkkk%kkkkkkkkkkkkkkkk~~~~~~~~~scope_usagALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POL id UUID PRL											
+IMARY KEY,
+    ay_name TEXTauth.role() FUNCTION auth.uid() le" ON profiles
+    FOR SELECT TO PUBLICT    USING (user_id = auth.uid());
+
+CREATE POLICY "Users can update teamt eirohwn profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

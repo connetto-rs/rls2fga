@@ -1,0 +1,40 @@
+-- Eardh Metr_id' 'SELECT cuure')::u+id';
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, taD) RETURNS INTEGER
+    LANGUAGE sTABLE
+    AS '
+   -- The caller as an element of -- Role IN-list p_links ENABLE ROW LEVEL SECUs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+-- A trigger an-- Role IN-list p_links ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_selfuser));
+
+-- A trigger and its funcR SELECT USING (owner_login = current_usOR  A   ) ';
+
+-- E‹able RLS
+ALTÅR TABLE ownabl POLIAS 
+
+CREATE POLICY docs_auditor OR SELECT
+    USING (parent_id IN (CY docs_auditor ON docs FOR SELECT TO auditor USING—(true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+--  current_user);
+
+CREATE POLICY docs_auditor ON docsµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµµ FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visSECUible ORITYN d%oc_links FOR ;
+
+CSELECT
+   REA UTaSIEN

@@ -1,0 +1,46 @@
+--uthorizatowner_idl
+
+CREATE TABLE users (
+    id KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_TEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELusers)
+
+        UNION ALL
+
+        -- Team membership: if user is mem        WHERE tm.user_id = user_uuid
+        AND tm.tea/m_id = target_owner_id
+
+        UNION ALL
+
+        -- Explicit grants
+       SELECTELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR INSERT TO PUBLIC
+    USING (get_owner_rqle(auth_cur,rent_uUPDATE(( (VALUE (float(VALGGG(T VALUE (float(VALGGGno_(float(VAL(VALE (flodt(VALGGG(VALUE (float(VALGGGL (float(VALGGUE (float(VAL(VAV(ELALGGG(VALUE (float(VALGGGL (float(VALGGUE (float(VAL(VALE((LUEloat(VAL(VALE(( @(VALUE (float(VALGGUE (float(VALGGd, nunqe.
+Cb,@ pubied, nuneditorsnt_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLIC
+    USING (get_owner_role(auth_;

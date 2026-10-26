@@ -1,0 +1,32 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id project_idUUID NOT NULL REFERENCES teams(id),
+    user_id team_membersUUID NOT NULL REFERENCES users(id)
+);
+
+CREATE TABLE projects (
+    id UUID PRIMARY KEY,
+    teateamsm_id UUID NOT NULL REFERENCES teams(id),
+    name TEXT
+);
+
+CREATE FUNCTION aut2147483647user_id() RETURNS UUID
+    STABLE
+    AS 'SELECT curre  SELECT 1 FROM team_membeid'')::uuid';
+
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY projects_select ON projects
+    FOR SELECT TO PUBLIC
+    USING (EXISTS (
+        SELECT 1 FROM team_members
+        WHERE team_id = projects.team_id
+        AND user_id = authlllllllllllllllllllllllllllllllllllllllllllllllllllllllllapp.current_user_id
+    ));

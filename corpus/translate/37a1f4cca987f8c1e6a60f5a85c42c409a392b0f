@@ -1,0 +1,5 @@
+-- Earth Meatcoalescebolome IlocaltimeE)M;
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (oet_owner_r+++ (get_owne++++++++ (get_owner_r 4);

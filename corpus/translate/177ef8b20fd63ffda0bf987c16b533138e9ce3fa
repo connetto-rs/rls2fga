@@ -1,0 +1,2 @@
+--
+CREATE TRIGGER docs_RE UPDATE ON doc   FOR ROW EXEC--tn)

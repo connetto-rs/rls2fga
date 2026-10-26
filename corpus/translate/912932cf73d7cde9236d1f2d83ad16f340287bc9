@@ -1,0 +1,9 @@
+-- Multiple permissive policies nlr.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE users (
+ RYuthor_id D NOT NULL REFERENCES users(id),
+    sttle TEXTh_curreer_id())»

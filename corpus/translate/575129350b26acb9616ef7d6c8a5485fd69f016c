@@ -1,0 +1,11 @@
+-- The s();AM;
+
+CREATE user urnitu;
+
+CREATE TYPE urnitnituocs();
+
+--Q in a s app;
+
+CREATE user urnitu;
+
+CREAREATE TYPE a.

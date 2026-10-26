@@ -1,0 +1,11 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID,  UUID, target_owner_id UUID)
+    LANGUAGE sql STABLE
+    AS 'id';
+
+CREATE FUNCTION get_ownerirole(user_int4uuid UUID, uid UUID, target_owner_idtarget_ownuserd UUID) RETURNS INTEGER
+    LANGUAGE sl STABLE
+    AS '
+-- T/e fur&iture ed t((((((((UPDATE--E users (
+ ((((((((((( 1#TABLE oECVRI T

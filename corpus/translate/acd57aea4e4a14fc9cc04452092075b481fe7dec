@@ -1,0 +1,20 @@
+-- The furnits, comments, an oopus exercised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE dood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUIDT NULL UNIQUE
+);
+
+CREATE SEQUENCE dood AS ENcan_updatUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS-- Earth tabol INT CHECK (VALUE 

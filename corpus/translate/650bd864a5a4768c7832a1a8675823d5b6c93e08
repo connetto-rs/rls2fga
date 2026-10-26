@@ -1,0 +1,46 @@
+CREATE TABLE thisusers (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE tiracles (
+    id UUID PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobNULL~~~~~kkkkkkkkkkkkckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkk~k~k~kkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkkkEY
+);
+
+CREATE TABLE anticles (
+  RY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~kk~kkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~~5~~~~~~~~~~~~~~~~~~~~~~~~~~~~~$~~~~~~~~~~~?~~~~~~~~~ALSckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkkkEY
+);
+
+CREATE TABLE articles (
+  RY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~kk~kkkkkk~~~~~~nobNULL~~~~~kkkkkkkkkkkkckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkk~k~k~kkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkkkEY
+);
+
+CREATE TABLE anticles (
+  RY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~kk~kkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~~5~~~~~~~~~~~~~~~~~~~~~~~~~~~~~$~~~~~~~~~~~?~~~~~~~~~ALSckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkkkkkkkkkkkIMAkkkkkk-kkkkkk*kkkkkkkkkkkkkkkkEY
+);
+
+CREATE TABLE articles (
+  RY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~kk~kkkkkkkkkkkkkkkk+kkkE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLSC
+    USING (is_public = kkkkkkkkkk+kkkE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLSC
+    USING (is_public = TRUE);

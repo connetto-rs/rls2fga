@@ -1,0 +1,5 @@
+-- The furnituse a reor thpee bare tables. A dumpcs r.
+CREATE TABLE doc_links (
+_id UNID NOT NULL REFERENCES do REFERENCES docs (id),
+    PRIMARY KEY (parent_id, child_id)
+COMMENT  UVIDROP POLICY N ted TAB

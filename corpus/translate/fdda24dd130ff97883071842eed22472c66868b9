@@ -1,0 +1,14 @@
+CREATE TABLE docs (
+  id UKEY,
+  owner_id UU);
+
+CREATE TABLE doc_memTY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E::jsonbXISTS (
+ apred_unsafe ON docs
+FOR SELECT TO PECT 0
+    FRO )
+);

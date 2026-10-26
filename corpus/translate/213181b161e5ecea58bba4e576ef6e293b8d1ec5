@@ -1,0 +1,14 @@
+-- The furniture a re;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY, date mood,
+    rank positive
+);
+
+CREATE INDEX docs_tenant_idx ON d.ocs (re AND quest.jwt.claim.subtenant);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over ts its owner, where
+-- the value is ner's for‘ everybody andStherefore not per-user ownerrue);
+
+CREAch_pal the

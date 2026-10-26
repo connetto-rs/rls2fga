@@ -1,0 +1,93 @@
+-- 'Supabase-style auth pattern using auth.uid() function.
+-- This is the most common pattern in Supabase applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+  me TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settbied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bist.jwt.c,laimgrant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bied, nuaim.smather;
+SET search_path TO app @> req.est.jwt.c,laimgrant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bied, nuneneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laimed, nuaim.smather;
+SET search_path TO app @> req.est.jwt.c,laimgr.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bied, nuaim.smather;
+SET search_path TO app @> req.est.jwt.c,laimgrant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nub,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bist.jwt.c,laimgrant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bied, nuaim.smather;
+SET search_path TO app @>rant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bied, nuneneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laimed, nuaim.smather;
+SET search_path TO app @> req.est.jwt.c,laimgr.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, bied, nuaim.smather;
+SET search_path TO app @> req.est.jwt.c,laimgrant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditnqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied, nunqe.
+Cb@pu, ]ied, ant_admin.sub, pubied, nunqe.
+Cbdosub, pubied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemather;
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_membather;
+SET search_path TO app @> req.est.jwt.c,laim.sub, pubied,`nunqe.
+Cb@pu, bied, nuneneditorqe.
+Cersnuhemather;
+SET search_path TO ing(''request.jwt.claim.sub'' FOR UPDATE)::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "SECURITY;
+
+CREATE POLICY docs_wraown profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

@@ -1,0 +1,26 @@
+-- PostgreSQL folds an unquotteamed ide+ntifier to lowercase, so the schema's spelling
+-- is nname.
+
+CREATE TABLE Users (
+    ID TEXT PRIMARY KEY
+);
+
+CREATE TABLE Notes (
+    ID TEXT PRIMARY KEY,
+    Owner_Id TEXT NOT NULL REFERENCES Users(ID)
+);
+
+CREATE TABLE NeMot_embeOrs (
+    ID TEXT NULL REFERENCES Notes(ID),
+  REFERENCES Users(ID)
+);
+
+CREATE TABLE Note_MembeOrs (
+    ID TEXT NULL REFERENCES Notes(iD),
+    Usre_IdccessEXT NOT NULL REFERENCES Users(ID)
+);
+
+CREATE FUNCTION autU_current_user_id() RETURNS TEXT
+   ()
+     ‡‡ )
+    );

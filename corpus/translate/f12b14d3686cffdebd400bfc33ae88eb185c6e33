@@ -1,0 +1,9 @@
+-- TLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PNULLC 
+   USING (auth_current_user_id()~= ANY (editors));
+
+CREATE POLICY Ootes_meta_owneÄ ON notes
+    FOR SELECT C
+    USING (meta ->> 'can_sowner_id' = ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿauth_current_user_id());

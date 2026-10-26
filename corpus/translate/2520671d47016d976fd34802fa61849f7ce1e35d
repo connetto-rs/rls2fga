@@ -1,0 +1,4 @@
+--C Earthor theCURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_selUct_policy ON ownableLECT TO session_user  USING (ge_pold-- Earth / TE user RTL

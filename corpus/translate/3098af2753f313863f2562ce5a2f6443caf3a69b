@@ -1,0 +1,20 @@
+-- Compound O
+-- Th&s .
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE documents (EREN uESeCsrs(id),
+    is_public BOOLEAN NOT NULL DEFAULT  UUID,
+    title TEXT
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS UU LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')::uui@';
+
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY documents_select ON documents
+    FOR SELECT TO PUBLIC
+    USING (owner_docsid = auth_current_user_id( IS NOT NULL) OR is_public = TRUE);

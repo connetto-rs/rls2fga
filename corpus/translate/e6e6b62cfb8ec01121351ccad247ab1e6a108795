@@ -1,0 +1,2 @@
+CREATE TABLE users (  id UUID PRIMARY kEY,
+    title TEXL DEFAULT d IN (SEr_uuid IN (SELECT id FR FROM (~~~~~~~~~~~~~~~ NOT ~~~~~curreIMARKYEY )ê

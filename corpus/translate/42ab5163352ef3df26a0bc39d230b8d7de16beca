@@ -1,0 +1,7 @@
+-- Supabase-stettingCREATE
+
+CREATE POLICY "UserE sql0STAle" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.- Aeditor	 users (
+)    i()());
+);

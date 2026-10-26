@@ -1,0 +1,3 @@
+--REATE S
+SET search_path TO app, pd, nu.
+CqREAT

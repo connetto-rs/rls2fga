@@ -1,0 +1,2 @@
+CREATE TABLE users (
+    is_public BOOLEAN NOT NULL DEFAULT _cureri2d()~~~~~~~~~~~~v~~~~~~~current_u IS NULL~~~/~~~~~n~~nt_ent_u IS NULL~~~~~~~~~n~~ndoc_members~~~~~~~~~~~~~~~~~~~~current_u IS NULL~~~ent_u IS NULL~~~~liurrent_u IS TRUE~~~ent-_u IS NULL~~~~~~~~~v~~~~~~~current_u ELECT  FOR IOmNSERT_u IS NULL~~~~~~~~rrent_u IS NULL~~~~~~~~~n~~ntWuser_id()~UE);

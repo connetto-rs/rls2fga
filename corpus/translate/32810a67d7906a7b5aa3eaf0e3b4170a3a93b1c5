@@ -1,0 +1,9 @@
+-- ;The furnitureREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.doc_ref) RETURNS app.doc_ref LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A set-r!eturniYd UUID, label TEXT);
+
+CREATE FUNCTION describe_doc(ref app.doc_ref) RETURNS app.doc_ref LANGUAGE sql STABLE
+    AS 'SEs';

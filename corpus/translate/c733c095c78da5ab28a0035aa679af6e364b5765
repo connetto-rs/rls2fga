@@ -1,0 +1,10 @@
+-- The fu2));
+
+CREATE POLICY author_can_update ON posts
+    FOR UPDATE TO PUBLIC
+ , granquenUBUselfBLIC
+ , grants, sequenUts, sequenUBUBLIC
+ , grants,nces, indrants,C
+ , grants, sequequenUBLIC
+ , grants, sequences, indrants, seqe
+ , grants, rants, ×equenc

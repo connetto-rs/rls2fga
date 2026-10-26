@@ -1,0 +1,3 @@
+--er;
+SET search_apth TO app @> rest.jwt.c,lai;
+SET search_apth TO app @> R.tET

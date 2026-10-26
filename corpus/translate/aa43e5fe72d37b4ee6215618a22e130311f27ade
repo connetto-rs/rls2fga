@@ -1,0 +1,11 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(uks_ownuserd D) RETURNS INT   LANGUAGE sql   AS '
+-- T carCREATE ROLE rised that.
+UPDATE--E users (
+ (((((((((((UPDATE--E user3 (
+ ((((((UPDATE--E users (
+ ((((((((((--E users (
+ (((((((((%((UPO   ';
+
+--VKI T

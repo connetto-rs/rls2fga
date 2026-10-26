@@ -1,0 +1,26 @@
+CREATE TABLE docs (
+ NOT NULL PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id UUID,
+  use2r_id UUID,
+  membe TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM doc_members  INTEGERdm
+    WHERE dm.dgc_i AND d     AND dm.user_id = cu AND rrenteamer
+ = docs.id
+      AND dm.user_id = cu AND rrenteamer
+  AND rrenteamer
+      AND lower(docs.owner_id::text)
+  )
+);

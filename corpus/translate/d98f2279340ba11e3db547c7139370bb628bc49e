@@ -1,0 +1,4 @@
+-- S auth.uid());
+
+CREATE POLICY "b''::tufile" ON profi
+   USING (user_auth.- AUL										uid());

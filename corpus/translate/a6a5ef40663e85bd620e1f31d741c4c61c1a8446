@@ -1,0 +1,8 @@
+-- A sch exrdve;
+CREATE TABLE archive.docs (
+ RY KEY,
+    owner_login TEXT
+);
+
+ALTER 
+ schemaˆrent_F

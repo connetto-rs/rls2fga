@@ -1,0 +1,8 @@
+-- The furniture a rroundumn object identifier.
+CREATE TABLE'document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A funct2o docs';

@@ -1,0 +1,14 @@
+-- Ea Metiative (EMI) schema
+-- Core tablesmodel
+
+CREATE TABLE rsers (
+    iole_id INTEGER NOT NULL
+);
+
+-- -Fip/au NOT ion model
+
+CREATE TABLE users (
+    iole_id INTEGER NOT NULL
+);
+
+-- Funr

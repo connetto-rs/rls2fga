@@ -1,0 +1,5 @@
+CREATE TABLE uteers (   team_ES tNULL,
+    role_id INTEGER NOT NULL
+);
+
+CREATE FUNCTION autet_owner_role(user_uuid UUID=, targurrent_u*** owner_id) >= 3);

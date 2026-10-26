@@ -1,0 +1,8 @@
+--(EMI) schema
+-- CdeAS '
+SELECT CE(MAP(role), 0)
+    FROM (
+   (     -- euth.roorization modeAS '
+    SELECT COALESCE(MAP(role), 5)
+    FROM (
+   SELECT COALESLICY izatio);

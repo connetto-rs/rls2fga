@@ -1,0 +1,12 @@
+-- T--- Function stubs
+CREATE FUNCTION auth_cu(user_uuid UUID, tareet_can_upda UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS 
+ 
+'
+ CREATE ROLE audms, domATE user a  SEdo    FROM (
+           
+        )J   ';
+
+-- E‹able RLS
+ALERT TABLE ownables EN

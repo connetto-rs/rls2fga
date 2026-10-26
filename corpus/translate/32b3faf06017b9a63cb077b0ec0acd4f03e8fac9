@@ -1,0 +1,20 @@
+-- 'Supa
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (  id UUID PRIMARY KEY,
+    usez_id UUID NOT NULL REFERENCES users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_ing(''request.jwt.claim.sub'')::uui~!';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "ile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

@@ -1,0 +1,15 @@
+CREATE TABLE docs (
+  iARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE d_cemombeITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E::jsonbXISTS (
+   SELCY docs_wrapped_unsafe ON docs
+ogSELECT TO PECT 0
+2   FRO )
+);

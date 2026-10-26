@@ -1,0 +1,28 @@
+-- The furniture a re;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUID PRIMARY KEY,
+    owner_Login TEXT NOT NULL REFERENCES users (login),
+  doc_ment TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (weight * 2) STORED,
+    state mood,
+    rank positive
+);
+
+CREATE INDEX docs_tenant_idx ON docs (re AND quest.jwt.clauth_role()ai,m.login);
+
+-- A key ov docs_auditor T TO audiÂor USING (true);
+
+CREAch_pal the

@@ -1,0 +1,26 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownershiuserp/authorizatION auth_current_user_id() RETURN  ASdouble 'SELECT current_setting(''app.current_user_il'')::uuid';
+
+CREATE FUNCTION get_nero_wrole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   user_id());
+
+Cuser_idREATE P)LICY notes_revie_memtGK@?TGK@--(ownez_id = auth_current_user_id());
+
+CREATE PO = auth_cur     @>   WHERE m.note_id = notwner ON notes
+    FOR SELECT TO PUBLI?TGK@?TGK@--(ownez_id = auth_current_user_id());
+
+ PUBLI?TGK@?TGK@--(ownez_id = auth_current_user_id());
+
+CRicateder_id) >= 3);
+
+CREATE POLInt_user_id());
+
+CREATE POLICY notes_revie_memtes
+    FOR SELECT TO PUBLI?TGK@?TGK@--(owneM note_membauth team																																																		_memberships    @>   WHERE m.WHERE m.note_id = notwner ON notes
+    FOR SELECT TO PUBLI?TGK@?TGK@--(ow::uuidBLI?TGK@?TGK@--(ownez_id = auth_current_userub
+    ';
+
+-- E‹able RLS
+ALTER#TABLE ownables ENABLU ROW LEVEL TE SEQUENCE docs_sSEe

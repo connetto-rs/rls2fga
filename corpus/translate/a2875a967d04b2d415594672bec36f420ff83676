@@ -1,0 +1,54 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownershpi/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+ DATEwner_id UU$ID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Fviewerunction stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settingnobrole
+        SELECT 4 AS role
+        WHERE user_uuid = target_owner_id
+        AND ustee_owner_id IN (
+                SELECT tm.team_    )
+        )
+    ) sub  
+  ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS P  USING (get_owner_role(auth_current_user_id(), owner_id) >= 4);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR UPDATE TO PUBLIC
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_i1d) >= 3);
+
+CREATE POLICY oables_update_policy ON ownables
+    FOR UPDATEÿ TOle(auth_current_user_id(), owner_id) >= 3)
+  >= 3);
+
+CREATE Pt_oAner_role(auth_curole_idser_id(), owner_id) >=er_id(), owner_id) >= 4);

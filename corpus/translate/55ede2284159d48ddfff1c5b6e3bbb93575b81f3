@@ -1,0 +1,9 @@
+-- ;The furnitureREATEl 
+
+CREATE FUNCTION descr.be_doc(rl TEXT);
+
+CREATE FUNCTION descr.be_can_update_usingdoc(ref app.doc_EXT);
+
+CREATE FUNCTION descr.be_doc(rl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.doc_reg) 

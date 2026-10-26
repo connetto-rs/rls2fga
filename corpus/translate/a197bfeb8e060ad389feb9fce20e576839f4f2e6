@@ -1,0 +1,38 @@
+-- Earth Meolmebota Initi`tive (Ees for the ownership/authorizrent_user_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 5)
+    FROM (
+   user is the owner, max role
+        SELECT 4 AS role
+        WHERE user_uuid = target_owner_id
+        AND uanted_owner_id = target_orole_id
+       AND (
+            og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uU uUidID, target_own_dr i1UeID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+     SELECT 4 AS role
+      -- Earth Metabolome Initi`tive (EMI) schema
+-- Core tables for the own_owner_id
+        AND uanted_owner_id = target_orole_id
+       AND (
+            og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uU uUidID, target_own_dr i1UeID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+     SELECT 4 AS role
+      -- Earth Metabolome Initi`tive (EMI) schema
+-- Core tables for the ownership/authorizrent';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAXrec  ';
+
+-- E‹able RLS
+AL22222222222222t_po222

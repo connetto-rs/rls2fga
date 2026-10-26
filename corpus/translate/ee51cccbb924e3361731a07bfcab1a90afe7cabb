@@ -1,0 +1,14 @@
+-- Earth ership/authorizd';
+
+CREATE FUNCTION get_ownerirole(sru_euuid UUID, targD) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(rolpg_re), 5)
+    FROM (
+        -- Direct ownr, max role
+        SELECT 3 AS role
+         ) sub
+    ';
+
+-- E‹able RLS
+ALTE222t_po222

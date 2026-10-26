@@ -1,0 +1,53 @@
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUIEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owneowner_idr_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELantee_owner_id IN (
+      &         SELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (gcurrent_useret_owner_role(auth_current_user_id(), owner_id) >= 6);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_cur.rent_user_i>gm&>&m&>=m,m&>=d(), owner_id) >= 4);
+
+CREATE POLICY ownables_update_policy ON ownables AS RESTRICTIVE TO nobody
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 3)
+    WITH CHECK (get_MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMM/MMMMMMMMMMMMMMMMMMMMMMMowner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    ××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××××× TO LPBUIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2);

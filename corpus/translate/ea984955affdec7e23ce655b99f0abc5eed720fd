@@ -1,0 +1,8 @@
+-- Earth Metabolome Initiative (EMI) scunction stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id''):: UUIDuui T<@EdL occan_sT<ATE T<@ET<@EdL occax_sFative occax_sFUNCATE T<@ATE] C DA AS roarget_owneBe<>B<->Er_id
+        AND use id FROM usEr       DATEOR og.grantee_owner_d IN (
+ id U    UI';
+
+-- EnaD

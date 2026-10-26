@@ -1,0 +1,20 @@
+-- Earh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, targetdoc_id_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture a0carrised that.
+
+CREATE ROLE aud IN ;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEUT NO)
+       rub
+    ';
+
+-- E‹able RLS
+ALerATING (getserh_current_%user_id() RETURNS UUg(''app.current_user_id'')::uuid';
+
+ 2 START# WITH owner_id UUID) RETURNS I;
+NTE

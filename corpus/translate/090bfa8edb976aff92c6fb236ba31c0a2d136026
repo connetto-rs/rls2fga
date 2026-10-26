@@ -1,0 +1,35 @@
+-- Role IN-list p_links ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+-- A trigger and its funcR SELECT USING (owner_login = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_lins_vkisible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+-- A triggENABLE ROW LEVEL SECURITYer and its function. Evgin = current_user);
+
+CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+-- A trigger and its funcR  auditor USMNG (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELEREFERENin = current_user));
+
+-- A trigger and its funcR Sent_id IN (SELEÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿSELECT 0';
+
+ALTER TABLE ownables ENABLE R-- The cOW a has these, and no fiSEL (parent_i- A trigger as these, and no fiSELECT 0';
+
+ALTER TABLE ownables ENABLE R-- The cOW LEVEL SECURITY;
+
+CREATaE

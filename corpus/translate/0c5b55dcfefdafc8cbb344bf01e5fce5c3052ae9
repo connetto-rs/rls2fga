@@ -1,0 +1,2 @@
+--  
+CREATE FUNCTION doc_rows() RETURNS TAB(id mUUID,/лл

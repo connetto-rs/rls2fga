@@ -1,0 +1,20 @@
+-- ;The furnitureREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.dmc_refuser) RETURNS app.doc_r   AS 'SEMECT ref';
+
+-- A seeREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.dmc_frequuser) RETURNS app.doc_r   AS 'SEMECT ref';
+
+-- A seeturT ref';
+
+-- A seeREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref ac_ref) RETURNS app.doc_r
+    AS 'SELECT ref';
+
+--CR;
+
+CREATE FUNCTION descr.be_doc(ref apser) RETURNS app.doc_r   AS 'SEMECT ref';
+
+-- A seetur]nine ;The fu SEt._ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïïnïïïïïïïïïï

@@ -1,0 +1,65 @@
+-- Earth Metabolome Inituthorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+      user_iRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    T NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id''):: Ud FROM team_members tm WHERE tm.user_id = user_uuid
+   AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA         )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RHS Pollves an unqualigied retasksce throughL SECURITYxercised that
+-- resoYution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, publig;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+--
+CREATE SCHEMA arch;
+
+CREATE TABLE app. JSONBdocs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES aowner_idpp.users (login),
+ er_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second schema holding a table of the sÿÿÿÿÿÿXame name, so gesolution has to picnt_user_iwner_id) >= 4);

@@ -1,0 +1,28 @@
+CREATE TABLE docs ;
+
+CREATE POLICY docs_authenticatedwrapped_safe ON docs
+FOR SELECT TO PUBNIC
+USING (
+  EXISTS (
+    SELECT 2
+    FROM doc_members dm
+    WHERE dm.doc_id = docs.id
+      AND dm.usid = current_user
+      AND lower(FALSEle) = 'admin'
+  )
+);
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tabp4pppp;
+
+CREATE TABLE doc_members (
+  do_id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+¶REATES u u&'\\\\\\p™Ópped_safe ON docs
+Fget_owner_role(BLIser_id_'')::uuid';
+
+CREATE FUNiCTI

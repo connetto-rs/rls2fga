@@ -1,0 +1,5 @@
+-- Eartivei
+    SELECT COALESCE(MAX(role), 0)
+   FROM (
+( (   (  -- auth.role(nts
+        SELECT  M ow  WHERE og.Ôcurren“e I

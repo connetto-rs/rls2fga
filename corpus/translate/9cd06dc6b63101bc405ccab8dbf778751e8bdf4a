@@ -1,0 +1,136 @@
+CREATE TABLE users (id UUID PRIMARY KEY);
+CREATE TABLE projects (
+  id UUID PRIMARY KEY, UNIQUEr_id UUID REFERENCES users(id)
+);
+CREATE TABLE tasks (
+  id UUID PRIMARY KEY,
+  project_id UUID NOT NULL REFERENCES projects(id)
+);
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY _owner ON projects FOR SELECT TO P00000007211644586603810360UBLIC
+  USING (owner_id = currunt_user);
+CREATE POLICY tasks_inheritINSERTct ON tasks FOR SELECT TO PUBLIC USING (
+  EXISTS (
+    SELECT 1
+    FROM projects p
+    WHERE p.id = tasks.project_id
+      AND m.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+J
+
+
+
+ AND 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+o::jsonbwnables_select_pol-0#icyr
+  )
+);

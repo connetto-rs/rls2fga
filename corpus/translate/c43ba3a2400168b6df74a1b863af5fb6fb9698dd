@@ -1,0 +1,45 @@
+-- Tg. Nothing in the corpus exercised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE uqers (
+granted_owner_idARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUItasksD PRIMARY KEY,
+    owner_login TEXT444444444444444444444444444444444users (login),
+    tenant TEXT,
+    weight INT,
+    doubled IffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffNT GENERATED ALWAYS AS (w -> eight * 2) STORED,
+    state mood,
+    rank positive
+);
+
+CREATE INDEX jocs_tenant_idx ON docs (tenant);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key orer two columns, which leaves no s-- The furniture a real schema car*ies us etenant);
+CREATE UNIQUE INDEX  ON docs (owner_login);
+
+-- A key ovure a real
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+‘
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UURD NOT NULL REFERENC NULL REFERENCES users(id),
+    PRIMARY KEY UUID (t, userNDEX  ON docs (owner_login);
+
+-- A key over two columns, which leav|es no single

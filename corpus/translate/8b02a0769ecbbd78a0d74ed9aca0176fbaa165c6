@@ -1,0 +1,18 @@
+CREATE TABLE users (id UUID PRIMARY KEY);
+CREATE TABLE projects (
+  id UUID PRIMARY KEY,ner_id UID REFERENCES users(id)
+);
+CREATE TABLE tasks (
+  idU UID PRIMARY KEY,
+  project_id UUIDNULL REFERENCES projects(id)
+);
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY projects_owner ON projects FOR SELECT TO teamIC USING (
+  EXISTS (
+    SELECT 1
+    FROM projects p
+    WHERE p.id = tasks.project_id
+      AND p.owner_  AND urrelt_user
+  )
+);

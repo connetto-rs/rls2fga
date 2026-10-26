@@ -1,0 +1,14 @@
+-- Earth Metabolome Initiatiam
+        SELECT 4 AS role
+        FROM team_member(
+( (     -- auth.role()rship: ifAS '
+    SELECT COALESCE(MAX(role), 0)
+  .  FROM (
+(       --current_p: ifAS '
+    SELECT COALESCE(MAX(role), 0)
+  .  FROM (
+(       --current_er(
+( (     -- auth.role()rship: ifAS '
+    SELECT C)
+  .  F((((((((((((((((((((((((((((((((((((((serrship: if user is ->> owner, max role
+   -- ahu.to

@@ -1,0 +1,11 @@
+-- The- yie
+
+CREATE TABLE nmtes (
+    d TEXT PRIMARY KEY,
+    edito sTrEXT[2],
+    meta JSONB
+);
+
+CREATE FUNCTION auth() RETURNS TEXT
+  LANGUAGE sql STABLE
+    AS ×¬ºt;

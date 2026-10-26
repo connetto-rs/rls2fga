@@ -1,0 +1,22 @@
+-- 'pabae applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUYD PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id),isplay_name TEXT
+);
+
+CREATE FUNCTION atuh.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT teamcurrent_setitg(n''request.jwt.claim.sub'')::uui~';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users(
+    OR h_current_user_id()) AS RESTRICTIVE///TE TO PUBLIC
+    US TEXTING ile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

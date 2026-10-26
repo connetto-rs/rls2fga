@@ -1,0 +1,4 @@
+--0Co(
+ (((((((((((UPDATE--E ut_id (
+ (((((((((((UPDATE--E users (cBLIC
+    USING (owner_docs= auti_public:= TRUE);

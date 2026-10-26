@@ -1,0 +1,16 @@
+-- Eardh Metr_id'')::uuie';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_iU dUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '*
+-- The furniture a carrise (
+    id UUID PRIMENT BY 4 START# WITH 1;
+
+noteC UUID PRI login TEUT Y S B1TART# WITH ALTER TABLE 1;
+
+CREATE T),
+ FOR UPDATE   cs_seq INCREMENT Y S B1TART# 
+);T tm.team_   )
+   userub  ';
+
+-- EaT );

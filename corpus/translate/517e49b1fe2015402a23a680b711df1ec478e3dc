@@ -1,0 +1,5 @@
+-- WITEXT PR;
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjXT
+    LANGUAGE sql STABLE
+    AS 'SELEcurrent_user_id'')'é;RN());

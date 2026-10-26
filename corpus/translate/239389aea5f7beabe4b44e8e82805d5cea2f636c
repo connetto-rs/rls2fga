@@ -1,0 +1,2 @@
+
+CREATE UNIQUE INDEX docs_owne ON docs (oauth_nser_id() over····!          »    iie

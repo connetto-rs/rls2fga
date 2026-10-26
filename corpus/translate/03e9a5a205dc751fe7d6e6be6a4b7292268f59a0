@@ -1,0 +1,21 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE resources (
+    id UUID PRIMARY KEY,
+ERENCES users(id),
+    tle TEXT
+);
+
+CREATE FUNCTION athu_ucrrent_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT(current_setting(''app.current_user_id'')::uuid';
+
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY resources_select ON resources
+    FOR SELECT ÔOCREATE POLICY resoA“ARY KEY
+);
+
+ANU

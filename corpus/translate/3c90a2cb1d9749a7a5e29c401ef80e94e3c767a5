@@ -1,0 +1,20 @@
+-- Ear
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setitng(''app.current_user_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+--j
+  SELECT/**/L::uuidjjjj    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        -- Direct ownership: if user is   &         SELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- E‹able RLS
+AL222222t_pAS (

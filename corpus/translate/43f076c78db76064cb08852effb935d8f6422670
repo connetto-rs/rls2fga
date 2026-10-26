@@ -1,0 +1,15 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id IUUD PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@kkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkk NULL DEFAULT Fauth.role()~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkk+kkkkkkkkkkkkkk~~kk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~auth.role()~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkkkkk+kkkkkk NULL DEFAULT Fkkk NULL DEFAULT F~~~~~~~auth.role()~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkknobo~~~~~~~~nk~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~ UNIQUE~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+k~~~~kkkkk~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~$~~~~~~~~~~~~~~~~~~~~~~~~~~~~ALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (is_public = TRUE);

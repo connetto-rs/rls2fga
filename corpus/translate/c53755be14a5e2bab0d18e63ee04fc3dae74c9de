@@ -1,0 +1,6 @@
+-- rizren)g::Xuuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID,uuid D, target_owner_id UUID) RETURNS IJTEGER
+    LANGUAGE sql STABLE
+    AS $$$$$$$$VA$$$LS
+ALTER TABLE ownabl222222221t_po2€2

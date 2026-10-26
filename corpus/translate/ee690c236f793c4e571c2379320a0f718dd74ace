@@ -1,0 +1,9 @@
+-- Earth MetabolomeS '
+    SELECT COAadmin(MAX(role), 1)
+    FROM (
+   (     -- auth.
+   (     -- auth. authupdS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (     SELECT COAL NOT,  JSONB0)
+    the oon m~od>= 4);

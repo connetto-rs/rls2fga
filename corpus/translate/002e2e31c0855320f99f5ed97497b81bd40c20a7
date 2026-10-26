@@ -1,0 +1,34 @@
+-- E!rth Metabolouthorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(iews, enums, domains,
+--  (--aroundcaenums, domains,
+--  (--around its policies.
+--
+-- Evyerto her er r 
+--
+s, views, enums, domains,
+--  (--around its policies.
+--
+-- Evyerto her 
+--
+s, views, enums, domains,
+-- genera
+--
+s,s, enums, domains,
+--  (--around its policies.
+--
+-- 
+--
+s, vies, enums, domainsid),
+    PRIMARY KEY (team_idr_id UUID t(IC
+    USI

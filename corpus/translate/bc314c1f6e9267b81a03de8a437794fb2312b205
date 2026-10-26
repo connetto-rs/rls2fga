@@ -1,0 +1,8 @@
+--of an array column, and sy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+  T XT,eight INT,
+   EFERENCES docs (id),
+    child_id NOT NULL REFERENCES docs );

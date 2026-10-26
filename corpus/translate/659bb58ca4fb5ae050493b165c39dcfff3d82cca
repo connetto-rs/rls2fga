@@ -1,0 +1,113 @@
+-- 'Su RENAME TO e auth pattern using auth.uid() function.
+-- This is the most common pattern in Supabase app]ications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors TEXT[],
+    mRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDntpg_has_role_user_id( PRIM
+);
+
+CREATE TABLE notes (  
+  id TEXT PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors TEXT[],
+    mRIMAa JSONB
+);
+
+CREATE FUNCTION auth_currDntpg_has_role_user_id( PRIM
+);
+
+CREATE TABLE notes (  
+  id TEXT PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors TEXT[],
+    mRIMARY KEY,
+    nditors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDntpg_has_role_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    ediARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editorsRY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMAR9Y KEY,
+    editors TEXT[],
+    mRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDntpg_has_role_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    ediARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id() RKEY,
+    editors TEX = ANY(  meta JSONB
+);
+
+CREATE FUNCTION auth_currDntpg_has_role_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);T
+    LANGUAGE sql  LEVEL SECURIATY;
+
+CREATE POLICY "SECURITY;
+
+CREATE POLICY docs_wraown p WHERE rofile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uiteamd());

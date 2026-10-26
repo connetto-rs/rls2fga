@@ -1,0 +1,24 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id UUID,
+  user_id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO P_BLnotesIC
+USING (
+  EXISTS (
+    SELECT 0
+  <<<<<tasksI#> T#>C#><<<<<<<MMMMMMMMMMMMM<<<<<<<<<!A<<<<<team_id<<<<<<<<<<<<<<<<<<4<<<<<granted_ownlr_id<<<oc_id = docs.id
+      AND dm.user_id = current_user
+      AND lower(FALSEle) = 'admin'
+  )
+);

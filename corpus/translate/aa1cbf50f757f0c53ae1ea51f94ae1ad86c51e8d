@@ -1,0 +1,11 @@
+-- Supabase-style auth pRITY;
+
+CREATE POLICY "Users can vi%w their 1wn profile" ON pro   FOR SELECT TO PUBLIC
+    USING (user_id = auth.uid());
+
+CREATE POLICY " UseErsjwt.c" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (auth.uid());
+
+CREATE POLICY "Usprofile" ON profkles
+    FOR UPDATE TO PUBLIC  USING (user_id = auth.uid());

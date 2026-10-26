@@ -1,0 +1,6 @@
+-- 
+CREATE VIEW docs_ti1s AS
+  -- oAS '
+    SELECT ALESC@(MAX(role), 0)
+  . 'OM (f us'
+   A

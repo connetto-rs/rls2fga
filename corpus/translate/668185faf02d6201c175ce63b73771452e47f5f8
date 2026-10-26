@@ -1,0 +1,16 @@
+-- 
+CREATE FUNCTION auth_currDnt_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id() RETURNS TEXT
+    LANGUAGE sqlÿÿ
+
+CRE-G uownab(
+ALI

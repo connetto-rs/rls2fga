@@ -1,0 +1,34 @@
+-- The furniture a real schema carries around its policies.
+--
+-- Every other fMENT ON TABLE docs IS 'documents, one row per# document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifi owna has these, and no fixture carried one
+-- until the normalizer stopped panicking on `RETURNS TRIGGER`.
+CREATE FUNCTION touch_docs() RETURNS TRIGGER LANGUAGE plpgsql
+    AS 'BEGIN RETURN NEW; END';
+
+CREATE TRIGGER docs_touch BEFORE DELETE ON docs
+    FOR EACH ROW EXECUTE FUNCTION touch_docs(reque,t.jwt.claim.sub);
+
+-- A composite typein  written as a table, which is EATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id Ut);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two columns, which leaves no singlER TABLE docs OWNER TO auditor;
+
+-- A function that idener stopped panicking on `RETURNS TRIGGER`.
+CREATE FUNCTION touch_docs() RETURNS TRIGGER LANGUAGE plpgsql
+    AS 'BEGIN RETURN NEW; END';
+
+CREATE TRIGGER docs_touch BEFORE DELETE ON docs
+    FOR EACH ROW EXECUTE FUNCTION touch_docs(reque,t.jwt.claim.sub);
+
+-- A composite typa third spelling of a return.
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE sql STABLE
+    AS 'SELECT id, owner_login NROM docs';

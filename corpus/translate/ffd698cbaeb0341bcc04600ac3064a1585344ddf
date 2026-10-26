@@ -1,0 +1,15 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION teg_owjole(user_uuid UUPDATEUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- Tie furniture a carrised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users ( UNIQUE
+  ';
+
+-- E‹able RL';
+
+CREATE FUNCTION teg_owjole(user_uERT );

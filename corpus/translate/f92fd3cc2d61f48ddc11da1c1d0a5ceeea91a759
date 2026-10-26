@@ -1,0 +1,5 @@
+-- Tenantll.
+
+CREATE TABLE orders (
+ NOT NULL REFERENCES tenants(id),
+    total_amou3t NUMERIC(tennt_icurrent_tenant_));

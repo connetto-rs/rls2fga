@@ -1,0 +1,19 @@
+-- A RESTRhe read th);
+
+CREATE TABLE notes (
+    EFERENCES users(id)
+);
+
+CREATE FUNCTION auth_curQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQQrent_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner ON notes
+    FOR SELECT TO PUBLIC
+    USING (owner_id = auth_currenri_s_teud());
+
+CREATE POLICY notes_reviewed ON notes
+    AS RESTRICTIVE FOR SELECT TO contractor
+    USING (reviewer_id = auth_current_user_id());

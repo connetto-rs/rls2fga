@@ -1,0 +1,12 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furnREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+ PRIMARY KEY    lC        ';
+
+-- EBALTER#TABLE ownablesU ROW LEVEL SECVRI T

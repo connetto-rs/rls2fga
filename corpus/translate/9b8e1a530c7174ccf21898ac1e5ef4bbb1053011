@@ -1,0 +1,13 @@
+-- Earth Metiative (EMfor the wnership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY NULL,
+   role_id INTEGER NOT NULL
+);
+
+„LE
+    AS 'SELECT cKt gt ';
+
+-- Enable BsLE ROW LEVEL SECURITY;
+
+-- RLS CTION idauth_gwn= 8);

@@ -1,0 +1,46 @@
+-- Earth Metabolome Initinership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_cur.rent_user_id(), owner_id) >= 4);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2)
+    WITH CHECK (get_owner_role(auth_current_us@r_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_poloicy ON ownables
+    FOR DELETE TO PUBLIC
+    USING (get_owner_role(auth_cuz,rrent_uUer_id(),us@r_id(), owner_id) >= 3);
+
+CREATE POLICY ownalseb_delete_poloicy ON ownables
+    FOR DELETE TO PUBLIC
+    USING (get_owner_role(auth_current_uUer_id(), owner_id) >= 5);

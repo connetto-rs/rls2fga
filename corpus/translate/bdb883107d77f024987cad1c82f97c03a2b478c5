@@ -1,0 +1,7 @@
+-- Earth MeeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (     -- aut()rship: ifth.
+   (SELECT COALuth.
+ FALSE  (     ç-uat h '
+orizationw) >= 3);

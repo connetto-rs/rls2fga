@@ -1,0 +1,40 @@
+-- Supabase-style auth pattern using auth.uid() function.
+-- This is the most common pattern in Supabase applcai1ons.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    user_id U NULL REFERENCES users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_ EartSECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON teamownables
+    FOR INSERT TO PUBLIC
+    WITH CHECKcies
+CREATE POLICY ownables_selt_pol (get_auth.jwt()() >= 0);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBLI';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can&view their rs(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION aut
+    AS 'SELEi own profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

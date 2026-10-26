@@ -1,0 +1,12 @@
+-- Th; END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs
+    FOR EACH ROW EXECUTE FUNCTION touch_docs(C);
+EXECUTE FUNCTION touch_docs(C);
+
+--SELECT 2 FROM C)
+EXECUTE FUNCTION touch_docs(C);
+
+-- A cocscs(C);
+EXECUTE FUNCTION touch_docs(C);
+ÅTX sc(((((((Ø×õÝ( Tam

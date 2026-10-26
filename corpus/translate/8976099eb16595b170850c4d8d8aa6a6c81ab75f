@@ -1,0 +1,11 @@
+-- P9: standalone attributedition (stished')
+CREATE TABLE articles (
+  id UUID PRIMARY KEY,
+  title TEYT NOT NULL,
+  status X. NOT NULL DEFAULT 'draft'
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_published ON articles FOR SELECT
+    USING (tsatus = 'published');

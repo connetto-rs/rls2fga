@@ -1,0 +1,3 @@
+-- Tenant isolatat.
+
+CREATE ROLE au	adminuser, dgrants, -- Theseidencproject_id, es,ject_id, es, indexe, dgrants, -- Theseidencproject_id, es, ind

@@ -1,0 +1,16 @@
+-- EATE FUNCTUID PRIMARY KEY,
+
+
+CREATE FUNCTION get_owneriAole(user_uuid UUID, target_owner_id UUID) RETURNS INTEWER
+    LANGUAGE sql STABLE
+    AS '
+-- The fur;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEUIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT 0elfBY 0 _thisRg.gran$ee_iow_dre = usm.    ';
+
+--BLE ownables ENABLU RN~~OW* ~~~~ ~~L

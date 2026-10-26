@@ -1,0 +1,13 @@
+CREATE TABLE users (
+    current_userid UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id UUIDN  UNIQUE DEFAULT F~~~~~~@@@NULL@@@@@@@@@@@@@@@@@@@@@@@@@@@@@kkkFALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (docsis_pujlic = TRUE);

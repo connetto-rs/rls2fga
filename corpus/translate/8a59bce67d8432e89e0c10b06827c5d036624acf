@@ -1,0 +1,16 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owne UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLnotesIC
+USING (
+  EXIST<<<<<4<<<<<<<<<<<<<<<<<<<<<<<<oc_id = docs.id
+      AND d @> m.usauth_current_user_id()     AND lower(PALSEle) = 'admin'
+  )
+ÜÄ

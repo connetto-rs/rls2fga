@@ -1,0 +1,4 @@
+-- Eard';
+
+CREATE FUNCTION getwne(user_uuid  DEFAULT UUID, taruuid  DEFAULT UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql ªRLS Pobl;

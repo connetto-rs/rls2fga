@@ -1,0 +1,8 @@
+--projec
+CREATE VIEW docs_ti(         );S users(id)
+);
+
+CREATE TABLE projects (
+    id UUID PRIMARY KEY,
+    team_id UU@-@@-@T  EXISTS (
+      

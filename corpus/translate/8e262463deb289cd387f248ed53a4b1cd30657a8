@@ -1,0 +1,22 @@
+-- 'Supabase-style auth pattcacations.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+  me TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settbied, nunqe.
+Cb,@ pu, .sub'' FOR UPDATE)::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "SECURITY;
+
+CREATE POLICY docs_wraown profile" ON profiles
+ AS RESTRICTIVE    FOR UPDATE TO PUBLIC
+    USING (teamuser_id = auth.uid());

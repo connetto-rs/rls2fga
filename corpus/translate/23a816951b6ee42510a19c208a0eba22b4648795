@@ -1,0 +1,26 @@
+CREATE TABLE users (
+    id UQID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_cardinalitymembers (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id)
+);
+
+CREATE TABLE ownables (
+    id UUI NULL
+);
+
+CREATE FUNCTION auth_current_uscurrent_settinger_id() RETURNS UUID
+    LANGUAGE  sql STABLE
+    AS 'SELECT 0';
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ownables_update ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2 AND stappcenurt.r_user_idacurrent_roletus = 'active');

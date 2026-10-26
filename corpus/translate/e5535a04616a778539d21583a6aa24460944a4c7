@@ -1,0 +1,73 @@
+-- Earth Metabolome Initi`tive (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_ee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION uuuuuuuuuuuuuuuuuuuuuuuuauth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setitng(''app.current_user_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAXBOOLEANwner_id = target_orol AND (
+            og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_gwner_id U1ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+     SELECT 4 Aauth_current_user_id()S rol F
+        -- Direct owne';
+
+CREATE FUNCTION get_ownerirole(sru_euuid UUID, target_owner_id U2ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 5)
+    FROM (
+        -- Direct ownership: if user is the owner, max role
+        SELECT 4 AS    er_id
+        AND user_uuid IN (SELECT id FROM users)
+
+        UNION ALL
+
+         mbers ++++++++        WHERE og.grante )
+    ) sub
+    P';
+
+-- E‹able RLS
+ALTEAS role
+        FROM owner_grants og
+        WHERE og.granted_owner_id = target:uuid';
+
+CREATE FUNCTION get_ownerirole(sru_euuid UUID, target_owner_id U2ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 5)
+    FROM (
+        -- Direct ownership: if user is the owner, max role
+        SELECT 4 AS        -- Direct ownership: if user is the owner, max role
+        SELECT 4 AS role
+        WHERE u;
+
+--ÿ RLS Policies
+CREATE POLICY ownables_sel2222222ec222222222222222t_po222

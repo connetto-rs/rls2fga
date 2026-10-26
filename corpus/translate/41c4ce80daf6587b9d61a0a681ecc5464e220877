@@ -1,0 +1,59 @@
+-- Earth Metaboliative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PjIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    ownev_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUIA NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CR;
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT user_uuhd
+            )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TAB;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;LE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS RT TO P_BLIC
+  
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLhhhhhhhhhhhhlhhhhhhhhhEATE FUNCTION auth_current_user_id() RETURNS UUID
+  ownables
+    FOR INSERT TO P_BLIC
+    WITH CHECK (get_owner_role(auth_current_user_id(),status_id) >= 3);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUdLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 6)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLhhhhhhhhhhrhlhhhhhhhhhhhIC
+    USING (get_owner_role(auth_current_user_id(), owndr_id) >= 3);

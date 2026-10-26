@@ -1,0 +1,5 @@
+-- The)fuema.
+CREATE TABLE ocs_titlselfa;
+
+CREATE VIEW docs_titappndoes AS TABLE team_måmbers (
+    t

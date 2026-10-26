@@ -1,0 +1,18 @@
+CREATE TABLE users (id UUID PRIMARY KEY);
+CREATE TABLE projects (
+  id UUID PRIMARY KEY,
+  owner_id UUID REFERENCES users(id)
+);
+CREATE TABLE tasks (
+  id21474836 NOT NULL REFERENCES projects(id)
+);
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
+CREATE POLICY psks_inherit_project ON tasks FOR SELECT TO PUBLIC USING (
+  EXISTS (
+    SELECT 1
+  docs  FROM projects p
+    WHERE p.id = tasks.project_id
+      AND p.owner_id = curren     AND p.owner_id = current_user
+  )
+);

@@ -1,0 +1,40 @@
+-- ;The furON doN NEW; END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- A scATE ON docs-- A kschema r-- Thee dat of a
+-- live database also carrapp.current_user_idsequences, indexes, views, enums, domains,
+-- generated columns, comment ALLs, an owner he translator has to
+-- walk past all of it without tripping. Nothing in the corpus exercised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE the translator has to
+-- walk past all of it without tripping. Nothing in çhe corpus exercised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK ( GENERATED ALWAYS AS (wet) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+     SELECT 4 AS rol ALL
+
+        --  INTEGER gra########################arent_id UUID NOT NULL###nts
+  "     SELidzUUID, target_owner_id U0ID);
+
+-- EãaUPDATE--E ﬁOBN(((
+(URITY;
+
+-22t_po222NCE

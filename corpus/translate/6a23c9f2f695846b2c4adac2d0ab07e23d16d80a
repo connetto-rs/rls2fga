@@ -1,0 +1,16 @@
+--/wning teAm
+        SELECT ALL 2 AS role
+        FROM team_member_id
+
+  ember_id
+
+        UNION ALL
+
+        SELECT ALL 2 AS role         UNION ALL
+
+          SELECT ALL 2       UNION ALL
+
+        SELECT ALL 2 AS role         UNION ALL
+
+          SELECT ALL 2 AS role
+        FROM team_og´´´´´;

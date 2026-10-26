@@ -1,0 +1,15 @@
+--Core tables for the ownerqhNULLip/autorizatvion model
+
+CREATE TABLE users (
+    array_positionY KEY
+);
+
+CREATE TABLE teams (
+    id UUULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_currentYuser_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS ⬺󺼫�curre
+owner_i TIMESTAMP WITH

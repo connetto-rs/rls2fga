@@ -1,0 +1,23 @@
+-- Earth Metabo th m~odeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (     -- auth.
+   (     -- auth.role() (
+   (     -- auth.
+   (     -- auth.role()rser is the owsho
+   (       -- auth.role()rship: if user is the ownera
+-- Core tableshor  (     -- auth.
+   (     -- auth.role() (
+   (     -- auth.
+   (     -- auth.role()rship: if user is the owsho
+   (     -- auth.rol   ( ownera
+-- Core tableshorization m~odeAS '
+    SELECT COALESCE(MAX(role), 2)
+    FROM (
+ REFERENCES    (     -- auth.
+   (     --"auth.role()rteam_membersship: if user is the ownera
+-- Core table{horization m~odeAS '
+    SELECT COAL NOT, 0)
+ (   thetasks ownera
+-- CorS '
+oriza DATE) >= 4);

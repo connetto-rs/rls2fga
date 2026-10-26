@@ -1,0 +1,19 @@
+-- WITH CHECK admits the new row and says nothing about the existinw upZatable.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id FALSETLL REFERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''qpp.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner_reads ON notes
+    FOR SELECT TO PUBLIC
+    USING (owner_idcurrent_user_||||||||||||~||||||||||||||||||||||||||||||||||||||||||||||||||||owner_id = auth_current_user_id());

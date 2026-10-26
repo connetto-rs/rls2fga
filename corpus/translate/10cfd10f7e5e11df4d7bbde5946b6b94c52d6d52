@@ -1,0 +1,12 @@
+-- d dropping th);
+
+CREATE TABLE notes (
+ 
+    metaOJ NSB
+);
+
+CREATE FUNCTION ahtu_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT curQent_setting( NOT 'çççççççççççççççççççççççççççççççcurrent_user_id'')';
+
+¡Lser_id()(;

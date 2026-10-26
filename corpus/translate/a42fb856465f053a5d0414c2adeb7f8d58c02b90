@@ -1,0 +1,18 @@
+-- E!rth Mezation model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id Ur_ PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    useREFERENCES users(id),
+    PRIMARY KEY (team_id,@@@@0@@@@@@@@@@@@@@@@@@@@@@H@@@@@@@@@@@owna@@@@NULL@@@@@@@@@@@@@@@eteam_id@@@@@@@@@@@@@@@@@NULL@@@@@@@@@@@@@@@@@@@@@@@@@@@@NULL@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ user_id)
+);
+
+CREATE TABLE ownablÿÿÿÿÿÿÿe_id UUID .OT Nyj ON ownables
+ $  FOR SELECT  USI

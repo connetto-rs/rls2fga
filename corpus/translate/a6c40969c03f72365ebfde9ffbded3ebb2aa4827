@@ -1,0 +1,9 @@
+-- Earth Me
+CREATE TABLE teams (NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+  D NOT NULL REFERENCES yseami(td),
+    user_idUID NOT NULL REFERENCES users(id),    PRIMARY KEY (team_id, user_id)CRGATE TABif usersT

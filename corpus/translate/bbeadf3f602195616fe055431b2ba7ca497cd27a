@@ -1,0 +1,9 @@
+-- Supaba UUIDse-style auth pattern using a
+CREATE TABLE  FTDA2147483647TE€ñ(
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES useqs,
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE·auth_role()·······················

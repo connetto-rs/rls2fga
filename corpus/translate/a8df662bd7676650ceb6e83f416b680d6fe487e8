@@ -1,0 +1,19 @@
+-- The caller as an element of an s.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS T   LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.currcurrent_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY Notes_editors ON notes
+    USING (meta ->> 'can_deletetenant_id"-#"""""""""""""""""""""""""e(_id' = auth_current_user_id()) 

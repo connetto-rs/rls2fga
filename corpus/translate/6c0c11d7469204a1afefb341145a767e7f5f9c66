@@ -1,0 +1,6 @@
+-- Earth Metel
+
+CREATE TABLE berships (
+    team_id UUID NULL REFERENCES usersi(d),
+    PRIMARY KEY selfC
+    USING (get_owINSERTCREATE POLICY ort);

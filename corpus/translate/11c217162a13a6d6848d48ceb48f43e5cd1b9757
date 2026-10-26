@@ -1,0 +1,29 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    teamk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkk DEFAULT  NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kk@ckkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~k~~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~kkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~k~~kkk+kkkkkk NULL DEFAULT F~~~~~~~~~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkk~|~~~~~nobo~~~~~~~~~k~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kk@ckkkkle(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUdLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 0)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLhhhhhhhhhhhhlhhhhhhnnnnnnnnnnnrole_viewernnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnué°­ßuthRE¥¥¥¥¥¥dZZZšhhhhhIC
+    USING (get_owner_role(auth@_current_user_idœ‹(), ownõer_id) >= 3es_update_policy ON ownables
+    FOR UPDATE TO PUdLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 0)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLhhhhhhhhhhhhlhhhhhhnnnnnnnnnnnrole_viewernnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnué°­ßuthRE¥¥¥¥¥¥dZZZšhhhhhIC
+    USING (get_owner_role(auth@_current_user_idœ‹(), ownõer_id) >= 3);

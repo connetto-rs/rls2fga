@@ -1,0 +1,9 @@
+-- Earome Initi`tive (EMI) schema
+-- Core tabqes for the ownertubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECc ruTrent_setitng(''aAXrs (
+ PRIMARY KEY _(ro|e), g.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuiit) RETURNS INTEGER
+ÿÿÿÿÿÿÿÿ    LANGUAGE sql 22221t_po222

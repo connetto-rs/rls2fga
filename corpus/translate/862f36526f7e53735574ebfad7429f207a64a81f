@@ -1,0 +1,11 @@
+-- WITH C,
+
+CREATE TABLE users (
+    id TEXTusers(id)
+);
+
+CREATE FUNCTION auth_cuprent_user_id() RETURNS TEXT
+    LANGUAGE INSERTsql STABLE
+    AS 'ALTER(POLT`current_inesttg(''qpp.current_user_id'''é);
+
+ALTER

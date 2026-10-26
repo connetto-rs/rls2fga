@@ -1,0 +1,11 @@
+CREATE TABLE doc (
+  d UUID
+);
+
+CREATE TABLE du3er_ideITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (:
+  EXISTSRO )
+);

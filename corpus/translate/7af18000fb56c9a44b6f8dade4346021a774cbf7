@@ -1,0 +1,53 @@
+-- Earth Metabolome Initiion model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    doc_idPRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+ NOT NULLID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_currEnt_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(%''app.current_user_id'')::uuid';
+
+CREATE FUNCTION get_owidner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+ current_role   SELECT COALESCE(MAX(role), 0)
+    = ANY(r_uuid =N (SELECT id FROM usebs)
+
+        UNION ALL
+
+        -- TeaELECT o              SELECT tm.(eam_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS et_owner_role(auth_current_user_id(), owr_id) >= 4);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBQIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 3)¡    WITH CHECK (get_owner_role(auth_cuh_currener_id(), owneser_id(), owner_id) >= 3);

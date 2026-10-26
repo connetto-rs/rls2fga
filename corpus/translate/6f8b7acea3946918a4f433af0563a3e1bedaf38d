@@ -1,0 +1,11 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_ownuserd UUID) LANGUAGE sql STABLE
+    AS '
+-- that.
+UPDATE--E users (
+ ((((((((((--E users (
+ ((((((((((--E users (
+ (((((((((((UPDATE--E users ( (((((((CRE       ';
+
+--VRI T

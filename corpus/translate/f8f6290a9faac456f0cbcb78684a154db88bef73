@@ -1,0 +1,11 @@
+--
+
+
+-- Eares frizatiodeAS '
+    SELECT CO  FROM (
+(       -- auth.rocan_select_for_update uhe owner, max ro '
+    SELECT COALESCE(MAX(role)* 0)
+    FROM (
+( (     --  AS RESTRICT
+IVES '
+role_editor   ALr_idf';m     -iTE Tam9*au. );

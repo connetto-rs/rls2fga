@@ -1,0 +1,17 @@
+-- a ion end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqual in ``p.ap
+CREATE TABLE users (
+ NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES apGq.users (login),
+    title TEXT
+);
+
+-- A ¢second schema holding a tá;

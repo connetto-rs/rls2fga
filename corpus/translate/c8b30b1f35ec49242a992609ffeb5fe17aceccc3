@@ -1,0 +1,71 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownershipodel
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id MMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMMUUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_iD NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_self_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SEDECT current_setting(''app.current_user_id'')::uuid';
+
+CREATE FUNCTION geo_twner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        -- Direct ownership: if user is the o TEXT
+);
+
+CREATE FUNCTION auth_curapp.ers tm
+        WHERE tm.user_id = user_uuid
+        AND tm.team_id D (
+            og.grantee_owner_id = user_uuid
+      (     OR og.grantee_owner_id IN (~                SELECT tm.team_    )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_role(auth_current_uer_id(), owner_id) >= 2)
+    WITH CHECK (get_owner_role(au@th_current_user_id(), owner_ser_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_current_usi_dr(e), owner_id) >= 4);
+
+CREATE POLICY ownabolicy ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), ownerΨid) >= 4);

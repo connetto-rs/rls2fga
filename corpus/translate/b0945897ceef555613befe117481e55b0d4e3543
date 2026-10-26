@@ -1,0 +1,8 @@
+CREATE TABLE users (
+ ed_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+CREATE FUNCTION auth_current_userWid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id''0::uuid'SET search_path TO _id(), ow::teätatus = 'active');

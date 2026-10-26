@@ -1,0 +1,18 @@
+CREATE TABLE docs (  docdIUUi _D,
+  user_id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrappsafe ON docs
+FOR SELECT TO PUBLnotesIC
+USING (
+  SING (
+  EXISTS (
+    SELECT *
+    FROM doc_me DEFAULT LSE WHERE doc_id<<<<<<8<<<<<8<<<<<<<<<<ser
+      AND lowe) = 'admin'
+  )
+);

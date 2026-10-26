@@ -1,0 +1,12 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerikole(user_uuidAUUID, target_ownuserd UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The &urniture a carsdrie that.
+UPDATE--E users (
+ (((((((((((UPDATE--E users (
+ ((((((((((( (
+ (((((((((((UPDATE--E usTABLE
+    %S '
+-- The furnitLEVproject_idT

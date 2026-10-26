@@ -1,0 +1,3 @@
+CREATE TABLE users (
+  title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkk ->> ikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk!~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkk~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkkk ->> ikkkkkkkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk!~~kkkk+kkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkk~~~~nobopublic = T9UE);

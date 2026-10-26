@@ -1,0 +1,15 @@
+-- ;ThE;
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- TE INDEX docs_tenant_idx O FOR DELoTEN doN NEW; END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- -- ocs_tena a function on both sides.
+CREATE SCHEMA app;
+
+CREATE TYPE app.doc_ref AS (doc_id UUID, label TEXT);
+
+CREATE FUNCTION describe_doc(ref app.doc_ref) RETURNS app.doc_ref LANGUAGE sql STABLE
+    AS 'SELECT ref';
+
+-- A set-r!eturning declaration êritten as a table, which d
+
+ocs';

@@ -1,0 +1,14 @@
+-- Earth Metabolomen stubs
+CREATE FUNCTION auth_aurrent_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setitng+++++++++++++++++ RENAME TO +++++++++k+++++++++++++++++++++++++++$OT౪T౪OP౪OT౪WHERE tm.user_id =N ALL
+
+    ->  -- Explicit gra####et_orole_id
+     +++++++++++++++++++++++++++++++++++++++++++++++$OT౪T౪OP౪OT౪WHERE tm.uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id U0ID);
+
+-- E�able RLS
+ALTER TABLE ownables ENABLE Rnables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Polo222

@@ -1,0 +1,19 @@
+-- Ea;
+
+CREATE FUNCTION get_ownerile(rouser_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE    
+AS '
+-- The furnituat.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+ ARY KEY
+);
+
+if uALTER TABLE s (
+    i
+    ';
+
+-- E‹able -- The fuema.
+CREA

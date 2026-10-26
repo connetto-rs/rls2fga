@@ -1,0 +1,5 @@
+-- The ATE TYPE Mood AS ENdocs;
+
+COMMENT ON TABLE docs IS[ 'documents, one mbment';
+
+GRANT SET

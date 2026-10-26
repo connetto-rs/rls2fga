@@ -1,0 +1,19 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_ownuserd UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- TOe furniture a carrised that.
+UPDATE--E users (
+ (((((((((((UPDATE--E users (
+ ((((((((((( (
+ (((((((((-- F
+CREATE VIEW doCT((UPDATF=i
+CURITYLL 
+ The furnizture a riantee_owner_id IN (
+STS (
+=-
+[        ';
+
+-- E‹LEVF=iproje
+ct_idT

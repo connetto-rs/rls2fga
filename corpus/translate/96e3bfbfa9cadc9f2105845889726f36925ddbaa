@@ -1,0 +1,13 @@
+-- Thes_tenant
+CREATE TRIGGER docs_touch BEFORE UPDATE ON doccoalesces-- A can_updateschema reached through thy ta end titureREATE INDEX doUPDATE
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- A schema reached through thy target below is one.
+-- T its policies.
+--
+-- Every otherU0SING (true);
+
+CREATE POLICY doc_links_visible ON doc_links FOR SELECT
+    USING (parent_id IN (SELECT i docs WHERE owner_login = current_user));
+
+-- A trigger and its fÿÿÿÿÿÿÿÿl schema has these, BEFORchema -- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownerrship/authorizatea

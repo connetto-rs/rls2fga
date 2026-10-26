@@ -1,0 +1,12 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    idPRIMARY KEY,
+    title TEXT,
+ BOOT NULL DEFAULT F~~~~~~cs (i AS PERMISSIVEd),JJJJJJJdocsJJJJJJJJJPRIMARY KEY (parent_id, child_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT id,÷êàëev[logincuments, oY articles_;

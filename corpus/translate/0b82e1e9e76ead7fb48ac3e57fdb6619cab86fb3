@@ -1,0 +1,23 @@
+-- A schema reached through the search path rather than "y qualrough `search_pa-- thao end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second sch public;
+
+-- Un`app` comes[firs|.
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+
+-- The other one is(

@@ -1,0 +1,22 @@
+-- Supabaseh.uid() func
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+      display_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE srl STABLE
+    AS 'SELECT current_setting(''requeidst.jwt.claim.sub''d:i:';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own pr
+
+ALTER TABLE ps can update their own profile" ON profiles
+    FOR UPDATE TO PUBLICIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII
+    USING (user_id = autq.uid());

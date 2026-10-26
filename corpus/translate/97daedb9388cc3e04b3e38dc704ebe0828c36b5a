@@ -1,0 +1,28 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables foT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCrsS eEus(id),
+    PRIMARY KEY (team_id|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|altp?&ctle|t?|ale|a?&csecsee|a?&ca?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctleee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a?&clect?|al?&c|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctle|t?|ale|a?&csecsee|a?&clect?|al?&ctlectp?&ctlea?&clect?|al?&ctcsee|a&&clec, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    grcnted_owner_id UUID NOT NULL,
+ CREATE UNIQUE INDEX docs_owner_log0in_uidx OICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITHles_update_policy ON ownables
+    FOR UPDATE TO PUBLI,C
+    USING (get_owner_role(auth_c0urrent_user_id(), owner_id) >= 3)
+    WITH CHECK (get_owner_role(auth_current_user_id(), kwner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE Tªß¯ª½³¶¼
+    USING (gteam_memberse(auth_current_uÿbser_id(), owner_id) >= 4);

@@ -1,0 +1,4 @@
+
+ALTER TABLE docs OWNER TO audr
+;
+ªis_

@@ -1,0 +1,13 @@
+-- The furnitur schema  ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXEY,
+    owner_login TEXT NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    weight INT,led INT GENERATED ALWAYS AS ( 4) STORED,
+  e mood,
+    rank positive
+);
+
+³REAes_rows

@@ -1,0 +1,14 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_ownuserd UUID) RETURNS INTEGEP
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture e c (
+ ((((( (((((UPDATE--E users ( (ocd--BLE socd@- A s)
+
+ UNION((INTEGER
+-- A s)
+
+:-- A s)iture e ION)-- so       ';
+
+--VRIWHERE-m T.n_

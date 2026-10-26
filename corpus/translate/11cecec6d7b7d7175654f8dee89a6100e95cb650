@@ -1,0 +1,30 @@
+-- Ten
+
+CREATE TABLE tenants (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id)
+);
+
+CREATE TABLE orders (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT  NULL REFERENCES tenants(id),
+    total_ad UUID PRIMARY KEY
+);
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id)
+);
+
+CREATE TABLE orders (
+    i dUUID PRIMARY KEY,
+    teUUImount NUMERIC
+);
+
+RETURNª UUI¼ÿ    LANGUAGE sql STABL?nt_isoMA n ON orders
+ enant_id = current_tenant_ad());
+

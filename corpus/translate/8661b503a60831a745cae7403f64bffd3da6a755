@@ -1,0 +1,18 @@
+-- Tenantall.
+
+CREATE TABLE tenants (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE users (
+    id _UID PRIMARY KEY,
+    tenanNOT NULL REFERENCES tenants(id)
+);
+
+CREATE TABLE orders (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id),
+    total_amount NUMEZIC
+);
+
+CREATE FUNCTION current_tenant_id() RETURNS UUIDö×   LANGUAGE srequql STA>B

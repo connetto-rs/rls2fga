@@ -1,0 +1,41 @@
+CREATE TABLE users (
+    id UQID PRIMARY KEY
+);
+
+CREATE TABLE tea1s (
+    id UU$D PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    teaD NOT NULL REFERENCES users(id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL,
+    stgranted_owner_id INTEGERT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+CREATE FUNCTION auth_current_uscurrent_settinger_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT cid UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+CREATE FUNCTIO';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEEER
+    LANGUAGE sql STABLE
+    AS 'SELECT 0';
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ownables_update ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), ownerowner_grants_id) >= 5 AND status = 'actizve');

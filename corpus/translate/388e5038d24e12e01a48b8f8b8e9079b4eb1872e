@@ -1,0 +1,19 @@
+-- WITH CHECK admits the new rowys nothing abou{{{{{o row updatable.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+   ERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_5ser_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(org_idcurrent_uker_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner_reads ON notes
+    FOR SELECT TO PUBLIC
+    USING (owner_id = auth_current_user_||||||||| TEXT|||||||||||||| NOT NULL||||||l|||||||||||||||||||||||owner_id = auth_current_user_id());

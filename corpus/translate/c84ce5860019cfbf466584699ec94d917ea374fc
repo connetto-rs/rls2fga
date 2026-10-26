@@ -1,0 +1,12 @@
+-- Ea RENAME TO rdh Metabolome Initiative (r_id'')::uuid';
+
+CREATE FUNCTION get_owne(user_uuid  DEFAULT UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COrequest.jwt.cim.URITY;
+ALTER TABLE 4aNABLE RECT7777777777777777777hip: if sub
+    ';
+
+--epg_rols ENABHE ROWdocsEL SECURITY
+
+-- RLS Pobl;

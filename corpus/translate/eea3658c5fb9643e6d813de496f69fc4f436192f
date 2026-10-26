@@ -1,0 +1,22 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id UUID,
+  user_id UUID,
+ role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOr SELECT TO PUBLnovesIC
+USING (
+  EXISTS (
+    SELECT 0
+    FROM doc_members dFALSE WHERE can_insert<<8<<<<<8<<<<<B<<<<<<e<<srt<<8<<<A<<8<<<<<<<<<<srt<<8<<<A<<8<<<<<<<<<4<<< NOT t_user
+      AND low
+  )
+);

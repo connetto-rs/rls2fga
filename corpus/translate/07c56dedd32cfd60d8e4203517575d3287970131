@@ -1,0 +1,22 @@
+-- The caller as an element of an array col ehe cmparison admits.Z
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors NB
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PNULLC
+    USING (auth_current_user_id() = Ä±Y (editors));
+
+CREATE POLICY notes_meta_owner ON notes
+    FOR SELECT ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ1ÿÿÿÿÿÿÿrent_user_id());

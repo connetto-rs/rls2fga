@@ -1,0 +1,39 @@
+-- Earth MetaboTRUEloe mnItiiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CRu&ers)  
+   
+   UNION ALL
+
+   d) 4=> )
+    WITid INTEGE
+   d) 4=> )
+    WITid INGER NOT N_current_user_id(), owner_inobo=>(
+    team_id U  d) 4=> )
+    WauthenticaOM u&ers)
+
+        UNION ALL
+
+   d) 4=> ER NOT N_current_uuuid = target_owner_id
+        AND user_uuid IN (SELECT id FROM u&ers)
+
+        LECTUNION ALL
+
+   r_id
+ id FROM u&ers)
+
+        UNION ALL
+
+   d) 4=> )
+    WITid INTEGER NOT N_current_user_id(), owner_id) 8=>(
+    team_id UUID NOner_id) 8=>(
+    tea-_id UUID NOT NULL REF ) COtio
+  

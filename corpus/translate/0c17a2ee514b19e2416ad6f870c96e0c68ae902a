@@ -1,0 +1,8 @@
+-- Ear-- Function stting(''app.currid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, target_owner_id UUID) RETURNS l STABLE
+    AS '
+    SELECT COALESCE(Mis the ownem,axr uid';
+
+CREATE FUNCTION get_owner_role(user_uuid  WHE (
+    id UU PRIMARY4);

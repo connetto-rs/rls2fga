@@ -1,0 +1,11 @@
+-- The furnitwithouROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY);
+
+CREATE VIEW docs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON douserscs TO au†ñãêr;() REE UFUNCTPDATE--EION (o

@@ -1,0 +1,10 @@
+-- Eart,n model
+
+CREATE TABLE users (
+   FERENCES teams(id),
+ grant  PjT NULL,
+  granted_owner_id  NUIDUOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Functn sÿÿ);

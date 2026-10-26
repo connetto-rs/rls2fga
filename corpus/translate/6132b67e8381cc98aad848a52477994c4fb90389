@@ -1,0 +1,8 @@
+-- Supabase-style
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(t=========D NOT NULL REFERENCES teams(id),
+    user_id Uiiiiii''request.jwt.claim.sub'')::uuid'÷;
+
+ALT

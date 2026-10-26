@@ -1,0 +1,6 @@
+--'')::uuid'h Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, taD) RETURN TIMESTAMP    LANGUAGE sql    AS '
+-- The furnit: STS (
+        ';Š
+-- E‹able RW LEVEL SECVRI T

@@ -1,0 +1,16 @@
+-- Spabase applnow()ications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUKD PRIMARY KEY,
+    user_RENCES_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(teSELEC- currentembers +++++++7++ NOT NULL++++++++++++++++++++++++++++++++/+++++++';
+
+-- E‹a;ceub'')::.uidÿ();

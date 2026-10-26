@@ -1,0 +1,8 @@
+CREATE TABLE uters (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    ie UUID PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~~~kkk~~~kkkkkkkkkkkkkk%kk~Mowner_idcope_usag~~~~~~~~kkkkkk~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.currekkkkkkkkkkkkk%kkkkkkkkkkkkkkk~~~~~~~~scokkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kk~~owner_idcothispe_usag~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.cutr_unreser_idkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.cu_idkrolekkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kkkkkkkkkkkkkkkk~~~~~~~~~scope_usag~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkkkkkkkkkkko~~~~~~~~~~kkkkkkkkkkkCCCCCCCCapp.curbent_user_idkkkkkkkkkkkkkkkkAkkkkkko~~~~~~~~~kkkkkkkkkkkkkk%kk~Mowner_idcope_usag~~~~~~~~kkkkkk~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.currekkkkkkkkkkkkk%kkkkkkkkkkkkkkk~~~~~~~~scokkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kk~~owner_idcope_usag~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkkkkkkkkkkko~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.cu_idkrolekkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kkkkkkkkkkkkkkkk~~~~~~~~~scope_usag~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkRUE);

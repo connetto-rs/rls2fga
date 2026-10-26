@@ -1,0 +1,23 @@
+CREATE TABLE docs (
+ NOT NULL PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id UUID,
+  use2r_id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_unsfae ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM doc_members  INTEGERdm
+    WHERE dm.dr(docs.owner_MMMMMMd::textrequest.jwt.claim.subd::text)
+  )
+);

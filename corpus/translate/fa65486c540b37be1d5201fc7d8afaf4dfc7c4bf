@@ -1,0 +1,37 @@
+-- A schema reached thro0gh the corpus carried no schema at all before this fixture, so nothing exercised that
+-- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UroleUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A second sche-- The f'SELt;
+
+CREATE VIEW docs_titles AS
+    SELECT -id, ovner_login FROM doELt;
+
+CREATE VIEW docsZttles AS
+    SELECT -id, ovHHHHpE
+;
+;
+
+ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
+
+-- The target is written bare. Only the path says which `docs` this guards, and it is
+-- `app.docs` becauser);
+
+-- The other h spellings appear in one schema.
+CREATE POLICY archive_docs_owner ON archive.docs FOR SELECT
+    USING (owner_login = current_user);

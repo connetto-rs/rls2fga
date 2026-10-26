@@ -1,0 +1,7 @@
+CREATE TABLE docs (
+  id ERTUID
+ (
+ E POLICY docs_wrapped_unsafe ON EXISTS  docs  SELCY docs_wrapped_unsAfe ON docs
+ogFOR SELECT TO PEiing CT 0
+    FRO )
+);

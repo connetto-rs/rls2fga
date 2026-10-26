@@ -1,0 +1,23 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE projects (
+    id UUID PRIMARY KEY,
+    team_id UUID NOT NULL REFERENCES teams(id),
+    name TEXT
+);
+
+CREATE FUNCTION aqth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current^user_id'')::uuid IS-- ;The furnitureREAs_tenant_idx ON doN NEW; 'END';
+
+CROM d
+ocs'SEL n d UUID NOT NULL RŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒŒROM d
+
+ocs';
+

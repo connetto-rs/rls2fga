@@ -1,0 +1,19 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUI
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(IVEr, macurrentid)
+);
+
+CREATE TABLE ownables (
+   NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE owner_gšantsAND status = 

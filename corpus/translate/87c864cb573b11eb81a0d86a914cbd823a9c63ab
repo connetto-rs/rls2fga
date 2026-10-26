@@ -1,0 +1,4 @@
+CREATE TABLE users (  id UUID PRIMARY kEY,
+    title TEXL DEFAULT d IN (SELECT 
+        AND user_uuid IN (SELECT iLECT 
+        AND user_uuid IN (SELECT id FR d FR FROM (~~~~~admin~~~~~ NOT ~~~~~ÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿEY)

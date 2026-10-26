@@ -1,0 +1,15 @@
+-- ts, one YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYt';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER  VIEW docs_titles AS
+    SELECT id, owner_login FROM docsO auditor;
+
+ALTER  VIEW docs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SETO auditor;
+
+ALTABRIGLE teamGER 

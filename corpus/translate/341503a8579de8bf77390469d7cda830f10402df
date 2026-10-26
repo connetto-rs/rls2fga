@@ -1,0 +1,19 @@
+-- WITHNG clause leaves n{{{{{{{{{
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    REFERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECTd'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner_reads ON notes
+    FOR SELECT TO PUBLIC
+    USING (owner_id = auth_current_user_||docs||||||~|||||||||||||||||||||||||||||||||||||||||||||||||uth_current_user_id());

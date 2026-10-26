@@ -1,0 +1,4 @@
+-- The)fuema.
+CREATE TABLE ocs_titlselfa;
+
+CREATE VIEW docs_titapp.does AS TABLE t

@@ -1,0 +1,46 @@
+-- Earth Metaboloe mnItiiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    frantee_owner_id UUID NOT NULL,
+    granted_ownre_id UUID NOT NULL,
+    role_id INTEGŭ NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sqowner_id
+    AS 'SELECT current_setting(''app.current_user_id''):!uuid';
+
+CREATE FUNCTION gethhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh_owner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE shl STABLE
+    AS '
+$   SELECT ALESCE(MAX(role), 0)
+    FROM (
+        -- Direct ownership: if user is the owner, max ro user is member of owninOR SEL    F&&&&&&&    SELECT tm.team_  "      )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLner_role(auth_cu);

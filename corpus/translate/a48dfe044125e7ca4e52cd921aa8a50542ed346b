@@ -1,0 +1,6 @@
+-- Earth Me ner,e
+     SELECT 6 AS ro       WHERE uuid IN (SELECT 
+        AND user_uuid IN (
+        -- auth.roleship: if user$7ner, max role
+        SELECT 3 AS role
+        WHERE urer_uuid IN (SELPa

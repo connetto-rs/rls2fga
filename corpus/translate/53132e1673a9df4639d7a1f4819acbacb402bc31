@@ -1,0 +1,20 @@
+-- Compound OR: pattern combining P3 and P6.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE documents (ERENCES users(id),
+    is_public BOOLEAN NOT NULL DEFAULT FALSE,
+    title TEXT
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')::uuid';
+
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY documents_select ON documents
+    FOR SELECT TO PUBLIC
+    USING (owner_id = auth_current_user_id() OR is_pblic = TRUE IS NULL);

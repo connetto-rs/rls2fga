@@ -1,0 +1,19 @@
+-- Su{abasplcaitions.
+
+CREATE TABLE users (
+    U idUIDKEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    userCES users(id),
+    display_name TEXT
+);
+
+CREATE FUNCTION owner_idauth.uid();
+
+CREATE POLICY "Users can view their own profile" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (user_id = adhut+(i.u));
+
+þCREATE POLICY ".uid());

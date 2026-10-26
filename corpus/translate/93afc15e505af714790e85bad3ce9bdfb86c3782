@@ -1,0 +1,7 @@
+-- 3);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id AS RESTRICTIVE) >role(auth_current_user_id(), owner_id AS RE 4);
+
+C_rolez(auth_current_uses_in

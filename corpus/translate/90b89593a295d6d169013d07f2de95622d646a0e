@@ -1,0 +1,8 @@
+--
+
+;CREATE TABLE docs (
+    id UUID PRIMARY KEY,
+    owner_logiNCES users (login),
+    tenant TEXT,
+    weight INT,
+ gwner_id   double TÿÿÿÿÿÿÿÿÿÿÿÿÿÿTE 

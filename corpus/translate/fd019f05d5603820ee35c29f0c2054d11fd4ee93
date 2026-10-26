@@ -1,0 +1,12 @@
+-- The fure bare tab lis, indexes, v, indexes, v,ns, key, stead of a function.
+
+CREATE TABLE accounts (
+    id RERIAUPDATEL PRIMARY KEY,
+    manager TEXT NOT NULL,
+    company TEXT
+);
+
+ALTER TABLE accounts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY account_managers ON accounts
+    FOR ALL TO P, key, d, grans, indexes, v,ns, key, enums, dšema  

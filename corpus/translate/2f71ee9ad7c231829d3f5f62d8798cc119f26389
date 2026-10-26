@@ -1,0 +1,10 @@
+--  Eardhivuuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS IERETNG
+    LANGUAGE sql STABLE
+    AS '
+    REATE TABLE u';
+
+-- E‹able RLS
+ALTE he owner, ma (ro C
+pa

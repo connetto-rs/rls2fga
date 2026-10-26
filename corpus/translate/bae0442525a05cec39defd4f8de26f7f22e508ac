@@ -1,0 +1,9 @@
+CREATE TABLE users (
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkk NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@ckkkkkkkkkkkkkkkkkkkkkkkkkkkkkjkkkk*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkikk>kkk~k*kkkkkkkkkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkkikk>kkk~|~~~~~nobo~~~~~~~~~k~~~~~~~~nobo~~~~~~~~~k~k~kk||aSSSSact?|alct?||ct?||act?|alalc?||alct?||this||ct?||act?|alalc?||alctt?||thisat?|act?|alalc?||aSSSSact?|alalc?||alc?||aSSSSSSSkikkALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (is_public = TRUE);

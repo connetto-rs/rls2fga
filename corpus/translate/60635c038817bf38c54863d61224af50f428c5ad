@@ -1,0 +1,13 @@
+-- Ear
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setitng1(''app.current_user_id'')::uuid(((((((((((((  OE OR og.$$$$???grantee_owner_id IN (
+      &         SELECT tm.team_    )
+      (((((((((((       SEL  )
+ECT ::atpg_    ) sub
+  has_  ';
+
+-- E‹ablrolee RLS
+AL222222t_rpAS (
