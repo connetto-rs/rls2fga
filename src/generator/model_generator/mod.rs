@@ -74,7 +74,8 @@ use actions::{
 use dsl::render_dsl;
 use emit_membership::{
     emit_abac_and, emit_blocked_set, emit_composite, emit_exists_membership,
-    emit_membership_exclusion, emit_parent_inheritance, emit_uncorrelated_membership,
+    emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
+    emit_uncorrelated_membership,
 };
 use emit_ownership::{
     emit_attribute_condition, emit_boolean_flag, emit_constant_bool, emit_direct_ownership,
@@ -2548,6 +2549,9 @@ fn translate_pattern<DB: DatabaseLike>(
             notes,
             readability,
         ),
+        PatternClass::P19IndirectMembership(indirect) => {
+            emit_indirect_membership(indirect, ctx, table_plan, all_types, notes, readability)
+        }
         PatternClass::ExpandedFunction(expanded) => {
             notes.push(TranslationNote::FunctionExpanded {
                 policy: ctx.policy_name.to_string(),

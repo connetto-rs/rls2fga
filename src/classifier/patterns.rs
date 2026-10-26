@@ -268,6 +268,12 @@ impl ResidualPredicates {
         }
         Some(ResidualDecision { guards, requests })
     }
+
+    /// The conjuncts the residual holds, consumed.
+    #[must_use]
+    pub(crate) fn into_conjuncts(self) -> Vec<ResidualPredicate> {
+        self.0
+    }
 }
 
 /// A residual every conjunct of which a row image or the request can evaluate.
@@ -516,6 +522,23 @@ pub struct MembershipInCallerSet {
     pub source: SessionAttribute,
 }
 
+/// Membership reached through a closure table sharing the far table's declared owner key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IndirectMembership {
+    /// The link table read first, one row per guarded row and owner.
+    pub link_table: TableId,
+    /// Link-to-guarded equalities in the guarded key's order.
+    pub pairs: Vec<MembershipJoinPair>,
+    /// The owner entity the link and far columns reference.
+    pub owner_table: TableId,
+    /// Link columns holding the owner key in primary-key order, aligned with each membership's pairs.
+    pub owner_columns: Vec<ColumnName>,
+    /// Far-table memberships with owner-key pairs and a residual for each listed role.
+    pub memberships: Vec<ExistsMembership>,
+    /// Residual filter on the link row itself.
+    pub extra_predicates: ResidualPredicates,
+}
+
 /// Correlated caller-identity memberships subtracted from a positive grant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MembershipExclusion {
@@ -595,6 +618,8 @@ pub enum PatternClass {
     /// grant is a request-completed gate on the parent rather than a subject named by
     /// the row: the member value is not a person.
     P18MembershipInCallerSet(MembershipInCallerSet),
+    /// Membership reached through a closure table.
+    P19IndirectMembership(IndirectMembership),
     /// A correlated blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

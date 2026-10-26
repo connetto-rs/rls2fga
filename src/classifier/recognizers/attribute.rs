@@ -553,7 +553,7 @@ fn mirrored(operator: AttributeOperator) -> AttributeOperator {
 }
 
 /// A literal constant, and nothing a function or the clock supplies.
-fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
+pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
     let Expr::Value(value) = unwrap_cast_or_nested(expr) else {
         return None;
     };

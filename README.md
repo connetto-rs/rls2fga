@@ -131,6 +131,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P16 | `ConstantInCallerSet` | `'admin' = ANY(string_to_array(current_setting('app.roles', true), ','))` | A test of the caller's list, held once per table, see below |
 | P17 | `CallerScalarEqualsConstant` | `(SELECT auth.jwt() ->> 'aal') = 'aal2'` | A test of the caller's value, held once per table, see below |
 | P18 | `MembershipInCallerSet` | `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND s.viewer = ANY(...))` | The gate on each share row, reached through the same parent P4 bridges to |
+| P19 | `IndirectMembership` | Nested `EXISTS` or an inner `JOIN` through a closure table | `member from ancestor`, with both hops referencing the same declared owner key |
 | - | `MembershipExclusion` | Positive grant `AND NOT EXISTS (...)`, caller `NOT IN (...)`, caller `<> ALL (...)` | Grant `but not blocked`, with independent relations per blocklist |
 | - | `Unknown` | Anything else | Denied, with a TODO, unless an oracle classifies it |
 

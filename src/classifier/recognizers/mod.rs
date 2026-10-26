@@ -34,6 +34,7 @@ mod session;
 /// P4/P5 membership and parent-inheritance recognizers (correlated EXISTS / IN subqueries).
 mod subquery;
 
+use attribute::attribute_literal;
 pub use attribute::{
     attribute_literal_predicate, attribute_request_predicate, is_attribute_check,
     residual_predicate,
@@ -45,7 +46,9 @@ pub use session::recognize_session_attribute;
 pub(crate) use session::{
     caller_set, caller_set_in_subquery, row_valued_set, undeclared_set_reads,
 };
+pub(crate) use subquery::owner_key_of;
 pub(crate) use subquery::projected_select;
+pub use subquery::recognize_p19_indirect_membership;
 pub(crate) use subquery::{
     diagnose_p4_membership_ambiguity, diagnose_p5_parent_inheritance_ambiguity,
 };

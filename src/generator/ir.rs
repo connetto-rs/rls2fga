@@ -292,6 +292,23 @@ pub(crate) enum TupleSource {
         share_type: TypeName,
         relation: RelationName,
     },
+    /// P19 links each guarded object to the owner its closure row names.
+    ClosureBridge {
+        /// Table whose rows record the closure.
+        link_table: TableId,
+        /// Columns of `link_table` naming the guarded row, in the guarded key's order.
+        object_cols: Vec<ColumnName>,
+        /// Columns of `link_table` naming the owner, in the owner key's order.
+        subject_cols: Vec<ColumnName>,
+        /// The guarded table's own type, which the objects belong to.
+        guarded_type: TypeName,
+        /// The owner type the closure rows carry.
+        owner_type: TypeName,
+        /// The link relation the closure rows fill.
+        relation: RelationName,
+        /// Row-local filter on the closure row.
+        extra_predicates: ResidualPredicates,
+    },
 
     /// A membership row as its own witness object: the member is the subject and the
     /// row's own clock values ride the tuple, so the condition is evaluated per row
@@ -579,6 +596,15 @@ pub(crate) enum TupleSourceKey<'a> {
         share_type: &'a TypeName,
         relation: &'a RelationName,
     },
+    ClosureBridge {
+        link_table: &'a TableId,
+        object_cols: &'a [ColumnName],
+        subject_cols: &'a [ColumnName],
+        guarded_type: &'a TypeName,
+        owner_type: &'a TypeName,
+        relation: &'a RelationName,
+        extra_predicates: ResidualSqlKey<'a>,
+    },
     MembershipShareMembers {
         join_table: &'a TableId,
         identity_cols: &'a [ColumnName],
@@ -655,6 +681,7 @@ impl TupleSource {
             | Self::PolicyScope { .. }
             | Self::HolderBridge { .. } => true,
             Self::ShareBridge { .. }
+            | Self::ClosureBridge { .. }
             | Self::PolicyScopeRoles { .. }
             | Self::RequestGateEntry { .. }
             | Self::OwnerIdentity { .. }
@@ -699,6 +726,11 @@ impl TupleSource {
                 .map(|(_, relation, _)| (owner_type.clone(), relation.clone()))
                 .collect(),
             Self::ShareBridge {
+                guarded_type,
+                relation,
+                ..
+            }
+            | Self::ClosureBridge {
                 guarded_type,
                 relation,
                 ..
@@ -989,6 +1021,23 @@ impl TupleSource {
                 object_cols,
                 share_type,
                 relation,
+            },
+            Self::ClosureBridge {
+                link_table,
+                object_cols,
+                subject_cols,
+                guarded_type,
+                owner_type,
+                relation,
+                extra_predicates,
+            } => TupleSourceKey::ClosureBridge {
+                link_table,
+                object_cols,
+                subject_cols,
+                guarded_type,
+                owner_type,
+                relation,
+                extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::No),
             },
             Self::MembershipShareMembers {
                 join_table,

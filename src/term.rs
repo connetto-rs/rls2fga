@@ -309,6 +309,7 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P2RoleNameInList(_)
             | PatternClass::P3DirectOwnership(_)
             | PatternClass::P4ExistsMembership(_)
+            | PatternClass::P19IndirectMembership(_)
             | PatternClass::P11ArrayMembership(_)
             | PatternClass::P12JsonbFieldOwnership(_)
             | PatternClass::P13UncorrelatedMembership(_) => TermCaller::Identity,

@@ -6,7 +6,7 @@
 use super::*;
 
 use crate::classifier::expansion::ExpansionState;
-use crate::classifier::recognizers::{resolve_membership_pairing, MembershipPairing};
+use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
 
 pub(super) struct MembershipSourceGate<'a> {
     pub condition: &'a ConditionName,
@@ -613,6 +613,14 @@ enum MembershipPolarity {
     Block,
 }
 
+enum MembershipRoute {
+    Parent(MembershipPolarity),
+    Closure {
+        parent: MembershipParent,
+        tupleset: RelationName,
+    },
+}
+
 /// Membership through a join table, bridged on the column the policy correlates.
 pub(crate) fn emit_exists_membership<DB: DatabaseLike>(
     exists_membership: &ExistsMembership,
@@ -629,7 +637,7 @@ pub(crate) fn emit_exists_membership<DB: DatabaseLike>(
         all_types,
         notes,
         readability,
-        MembershipPolarity::Grant,
+        MembershipRoute::Parent(MembershipPolarity::Grant),
     )
 }
 
@@ -640,11 +648,15 @@ fn emit_membership<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
     notes: &mut Vec<TranslationNote>,
     readability: &mut BTreeMap<TableId, TableReadability>,
-    polarity: MembershipPolarity,
+    route: MembershipRoute,
 ) -> UsersetExpr {
+    let polarity = match &route {
+        MembershipRoute::Parent(polarity) => *polarity,
+        MembershipRoute::Closure { .. } => MembershipPolarity::Grant,
+    };
     let ExistsMembership {
         join_table,
-        pairs,
+        pairs: _,
         user_column,
         extra_predicates,
     } = exists_membership;
@@ -675,8 +687,20 @@ fn emit_membership<DB: DatabaseLike>(
         };
         scope
     };
-    let Some(parent) = MembershipParent::resolve(pairs, join_table, ctx, table_plan, notes) else {
-        return deny_expr(table_plan);
+    let (parent, tupleset) = match route {
+        MembershipRoute::Parent(_) => {
+            let Some(parent) = MembershipParent::resolve(
+                &exists_membership.pairs,
+                join_table,
+                ctx,
+                table_plan,
+                notes,
+            ) else {
+                return deny_expr(table_plan);
+            };
+            (parent, None)
+        }
+        MembershipRoute::Closure { parent, tupleset } => (parent, Some(tupleset)),
     };
     let MembershipParent {
         pairs, parent_type, ..
@@ -772,6 +796,11 @@ fn emit_membership<DB: DatabaseLike>(
                 },
             )
         };
+        let reached = if tupleset.is_some() {
+            format!("{share_type}_{member_rel}_{condition}")
+        } else {
+            format!("{share_type}_{member_rel}")
+        };
         let share_source = TupleSource::MembershipShareMembers {
             join_table: join_table.clone(),
             identity_cols: identity_cols.clone(),
@@ -792,7 +821,6 @@ fn emit_membership<DB: DatabaseLike>(
             fk_cols: &parent.fk_cols(),
             share_type: &share_type,
         };
-        let reached = format!("{share_type}_{member_rel}");
         let witness_member = if parent.is_self(table_plan) {
             let link = link_share_rows(table_plan, &share);
             table_plan.ensure_computed(reached, share_reach(link, member_rel))
@@ -801,8 +829,9 @@ fn emit_membership<DB: DatabaseLike>(
             let link = link_share_rows(parent_plan, &share);
             parent_plan.ensure_computed(reached, share_reach(link, member_rel))
         };
+        let tupleset = tupleset.unwrap_or_else(|| parent.bridge_from(table_plan, source_table));
         UsersetExpr::TupleToUserset {
-            tupleset: parent.bridge_from(table_plan, source_table),
+            tupleset,
             computed: witness_member,
         }
     } else {
@@ -865,7 +894,7 @@ fn emit_membership<DB: DatabaseLike>(
             UsersetExpr::Computed(member_rel)
         } else {
             UsersetExpr::TupleToUserset {
-                tupleset: parent.bridge_from(table_plan, source_table),
+                tupleset: tupleset.unwrap_or_else(|| parent.bridge_from(table_plan, source_table)),
                 computed: member_rel,
             }
         }
@@ -875,6 +904,244 @@ fn emit_membership<DB: DatabaseLike>(
         join_table,
         extra_predicates,
         read_scope,
+        ctx,
+        table_plan,
+        all_types,
+        notes,
+    )
+}
+
+/// The read scope a two-hop hop may rest on; guarded hop tables are refused.
+fn indirect_read_scope<'a, DB: DatabaseLike>(
+    table: &TableId,
+    ctx: &PatternCtx<'_, DB>,
+    memo: &'a mut BTreeMap<TableId, TableReadability>,
+    notes: &mut Vec<TranslationNote>,
+) -> Option<&'a TableReadability> {
+    if ctx.membership_reads_bypass_rls {
+        return Some(&TableReadability::Open);
+    }
+    let scope = join_table_readability(table, ctx.db, ctx.registry, memo);
+    match scope {
+        TableReadability::Open | TableReadability::RequestGated { .. } => Some(scope),
+        TableReadability::Guarded { .. } => {
+            notes.push(TranslationNote::MembershipTableGuarded {
+                policy: ctx.policy_name.to_string(),
+                join_table: table.clone(),
+            });
+            None
+        }
+        TableReadability::Unreadable => {
+            notes.push(TranslationNote::MembershipTableGrantsNoReads {
+                policy: ctx.policy_name.to_string(),
+                join_table: table.clone(),
+            });
+            None
+        }
+    }
+}
+
+/// Emit owner membership reached through a closure table.
+pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
+    indirect: &IndirectMembership,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+    notes: &mut Vec<TranslationNote>,
+    readability: &mut BTreeMap<TableId, TableReadability>,
+) -> UsersetExpr {
+    let IndirectMembership {
+        link_table,
+        pairs,
+        owner_table,
+        owner_columns,
+        memberships,
+        extra_predicates,
+    } = indirect;
+    let policy_name = ctx.policy_name;
+    let db = ctx.db;
+    let source_table = ctx.source_table;
+    let table_types = ctx.table_types;
+    if memberships.is_empty() {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: policy_name.to_string(),
+            reason: format!("the closure '{link_table}' carries no membership to grant"),
+        });
+        return deny_expr(table_plan);
+    }
+    if indirect_read_scope(link_table, ctx, readability, notes).is_none() {
+        return deny_expr(table_plan);
+    }
+    let owner_type = table_types.resolve(owner_table);
+    let Some((link_owner, owner_mapping)) = owner_key_of(db, link_table, owner_columns) else {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: policy_name.to_string(),
+            reason: format!("the closure '{link_table}' names no declared owner key"),
+        });
+        return deny_expr(table_plan);
+    };
+    if &link_owner != owner_table
+        || !owner_mapping
+            .iter()
+            .map(|(_, host)| host.as_str())
+            .eq(owner_columns.iter().map(ColumnName::as_str))
+    {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: policy_name.to_string(),
+            reason: format!("the closure '{link_table}' does not name the key of '{owner_table}'"),
+        });
+        return deny_expr(table_plan);
+    }
+    let (link_pairs, pairing) =
+        match resolve_membership_pairing(pairs.clone(), link_table, source_table, db) {
+            Ok(resolved) => resolved,
+            Err(reason) => {
+                notes.push(TranslationNote::ExpressionRefused {
+                    policy: policy_name.to_string(),
+                    reason,
+                });
+                return deny_expr(table_plan);
+            }
+        };
+    match pairing {
+        MembershipPairing::SelfKeyed => {}
+        MembershipPairing::ForeignKey { parent_table } => {
+            if table_types.resolve(&parent_table) != table_plan.type_name {
+                notes.push(TranslationNote::ExpressionRefused {
+                    policy: policy_name.to_string(),
+                    reason: format!(
+                        "the closure '{link_table}' links its rows to '{parent_table}' \
+                         rather than the guarded rows"
+                    ),
+                });
+                return deny_expr(table_plan);
+            }
+        }
+        MembershipPairing::Single => {
+            notes.push(TranslationNote::ExpressionRefused {
+                policy: policy_name.to_string(),
+                reason: format!(
+                    "the closure '{link_table}' does not name the guarded rows by a declared key"
+                ),
+            });
+            return deny_expr(table_plan);
+        }
+    }
+    let join_columns: Vec<ColumnName> = link_pairs
+        .iter()
+        .map(|pair| pair.join_column.clone())
+        .collect();
+    let missing = join_columns
+        .iter()
+        .chain(owner_columns.iter())
+        .find(|column| !table_id_has_column(db, link_table, column.as_str()));
+    if let Some(column) = missing {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: policy_name.to_string(),
+            reason: format!("the closure '{link_table}' has no column '{column}'"),
+        });
+        return deny_expr(table_plan);
+    }
+    if !extra_predicates.requests().is_empty() {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: policy_name.to_string(),
+            reason: "request-dependent closure filters are unsupported".to_string(),
+        });
+        return deny_expr(table_plan);
+    }
+    announce_residual(extra_predicates, false, policy_name, notes);
+    {
+        let owner_plan = all_types.entry(owner_type.clone()).or_insert_with(|| {
+            TypePlan::new_with_well_known(owner_type.clone(), &table_plan.well_known)
+        });
+        owner_plan.names_rows_of(owner_table);
+    }
+    let mut key = table_source_key("indirect_closure", link_table);
+    source_key_columns(&mut key, &join_columns);
+    source_key_columns(&mut key, owner_columns);
+    source_key_part(&mut key, owner_type.as_str());
+    let residual_sql = extra_predicates.sql();
+    let _ = write!(key, "{}:", residual_sql.is_some());
+    source_key_part(&mut key, residual_sql.as_deref().unwrap_or_default());
+    let link_relation = table_plan.membership_source_relation(
+        &key,
+        format!("indirect_{owner_type}"),
+        DirectSubject::Type(owner_type.clone()),
+    );
+    table_plan.add_source(TupleSource::ClosureBridge {
+        link_table: link_table.clone(),
+        object_cols: join_columns,
+        subject_cols: owner_columns.clone(),
+        guarded_type: table_plan.type_name.clone(),
+        owner_type: owner_type.clone(),
+        relation: link_relation.clone(),
+        extra_predicates: extra_predicates.clone(),
+    });
+    let mut arms: Vec<UsersetExpr> = Vec::new();
+    for membership in memberships {
+        let Some(_scope) = indirect_read_scope(&membership.join_table, ctx, readability, notes)
+        else {
+            return deny_expr(table_plan);
+        };
+        let hosts: Vec<_> = membership
+            .pairs
+            .iter()
+            .map(|pair| pair.join_column.clone())
+            .collect();
+        let valid_owner =
+            owner_key_of(db, &membership.join_table, &hosts).is_some_and(|(table, mapping)| {
+                &table == owner_table
+                    && mapping.len() == membership.pairs.len()
+                    && mapping
+                        .iter()
+                        .zip(&membership.pairs)
+                        .all(|((key, host), pair)| {
+                            key == pair.outer_column.as_str() && host == pair.join_column.as_str()
+                        })
+            });
+        if !valid_owner {
+            notes.push(TranslationNote::ExpressionRefused {
+                policy: policy_name.to_string(),
+                reason: format!(
+                    "the membership on '{}' names a different owner key",
+                    membership.join_table
+                ),
+            });
+            return deny_expr(table_plan);
+        }
+        let parent = MembershipParent {
+            pairs: membership.pairs.clone(),
+            parent_type: owner_type.clone(),
+            row_source: Some(owner_table.clone()),
+        };
+        arms.push(emit_membership(
+            membership,
+            ctx,
+            table_plan,
+            all_types,
+            notes,
+            readability,
+            MembershipRoute::Closure {
+                parent,
+                tupleset: link_relation.clone(),
+            },
+        ));
+    }
+    let membership = if arms.len() == 1 {
+        arms.pop().unwrap_or_else(|| deny_expr(table_plan))
+    } else {
+        combine_union(arms).unwrap_or_else(|| deny_expr(table_plan))
+    };
+    let link_scope = if ctx.membership_reads_bypass_rls {
+        &TableReadability::Open
+    } else {
+        join_table_readability(link_table, db, ctx.registry, readability)
+    };
+    apply_membership_read_scope(
+        membership,
+        link_table,
+        extra_predicates,
+        link_scope,
         ctx,
         table_plan,
         all_types,
@@ -900,7 +1167,7 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
             all_types,
             notes,
             readability,
-            MembershipPolarity::Block,
+            MembershipRoute::Parent(MembershipPolarity::Block),
         );
         if grants_nothing(&set, table_plan, &mut BTreeSet::new())
             || notes

@@ -933,6 +933,51 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             ))
         }
 
+        TupleSource::ClosureBridge {
+            link_table,
+            object_cols,
+            subject_cols,
+            guarded_type,
+            owner_type,
+            relation,
+            extra_predicates,
+        } => {
+            let (first, rest) = subject_cols.split_first()?;
+            let mut guards: Vec<_> = object_cols
+                .iter()
+                .map(|column| not_null(link_table, column, db))
+                .collect();
+            guards.extend(
+                subject_cols
+                    .iter()
+                    .map(|column| not_null(link_table, column, db)),
+            );
+            let Some(residual) = residual_guards(link_table, extra_predicates, db) else {
+                let query = rendered(query)?;
+                return Some(residual_description(
+                    query,
+                    link_table,
+                    object_cols,
+                    extra_predicates,
+                    ReplayScope::Object {
+                        object_type: guarded_type.clone(),
+                        relations: vec![relation.clone()],
+                    },
+                    "the closure filter requires SQL evaluation".to_string(),
+                ));
+            };
+            guards.extend(residual);
+            Some(from_row(
+                link_table,
+                guarded_type,
+                ObjectKey::new(key_parts(link_table, object_cols, db)),
+                relation,
+                owner_type,
+                composite_subject(link_table, first, rest, db),
+                guards,
+            ))
+        }
+
         // Every row of the table points at the one holder object.
         TupleSource::HolderBridge {
             table,

@@ -10,6 +10,10 @@ use sqlparser::ast::{
     VisitMut, Visitor, VisitorMut,
 };
 
+mod indirect;
+pub(crate) use indirect::owner_key_of;
+pub use indirect::recognize_p19_indirect_membership;
+
 /// Immutable visitor that gates `handle` on expressions outside nested subqueries.
 struct TopLevelOnly<F> {
     depth: usize,
