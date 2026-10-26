@@ -1,13 +1,14 @@
 //! Reaching the outputs, and what stops it.
 use core::fmt::Write;
 
+use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::generator::model_bounds::ModelBound;
 use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::PlanningError;
 
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translator, TranslatorBuilder};
+use rls2fga::translator::{Translation, Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
 
@@ -55,12 +56,10 @@ fn an_unhandled_expression_refuses_the_outputs() {
 
     assert_eq!(error.notes().len(), 1, "got {:?}", error.notes());
     assert_eq!(error.notes()[0].severity(), NoteSeverity::Unhandled);
-    assert!(
-        error
-            .to_string()
-            .contains("denies what the database grants"),
-        "the refusal has to say what it costs, got: {error}"
-    );
+    assert!(matches!(
+        error.notes()[0],
+        TranslationNote::ExpressionRefused { .. }
+    ));
 }
 
 /// Accepting the gaps is the same outputs, one visible line later.
@@ -78,8 +77,7 @@ fn accepting_the_gaps_yields_the_same_outputs() {
         accepted.model()
     );
 
-    // The refusal names the unhandled notes only, while the accepted outputs carry
-    // every note, so nothing is lost by taking the other door.
+    // Accepted outputs retain the non-diverging notes too.
     let refused = translator(ConfidenceLevel::D)
         .translate(&db)
         .expect("translation should plan")
@@ -113,17 +111,21 @@ fn a_translation_with_nothing_unhandled_answers() {
     assert!(outputs.model().contains("type docs"));
 }
 
-/// The payoff of typing the notes. A clause the caller's own threshold dropped is their
-/// choice, not a limitation of this crate, so it must not refuse: the same schema that
-/// refuses at `D` has to answer at `B`.
 #[test]
-fn a_clause_the_callers_threshold_dropped_does_not_refuse() {
+fn a_clause_the_callers_threshold_dropped_refuses() {
     let db = db_of(REFUSED);
-    let outputs = translator(ConfidenceLevel::B)
+    let translation = translator(ConfidenceLevel::B)
         .translate(&db)
-        .expect("translation should plan")
+        .expect("translation should plan");
+    let error = translation
+        .clone()
         .outputs()
-        .expect("the caller's own threshold is not a gap in the translation");
+        .expect_err("a dropped clause diverges");
+    assert!(error
+        .notes()
+        .iter()
+        .any(|note| matches!(note, TranslationNote::ClauseBelowThreshold { .. })));
+    let outputs = translation.outputs_accepting_gaps();
 
     assert!(
         outputs
@@ -133,29 +135,24 @@ fn a_clause_the_callers_threshold_dropped_does_not_refuse() {
         "the loss is still reported: {:?}",
         outputs.notes()
     );
-    assert!(
-        outputs
-            .report()
-            .contains("fell below the confidence threshold"),
-        "and the report still names it:\n{}",
-        outputs.report()
-    );
+    assert!(outputs.model().contains("define can_select: no_access"));
 }
 
-/// The same payoff, for the mode it never covered. A RESTRICTIVE clause the caller's
-/// own threshold dropped is the same caller choice as a permissive one and must not
-/// refuse either. It used to: the stand-in denial was filed as an expression nobody
-/// classified, which is the one severity that blocks the outputs, so raising the bar
-/// made the crate refuse to answer at all. The stand-in still denies, so the model is
-/// unchanged, and the loss is now reported as what it is.
 #[test]
-fn a_restrictive_clause_the_callers_threshold_dropped_does_not_refuse() {
+fn a_restrictive_clause_the_callers_threshold_dropped_refuses() {
     let db = db_of(RESTRICTIVE_BELOW_THRESHOLD);
-    let outputs = translator(ConfidenceLevel::A)
+    let translation = translator(ConfidenceLevel::A)
         .translate(&db)
-        .expect("translation should plan")
+        .expect("translation should plan");
+    let error = translation
+        .clone()
         .outputs()
-        .expect("the caller's own threshold is not a gap in the translation");
+        .expect_err("a dropped barrier diverges");
+    assert!(error.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::ClauseBelowThreshold { policy, .. } if policy == "docs_bar"
+    )));
+    let outputs = translation.outputs_accepting_gaps();
 
     let dropped: Vec<&TranslationNote> = outputs
         .notes()
@@ -192,6 +189,164 @@ fn a_restrictive_clause_the_callers_threshold_dropped_does_not_refuse() {
         "the barrier still denies, so the emitted model is unchanged:\n{}",
         outputs.model()
     );
+}
+
+fn membership_translation(
+    read_rule: &str,
+    extra_policy: &str,
+    min_confidence: ConfidenceLevel,
+) -> Translation {
+    let db = db_of(&format!(
+        "CREATE TABLE projects (id TEXT PRIMARY KEY);
+         CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), bits INT);
+         CREATE TABLE members (
+             project_id TEXT NOT NULL REFERENCES projects(id),
+             member_id TEXT NOT NULL,
+             enabled BOOLEAN NOT NULL,
+             PRIMARY KEY (project_id, member_id));
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY own_rows ON members FOR SELECT USING ({read_rule});
+         CREATE POLICY docs_read ON docs FOR SELECT USING (
+             EXISTS (SELECT 1 FROM members m
+                     WHERE m.project_id = docs.project_id
+                       AND m.member_id = current_setting('app.user_id', true)));
+         {extra_policy}"
+    ));
+    TranslatorBuilder::new()
+        .with_min_confidence(min_confidence)
+        .with_session_attributes([SessionAttribute::setting(
+            "app.user_id",
+            SessionAttributeKind::CallerId,
+        )])
+        .build()
+        .translate(&db)
+        .expect("membership schema should plan")
+}
+
+#[test]
+fn guarded_membership_refuses_even_when_the_guard_is_redundant() {
+    for rule in [
+        "member_id = current_setting('app.user_id', true)",
+        "member_id = current_setting('app.user_id', true) AND enabled",
+    ] {
+        let translation = membership_translation(rule, "", ConfidenceLevel::B);
+        let error = translation
+            .clone()
+            .outputs()
+            .expect_err("guarded membership diverges");
+        assert!(error.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::MembershipTableGuarded { policy, join_table }
+                if policy == "docs_read" && join_table.name() == "members"
+        )));
+        let accepted = translation.outputs_accepting_gaps();
+        assert!(accepted.model().contains(" from projects"));
+        assert!(accepted
+            .tuple_queries()
+            .iter()
+            .any(|query| query.sql.contains("\"members\"")));
+    }
+}
+
+#[test]
+fn unguarded_membership_passes_the_checked_entry_point() {
+    let translation = membership_translation("true", "", ConfidenceLevel::B);
+    let accepted = translation.clone().outputs_accepting_gaps();
+    let checked = translation.outputs().expect("open membership has no gap");
+    assert_eq!(checked.model(), accepted.model());
+    assert_eq!(checked.notes(), accepted.notes());
+}
+
+#[test]
+fn an_attribute_left_to_runtime_enforcement_refuses() {
+    let db = db_of(
+        "CREATE TABLE docs(id INT PRIMARY KEY, owner_id TEXT, status TEXT);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY docs_read ON docs FOR SELECT
+             USING (owner_id = current_user AND status LIKE 'pub%');",
+    );
+    let translation = translator(ConfidenceLevel::C)
+        .translate(&db)
+        .expect("schema should plan");
+    let error = translation
+        .clone()
+        .outputs()
+        .expect_err("the attribute guard is missing");
+    assert!(error.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::AttributeNeedsRuntimeEnforcement { policy, .. } if policy == "docs_read"
+    )));
+    assert!(translation
+        .outputs_accepting_gaps()
+        .model()
+        .contains("define can_select: owner"));
+}
+
+#[test]
+fn refusal_reports_all_diverging_notes_without_operator_requirements() {
+    let translation = membership_translation(
+        "member_id = current_setting('app.user_id', true) AND enabled",
+        "CREATE POLICY unsupported ON docs FOR SELECT USING ((bits & 2) = 2);",
+        ConfidenceLevel::D,
+    );
+    let expected: Vec<_> = translation
+        .notes()
+        .iter()
+        .filter(|note| note.severity().diverges_from_database())
+        .cloned()
+        .collect();
+    assert!(expected
+        .iter()
+        .any(|note| note.severity() == NoteSeverity::Partial));
+    assert!(expected
+        .iter()
+        .any(|note| note.severity() == NoteSeverity::Unhandled));
+    assert!(translation
+        .notes()
+        .iter()
+        .any(|note| note.severity() == NoteSeverity::ActionRequired));
+    let error = translation
+        .clone()
+        .outputs()
+        .expect_err("both gaps must refuse");
+    assert_eq!(error.notes(), expected);
+    let accepted = translation.outputs_accepting_gaps();
+    assert!(expected.iter().all(|note| accepted.notes().contains(note)));
+    for note in error.notes() {
+        assert!(error.to_string().contains(&note.to_string()));
+    }
+}
+
+#[test]
+fn operator_requirements_alone_do_not_refuse() {
+    let db = db_of(
+        "CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE docs FORCE ROW LEVEL SECURITY;
+         CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_user) WITH CHECK (owner_id = current_user);"
+    );
+    let translation = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("schema should plan");
+    assert!(translation.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::RowIdentifierBudget { table, .. } if table.name() == "docs"
+    )));
+    assert!(
+        translation
+            .notes()
+            .iter()
+            .all(|note| note.severity() == NoteSeverity::ActionRequired),
+        "{:?}",
+        translation.notes()
+    );
+    let accepted = translation.clone().outputs_accepting_gaps();
+    let checked = translation
+        .outputs()
+        .expect("operator requirements are not gaps");
+    assert_eq!(checked.model(), accepted.model());
+    assert_eq!(checked.notes(), accepted.notes());
 }
 
 /// One plan, three outputs. Asking for each of them twice must not change any of them,

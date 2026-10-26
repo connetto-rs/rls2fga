@@ -199,8 +199,7 @@ pub enum NoteSeverity {
     /// A principal the database exempts from row level security entirely, so the model
     /// describes rules that do not reach them.
     Exempt,
-    /// An expression nobody classified, so the model denies what the database may
-    /// grant. The only severity that blocks reaching the model.
+    /// An expression nobody classified, so the model denies what the database may grant.
     Unhandled,
 }
 
