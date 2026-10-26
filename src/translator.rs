@@ -229,10 +229,6 @@ impl DerivedOutputs {
 }
 
 /// A planned translation of one schema.
-///
-/// Holding the plan is what makes the outputs cheap, and it is also what makes them
-/// refusable: an expression nobody classified leaves the model denying what the
-/// database grants, and that has to be seen rather than discovered later.
 #[derive(Debug, Clone)]
 pub struct Translation {
     plan: SchemaPlan,
@@ -269,9 +265,7 @@ impl Translation {
         &self.plan.notes
     }
 
-    /// The expressions nobody classified. These are the only notes that make the model
-    /// narrower than the database through a limitation of this crate rather than a
-    /// choice the caller made.
+    /// The notes about expressions nobody classified.
     pub fn unhandled(&self) -> impl Iterator<Item = &TranslationNote> {
         self.notes()
             .iter()
@@ -323,36 +317,33 @@ impl Translation {
         &self.derived.unrestricted_tables
     }
 
-    /// The outputs, refused while any expression went unhandled.
+    /// The outputs, refused while any note's severity [`diverges_from_database`](NoteSeverity::diverges_from_database).
     ///
     /// # Errors
     ///
-    /// Returns the unhandled expressions, which is what a caller has to look at before
-    /// trusting a model that denies what the database grants.
-    pub fn outputs(self) -> Result<Outputs, UnhandledExpressions> {
-        let unhandled: Vec<TranslationNote> = self.unhandled().cloned().collect();
-        if unhandled.is_empty() {
-            Ok(Outputs(self))
+    /// Returns every diverging note in [`DivergentTranslation`].
+    pub fn outputs(self) -> Result<Outputs, DivergentTranslation> {
+        if self
+            .notes()
+            .iter()
+            .any(|note| note.severity().diverges_from_database())
+        {
+            let mut notes = self.plan.notes;
+            notes.retain(|note| note.severity().diverges_from_database());
+            Err(DivergentTranslation { notes })
         } else {
-            Err(UnhandledExpressions { notes: unhandled })
+            Ok(Outputs(self))
         }
     }
 
-    /// The outputs, gaps and all.
-    ///
-    /// Say this deliberately. For every expression [`Translation::unhandled`] names,
-    /// the model denies what the database grants.
+    /// Accepts gaps that may widen access (`MembershipTableGuarded`, `AttributeNeedsRuntimeEnforcement`) or narrow it (unhandled expressions, dropped clauses, `NullableBooleanFlagNarrowed`, `InheritanceParentReadsOwnRowsOnly`).
     #[must_use]
     pub fn outputs_accepting_gaps(self) -> Outputs {
         Outputs(self)
     }
 }
 
-/// The outputs of a translation.
-///
-/// Reachable only through [`Translation::outputs`], which refuses while anything went
-/// unhandled, or [`Translation::outputs_accepting_gaps`], which is one visible line
-/// saying the caller took the narrower model on purpose.
+/// Translation outputs checked by [`Translation::outputs`] or explicitly accepted through [`Translation::outputs_accepting_gaps`].
 #[derive(Debug, Clone)]
 pub struct Outputs(Translation);
 
@@ -455,26 +446,25 @@ impl Outputs {
     }
 }
 
-/// Expressions nobody classified, which is what stops [`Translation::outputs`]
-/// answering.
+/// Every note that makes [`Translation::outputs`] refuse a model that diverges from the database.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnhandledExpressions {
+pub struct DivergentTranslation {
     notes: Vec<TranslationNote>,
 }
 
-impl UnhandledExpressions {
-    /// The notes naming each expression and why it was refused.
+impl DivergentTranslation {
+    /// Every note whose severity [`diverges_from_database`](NoteSeverity::diverges_from_database).
     #[must_use]
     pub fn notes(&self) -> &[TranslationNote] {
         &self.notes
     }
 }
 
-impl core::fmt::Display for UnhandledExpressions {
+impl core::fmt::Display for DivergentTranslation {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(
             f,
-            "{} expression(s) went unhandled, so the model denies what the database grants",
+            "{} note(s) disclose a model that diverges from the database",
             self.notes.len()
         )?;
         for note in &self.notes {
@@ -484,7 +474,7 @@ impl core::fmt::Display for UnhandledExpressions {
     }
 }
 
-impl core::error::Error for UnhandledExpressions {}
+impl core::error::Error for DivergentTranslation {}
 
 #[cfg(test)]
 mod tests {
