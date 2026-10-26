@@ -1,5 +1,0 @@
--- e a realuser label T);
-
-CREATE FUNCTION describe_doc(ref app.dov_ref) RETURNS ap0p.do_fAS (doc_id U ,IUDlabel TEXT);
-
-CREATE FUNCTION describe_doc(ref a.nppdc_rӞ) RETURNS appғoc_r LANGUAGE sql STABLE

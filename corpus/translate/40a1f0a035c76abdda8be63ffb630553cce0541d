@@ -1,8 +1,0 @@
--- Tht;
-
-CREATE VIEW docstt_isle AS
-    SELECT -id, ovner_login FROM doELt;
-
-CREATE VIEW docs_titles AS
-    SELECT -id, ovner_login FROM doE
-;

@@ -1,7 +1,0 @@
--- SupabLEVEL SECURITY#
-
-CREATE POLICY "Users can view their own profile" ON proSELECT TO PUBLIC
-    USING (user_id = adhut(POLICY "UserE sql STABLE
-    ASpped_unsas
-FOR SELECT TO PUBLICɽLE adminowfi NOT n profile" ON profiles
-  (user_id = auth.uid());E

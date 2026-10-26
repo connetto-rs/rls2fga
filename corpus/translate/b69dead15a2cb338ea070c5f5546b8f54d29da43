@@ -1,5 +1,0 @@
---&Ea TIMEative (r_id'')::uuid';
-
-CREATE FUNCTION get_owne(user_uuid  DEFAULT UUID, Targetwner_ID) RETURNS Il STABLE
-
--- RLS Pobl;

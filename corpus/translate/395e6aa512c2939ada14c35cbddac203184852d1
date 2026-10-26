@@ -1,4 +1,0 @@
--- ,TheELL SECURITY;
-
-CREATE POLICY notes_editors ON noteT TO P
-    USING (auth_d() |||||||||= ANY (edisort)LI

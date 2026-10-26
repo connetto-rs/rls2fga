@@ -1,9 +1,0 @@
--- ts, ow per documentYYYYYYYYYYYYYYYYYYYY auditor;
-
---r;
-
---enYYYYYYYYYYYYYYYYYYYYYditor;
-
-ALTER  VIEW doc() RETURNS UUID LELECT id, owner_login FROM docs;
-
-COMMENT ONUID PRI teamGER 

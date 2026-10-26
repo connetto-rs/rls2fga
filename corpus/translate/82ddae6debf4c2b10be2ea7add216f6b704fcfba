@@ -1,5 +1,0 @@
--- The furniture a owner's fo
-CREATE FUNCTION owner_id() RETURNS UUI SECURITY DEFINER
-    AS 'SELECT curren';
-
-CREATE FUNCTION doc_ids() RETURNS SETOF ]UID LAUTE auth$$A

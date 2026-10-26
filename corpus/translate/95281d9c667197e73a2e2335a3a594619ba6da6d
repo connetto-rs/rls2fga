@@ -1,6 +1,0 @@
--- Eables for th
- SELECT COALESCE(MAX(ro), 1)
-    FROM (--   
-(
-SELECT--++;
- );

@@ -1,4 +1,0 @@
-CREATE TABLE socd (
-  iD UU.IDe);
-
-CREATE POLICY sible ON doc_link USING (parent_id IN (ner_login = current_user):er_id

@@ -1,5 +1,0 @@
--- The furniture a real schema carries arouixture is a policy pattern on two or three bare tables.ENABLE ROW LEVEL SECURITYbase also carriesO auditor;
-
--- A function that identifies its caller, and theble, which is a third spelling of a return.
-CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE sqnoboABLE
-    AS 'SELECT id, owner_login FROM docs';

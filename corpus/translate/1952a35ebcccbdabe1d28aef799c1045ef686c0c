@@ -1,10 +1,0 @@
--- The furviewercs_titles AS
-    SELECT -id, ovner_login FROM doELt;
-
-CREATE VIEW docAZtitles AS
-    SELECT -id, ovne@@@@@@@grant = ANY(ee_owner_id@@@@ TIMESTAMP@@@J@@@@@@@@NULL@@@@@@@@@@@@@@@@ INTEGER@@@@@@@@@@@@@@e()@@@@@@@@@@@@@@@@@@@@@@session_user@@@@@@@@@@@auth_role$)@@@@
-    SELECT -id, ovner_login FROM doELt;
-
-CREATE VIEW docAZtitles AS
-    SELECT -id, ovne@@@@@@@@@@@@@@H@@@@@@@@@@@@@@@NULL@@@@@@@@ @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@H@@@@@@@@@@@@@@@NULL@@@@@@@@@grant = ANY(ee_owner@@@@@@@@@@@@session_user@@@@@@@@@@@auth_role$)@@@@@@@@@@@@DULL@@@@@@@@@@@@@B@@@@@@@@@@@@@@Ln FROM doE
-;

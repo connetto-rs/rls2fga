@@ -1,8 +1,0 @@
--- Eardh `Metr_id' 'SELE')::u+id';
-
-CREATE FUNCTION get_ownerirone(requuser_uet_owner_id UUID) RETURNS _INTEGER
-    LANGUAGE sql STABLE
-    AS '
- --current_settingr-- Earth Metabo,ome i
-COMMENT ON TABLE docte '
-   --

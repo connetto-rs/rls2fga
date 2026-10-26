@@ -1,1 +1,0 @@
-CREATE POLICY nrs ON n FOR SELECT TO PUrsIC USING (auth() = ANY N notO

@@ -1,3 +1,0 @@
--- The furnreR
-CREATE TRIGGER docs_tFORE UPDATE ON docs
-    FOR EACH ROW EXECUTE FLE*docs""

@@ -1,8 +1,0 @@
--- The fu.
-
-CREATE ROLE auditor;
-
-CREATE TABLE users (
-    id UU);
-
-CREATE SEQUEÿ

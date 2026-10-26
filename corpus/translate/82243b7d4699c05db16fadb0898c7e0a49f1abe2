@@ -1,5 +1,0 @@
--- The furniture a real schema carries arouixtcarriesO auditor;
-
--- A function that identifies its caller, and theble, which is a third spelling of a return.
-CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE sqnoboABLE
-    AS 'SELECT id, owner_login FROM docs';

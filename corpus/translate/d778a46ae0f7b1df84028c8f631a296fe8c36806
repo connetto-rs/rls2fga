@@ -1,7 +1,0 @@
-CREATE TABLE sers (
-    id UUID PRIMARY KEY
-);
-
-CREATE TABLE articles (
-   IMARY KEY,
-    title TEAN NOT NULL DEFAULT owner_kk~~~~scE);

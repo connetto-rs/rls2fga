@@ -1,4 +1,0 @@
--- PostrelVEL SECURI1Y;
-
-CREATE POLICY notes_er ON NoECT USING (owr( -> 
-CREATE POLIN NotL    FO

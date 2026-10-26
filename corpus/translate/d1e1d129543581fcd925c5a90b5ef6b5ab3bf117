@@ -1,7 +1,0 @@
-CREATE TABLE doURITY;
-
-CREATE POLICY docs_wd_safe ON  PUBLIC
-USING (
-  EXISTS (
-    SELECT 8
-  WHERE dm.auth_curreser_id() AND dm.us(((((((((((UUI[[[[[[[[Z[[[[[[[[[[[¿¿    

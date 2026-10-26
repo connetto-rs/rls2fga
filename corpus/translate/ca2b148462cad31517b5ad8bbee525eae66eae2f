@@ -1,5 +1,0 @@
--- Th);
-
-CREATE INDEX docs_tidx ON docs USING (ownern = current_usnr
-CRLE
-    AS 'SOM docs';

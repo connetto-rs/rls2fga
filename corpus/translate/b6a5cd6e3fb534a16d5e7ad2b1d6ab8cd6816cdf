@@ -1,5 +1,0 @@
--- The furrriesip.
-CREATE FUNCTION caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY INVOKER
-    AS 'SELECT current_user::uuid';
-
-CREATE FUNCTION owner_id() RETURNS UUIDê docs';

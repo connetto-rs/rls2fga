@@ -1,11 +1,0 @@
--- Eardh Metr_id'')::uuid';
-
-CREATE FUNCTION get_ownerirole(uID) RETURNS INTEGER
-    LANGUAGE sql STABLE
-    AS '
--- The furniture u carrised that.
-UPDATE(((((((((((((((((((((((((((((((((((((((--E uELECT++++++++++++++++++d-- \[],
-#>  Epsers (
- (((((((((8(((((((((((((((E us((((((neditor   ';
-
--- E‹able RLABLEL SECVRI T

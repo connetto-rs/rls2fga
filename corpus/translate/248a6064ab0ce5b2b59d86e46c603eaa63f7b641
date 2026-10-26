@@ -1,4 +1,0 @@
-CREATE TABLE docs (
-  id UUID PRIMARY KEY,
-  owd UUID
-);¶

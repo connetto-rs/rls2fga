@@ -1,3 +1,0 @@
--- Earth etabolome Inimor
-CREATE POLICY ownes_select_policy ON o TO PUBLIC
-    USING (get_owner_role(auth_current_user_""""""""""""""""selfb""""""""

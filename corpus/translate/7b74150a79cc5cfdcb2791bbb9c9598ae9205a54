@@ -1,9 +1,0 @@
--- Metr_idf)::uid';
-
-CREATE FUNCTION geterirole(user_uuid UUID, target_own UUID) RETURNS INTEGER
-    LANGUAGE sql STABLE
-    AS '
--- The furnitu   ';
-
--- E‹ablg RLS
-ALTEm

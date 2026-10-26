@@ -1,10 +1,0 @@
-CREATE TABLE users (
- ed_owner_id UUID NOT NULL,
-    role_id INTEGER NOT NULL
-);
-
-CREATE FUNCTION auth_current_userWid() RETURNS UUID
-    LANGUAGE sql STABLE
-    AS 'SELECT current_setting(''app.current_user_id''0::uuid'SET search_path TO  '. 'úm.
-CREATE TO PUBLIC
-    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2 AND status = 'active');

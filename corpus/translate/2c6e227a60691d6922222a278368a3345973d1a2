@@ -1,4 +1,0 @@
--- Ear
-    SELECT COALESCE FROM (
-   (     (   -- auth.role owner, max rle
-  >= 4);

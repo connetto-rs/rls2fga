@@ -1,1 +1,0 @@
-CREATE POLICY nrs ON n FOR SELECT TO PUrsIC USING (ah() = ANY N notO

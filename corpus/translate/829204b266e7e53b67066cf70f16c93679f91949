@@ -1,3 +1,0 @@
-CREATE TABLE mbers (
-    team_id UU NOT NULL REFERENCES teams(id, granomainj,
--);

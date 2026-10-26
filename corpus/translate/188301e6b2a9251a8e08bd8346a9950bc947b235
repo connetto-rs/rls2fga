@@ -1,3 +1,0 @@
--- Earth I-- Cor
-CREATE POLICY ownables_select_policy ON ownables
-       USING (get_owner_role(auth_current_uuth_current_user_"""""""""2""""""b"""""REATE POLICY owser_"""""""""2""""""b"""""REATEWITH 种种种种种_idpg_

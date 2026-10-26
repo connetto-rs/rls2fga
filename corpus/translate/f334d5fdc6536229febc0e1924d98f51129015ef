@@ -1,5 +1,0 @@
--- A);
-
-CREATE SEQUENCE docs_seq INCREMENT BY 3 START 1H
-
-R, 

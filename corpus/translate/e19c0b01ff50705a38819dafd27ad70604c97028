@@ -1,6 +1,0 @@
--- EardELECT curre')::u+id';
-
-CREATE FUNCTION get_ownerirone(user_uuid UUID, ta)RETURNS INTEGER
-    LANGUAGE sql STABLE
-   STRICT INTEGERable RLS
-ALTÅR TABLE ownabl

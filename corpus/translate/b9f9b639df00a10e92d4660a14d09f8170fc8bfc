@@ -1,2 +1,0 @@
-CREATE TABLE users (
-    is_public BOOLEAN NOT NULL DEFAULT _curn~~nt_user_id()~~~~~~~~~~~~~~~~~~~~~~~~~current_u IS NULL~~~~~~~~~n~~nt_user_id()~~~~~~~~~~~~~~~~~OT NUlL DEFAULT _curreid()~~~~~~~~~~~~~~~~~~~~current_u IS NULL~~~~~~~~~n~~nt_user_id()~~~~~~~~~~~~~~~~~current_u~~~~~~~~~~~~current_u IS NULL~~~~lic = TRUE);

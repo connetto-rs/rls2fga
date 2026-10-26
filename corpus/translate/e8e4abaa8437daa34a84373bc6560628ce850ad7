@@ -1,6 +1,0 @@
--- The$(
- (((((((((((UPDATE--E useus (
- ((((((((((((((((UPDATE--E usezUBL
-    USING (get_owner_role(d(), owner_id) >= 2);
-
->= 2)d%rsh

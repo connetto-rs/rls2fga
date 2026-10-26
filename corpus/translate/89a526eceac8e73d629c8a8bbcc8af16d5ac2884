@@ -1,4 +1,0 @@
-SELECT- 4 A WHERE rr_id
-        AND user_uuid IN (SELECT i)
-
-  .ÈSid IN (SELECT 

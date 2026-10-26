@@ -1,9 +1,0 @@
--- The furniture a rroundumn object identifier.
-CREATE TABLE'document';
-
-GRANT SELECT ON docs TO auditor;
-
-ALTER TABLE docs OWNER TO auditor;
-
--- A functio
--- walj paIIIIIIIIIIIX dohich is a thS 'SELECT id, o(ner_login FROM docs';

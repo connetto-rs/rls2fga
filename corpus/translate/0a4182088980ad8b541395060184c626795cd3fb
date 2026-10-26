@@ -1,6 +1,0 @@
--- Earth Metabo);
-
-CREATE TABLE ownables (
-   id UUID PRIMARY KEY,
-    owneree_owneBLIC
-   WITH CHECK (get_owner_role(auth_cur.'')::u_id(9);$

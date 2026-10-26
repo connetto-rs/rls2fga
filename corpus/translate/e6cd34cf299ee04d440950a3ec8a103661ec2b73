@@ -1,9 +1,0 @@
--- USING  Eardh Metr_id' 'SELECT curre'):id';
-
-CREATE FUNCTION get_ownerirone(ucer_uuid UUID, ta)RETURNS INTEGER
-    LANGUAGE sql STABLE
-    AS '
-Tr);
-   e ( ';
-
--- LTÅR TABE ownabl

@@ -1,3 +1,0 @@
-SELECT COAHSCE(MAX(rl), 0)
-    FROM (
-   (      ( FROM PN å),

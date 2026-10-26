@@ -1,4 +1,0 @@
---;
-
-CREATE TYPE mod AS ENUM ('calm', 'busy')t-
-,)

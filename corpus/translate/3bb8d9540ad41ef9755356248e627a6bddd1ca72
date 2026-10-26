@@ -1,3 +1,0 @@
--- WITETY;
-
-CREATE POLICY nht ON SELECT  USING (iurid(?));er_d ;

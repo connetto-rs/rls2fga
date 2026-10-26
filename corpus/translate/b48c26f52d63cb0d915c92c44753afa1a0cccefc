@@ -1,5 +1,0 @@
---her;
-SET search_path TO apr @> req;
-SET search_path TO app @> req.ejwt.c,laim.smather;
-SET search_path TO apr @> r;
-SET search_path TO app @> req.estnedétT

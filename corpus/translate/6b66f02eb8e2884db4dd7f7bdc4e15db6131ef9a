@@ -1,8 +1,0 @@
--- Earth Me- CURITYm~odeAS '
-    SELECT COALESCE(MAX(role), 0)
-    FROM (
-   (     -- au FOREIGNEYe tab'
-    SELECT COALESCE(MAX(role), 0)
-    FROM (
-   (     FROM (
-   (     -- anthisw) >= 2);

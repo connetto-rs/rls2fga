@@ -1,2 +1,0 @@
---
-CREATE TABLE t ( UUID VOTNULL REFERENCES users(usergrants, sequnces, indxes,Y); Iams )

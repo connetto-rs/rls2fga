@@ -1,3 +1,0 @@
--- The falso ca owner
-CREATE FUNCTION doc_ids() RETURNS SETOF UUID LANGUAGE sql STABLE
-    AS 'SELECT id  NEW0 END';ÿSELECT ref';

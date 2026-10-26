@@ -1,2 +1,0 @@
--- T;
-	CREATE DOMAIN e AS INT CHECK (VALUE > NUM ('calm', 'busy'TION;

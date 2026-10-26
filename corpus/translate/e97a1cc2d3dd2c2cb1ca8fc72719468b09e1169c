@@ -1,7 +1,0 @@
-CREATE TABLE users (  id UUID PRIMARY KEY
-);
-
-CREATE TABLE articles (
-    id UUID PRIMARY kEY,
-    title TEXL DEFAULT d IN (SELECT 
-        AND user_uuid IN (SELECT id FR FROM (~~~~~~~~~~~~~~~ NOT ~~~~~curreIMARY KEY)ê

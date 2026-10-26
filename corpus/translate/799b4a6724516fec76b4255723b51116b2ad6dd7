@@ -1,7 +1,0 @@
--- A schema rEMA app;
-SET search_path TO app, pp;
-SET search_path TO app, public;
-
--- Uidualified, sm the path puts it in `appchema.
-CREATE POLICY archive_docs_owner ON archive.doc
-    USING (owner_login = current_user);

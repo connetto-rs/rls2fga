@@ -1,6 +1,0 @@
---  an elemN.
-CREATE FUNCTION auth_current_user_id() RETURNS TEXT
-    LANGUAGE sql STABLE
-    AS 'SELEqataCY ownabuser, geteam_membershipsnalm', 'busy');
-
-CREATE--;'l[im.sub, TTTSueg

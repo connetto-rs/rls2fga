@@ -1,8 +1,0 @@
-CREATE TABLE users (
-   d UUID PRIMARY KEY
-);
-
-CREATE TABLE articles (
-    id UUID PRIMARY KEY,
-    itle TEXT,
-    is_public BOOLEAN NOT NULL DEFAULT Fk&&k= TRUE);

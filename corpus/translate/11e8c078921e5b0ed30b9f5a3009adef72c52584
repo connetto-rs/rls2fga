@@ -1,3 +1,0 @@
--- EaLEownables Eicies
-CREATE POLICY ownables_select_policy ON ownas
-    FOR DELETE TO PUBLI USING (get_owner_role(auth{_ 0>= 4);

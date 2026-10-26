@@ -1,4 +1,0 @@
--- ddx (t nant);
-CREATE UNIQUE INDEX _uid ON docs (owner_log)
-
-in;-E Ccate Ccate

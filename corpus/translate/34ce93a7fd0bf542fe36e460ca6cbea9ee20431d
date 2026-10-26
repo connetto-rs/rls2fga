@@ -1,6 +1,0 @@
--- Eachemauuid';
-
-CREATE FUNCTION gewnerirole(pg_ruser_uuid UUID, target_owUUID) RETURNS INTEGER
-    LANGUAGE s--aim.sE s--aim.ssmather;
-SET search_path TO app @> req.est.jw
-SET search_path -> ap.c,larhe

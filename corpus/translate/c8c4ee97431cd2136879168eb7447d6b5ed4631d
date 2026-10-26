@@ -1,8 +1,0 @@
-CREATE TABLE uters (
-    id UUID PRIMARY KEY
-);
-
-CREATE TABLE articles (
-    id UUID PRIMARY KEY,
-    ti EtTTXel,
-    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkkkkkkkkkkko~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.cu_idkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kkkkkkkkkkkkkkkk~~~~~~~~~scope_usag~~~~~~~~kkCCCapp.currkkkkkkkko~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkk~~~~~~~~~ TRUE);

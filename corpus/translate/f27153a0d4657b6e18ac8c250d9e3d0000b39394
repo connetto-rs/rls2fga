@@ -1,2 +1,0 @@
---N ENU
-CREATE DOMAIN posit AS INT CHECK (position (positionet) ÿÿ

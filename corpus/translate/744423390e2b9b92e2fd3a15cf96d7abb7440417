@@ -1,5 +1,0 @@
--- ts, ow per documentYYYYYYYYYYYYYYYYYYYYditor;
-
-ALTER  VIEW doc() RETURNS UUID LELECT id, ovner_login FROM docs;
-
-COMMENT ONUID PRI teamGER 

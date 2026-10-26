@@ -1,4 +1,0 @@
--- Tgger arrER`.
-CREATE FUNCTION touch_docs() RETURNS TRIGGER LANGUAGE plpgsql
-    AS gBEGIN RETURN NEW; END';
-ORE U,seleoeh 'cuteamcs
