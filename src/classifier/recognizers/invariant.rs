@@ -27,7 +27,7 @@ use crate::parser::names::{
     builtin_function_name, is_current_user_keyword_name, lookup_table, stored_ident_name,
     stored_relation_name, table_identity,
 };
-use crate::parser::sql_parser::{ColumnLike, DatabaseLike, TableLike};
+use crate::parser::sql_parser::{ColumnLike, DataTypeLike, DatabaseLike, TableLike};
 use crate::types::TableId;
 
 /// Aggregates whose value the rows decide without their order.
@@ -121,7 +121,7 @@ struct SessionColumns {
 impl SessionColumns {
     fn extend<DB: DatabaseLike>(&mut self, table: &DB::Table, db: &DB) {
         for column in table.columns(db).into_iter().flatten() {
-            let data_type = column.data_type(db);
+            let data_type = column.data_type(db).name(db);
             let name = || column.stored_column_name().into_owned();
             if type_is_temporal(&data_type) {
                 self.temporal.insert(name());

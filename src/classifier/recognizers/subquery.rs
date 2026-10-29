@@ -2,6 +2,7 @@ use super::*;
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::SessionAttribute;
 use crate::parser::names::{lookup_table_id, resolve_table_id, table_identity};
+use crate::parser::sql_parser::DataTypeLike;
 use crate::types::{ColumnName, TableId};
 use alloc::collections::BTreeSet;
 use core::ops::ControlFlow;
@@ -1175,7 +1176,7 @@ pub(super) fn session_zoned_columns<DB: DatabaseLike>(table: &DB::Table, db: &DB
         .columns(db)
         .into_iter()
         .flatten()
-        .filter(|column| type_carries_a_zone(&column.data_type(db)))
+        .filter(|column| type_carries_a_zone(&column.data_type(db).name(db)))
         .map(|column| column.stored_column_name().into_owned())
         .collect()
 }
