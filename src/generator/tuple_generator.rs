@@ -16,7 +16,7 @@ use crate::generator::well_known::{
     deny_relation, WellKnownTypes, ARRAY_ELEMENT_ALIAS, HOLDER_OBJECT_ID,
 };
 use crate::parser::names::{table_id_has_column, table_identity};
-use crate::parser::sql_parser::{ColumnLike, DatabaseLike, TableLike};
+use crate::parser::sql_parser::{ColumnLike, DataTypeLike, DatabaseLike, TableLike};
 use crate::types::{ColumnName, ConditionName, ContextWitness, RelationName, TableId, TypeName};
 use crate::types::{Record, RecordContextValue, RecordDescription};
 use alloc::collections::{BTreeMap, BTreeSet};
@@ -546,7 +546,7 @@ impl UnboundedColumns {
                 .columns(db)
                 .into_iter()
                 .flatten()
-                .filter(|c| !is_bounded_short_family(c.scalar_family(db)))
+                .filter(|c| !is_bounded_short_family(c.data_type(db).scalar_family(db)))
                 .map(|c| c.stored_column_name().into_owned())
                 .collect();
             by_table.insert(table_identity(table), unbounded);

@@ -5,12 +5,12 @@ use std::hint::black_box;
 use libfuzzer_sys::fuzz_target;
 use rls2fga::classifier::oracle::{consult_oracle, OracleAnswer, PolicyOracle, RefusedExpr};
 use rls2fga::classifier::patterns::{ClassifiedExpr, ConstantBool, PatternClass};
-use rls2fga::types::ConfidenceLevel;
 use rls2fga::generator::model_generator::GeneratorSettings;
-use rls2fga::types::{records_from_row, ColumnKind, RowCell, RowList, RowValues};
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::parser::sql_parser::parse_schema;
 use rls2fga::translator::{PlanningError, Translation, TranslatorBuilder};
+use rls2fga::types::ConfidenceLevel;
+use rls2fga::types::{records_from_row, ColumnKind, RowCell, RowList, RowValues};
 
 /// Answers out of the refused text alone, so one input always draws one answer and a
 /// crash replays. Spreads across all three states, since each reaches the pipeline
@@ -86,12 +86,14 @@ impl RowValues for FuzzRow<'_> {
 
 /// Render every output, and walk the records every shape describes.
 fn exercise(translation: Translation, sql: &str) {
-    let unhandled = translation.unhandled().count();
-    // The refusing door answers exactly when nothing went unhandled.
+    let diverges = translation
+        .notes()
+        .iter()
+        .any(|note| note.severity().diverges_from_database());
     assert_eq!(
         translation.clone().outputs().is_err(),
-        unhandled > 0,
-        "outputs() and unhandled() disagree"
+        diverges,
+        "outputs() and divergence notes disagree"
     );
 
     let shapes = translation.relations();

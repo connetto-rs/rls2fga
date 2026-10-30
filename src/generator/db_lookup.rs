@@ -1,10 +1,11 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::parser::names::lookup_table_id;
-use crate::parser::sql_parser::{ColumnLike, DatabaseLike, IndexLike, TableLike};
+use crate::parser::sql_parser::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike};
 use crate::types::ColumnKind;
 use crate::types::{ColumnName, TableId};
-use sql_traits::utils::scalar_family::{scalar_family, ScalarFamily};
+use core::num::NonZeroU32;
+use sql_traits::utils::scalar_family::ScalarFamily;
 
 /// SQL tables a user principal conventionally lives in, most specific first.
 pub(crate) const USER_PRINCIPAL_TABLES: &[&str] = &["users", "user"];
@@ -162,18 +163,19 @@ const fn column_kind_from_scalar_family(family: Option<ScalarFamily>) -> ColumnK
         Some(ScalarFamily::Timestamp) => ColumnKind::Timestamp,
         Some(ScalarFamily::TimestampTz) => ColumnKind::TimestampTz,
         Some(ScalarFamily::Json | ScalarFamily::Jsonb) => ColumnKind::Json,
-        Some(ScalarFamily::Float) | None => ColumnKind::Unsupported,
+        Some(ScalarFamily::Float | ScalarFamily::Interval) | None => ColumnKind::Unsupported,
     }
 }
 
 /// The modelled kind of one stored scalar column.
 pub(crate) fn column_kind<DB: DatabaseLike>(table: &TableId, column: &str, db: &DB) -> ColumnKind {
     column_kind_from_scalar_family(
-        declared_column(table, column, db).and_then(|column| column.scalar_family(db)),
+        declared_column(table, column, db)
+            .and_then(|column| column.data_type(db).scalar_family(db)),
     )
 }
 
-/// The modelled element kind of one stored list column.
+/// The modelled element kind of one stored list column, `Unsupported` for an array of arrays.
 pub(crate) fn list_element_kind<DB: DatabaseLike>(
     table: &TableId,
     column: &str,
@@ -181,7 +183,10 @@ pub(crate) fn list_element_kind<DB: DatabaseLike>(
 ) -> ColumnKind {
     let family = declared_column(table, column, db).and_then(|column| {
         let declared = column.data_type(db);
-        declared.strip_suffix("[]").and_then(scalar_family)
+        if declared.array_dimensions(db).map(NonZeroU32::get) != Some(1) {
+            return None;
+        }
+        declared.array_element(db)?.scalar_family(db)
     });
     column_kind_from_scalar_family(family)
 }
@@ -437,5 +442,30 @@ CREATE TABLE family_columns (
         assert_eq!(column_kind(&columns, "balance", &db), ColumnKind::Decimal);
         assert_eq!(column_kind(&columns, "clock", &db), ColumnKind::Time);
         assert_eq!(list_element_kind(&columns, "labels", &db), ColumnKind::Text);
+    }
+
+    #[test]
+    fn only_a_one_dimensional_array_or_a_known_family_has_a_kind() {
+        let db = parse_schema(
+            r"
+CREATE TABLE shaped_columns (
+    span INTERVAL,
+    counts INT[],
+    grid INT[][]
+);
+",
+        )
+        .expect("schema parses");
+        let columns = table("shaped_columns");
+
+        assert_eq!(column_kind(&columns, "span", &db), ColumnKind::Unsupported);
+        assert_eq!(
+            list_element_kind(&columns, "counts", &db),
+            ColumnKind::Integer
+        );
+        assert_eq!(
+            list_element_kind(&columns, "grid", &db),
+            ColumnKind::Unsupported
+        );
     }
 }
