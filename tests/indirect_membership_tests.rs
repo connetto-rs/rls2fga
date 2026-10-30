@@ -1130,3 +1130,25 @@ async fn indirect_membership_quoted_owner_column_live_parity() {
         assert_agrees(&case, &run);
     }
 }
+
+#[test]
+fn membership_report_keeps_a_quoted_link_name_in_one_table_cell() {
+    let quoted_link = "\"ancestry|edge\nrow\"";
+    let schema = SCHEMA.replace("ownable_ancestors", quoted_link);
+    let predicate = NESTED.replace("ownable_ancestors", quoted_link);
+    let outputs = outputs(
+        &schema,
+        &format!("CREATE POLICY orders_read ON orders FOR SELECT USING ({predicate});"),
+    );
+    let report = outputs.report();
+    let row = report
+        .lines()
+        .find(|line| line.starts_with("| orders_read "))
+        .expect("the report identifies the read policy");
+    assert!(row.contains("ancestry\\|edgerow"), "{report}");
+    let delimiters = row
+        .match_indices('|')
+        .filter(|(index, _)| *index == 0 || row.as_bytes()[index - 1] != b'\\')
+        .count();
+    assert_eq!(delimiters, 5, "{report}");
+}

@@ -1,11 +1,14 @@
 //! Scope and key boundaries for indirect membership.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-use rls2fga::classifier::patterns::{
-    ClassifiedExpr, IndirectMembership, MembershipJoinPair, PatternClass,
+use rls2fga::classifier::function_registry::{
+    FunctionRegistry, SessionAttribute, SessionAttributeKind,
 };
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::classifier::patterns::{
+    ClassifiedExpr, IndirectMembership, MembershipJoinPair, PatternClass, PolicyCommand,
+};
+use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
 use rls2fga::translator::TranslatorBuilder;
+use sqlparser::ast::{BinaryOperator, Expr, Ident, Select, Value};
 
 const SCHEMA: &str = "
 CREATE TABLE principals (id TEXT PRIMARY KEY);
@@ -669,4 +672,208 @@ fn owner_foreign_keys_must_unambiguously_name_a_primary_key() {
     ] {
         not_p19(&schema, NESTED_ROLE, why);
     }
+}
+
+#[test]
+fn far_in_list_on_a_zone_column_without_an_offset_is_refused() {
+    let schema = format!("{SCHEMA}ALTER TABLE memberships ADD COLUMN expires_at TIMESTAMPTZ;");
+    not_p19(
+        &schema,
+        "EXISTS (SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
+            AND EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = a.owner
+                AND m.expires_at IN ('2026-01-01 00:00:00')
+                AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read'))",
+        "an IN list item the session zone reads back differently than the caller",
+    );
+}
+
+#[test]
+fn far_in_list_on_a_zone_column_with_an_offset_is_kept() {
+    let schema = format!("{SCHEMA}ALTER TABLE memberships ADD COLUMN expires_at TIMESTAMPTZ;");
+    let c = classify_in(
+        &schema,
+        "EXISTS (SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
+            AND EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = a.owner
+                AND m.expires_at IN ('2026-01-01 00:00:00+00')
+                AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read'))",
+    );
+    let p19 = p19(&c);
+    assert_eq!(p19.link_table.name(), "ownable_ancestors");
+    assert_eq!(pair_names(&p19.pairs), [("ownable", "id")]);
+    assert_eq!(p19.owner_table.name(), "owners");
+    assert_eq!(p19.memberships.len(), 1);
+    assert_eq!(p19.memberships[0].join_table.name(), "memberships");
+    assert_eq!(pair_names(&p19.memberships[0].pairs), [("owner_id", "id")]);
+    assert_eq!(p19.memberships[0].user_column.as_str(), "member_id");
+    let extra = p19.memberships[0]
+        .extra_predicates
+        .sql()
+        .expect("the IN list becomes a row condition");
+    assert!(
+        extra.contains("role = 'read'"),
+        "lost the role filter: {extra}"
+    );
+    assert!(
+        extra.contains("expires_at = '2026-01-01 00:00:00+00'"),
+        "lost the zone-stable IN item: {extra}"
+    );
+    assert!(p19.extra_predicates.is_empty());
+}
+
+/// Extracts the policy's parsed `USING` expression.
+fn parsed_predicate(schema: &str, predicate: &str) -> (ParserDB, Expr) {
+    use rls2fga::parser::sql_parser::{DatabaseLike, PolicyLike};
+
+    let sql =
+        format!("{schema}CREATE POLICY orders_read ON orders FOR SELECT USING ({predicate});");
+    let db: ParserDB = parse_schema(&sql).unwrap();
+    let expr = db
+        .policies()
+        .next()
+        .expect("the schema declares one policy")
+        .using_expression(&db)
+        .expect("the policy carries a USING clause")
+        .clone();
+    (db, expr)
+}
+
+/// Classifies an expression with the declared caller setting.
+fn classify_ast(db: &ParserDB, expr: &Expr) -> ClassifiedExpr {
+    let mut registry = FunctionRegistry::new();
+    registry.declare_session_attributes([SessionAttribute::setting(
+        "app.user_id",
+        SessionAttributeKind::CallerId,
+    )]);
+    registry.enrich_from_schema(db);
+    rls2fga::classifier::policy_classifier::classify_expr(
+        expr,
+        db,
+        &registry,
+        "orders",
+        PolicyCommand::Select,
+    )
+}
+
+/// Finds the nested `SELECT` query that scans `memberships`.
+fn far_select_of(expr: &mut Expr) -> Option<&mut Select> {
+    match expr {
+        Expr::Exists {
+            negated: false,
+            subquery,
+            ..
+        } => {
+            let sqlparser::ast::SetExpr::Select(select) = subquery.body.as_mut() else {
+                return None;
+            };
+            if select.from.iter().any(|from| {
+                matches!(
+                    &from.relation,
+                    sqlparser::ast::TableFactor::Table { name, .. }
+                        if name.0.last().and_then(|part| part.as_ident())
+                            .is_some_and(|ident| ident.value == "memberships")
+                )
+            }) {
+                return Some(select);
+            }
+            select.selection.as_mut().and_then(far_select_of)
+        }
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::And,
+            right,
+            ..
+        } => far_select_of(left).or_else(|| far_select_of(right)),
+        _ => None,
+    }
+}
+
+#[test]
+fn colliding_scan_alias_keeps_the_two_hop_payload() {
+    // A scan alias shadows the other table's base name.
+    let c = classify(
+        "EXISTS (
+        SELECT 1 FROM ownable_ancestors a JOIN memberships ownable_ancestors
+            ON ownable_ancestors.owner_id = a.owner
+        WHERE a.ownable = orders.id
+        AND ownable_ancestors.member_id = current_setting('app.user_id', true)
+        AND ownable_ancestors.role = 'read')",
+    );
+    assert_standard_payload(&c, "the colliding alias");
+    let c = classify(
+        "EXISTS (
+        SELECT 1 FROM ownable_ancestors a JOIN memberships mm ON mm.owner_id = a.owner
+        WHERE a.ownable = orders.id
+        AND mm.member_id = current_setting('app.user_id', true)
+        AND mm.role = 'read')",
+    );
+    assert_standard_payload(&c, "the uncolliding alias");
+}
+
+#[test]
+fn a_scan_name_repeated_across_two_scans_is_refused() {
+    not_p19(
+        SCHEMA,
+        "EXISTS (SELECT 1 FROM ownable_ancestors JOIN memberships ownable_ancestors
+            ON ownable_ancestors.owner_id = ownable_ancestors.owner
+            WHERE ownable_ancestors.ownable = orders.id
+            AND ownable_ancestors.member_id = current_setting('app.user_id', true)
+            AND ownable_ancestors.role = 'read')",
+        "one name answering for two scans",
+    );
+}
+
+#[test]
+fn compound_identifiers_the_parser_cannot_produce_are_refused() {
+    let (db, clean) = parsed_predicate(SCHEMA, NESTED_ROLE);
+    assert_standard_payload(&classify_ast(&db, &clean), "the unmodified spelling");
+
+    let empty = Expr::BinaryOp {
+        left: Box::new(Expr::CompoundIdentifier(vec![
+            Ident::new("m"),
+            Ident::new("role"),
+        ])),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::CompoundIdentifier(Vec::new())),
+    };
+    let one_part = Expr::BinaryOp {
+        left: Box::new(Expr::CompoundIdentifier(vec![Ident::new("owner_id")])),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::Value(Value::SingleQuotedString("x".into()).into())),
+    };
+    for (junk, why) in [
+        (empty, "an empty compound identifier beside a far column"),
+        (one_part, "a one-part compound identifier as a far conjunct"),
+    ] {
+        let mut expr = clean.clone();
+        let select = far_select_of(&mut expr).expect("the predicate carries the far EXISTS");
+        let previous = select
+            .selection
+            .take()
+            .expect("the far select has a WHERE clause");
+        select.selection = Some(Expr::BinaryOp {
+            left: Box::new(previous),
+            op: BinaryOperator::And,
+            right: Box::new(junk),
+        });
+        let c = classify_ast(&db, &expr);
+        assert!(
+            !matches!(c.pattern, PatternClass::P19IndirectMembership(_)),
+            "P19 matched {why}, got {c:?}"
+        );
+    }
+}
+
+#[test]
+fn a_computed_role_in_list_keeps_its_row_filter() {
+    let predicate = NESTED_ROLE.replace(
+        "m.role = 'read'",
+        "(m.role || '_team') IN ('read_team', 'write_team')",
+    );
+    let classified = classify(&predicate);
+    let indirect = p19(&classified);
+    assert_eq!(indirect.memberships.len(), 1);
+    assert_eq!(
+        indirect.memberships[0].extra_predicates.sql().as_deref(),
+        Some("(role || '_team') IN ('read_team', 'write_team')")
+    );
 }

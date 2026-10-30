@@ -17,13 +17,13 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
     let outer_columns = table_column_names(db, lookup_table_id(db, &outer_id)?)?;
 
     let (link, far, mut far_select, link_conjuncts, joined_on) = match sources.as_slice() {
-        [source] => {
+        [(_, source)] => {
             let link = p19_table(db, source)?;
             let (far_expr, far_conjunct) =
                 p19_far_exists(select, &link, outer_table, &outer_columns, registry)?;
             let inner_select = readable_exists_select(&far_expr)?;
             let far_sources = plain_relation_sources(inner_select)?;
-            let [far_source] = far_sources.as_slice() else {
+            let [(_, far_source)] = far_sources.as_slice() else {
                 return None;
             };
             let far = p19_table(db, far_source)?;
@@ -33,7 +33,7 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
             let far_select = inner_select.clone();
             (link, far, far_select, link_conjuncts, None)
         }
-        [first, second] => {
+        [(first_factor, first), (second_factor, second)] => {
             let on = p19_join_on(select)?;
             let mut conjuncts = Vec::new();
             if let Some(selection) = select.selection.as_ref() {
@@ -49,12 +49,11 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
                 outer_table,
                 &outer_columns,
             )?;
-            let (link, far, far_source) = if first_is_link {
-                (first_table, second_table, second)
+            let (link, far, factor) = if first_is_link {
+                (first_table, second_table, *second_factor)
             } else {
-                (second_table, first_table, first)
+                (second_table, first_table, *first_factor)
             };
-            let factor = p19_factor(select, far_source)?;
             let mut far_select = select.clone();
             far_select.from = vec![TableWithJoins {
                 relation: factor.clone(),
@@ -90,17 +89,16 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
         flatten_and_predicates(on, &mut far_conjuncts);
     }
 
-    for conjunct in link_conjuncts {
-        let role = p19_conjunct_role(conjunct, &link, None, outer_table, &outer_columns)?;
-        match role {
-            P19Role::LinkPair(pair) if !link_pairs.contains(&pair) => link_pairs.push(pair),
-            P19Role::LinkPair(_) => {}
-            P19Role::LinkResidual => link_residuals.push(conjunct),
-            P19Role::FarPair { .. } | P19Role::FarResidual => return None,
-        }
-    }
-    for conjunct in far_conjuncts {
-        let role = p19_conjunct_role(conjunct, &link, Some(&far), outer_table, &outer_columns)?;
+    let conjuncts = link_conjuncts
+        .into_iter()
+        .map(|conjunct| (conjunct, None))
+        .chain(
+            far_conjuncts
+                .into_iter()
+                .map(|conjunct| (conjunct, Some(&far))),
+        );
+    for (conjunct, far_scope) in conjuncts {
+        let role = p19_conjunct_role(conjunct, &link, far_scope, outer_table, &outer_columns)?;
         match role {
             P19Role::LinkPair(pair) if !link_pairs.contains(&pair) => link_pairs.push(pair),
             P19Role::LinkPair(_) => {}
@@ -201,7 +199,7 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
         link_extras.push(residual);
     }
 
-    let (far_selection, in_lists) = split_far_in_lists(&far_residual_conjuncts, &far);
+    let (far_selection, in_lists) = split_far_in_lists(&far_residual_conjuncts);
     far_select.selection = combine_predicates_with_and(far_selection);
     let far_scope = MembershipScope {
         table: &far.name,
@@ -218,10 +216,10 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
         registry,
     );
     let MembershipColumns {
-        pairs: membership_pairs,
         user_column,
         member_match,
         extra_predicates,
+        ..
     } = extract_membership_columns_with_analysis(
         &far_select,
         &far_scope,
@@ -231,16 +229,6 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
         state,
     )?;
     if !matches!(member_match, MemberMatch::Caller) {
-        return None;
-    }
-    if membership_pairs.len() != far_pairs.len()
-        || membership_pairs.iter().any(|pair| {
-            !far_pairs.iter().any(|(join, outer)| {
-                join.as_str() == pair.join_column.as_str()
-                    && outer.as_str() == pair.outer_column.as_str()
-            })
-        })
-    {
         return None;
     }
 
@@ -318,12 +306,12 @@ fn p19_table<DB: DatabaseLike>(db: &DB, source: &RelationSource) -> Option<P19Ta
     })
 }
 
-fn plain_relation_sources(select: &Select) -> Option<Vec<RelationSource>> {
+fn plain_relation_sources(select: &Select) -> Option<Vec<(&TableFactor, RelationSource)>> {
     let mut sources = Vec::new();
     for from in &select.from {
-        sources.push(plain_relation_factor(&from.relation)?);
+        sources.push((&from.relation, plain_relation_factor(&from.relation)?));
         for join in &from.joins {
-            sources.push(plain_relation_factor(&join.relation)?);
+            sources.push((&join.relation, plain_relation_factor(&join.relation)?));
         }
     }
     Some(sources)
@@ -558,22 +546,15 @@ fn p19_far_exists<'a>(
 }
 
 fn p19_join_on(select: &Select) -> Option<&Expr> {
-    let mut on: Option<&Expr> = None;
-    for from in &select.from {
-        for join in &from.joins {
-            if !matches!(
-                join.join_operator,
-                JoinOperator::Inner(_) | JoinOperator::Join(_)
-            ) {
-                return None;
-            }
-            let predicate = join_on_expr(&join.join_operator)?;
-            if on.replace(predicate).is_some() {
-                return None;
-            }
-        }
+    let join = select.from.iter().flat_map(|from| &from.joins).next()?;
+    if matches!(
+        join.join_operator,
+        JoinOperator::Inner(_) | JoinOperator::Join(_)
+    ) {
+        join_on_expr(&join.join_operator)
+    } else {
+        None
     }
-    on
 }
 
 fn p19_link_source(
@@ -602,25 +583,6 @@ fn p19_link_source(
         }
     }
     chosen
-}
-
-fn p19_factor<'a>(select: &'a Select, source: &RelationSource) -> Option<&'a TableFactor> {
-    for from in &select.from {
-        if same_relation_factor(&from.relation, source) {
-            return Some(&from.relation);
-        }
-        for join in &from.joins {
-            if same_relation_factor(&join.relation, source) {
-                return Some(&join.relation);
-            }
-        }
-    }
-    None
-}
-
-fn same_relation_factor(factor: &TableFactor, source: &RelationSource) -> bool {
-    table_factor_parts(factor)
-        .is_some_and(|(name, alias)| name == source.table_name && alias == source.alias)
 }
 
 // Far residuals cannot depend on the closure row.
@@ -714,11 +676,11 @@ pub(crate) fn owner_key_of<DB: DatabaseLike>(
     found
 }
 
-fn split_far_in_lists(conjuncts: &[Expr], far: &P19Table) -> (Vec<Expr>, Vec<(Expr, Vec<Expr>)>) {
+fn split_far_in_lists(conjuncts: &[Expr]) -> (Vec<Expr>, Vec<(Expr, Vec<Expr>)>) {
     let mut rest = Vec::new();
     let mut in_lists = Vec::new();
     for conjunct in conjuncts {
-        match far_in_list(conjunct, far) {
+        match far_in_list(conjunct) {
             Some(list) => in_lists.push(list),
             None => rest.push(conjunct.clone()),
         }
@@ -726,7 +688,7 @@ fn split_far_in_lists(conjuncts: &[Expr], far: &P19Table) -> (Vec<Expr>, Vec<(Ex
     (rest, in_lists)
 }
 
-fn far_in_list(conjunct: &Expr, far: &P19Table) -> Option<(Expr, Vec<Expr>)> {
+fn far_in_list(conjunct: &Expr) -> Option<(Expr, Vec<Expr>)> {
     let Expr::In {
         expr: column,
         target: InTarget::List(items),
@@ -736,13 +698,10 @@ fn far_in_list(conjunct: &Expr, far: &P19Table) -> Option<(Expr, Vec<Expr>)> {
     else {
         return None;
     };
-    let (qualifier, name) = extract_qualified_column(column)?;
-    let far_reference = match qualifier {
-        Some(qualifier) => qualifier_matches_table(&qualifier, &far.name, far.alias.as_deref()),
-        None => far.columns.iter().any(|column| column == name.as_str()),
-    };
-    if !far_reference {
-        return None;
+    match column.as_ref() {
+        Expr::Identifier(_) => {}
+        Expr::CompoundIdentifier(parts) if parts.len() >= 2 => {}
+        _ => return None,
     }
     let mut values: Vec<Expr> = Vec::new();
     let mut seen: Vec<AttributeLiteral> = Vec::new();
