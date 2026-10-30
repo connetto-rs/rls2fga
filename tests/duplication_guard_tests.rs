@@ -569,7 +569,7 @@ fn membership_analysis_has_a_single_source_of_truth() {
     // Scoped to one file on purpose, unlike the guards above: reading a projection is an
     // ordinary thing to do, and this says the membership analyzer does it once, not that
     // the crate does.
-    let membership = read_module("src/classifier/recognizers/subquery.rs");
+    let membership = read_module("src/classifier/recognizers/subquery/mod.rs");
     let projection_readers = membership.matches("select.projection").count();
     assert_eq!(
         projection_readers, 1,

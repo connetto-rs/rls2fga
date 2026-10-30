@@ -5,8 +5,8 @@ use rls2fga::classifier::oracle::{
     consult_oracle, OracleAnswer, PolicyClause, PolicyOracle, RefusedExpr,
 };
 use rls2fga::classifier::patterns::{
-    ClassifiedExpr, ClassifiedPolicy, ConstantBool, ExistsMembership, MembershipInCallerSet,
-    MembershipJoinPair, ParentInheritance, PatternClass, ResidualPredicates,
+    ClassifiedExpr, ClassifiedPolicy, ConstantBool, ExistsMembership, IndirectMembership,
+    MembershipInCallerSet, MembershipJoinPair, ParentInheritance, PatternClass, ResidualPredicates,
 };
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
@@ -399,4 +399,117 @@ fn an_oracle_supplied_membership_obeys_the_pairing_rules() {
         "the refusal names the pairing rule: {:?}",
         outputs.notes()
     );
+}
+
+#[test]
+fn oracle_indirect_memberships_cannot_bypass_key_and_scope_validation() {
+    struct Answer(IndirectMembership);
+
+    impl PolicyOracle for Answer {
+        fn classify(&self, _refused: &RefusedExpr<'_>) -> OracleAnswer {
+            OracleAnswer::Classified(Box::new(ClassifiedExpr {
+                pattern: PatternClass::P19IndirectMembership(self.0.clone()),
+                confidence: ConfidenceLevel::B,
+            }))
+        }
+    }
+
+    fn pair(join: &str, outer: &str) -> MembershipJoinPair {
+        MembershipJoinPair {
+            join_column: ColumnName::from_stored(join),
+            outer_column: ColumnName::from_stored(outer),
+        }
+    }
+
+    let schema = "
+        CREATE TABLE owners (tenant TEXT, id TEXT, PRIMARY KEY (tenant, id));
+        CREATE TABLE other_owners (tenant TEXT, id TEXT, PRIMARY KEY (tenant, id));
+        CREATE TABLE docs (tenant TEXT, id INT, bits INT, PRIMARY KEY (tenant, id));
+        CREATE TABLE other_docs (tenant TEXT, id INT, PRIMARY KEY (tenant, id));
+        CREATE TABLE links (
+            doc_tenant TEXT, doc_id INT, owner_tenant TEXT, owner_id TEXT,
+            other_tenant TEXT, other_id INT, unkeyed TEXT,
+            PRIMARY KEY (doc_tenant, doc_id, owner_tenant, owner_id),
+            FOREIGN KEY (doc_tenant, doc_id) REFERENCES docs(tenant, id),
+            FOREIGN KEY (other_tenant, other_id) REFERENCES other_docs(tenant, id),
+            FOREIGN KEY (owner_tenant, owner_id) REFERENCES owners(tenant, id));
+        CREATE TABLE members (
+            owner_tenant TEXT, owner_id TEXT, member TEXT, expires_at TIMESTAMPTZ,
+            PRIMARY KEY (owner_tenant, owner_id, member),
+            FOREIGN KEY (owner_tenant, owner_id) REFERENCES owners(tenant, id));
+        ALTER TABLE docs ENABLE ROW LEVEL SECURITY;";
+    let native = parse_schema(&format!(
+        "{schema}
+        CREATE POLICY docs_read ON docs FOR SELECT USING (EXISTS (
+            SELECT 1 FROM links l
+            WHERE l.doc_tenant = docs.tenant AND l.doc_id = docs.id
+            AND EXISTS (SELECT 1 FROM members m
+                WHERE m.owner_tenant = l.owner_tenant AND m.owner_id = l.owner_id
+                AND m.member = current_user AND m.expires_at > now())));"
+    ))
+    .unwrap();
+    let classified = translator().classify(&native);
+    let PatternClass::P19IndirectMembership(original) =
+        &classified[0].using_classification().unwrap().pattern
+    else {
+        panic!("expected indirect membership, got {classified:?}");
+    };
+
+    let mut cases = Vec::new();
+    let mut invalid = original.clone();
+    invalid.memberships.clear();
+    cases.push(("no far membership", invalid));
+    let mut invalid = original.clone();
+    invalid.owner_columns = vec![ColumnName::from_stored("unkeyed")];
+    cases.push(("undeclared owner key", invalid));
+    let mut invalid = original.clone();
+    invalid.owner_table = TableId::from_stored(None, "other_owners".to_string());
+    cases.push(("different owner table", invalid));
+    let mut invalid = original.clone();
+    invalid.owner_columns.reverse();
+    cases.push(("reversed owner key", invalid));
+    let mut invalid = original.clone();
+    invalid.pairs.clear();
+    cases.push(("uncorrelated closure", invalid));
+    let mut invalid = original.clone();
+    invalid.pairs = vec![pair("other_tenant", "tenant"), pair("other_id", "id")];
+    cases.push(("different guarded table", invalid));
+    let mut invalid = original.clone();
+    invalid.pairs = vec![pair("unkeyed", "bits")];
+    cases.push(("unkeyed guarded row", invalid));
+    let mut invalid = original.clone();
+    invalid.pairs[0].join_column = ColumnName::from_stored("missing");
+    cases.push(("missing closure column", invalid));
+    let mut invalid = original.clone();
+    invalid.memberships[0].pairs[0].outer_column = ColumnName::from_stored("wrong");
+    cases.push(("different far owner key", invalid));
+    let mut invalid = original.clone();
+    invalid.extra_predicates = invalid.memberships[0].extra_predicates.clone();
+    cases.push(("request-dependent closure", invalid));
+
+    let db = parse_schema(&format!(
+        "{schema} CREATE POLICY docs_read ON docs FOR SELECT USING ((bits & 2) = 2);"
+    ))
+    .unwrap();
+    for (case, membership) in cases {
+        let mut classified = translator().classify(&db);
+        assert_eq!(
+            consult_oracle(&mut classified, &Answer(membership)).len(),
+            1
+        );
+        let outputs =
+            support::plan_at(classified, &db, translator().registry(), ConfidenceLevel::B);
+        assert_eq!(
+            relation(&outputs.model(), "can_select").as_deref(),
+            Some("no_access"),
+            "{case}"
+        );
+        assert!(
+            outputs.notes().iter().any(|note| matches!(
+                note,
+                TranslationNote::ExpressionRefused { policy, .. } if policy == "docs_read"
+            )),
+            "{case} must disclose the refused extension answer"
+        );
+    }
 }

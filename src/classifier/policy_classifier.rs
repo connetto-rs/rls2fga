@@ -302,6 +302,7 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
     }
@@ -578,6 +579,12 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classified;
     }
 
+    if let Some(classified) =
+        recognizers::recognize_p19_indirect_membership(expr, db, registry, table, state)
+    {
+        return classified;
+    }
+
     // Try P4: EXISTS membership
     if let Some(classified) = recognizers::recognize_p4(expr, db, registry, table, state) {
         return classified;
@@ -811,6 +818,9 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. }) => {
             "declared caller value equal to a constant"
         }
+        PatternClass::P19IndirectMembership(IndirectMembership { .. }) => {
+            "membership-through-a-second-table check"
+        }
         PatternClass::Unknown(UnclassifiedExpr { .. }) => "unrecognized expression",
         PatternClass::ExpandedFunction(ExpandedFunction { .. }) => "expanded function call",
         PatternClass::MembershipExclusion(MembershipExclusion { .. }) => {
@@ -829,6 +839,7 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P11ArrayMembership(ArrayMembership { .. })
         | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { .. })
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
+        | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         // Membership of the holder is still a user-resource relationship, even though
         // the holder stands for the whole table.
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })

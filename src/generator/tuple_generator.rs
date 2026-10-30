@@ -1192,6 +1192,56 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
+        TupleSource::ClosureBridge {
+            link_table,
+            object_cols,
+            subject_cols,
+            guarded_type,
+            owner_type,
+            relation,
+            extra_predicates,
+        } => {
+            let link_table_sql = link_table.sql_name();
+            let object_parts = quoted_key_parts(object_cols);
+            let subject_parts = quoted_key_parts(subject_cols);
+            let object_sql = typed_name_sql(guarded_type, object_parts.iter().map(String::as_str));
+            let subject_sql = typed_name_sql(owner_type, subject_parts.iter().map(String::as_str));
+            let mut base = object_parts
+                .iter()
+                .map(|part| format!("{part} IS NOT NULL"))
+                .collect::<Vec<_>>()
+                .join("\nAND ");
+            for part in &subject_parts {
+                let _ = write!(base, "\nAND {part} IS NOT NULL");
+            }
+            let guards = join_row_is_nameable(
+                &base,
+                &object_sql,
+                Some(&subject_sql),
+                link_table,
+                object_cols,
+                subject_cols,
+                names,
+            );
+            let where_clause = extra_predicates.sql().map_or_else(
+                || format!("\nWHERE {guards}"),
+                |e| format!("\nWHERE {guards}\nAND ({e})"),
+            );
+            Some(TupleQuery {
+                comment: format!(
+                    "-- {guarded_type} to {owner_type} closure link from {link_table}"
+                ),
+                sql: format!(
+                    "SELECT {object_sql} AS object, '{relation}' AS relation, \
+                     {subject_sql} AS subject\n\
+                     FROM {link_table_sql}{where_clause};"
+                ),
+                description: None,
+                condition: None,
+                skipped: None,
+            })
+        }
+
         // One tuple per membership row, keyed on the row's own identity, so the
         // condition is evaluated per row exactly as `EXISTS` is: no aggregation.
         TupleSource::MembershipShareMembers {

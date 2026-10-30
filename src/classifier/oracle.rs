@@ -314,6 +314,7 @@ where
         | PatternClass::P3DirectOwnership(DirectOwnership { .. })
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
         | PatternClass::P6BooleanFlag(BooleanFlag { .. })
+        | PatternClass::P19IndirectMembership(_)
         | PatternClass::P9AttributeCondition(AttributeCondition { .. })
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P11ArrayMembership(ArrayMembership { .. })
