@@ -7,8 +7,8 @@ use crate::types::{ColumnName, TableId};
 use alloc::collections::BTreeSet;
 use core::ops::ControlFlow;
 use sqlparser::ast::{
-    Distinct, GroupByExpr, Ident, JoinOperator, LimitClause, Query, SetExpr, TableWithJoins, Visit,
-    VisitMut, Visitor, VisitorMut,
+    Distinct, GroupByExpr, Ident, JoinOperator, LimitClause, Query, SetExpr, TableInheritance,
+    TableWithJoins, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 mod indirect;
@@ -602,12 +602,33 @@ pub(super) fn query_select(query: &Query) -> Option<&Select> {
 ///
 /// Membership and parent inheritance read the subquery as a plain set of rows, so a clause
 /// that drops rows from it lets the model grant rows the policy refuses. `TABLESAMPLE` is
-/// named first because it thins the rows before any other clause sees them. `HAVING` is
-/// named ahead of the `GROUP BY` it usually rides on because it is the clause doing the
-/// filtering. Plain `DISTINCT` drops duplicate rows only, leaving the set itself intact.
+/// named first because it thins the rows before any other clause sees them. `ONLY` leaves
+/// out the rows of every table inheriting from the one it names, which a plain read
+/// includes, while `t *` spells the plain read. `HAVING` is named ahead of the `GROUP BY` it
+/// usually rides on because it is the clause doing the filtering. Plain `DISTINCT` drops
+/// duplicate rows only, leaving the set itself intact.
 pub(super) fn select_result_shaping_clause(select: &Select) -> Option<&'static str> {
-    if from_item_is_sampled(select) {
+    if any_named_source(select, &|factor| {
+        matches!(
+            factor,
+            TableFactor::Table {
+                sample: Some(_),
+                ..
+            }
+        )
+    }) {
         return Some("TABLESAMPLE");
+    }
+    if any_named_source(select, &|factor| {
+        matches!(
+            factor,
+            TableFactor::Table {
+                inheritance: Some(TableInheritance::Only { .. }),
+                ..
+            }
+        )
+    }) {
+        return Some("ONLY");
     }
     if select.having.is_some() {
         return Some("HAVING");
@@ -627,27 +648,23 @@ pub(super) fn select_result_shaping_clause(select: &Select) -> Option<&'static s
     matches!(select.distinct, Some(Distinct::On(_))).then_some("DISTINCT ON")
 }
 
-/// True when any named source draws a sample rather than the whole relation.
-fn from_item_is_sampled(select: &Select) -> bool {
-    select.from.iter().any(table_with_joins_is_sampled)
+/// True when `test` holds for any relation the `FROM` reads, nested joins included.
+fn any_named_source(select: &Select, test: &dyn Fn(&TableFactor) -> bool) -> bool {
+    select
+        .from
+        .iter()
+        .any(|item| table_with_joins_has(item, test))
 }
 
-fn table_with_joins_is_sampled(item: &TableWithJoins) -> bool {
-    table_factor_is_sampled(&item.relation)
-        || item
-            .joins
-            .iter()
-            .any(|join| table_factor_is_sampled(&join.relation))
-}
-
-fn table_factor_is_sampled(factor: &TableFactor) -> bool {
-    match factor {
-        TableFactor::Table { sample, .. } => sample.is_some(),
-        TableFactor::NestedJoin {
-            table_with_joins, ..
-        } => table_with_joins_is_sampled(table_with_joins),
-        _ => false,
-    }
+fn table_with_joins_has(item: &TableWithJoins, test: &dyn Fn(&TableFactor) -> bool) -> bool {
+    core::iter::once(&item.relation)
+        .chain(item.joins.iter().map(|join| &join.relation))
+        .any(|factor| match factor {
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => table_with_joins_has(table_with_joins, test),
+            _ => test(factor),
+        })
 }
 
 /// True when a row count is a literal of at least one, so it cannot empty a result.

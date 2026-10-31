@@ -530,7 +530,7 @@ fn membership_analysis_has_a_single_source_of_truth() {
         "exists_subquery_select",
         "select_result_shaping_clause",
         "exists_emptying_limit_clause",
-        "from_item_is_sampled",
+        "any_named_source",
         "query_binds_its_own_names",
         "query_locks_its_rows",
         "query_level_refusal",
@@ -551,7 +551,8 @@ fn membership_analysis_has_a_single_source_of_truth() {
         "having.is_some()",
         "qualify.is_some()",
         "Distinct::On",
-        "sample.is_some()",
+        "sample: Some(_)",
+        "TableInheritance::Only",
         "with.is_some()",
         "locks.is_empty()",
     ] {

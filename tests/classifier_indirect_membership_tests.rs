@@ -216,6 +216,8 @@ fn indirect_membership_requires_unmodified_table_sources() {
         ("memberships m", "memberships() m"),
         ("ownable_ancestors a", "ownable_ancestors a(owner, ownable)"),
         ("memberships m", "memberships m(owner_id, role, member_id)"),
+        ("ownable_ancestors a", "ONLY ownable_ancestors a"),
+        ("memberships m", "ONLY memberships m"),
     ]
     .into_iter()
     .filter(|&(source, replacement)| {
@@ -229,6 +231,16 @@ fn indirect_membership_requires_unmodified_table_sources() {
         accepted.is_empty(),
         "modified sources classified as physical tables {accepted:?}"
     );
+}
+
+#[test]
+fn sources_naming_their_inheriting_tables_carry_the_same_payload() {
+    let c = classify(
+        &NESTED_ROLE
+            .replace("ownable_ancestors a", "ownable_ancestors * a")
+            .replace("memberships m", "memberships * m"),
+    );
+    assert_standard_payload(&c, "`t *` reads what the plain `t` reads");
 }
 
 #[test]
