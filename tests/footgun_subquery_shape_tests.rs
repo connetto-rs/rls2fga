@@ -231,6 +231,43 @@ fn a_membership_subquery_naming_the_inheriting_tables_translates_as_the_plain_ta
     );
 }
 
+/// A parenthesized join holds its relations one level down, where `ONLY` thins the
+/// membership rows all the same.
+#[test]
+fn only_inside_a_parenthesized_join_is_refused() {
+    let db = db_of(
+        r"
+CREATE TABLE users(id TEXT PRIMARY KEY);
+CREATE TABLE docs(id UUID PRIMARY KEY);
+CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT REFERENCES users(id));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT USING (
+    EXISTS (
+        SELECT 1
+        FROM (ONLY doc_members AS m JOIN users AS u ON u.id = m.user_id)
+        WHERE m.doc_id = docs.id AND u.id = current_user
+    )
+);
+",
+    );
+    let translator = translator(ConfidenceLevel::B);
+    let classified = translator.classify(&db);
+    let [policy] = classified.as_slice() else {
+        panic!("expected one policy");
+    };
+    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &policy
+        .using_classification()
+        .expect("USING should classify")
+        .pattern
+    else {
+        panic!("ONLY must refuse: {:#?}", policy.using_classification());
+    };
+    assert!(
+        reason.contains("ONLY"),
+        "the refusal must name ONLY: {reason}"
+    );
+}
+
 /// Sampling a joined source can drop a parent row despite its declared foreign key.
 #[test]
 fn a_sampled_p5_join_partner_is_refused() {
