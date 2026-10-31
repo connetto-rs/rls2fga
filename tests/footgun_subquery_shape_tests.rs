@@ -188,6 +188,49 @@ fn a_sampled_membership_subquery_is_refused() {
     ]);
 }
 
+/// `ONLY doc_members` reads the rows stored in `doc_members` itself and leaves out those of
+/// every table inheriting from it, while the membership tuples are read from all of them.
+#[test]
+fn a_membership_subquery_reading_only_the_named_table_is_refused() {
+    assert_every_spelling_refused(&[
+        (
+            "EXISTS (SELECT 1 FROM ONLY doc_members \
+             WHERE doc_id = docs.id AND user_id = current_user)",
+            "ONLY",
+        ),
+        (
+            "id IN (SELECT doc_id FROM ONLY doc_members WHERE user_id = current_user)",
+            "ONLY",
+        ),
+        (
+            "id = ANY (SELECT doc_id FROM ONLY (doc_members) WHERE user_id = current_user)",
+            "ONLY",
+        ),
+        (
+            "current_user IN (SELECT user_id FROM ONLY doc_members WHERE doc_id = docs.id)",
+            "ONLY",
+        ),
+    ]);
+}
+
+/// `doc_members *` spells out what `PostgreSQL` reads by default, the table and every
+/// table inheriting from it, which is the relation the membership tuples read.
+#[test]
+fn a_membership_subquery_naming_the_inheriting_tables_translates_as_the_plain_table() {
+    let plain =
+        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user)";
+    let (plain_dsl, plain_tuples) = membership_translation(plain);
+    assert_ne!(
+        relation_definition(&plain_dsl, "docs", "can_select").as_deref(),
+        Some("no_access"),
+        "the plain spelling must translate:\n{plain_dsl}"
+    );
+    assert_eq!(
+        membership_translation(&plain.replace("doc_members", "doc_members *")),
+        (plain_dsl, plain_tuples)
+    );
+}
+
 /// Sampling a joined source can drop a parent row despite its declared foreign key.
 #[test]
 fn a_sampled_p5_join_partner_is_refused() {

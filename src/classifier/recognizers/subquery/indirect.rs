@@ -329,6 +329,7 @@ fn plain_relation_factor(factor: &TableFactor) -> Option<RelationSource> {
         json_path: None,
         sample: None,
         index_directives,
+        inheritance: None | Some(TableInheritance::IncludeDescendants),
     } = factor
     else {
         return None;
