@@ -1,4 +1,6 @@
 pub(crate) mod action_relations;
+// `caller_roles` carries its own `//!` docs, so no outer doc here.
+pub mod caller_roles;
 /// Shared schema lookup helpers used by model/tuple generation.
 pub(crate) mod db_lookup;
 // `identity` carries its own `//!` docs, so no outer doc here.
