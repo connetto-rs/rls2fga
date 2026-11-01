@@ -1,0 +1,33 @@
+---
+source: tests/table_privileges_tests.rs
+expression: outputs.model().trim()
+---
+model
+  schema 1.1
+
+type user
+
+type nobody
+
+type notes
+  relations
+    define no_access: [nobody]
+    define owner: [user]
+    define public_viewer: [user:*]
+    define scope_usage_kind_anon_kind_user_e973d519: [pg_role_scope]
+    define scope_usage_kind_user_2fc08e8e: [pg_role_scope]
+    define can_delete: no_access
+    define can_insert: no_access
+    define can_select: public_viewer and usage from scope_usage_kind_anon_kind_user_e973d519
+    define can_select_for_update: can_update
+    define can_update: owner and usage from scope_usage_kind_user_2fc08e8e and can_select
+    define can_update_without_reading: owner and usage from scope_usage_kind_user_2fc08e8e
+
+type pg_role
+  relations
+    define usage: [user]
+
+type pg_role_scope
+  relations
+    define roles: [pg_role]
+    define usage: usage from roles

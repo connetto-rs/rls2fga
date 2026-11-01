@@ -343,7 +343,7 @@ pub(crate) enum TupleSource {
     /// the gates that read only the request. Produces `(type:pk, scope_relation,
     /// scope_type:scope_object)` per row.
     ///
-    /// What the object admits is a fact about the policy, carried once by
+    /// What the object admits is a fact about the schema, carried once by
     /// [`Self::PolicyScopeRoles`] or [`Self::RequestGateEntry`], so a policy naming
     /// several roles or a table carrying several gates writes one fact per row.
     PolicyScope {
@@ -356,9 +356,10 @@ pub(crate) enum TupleSource {
         scope_object: String,
     },
 
-    /// One role a policy's scope admits: `(scope_type:scope_object, roles, pg_role:pg_role)`.
+    /// One role a scope admits, a policy's `TO` clause or a command's table privilege:
+    /// `(scope_type:scope_object, roles, pg_role:pg_role)`.
     ///
-    /// Names no table. Which roles a scope admits is decided by the policy, so the query is
+    /// Names no table. Which roles a scope admits is decided by the schema, so the query is
     /// a constant `SELECT` yielding exactly one row whatever any table holds. Reading it off
     /// the guarded table instead tied the fact to that table having rows, and made every row
     /// of it look like a reason the fact exists.

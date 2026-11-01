@@ -36,6 +36,7 @@ mod identifiers;
 pub mod identity;
 mod notes;
 mod patterns;
+mod privileges;
 mod records;
 mod relations;
 mod row_naming;
@@ -54,6 +55,7 @@ pub use patterns::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ConfidenceLevel,
     ContextWitness, RolePrivilege,
 };
+pub use privileges::{PrivilegeHolders, TablePrivileges};
 pub use records::{
     records_from_row, BoundQuery, BoundQueryError, ColumnKind, ColumnRead, ContextRendering, Guard,
     ObjectKey, Record, RecordContext, RecordContextEntry, RecordContextValue, RecordDerivation,

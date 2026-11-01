@@ -20,7 +20,6 @@ use crate::generator::tuple_generator::{
     generate_tuple_queries_from_plan, record_from_tuple_row, TupleQuery, TupleRow, TupleRowError,
     UnboundedColumns,
 };
-use crate::generator::unrestricted::unrestricted_tables;
 use crate::generator::well_known::WellKnownTypes;
 #[cfg(feature = "std")]
 use crate::output::formatter::{write_output, WriteError};
@@ -142,6 +141,17 @@ impl TranslatorBuilder {
         self
     }
 
+    /// Require of every action its command's table privilege, read from the schema's `GRANT`
+    /// and `REVOKE` statements, as `PostgreSQL` does before any policy runs.
+    ///
+    /// Turning this on states that the schema holds every grant. Named holders gate the
+    /// action through a `pg_role` scope loaded like a `TO` clause's.
+    #[must_use]
+    pub fn with_table_privileges(mut self) -> Self {
+        self.generator.table_privileges = true;
+        self
+    }
+
     /// Build the translator.
     pub fn build(self) -> Translator {
         Translator {
@@ -223,7 +233,6 @@ struct DerivedOutputs {
     relations: Vec<RelationShapes>,
     row_naming: Vec<RowNaming>,
     action_relations: Vec<ActionRelations>,
-    unrestricted_tables: Vec<UnrestrictedTable>,
 }
 
 impl DerivedOutputs {
@@ -235,7 +244,6 @@ impl DerivedOutputs {
             relations,
             row_naming: row_naming(plan, db),
             action_relations: action_relations(plan, db),
-            unrestricted_tables: unrestricted_tables(db),
         }
     }
 }
@@ -320,13 +328,15 @@ impl Translation {
     ///
     /// Read beside [`Translation::action_relations`], and read positively: a table here
     /// shows every row to everybody, so a question about one of its rows is granted with
-    /// nothing asked. A table absent from both this and the action report is one nothing
-    /// covered, which says nothing about what the database allows.
+    /// nothing asked. Where [`TranslatorBuilder::with_table_privileges`] is on, everybody
+    /// means each command's [`privileges`](UnrestrictedTable::privileges) holders. A table
+    /// absent from both this and the action report is one nothing covered, which says
+    /// nothing about what the database allows.
     ///
     /// Reported by table because the emitted model defines no type for such a table.
     #[must_use]
     pub fn unrestricted_tables(&self) -> &[UnrestrictedTable] {
-        &self.derived.unrestricted_tables
+        &self.plan.unrestricted_tables
     }
 
     /// The outputs, refused while any note's severity [`diverges_from_database`](NoteSeverity::diverges_from_database).

@@ -102,15 +102,26 @@ pub(crate) fn plan_at(
     registry: &FunctionRegistry,
     level: rls2fga::types::ConfidenceLevel,
 ) -> rls2fga::translator::Outputs {
-    rls2fga::translator::Translation::plan(
+    plan_with(
         classified,
         db,
         registry,
         level,
         &rls2fga::generator::model_generator::GeneratorSettings::default(),
     )
-    .expect("translation should plan")
-    .outputs_accepting_gaps()
+}
+
+/// [`plan_at`] under the given generator settings.
+pub(crate) fn plan_with(
+    classified: Vec<ClassifiedPolicy>,
+    db: &ParserDB,
+    registry: &FunctionRegistry,
+    level: rls2fga::types::ConfidenceLevel,
+    settings: &rls2fga::generator::model_generator::GeneratorSettings,
+) -> rls2fga::translator::Outputs {
+    rls2fga::translator::Translation::plan(classified, db, registry, level, settings)
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
 }
 
 /// The tuple SQL a classification plans at the lowest confidence bar.

@@ -78,6 +78,11 @@ impl CallerRoles {
             Settlement::Callers(reaching)
         }
     }
+
+    /// The caller roles, as `PostgreSQL` stores their names.
+    pub(crate) fn roles(&self) -> &BTreeSet<String> {
+        &self.0
+    }
 }
 
 /// `role` and every role whose privileges it uses without `SET ROLE`.

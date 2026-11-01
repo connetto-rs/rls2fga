@@ -147,6 +147,212 @@ async fn every_parity_case_agrees() {
     );
 }
 
+/// Table privileges, compared on `PostgreSQL` 17 and 18.
+///
+/// A cluster per major rather than one more case in the list above, which runs on one
+/// pair.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn table_privileges_agree_on_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on_postgres(major).await;
+        a_withheld_privilege_refuses_what_the_policy_admits(&cluster, major).await;
+        every_grant_shape_gates_its_command(&cluster, major).await;
+        a_privilege_settles_to_the_caller_roles_reaching_its_holder(&cluster, major).await;
+    }
+}
+
+/// With caller roles, a grant to a role the callers inherit gates on the callers reaching it.
+///
+/// `UPDATE` is granted to `writers`, which `kind_user` inherits, so the gate names `kind_user`
+/// and each caller's one fact says which caller role it runs as.
+async fn a_privilege_settles_to_the_caller_roles_reaching_its_holder(
+    cluster: &Cluster,
+    major: &str,
+) {
+    let case = ParityCase::reading(
+        &format!("privileges-caller-roles-{major}"),
+        "
+CREATE ROLE kind_anon NOLOGIN;
+CREATE ROLE kind_user NOLOGIN;
+CREATE ROLE writers NOLOGIN;
+GRANT writers TO kind_user;
+CREATE TABLE notes (id BIGINT PRIMARY KEY, owner TEXT NOT NULL, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_read ON notes FOR SELECT USING (true);
+CREATE POLICY notes_write ON notes FOR UPDATE
+    USING (owner = current_setting('app.user_id', true));
+GRANT SELECT ON notes TO kind_anon, kind_user;
+GRANT UPDATE ON notes TO writers;
+",
+        &["INSERT INTO notes(id, owner, body) VALUES (1, 'bob', 'b'), (2, 'carol', 'c')"],
+        vec![
+            Principal::with_setting("bob", "kind_anon", "app.user_id", "bob")
+                .holding(&["kind_anon"]),
+            Principal::with_setting("carol", "kind_user", "app.user_id", "carol")
+                .holding(&["kind_user"]),
+        ],
+    )
+    .writing(
+        "notes",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    )
+    .with_caller_roles(&["kind_anon", "kind_user"])
+    .modelling_table_privileges();
+
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        ("bob", "notes:1", ActionStatement::Update, false),
+        ("bob", "notes:2", ActionStatement::Select, true),
+        ("carol", "notes:2", ActionStatement::Update, true),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// The rows a policy admits, refused to a role lacking the command's privilege.
+///
+/// `kind_anon` may read but not update, so the owner of a row acting as `kind_anon` is
+/// refused the update the policy grants. `alice` holds `kind_user` by inheriting it, which
+/// `has_privs_of_role` honours and `pg_role#usage` carries.
+async fn a_withheld_privilege_refuses_what_the_policy_admits(cluster: &Cluster, major: &str) {
+    let case = |name: &str, modelled: bool| {
+        // Only a model carrying privileges declares `pg_role`, so only that one is told
+        // who holds which role.
+        let held = |roles: &'static [&'static str]| -> &'static [&'static str] {
+            if modelled {
+                roles
+            } else {
+                &[]
+            }
+        };
+        let case = ParityCase::reading(
+            name,
+            "
+CREATE TABLE notes (id BIGINT PRIMARY KEY, owner TEXT NOT NULL, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_read ON notes FOR SELECT USING (true);
+CREATE POLICY notes_write ON notes FOR UPDATE
+    USING (owner = current_setting('app.user_id', true));
+GRANT SELECT ON notes TO kind_anon;
+GRANT SELECT, UPDATE ON notes TO kind_user;
+",
+            &["INSERT INTO notes(id, owner, body) VALUES (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', 'c')"],
+            vec![
+                Principal::with_setting("alice", "alice", "app.user_id", "alice")
+                    .holding(held(&["kind_user"])),
+                Principal::with_setting("bob", "kind_anon", "app.user_id", "bob")
+                    .holding(held(&["kind_anon"])),
+                Principal::with_setting("carol", "kind_user", "app.user_id", "carol")
+                    .holding(held(&["kind_user"])),
+            ],
+        )
+        .after(&[
+            "CREATE ROLE kind_anon NOLOGIN; CREATE ROLE kind_user NOLOGIN;
+             CREATE ROLE alice LOGIN IN ROLE kind_user",
+        ])
+        .writing(
+            "notes",
+            Mutations {
+                update_set: Some("body = body".to_string()),
+                // The policies read the owner, never the body.
+                check_neutral: true,
+            },
+        );
+        if modelled {
+            case.modelling_table_privileges()
+        } else {
+            case
+        }
+    };
+
+    let modelled = case(&format!("privileges-withheld-{major}"), true);
+    let run = support::parity::run(cluster, &modelled).await;
+    for (subject, object, statement, allowed) in [
+        ("bob", "notes:2", ActionStatement::Update, false),
+        ("bob", "notes:1", ActionStatement::Select, true),
+        ("alice", "notes:1", ActionStatement::Update, true),
+        ("carol", "notes:3", ActionStatement::Update, true),
+        ("carol", "notes:3", ActionStatement::Delete, false),
+    ] {
+        support::parity::assert_postgres(&modelled, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&modelled, &run);
+
+    // Without the option the model says nothing about privileges, so the pair a privilege
+    // refuses is left uncompared and every other one still agrees.
+    let unmodelled = case(&format!("privileges-unmodelled-{major}"), false);
+    let run = support::parity::run(cluster, &unmodelled).await;
+    assert_eq!(
+        run.postgres_answered("bob", "notes:2", ActionStatement::Update),
+        None,
+        "{}: a pair only the privilege refuses was compared",
+        unmodelled.name
+    );
+    assert_agrees(&unmodelled, &run);
+}
+
+/// `PUBLIC`, `ALL PRIVILEGES`, a `REVOKE`, and a role holding nothing on a policied table.
+///
+/// Every policy admits every row, so each answer is the privilege's alone.
+async fn every_grant_shape_gates_its_command(cluster: &Cluster, major: &str) {
+    let neutral = || Mutations {
+        update_set: Some("body = body".to_string()),
+        check_neutral: true,
+    };
+    let case = ParityCase::reading(
+        &format!("privileges-every-shape-{major}"),
+        "
+CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_all ON docs USING (true) WITH CHECK (true);
+CREATE TABLE secrets (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY secrets_all ON secrets USING (true) WITH CHECK (true);
+GRANT SELECT ON docs TO PUBLIC;
+GRANT ALL PRIVILEGES ON docs, secrets TO admin;
+GRANT UPDATE, DELETE ON docs TO editor;
+REVOKE DELETE ON docs FROM editor;
+",
+        &[
+            "INSERT INTO docs(id, body) VALUES ('d1', 'one')",
+            "INSERT INTO secrets(id, body) VALUES ('s1', 'one')",
+        ],
+        vec![
+            Principal::as_role("admin", "admin").holding(&["admin"]),
+            Principal::as_role("editor", "editor").holding(&["editor"]),
+            Principal::as_role("stranger", "stranger").holding(&["stranger"]),
+        ],
+    )
+    .after(&["CREATE ROLE admin LOGIN; CREATE ROLE editor LOGIN; CREATE ROLE stranger LOGIN"])
+    .writing("docs", neutral())
+    .writing("secrets", neutral())
+    .modelling_table_privileges();
+
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // `PUBLIC` reads docs, and nobody else's grant is needed for it.
+        ("stranger", "docs:d1", ActionStatement::Select, true),
+        ("stranger", "docs:d1", ActionStatement::Update, false),
+        // `ALL PRIVILEGES` holds every command.
+        ("admin", "secrets:s1", ActionStatement::Delete, true),
+        ("admin", "docs:d1", ActionStatement::Insert, true),
+        // The revoke took `DELETE` and left `UPDATE`.
+        ("editor", "docs:d1", ActionStatement::Update, true),
+        ("editor", "docs:d1", ActionStatement::Delete, false),
+        // Nothing on secrets at all.
+        ("stranger", "secrets:s1", ActionStatement::Select, false),
+        ("editor", "secrets:s1", ActionStatement::Select, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
 /// The message a panicking case left, so a failure reads like a test failure.
 fn panic_message(joined: tokio::task::JoinError) -> String {
     if !joined.is_panic() {
