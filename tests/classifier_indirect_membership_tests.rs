@@ -10,27 +10,11 @@ use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
 use rls2fga::translator::TranslatorBuilder;
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Select, Value};
 
-const SCHEMA: &str = "
-CREATE TABLE principals (id TEXT PRIMARY KEY);
-CREATE TABLE owners (id TEXT PRIMARY KEY);
-CREATE TABLE ownables (id TEXT PRIMARY KEY, owner_id TEXT REFERENCES owners(id));
-CREATE TABLE memberships (
-    owner_id TEXT NOT NULL REFERENCES owners(id),
-    member_id TEXT NOT NULL REFERENCES principals(id),
-    role TEXT NOT NULL,
-    PRIMARY KEY (owner_id, member_id));
-CREATE TABLE ownable_ancestors (
-    ownable TEXT NOT NULL REFERENCES ownables(id),
-    owner TEXT NOT NULL REFERENCES owners(id),
-    PRIMARY KEY (ownable, owner));
-CREATE TABLE orders (id TEXT PRIMARY KEY REFERENCES ownables(id), title TEXT);
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-";
+mod support;
 
-const NESTED_ROLE: &str = "EXISTS (
-    SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
-    AND EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = a.owner
-        AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read'))";
+use support::{
+    INDIRECT_MEMBERSHIP_NESTED_ROLE as NESTED_ROLE, INDIRECT_MEMBERSHIP_SCHEMA as SCHEMA,
+};
 
 fn classify(predicate: &str) -> ClassifiedExpr {
     classify_in(SCHEMA, predicate)

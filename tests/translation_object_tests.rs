@@ -7,20 +7,13 @@ use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::PlanningError;
 
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translation, Translator, TranslatorBuilder};
+use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
 
-fn db_of(sql: &str) -> ParserDB {
-    parse_schema(sql).expect("schema should parse")
-}
+mod support;
 
-fn translator(min_confidence: ConfidenceLevel) -> Translator {
-    TranslatorBuilder::new()
-        .with_min_confidence(min_confidence)
-        .build()
-}
+use support::footgun::{db_of, translator};
 
 /// A schema every clause of which translates.
 const CLEAN: &str = "CREATE TABLE users(id UUID PRIMARY KEY);\n\

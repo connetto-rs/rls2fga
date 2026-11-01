@@ -14,7 +14,9 @@ use rls2fga::types::{
 
 mod support;
 
-use support::footgun::{db_of, defines_in_type, gated_tables, relation_definition};
+use support::footgun::{
+    db_of, defines_in_type, gated_tables, relation_definition, OPEN_PLUS_CAP_BOT_LIST_GATES,
+};
 
 fn outputs_of(sql: &str) -> Outputs {
     TranslatorBuilder::new()
@@ -282,7 +284,9 @@ fn a_request_gate_names_its_link_and_the_type_it_admits() {
 
 /// A membership whose residual reads a request-gated table beside its own join table,
 /// both gated, translates by intersecting the grant with the gate of each.
-const RESIDUAL_GATED_SCHEMA: &str = "
+fn residual_gated_schema() -> String {
+    format!(
+        "
 CREATE TABLE papers (id UUID PRIMARY KEY);
 CREATE TABLE paper_shares (id UUID PRIMARY KEY, paper_id UUID REFERENCES papers(id), viewer TEXT, weight NUMERIC);
 CREATE TABLE tiers (id UUID PRIMARY KEY, cutoff NUMERIC);
@@ -297,27 +301,15 @@ CREATE POLICY paper_read ON papers FOR SELECT USING (
           AND s.weight > (SELECT max(cutoff) FROM tiers)
     )
 );
-
-ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
-CREATE POLICY shares_open ON paper_shares FOR SELECT USING (true);
-CREATE POLICY shares_cap ON paper_shares AS RESTRICTIVE FOR SELECT USING (
-    'paper_shares:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
-    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
-);
-
-ALTER TABLE tiers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tiers_open ON tiers FOR SELECT USING (true);
-CREATE POLICY tiers_cap ON tiers AS RESTRICTIVE FOR SELECT USING (
-    'tiers:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
-    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
-);
-";
+{OPEN_PLUS_CAP_BOT_LIST_GATES}"
+    )
+}
 
 /// A residual reading a gated table beside the join table translates, and the grant carries
 /// the gate of each.
 #[test]
 fn a_residual_over_a_request_gated_relation_translates() {
-    let outputs = outputs_of(RESIDUAL_GATED_SCHEMA);
+    let outputs = outputs_of(&residual_gated_schema());
     let dsl = outputs.model();
     let can_select =
         relation_definition(&dsl, "papers", "can_select").expect("papers defines can_select");

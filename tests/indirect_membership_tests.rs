@@ -7,30 +7,10 @@ use rls2fga::types::{
 
 mod support;
 
+use support::{INDIRECT_MEMBERSHIP_NESTED_ROLE as NESTED, INDIRECT_MEMBERSHIP_SCHEMA as SCHEMA};
+
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 const ATTRIBUTES: &str = r#"[{"key":"app.user_id","kind":"caller_id"}]"#;
-
-const SCHEMA: &str = "
-CREATE TABLE principals (id TEXT PRIMARY KEY);
-CREATE TABLE owners (id TEXT PRIMARY KEY);
-CREATE TABLE ownables (id TEXT PRIMARY KEY, owner_id TEXT REFERENCES owners(id));
-CREATE TABLE memberships (
-    owner_id TEXT NOT NULL REFERENCES owners(id),
-    member_id TEXT NOT NULL REFERENCES principals(id),
-    role TEXT NOT NULL,
-    PRIMARY KEY (owner_id, member_id));
-CREATE TABLE ownable_ancestors (
-    ownable TEXT NOT NULL REFERENCES ownables(id),
-    owner TEXT NOT NULL REFERENCES owners(id),
-    PRIMARY KEY (ownable, owner));
-CREATE TABLE orders (id TEXT PRIMARY KEY REFERENCES ownables(id), title TEXT);
-ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-";
-
-const NESTED: &str = "EXISTS (
-    SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
-    AND EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = a.owner
-        AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read'))";
 
 const JOINED: &str = "EXISTS (
     SELECT 1 FROM ownable_ancestors a JOIN memberships m ON m.owner_id = a.owner

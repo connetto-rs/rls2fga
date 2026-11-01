@@ -15,7 +15,8 @@ mod support;
 
 use support::footgun::{
     assert_model_is_internally_consistent, db_of, docs_read_definition, is_structural_type,
-    relation_definition, relation_definitions, translator, tuples_reading_from, type_names,
+    overlength_name_schema, relation_definition, relation_definitions, translator,
+    tuples_reading_from, type_names,
 };
 
 const COLLIDING_SCHEMAS: &str = r"
@@ -518,24 +519,7 @@ CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_user);
 /// unusable rather than just that relation.
 #[test]
 fn generated_names_respect_openfga_length_limits() {
-    let long_column = "c".repeat(60);
-    let long_table = "t".repeat(60);
-    let long_parent = "p".repeat(60);
-    let db = db_of(&format!(
-        "CREATE TABLE {long_parent}(id UUID PRIMARY KEY, owner_id UUID);\n\
-         ALTER TABLE {long_parent} ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY parent_sel ON {long_parent} FOR SELECT USING (owner_id = current_user);\n\
-         CREATE TABLE {long_table}(\n\
-           id UUID PRIMARY KEY,\n\
-           {long_column}_id UUID,\n\
-           parent_ref UUID REFERENCES {long_parent}(id)\n\
-         );\n\
-         ALTER TABLE {long_table} ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY own_sel ON {long_table} FOR SELECT USING ({long_column}_id = current_user);\n\
-         CREATE POLICY inherit_upd ON {long_table} FOR UPDATE TO some_long_reporting_role USING (\n\
-           EXISTS (SELECT 1 FROM {long_parent} p\n\
-                   WHERE p.id = {long_table}.parent_ref AND p.owner_id = current_user));\n"
-    ));
+    let db = db_of(&overlength_name_schema(Some("some_long_reporting_role")));
     let dsl = translator(ConfidenceLevel::B)
         .translate(&db)
         .expect("translation should plan")

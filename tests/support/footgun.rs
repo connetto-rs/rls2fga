@@ -57,6 +57,48 @@ pub(crate) fn gated_tables(count: usize) -> String {
         .collect()
 }
 
+/// The open read and the `app.bot_list` cap on `paper_shares` and `tiers`, for a schema
+/// that has already created both tables.
+pub(crate) const OPEN_PLUS_CAP_BOT_LIST_GATES: &str = "
+ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shares_open ON paper_shares FOR SELECT USING (true);
+CREATE POLICY shares_cap ON paper_shares AS RESTRICTIVE FOR SELECT USING (
+    'paper_shares:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+);
+
+ALTER TABLE tiers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tiers_open ON tiers FOR SELECT USING (true);
+CREATE POLICY tiers_cap ON tiers AS RESTRICTIVE FOR SELECT USING (
+    'tiers:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+);
+";
+
+/// A `parent` and its `child` with 60-character names that over-run `OpenFGA`'s limits,
+/// the update policy addressed to `role` when given.
+pub(crate) fn overlength_name_schema(role: Option<&str>) -> String {
+    let long_column = "c".repeat(60);
+    let long_table = "t".repeat(60);
+    let long_parent = "p".repeat(60);
+    format!(
+        "CREATE TABLE {long_parent}(id UUID PRIMARY KEY, owner_id UUID);\n\
+         ALTER TABLE {long_parent} ENABLE ROW LEVEL SECURITY;\n\
+         CREATE POLICY parent_sel ON {long_parent} FOR SELECT USING (owner_id = current_user);\n\
+         CREATE TABLE {long_table}(\n\
+           id UUID PRIMARY KEY,\n\
+           {long_column}_id UUID,\n\
+           parent_ref UUID REFERENCES {long_parent}(id)\n\
+         );\n\
+         ALTER TABLE {long_table} ENABLE ROW LEVEL SECURITY;\n\
+         CREATE POLICY own_sel ON {long_table} FOR SELECT USING ({long_column}_id = current_user);\n\
+         CREATE POLICY inherit_upd ON {long_table} FOR UPDATE{role_clause} USING (\n\
+           EXISTS (SELECT 1 FROM {long_parent} p\n\
+                   WHERE p.id = {long_table}.parent_ref AND p.owner_id = current_user));\n",
+        role_clause = role.map(|role| format!(" TO {role}")).unwrap_or_default()
+    )
+}
+
 /// The `define <name>: <body>` lines inside `type <type_name>`, in declaration order.
 pub(crate) fn defines_in_type<'a>(dsl: &'a str, type_name: &str) -> Vec<(&'a str, &'a str)> {
     let mut in_type = false;
@@ -371,6 +413,110 @@ pub(crate) const MEMBERSHIP_SCHEMA: &str = "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT, role TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+";
+
+/// The `docs` table whose read policy checks `memberships` and nests a read of the
+/// protected quoted `"Memberships"` table.
+pub(crate) const QUOTED_NESTED_MEMBERSHIP_SCHEMA: &str = r#"
+CREATE TABLE docs(id TEXT PRIMARY KEY);
+CREATE TABLE memberships(doc_id TEXT REFERENCES docs(id), user_id TEXT);
+CREATE TABLE "Memberships"(doc_id TEXT REFERENCES docs(id));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE "Memberships" ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_members ON docs FOR SELECT USING (
+  EXISTS (
+    SELECT 1 FROM memberships m
+    WHERE m.doc_id = docs.id
+      AND m.user_id = current_user
+      AND EXISTS (
+        SELECT 1 FROM "Memberships"
+      )
+  )
+);
+"#;
+
+/// Two `role_threshold` functions, each with its own grant table and its own
+/// `team_membership` table, beside the `users` and `docs` tables they read.
+pub(crate) const TWO_ROLE_THRESHOLD_SCHEMA: &str = "
+CREATE TABLE users(id UUID PRIMARY KEY);
+CREATE TABLE teams(id UUID PRIMARY KEY);
+CREATE TABLE team_members_a(team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id), PRIMARY KEY(team_id, user_id));
+CREATE TABLE team_members_b(team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id), PRIMARY KEY(team_id, user_id));
+CREATE TABLE owner_grants_a(grantee_owner_id UUID NOT NULL, granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL);
+CREATE TABLE owner_grants_b(grantee_owner_id UUID NOT NULL, granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL);
+CREATE TABLE docs_a(id UUID PRIMARY KEY, owner_id UUID NOT NULL);
+CREATE TABLE docs_b(id UUID PRIMARY KEY, owner_id UUID NOT NULL);
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE AS 'SELECT current_setting(''app.current_user_id'')::uuid';
+CREATE FUNCTION get_role_a(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE AS '
+    SELECT COALESCE(MAX(role), 0) FROM (
+        SELECT og.role_id AS role FROM owner_grants_a og
+        WHERE og.granted_owner_id = target_owner_id
+        AND (og.grantee_owner_id = user_uuid OR og.grantee_owner_id IN (
+            SELECT tm.team_id FROM team_members_a tm WHERE tm.user_id = user_uuid))
+    ) sub';
+CREATE FUNCTION get_role_b(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE AS '
+    SELECT COALESCE(MAX(role), 0) FROM (
+        SELECT og.role_id AS role FROM owner_grants_b og
+        WHERE og.granted_owner_id = target_owner_id
+        AND (og.grantee_owner_id = user_uuid OR og.grantee_owner_id IN (
+            SELECT tm.team_id FROM team_members_b tm WHERE tm.user_id = user_uuid))
+    ) sub';
+ALTER TABLE docs_a ENABLE ROW LEVEL SECURITY;
+ALTER TABLE docs_b ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_a_select ON docs_a FOR SELECT TO PUBLIC
+    USING (get_role_a(auth_current_user_id(), owner_id) >= 2);
+CREATE POLICY docs_b_select ON docs_b FOR SELECT TO PUBLIC
+    USING (get_role_b(auth_current_user_id(), owner_id) >= 2);
+";
+
+/// The registry declaring both `role_threshold` functions and the caller accessor.
+pub(crate) const TWO_ROLE_THRESHOLD_REGISTRY: &str = r#"{
+      "get_role_a": {
+        "kind": "role_threshold", "user_param_index": 0, "resource_param_index": 1,
+        "role_levels": {"viewer": 2, "editor": 3, "admin": 4},
+        "grant_table": "owner_grants_a", "grant_grantee_col": "grantee_owner_id",
+        "grant_resource_col": "granted_owner_id", "grant_role_col": "role_id",
+        "team_membership": {"table": "team_members_a", "user_col": "user_id", "team_col": "team_id"}
+      },
+      "get_role_b": {
+        "kind": "role_threshold", "user_param_index": 0, "resource_param_index": 1,
+        "role_levels": {"viewer": 2, "editor": 3, "admin": 4},
+        "grant_table": "owner_grants_b", "grant_grantee_col": "grantee_owner_id",
+        "grant_resource_col": "granted_owner_id", "grant_role_col": "role_id",
+        "team_membership": {"table": "team_members_b", "user_col": "user_id", "team_col": "team_id"}
+      },
+      "auth_current_user_id": {"kind": "current_user_accessor", "returns": "uuid"}
+    }"#;
+
+/// One `memberships` join table linking `docs` and `projects` to `owners` through
+/// different columns.
+pub(crate) const TWO_MEMBERSHIP_COLUMNS_SCHEMA: &str = "
+CREATE TABLE principals (id TEXT PRIMARY KEY);
+CREATE TABLE owners (id TEXT PRIMARY KEY);
+CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT REFERENCES owners(id));
+CREATE TABLE projects (id TEXT PRIMARY KEY, owner_id TEXT REFERENCES owners(id));
+CREATE TABLE memberships (
+    id TEXT NOT NULL,
+    owner_id TEXT NOT NULL REFERENCES owners(id),
+    lead_id TEXT NOT NULL REFERENCES owners(id),
+    user_id TEXT NOT NULL REFERENCES principals(id),
+    expires_at TIMESTAMPTZ,
+    PRIMARY KEY (id));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_select ON docs FOR SELECT USING (
+    EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = docs.owner_id
+        AND m.user_id = current_setting('app.user_id', true) AND m.expires_at > now()));
+CREATE POLICY projects_select ON projects FOR SELECT USING (
+    EXISTS (SELECT 1 FROM memberships m WHERE m.lead_id = projects.owner_id
+        AND m.user_id = ANY(string_to_array(current_setting('app.subjects', true), ','))));
 ";
 
 /// Model and tuples for a single `SELECT` policy over `MEMBERSHIP_SCHEMA`.

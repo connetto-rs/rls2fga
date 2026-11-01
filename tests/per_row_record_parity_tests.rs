@@ -992,32 +992,6 @@ async fn a_clock_gated_record_is_decoded_from_its_own_row() {
     }
 }
 
-/// The conditional replay corner: a share row carrying a residual only SQL can
-/// evaluate keeps its query, keyed on a foreign column while its rows carry a
-/// condition. One changed share replays every live share of the paper it names, which
-/// is required rather than sloppy: the object is the paper and its grant set is the
-/// union over its live shares, so replaying a single share row would drop the others.
-const EXPIRING_SHARE_SCHEMA: &str = "
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (
-    paper_id INT,
-    viewer TEXT,
-    expires_at TIMESTAMPTZ,
-    PRIMARY KEY (paper_id, viewer)
-);
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_p ON papers FOR SELECT USING (
-    owner = current_setting('app.user_id', true)
-    OR EXISTS (
-        SELECT 1
-        FROM paper_shares s
-        WHERE s.paper_id = papers.id
-          AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
-          AND s.expires_at > now()
-    )
-);
-";
-
 /// Two papers carry a live share, one an expired share and one none, so a replay has
 /// something to leave out in both directions and the union over every key still has to
 /// reproduce the whole table.
@@ -1034,13 +1008,13 @@ INSERT INTO paper_shares (paper_id, viewer, expires_at) VALUES
 async fn an_expiring_share_settles_and_matches_its_own_sql() {
     let (_container, mut conn) = start_postgres().await;
 
-    conn.batch_execute(EXPIRING_SHARE_SCHEMA)
+    conn.batch_execute(support::EXPIRING_SHARE_SCHEMA)
         .expect("failed to apply the expiring share schema");
     conn.batch_execute(EXPIRING_SHARE_SEED)
         .expect("failed to seed the expiring shares");
 
     let (classified, db, registry) = support::classify_sql_with_session_attributes(
-        EXPIRING_SHARE_SCHEMA,
+        support::EXPIRING_SHARE_SCHEMA,
         r#"[
       { "key": "app.user_id", "kind": "caller_id" },
       { "key": "app.subjects", "kind": "set_attribute" }
