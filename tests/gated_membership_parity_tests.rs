@@ -63,12 +63,7 @@ async fn assert_exact(cluster: &Cluster, mut case: ParityCase, pairs: &[(&str, &
         if from_rows {
             case.name.push_str("-rows");
         }
-        let run = tokio::time::timeout(
-            Duration::from_secs(120),
-            support::parity::run(cluster, &case),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name));
+        let run = support::parity::run_before(cluster, &case, Duration::from_secs(120)).await;
         for (subject, object, allowed) in pairs {
             assert_postgres(
                 &case,

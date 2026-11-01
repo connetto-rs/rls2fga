@@ -221,12 +221,7 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
         if from_rows {
             case.name.push_str("-rows");
         }
-        let run = tokio::time::timeout(
-            Duration::from_secs(120),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name));
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(120)).await;
         assert_agrees(&case, &run);
         for (subject, object, allowed) in [
             ("entry", "orders:1", true),

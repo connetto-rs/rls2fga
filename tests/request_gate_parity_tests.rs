@@ -157,12 +157,7 @@ async fn request_gate_parity() {
     for from_rows in [false, true] {
         let mut case = case(if from_rows { "gates-rows" } else { "gates" });
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name));
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(300)).await;
         for (subject, object, allowed) in [
             ("entry", "t0:entry", true),
             ("entry", "t1:entry", false),
@@ -272,12 +267,7 @@ async fn gated_aggregate_parity() {
         )
         .with_attributes(ATTRIBUTES);
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name));
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(300)).await;
         for (subject, object, allowed) in [
             ("both", "papers:both-hi", true),
             ("both", "papers:both-lo", false),

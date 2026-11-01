@@ -20,6 +20,15 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (author_id = current_user);
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
 ";
 
+/// A `docs` the owner reads by `SELECT`, with an `UPDATE` whose only stored clause is
+/// `WITH CHECK`.
+const CLAUSELESS_UPDATE: &str = r"
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_user);
+";
+
 /// Returning a table column, or naming an `ON CONFLICT` target, also checks the
 /// new row against the `SELECT` policies, so inserting a row the author cannot
 /// read back fails even though plain `INSERT` succeeds.
@@ -257,14 +266,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT;
 /// onto the `USING` side grants what `PostgreSQL` refuses.
 #[test]
 fn an_update_policy_with_no_using_clause_updates_no_row() {
-    let db = db_of(
-        r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_user);
-",
-    );
+    let db = db_of(CLAUSELESS_UPDATE);
     let model = translator(ConfidenceLevel::A)
         .translate(&db)
         .expect("translation should plan")
@@ -283,14 +285,7 @@ CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_user);
 /// `PostgreSQL` grants the update, which is the opposite of the truth.
 #[test]
 fn a_command_a_policy_names_without_the_clause_it_needs_is_reported_as_unpolicied() {
-    let db = db_of(
-        r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_user);
-",
-    );
+    let db = db_of(CLAUSELESS_UPDATE);
     let model = translator(ConfidenceLevel::A)
         .translate(&db)
         .expect("translation should plan")
@@ -415,14 +410,7 @@ CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user);
 /// they already wrote. The report has to name the one that stores no clause.
 #[test]
 fn report_names_the_policy_whose_clause_is_absent() {
-    let db = db_of(
-        r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_user);
-",
-    );
+    let db = db_of(CLAUSELESS_UPDATE);
     let model = translator(ConfidenceLevel::A)
         .translate(&db)
         .expect("translation should plan")

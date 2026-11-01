@@ -251,12 +251,12 @@ async fn indirect_membership_live_parity() {
                     }).collect(),
                 ).with_attributes(ATTRIBUTES);
                 case.loading_from_rows = from_rows;
-                let run = tokio::time::timeout(
+                let run = support::parity::run_before(
+                    &cluster,
+                    &case,
                     core::time::Duration::from_secs(300),
-                    support::parity::run(&cluster, &case),
                 )
-                .await
-                .expect("indirect membership parity deadline");
+                .await;
                 assert_postgres(
                     &case,
                     &run,
@@ -335,12 +335,12 @@ async fn indirect_and_direct_membership_sources_stay_separate_in_both_policy_ord
                 )
                 .with_attributes(ATTRIBUTES);
                 case.loading_from_rows = from_rows;
-                let run = tokio::time::timeout(
+                let run = support::parity::run_before(
+                    &cluster,
+                    &case,
                     core::time::Duration::from_secs(300),
-                    support::parity::run(&cluster, &case),
                 )
-                .await
-                .expect("source isolation parity deadline");
+                .await;
                 for (subject, select, delete) in [
                     ("reader", true, false),
                     ("direct", false, false),
@@ -409,12 +409,9 @@ async fn indirect_memberships_keep_independent_clock_conditions() {
             }).collect(),
         ).with_attributes(ATTRIBUTES);
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            core::time::Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .expect("clock condition parity deadline");
+        let run =
+            support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
+                .await;
         for (subject, select, delete) in [
             ("reader", true, false),
             ("blocked", false, false),
@@ -489,12 +486,9 @@ async fn indirect_membership_witnesses_never_mix_rows() {
              FROM owners o CROSS JOIN principals p",
         );
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            core::time::Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .expect("witness parity deadline");
+        let run =
+            support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
+                .await;
         assert_postgres(
             &case,
             &run,
@@ -560,12 +554,9 @@ async fn indirect_membership_composite_owner_keys_preserve_tenant_identity() {
             }).collect(),
         ).with_attributes(ATTRIBUTES);
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            core::time::Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .expect("composite owner parity deadline");
+        let run =
+            support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
+                .await;
         for (subject, object) in [
             ("reader", "orders:o1"),
             ("other", "orders:o2"),
@@ -978,12 +969,9 @@ async fn indirect_membership_request_gated_hop_live_parity() {
         )
         .with_attributes(GATE_ATTRIBUTES);
             case.loading_from_rows = from_rows;
-            let run = tokio::time::timeout(
-                core::time::Duration::from_secs(300),
-                support::parity::run(&cluster, &case),
-            )
-            .await
-            .expect("request gate parity deadline");
+            let run =
+                support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
+                    .await;
             assert_postgres(
                 &case,
                 &run,
@@ -1050,12 +1038,9 @@ async fn indirect_membership_sql_residual_live_parity() {
         )
         .with_attributes(ATTRIBUTES);
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            core::time::Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .expect("sql residual parity deadline");
+        let run =
+            support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
+                .await;
         assert_postgres(
             &case,
             &run,
@@ -1113,12 +1098,9 @@ async fn indirect_membership_quoted_owner_column_live_parity() {
         )
         .with_attributes(ATTRIBUTES);
         case.loading_from_rows = from_rows;
-        let run = tokio::time::timeout(
-            core::time::Duration::from_secs(300),
-            support::parity::run(&cluster, &case),
-        )
-        .await
-        .expect("quoted column parity deadline");
+        let run =
+            support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
+                .await;
         assert_postgres(
             &case,
             &run,

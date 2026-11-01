@@ -85,18 +85,20 @@ fn relation(dsl: &str, relation: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+/// A `docs` read through a `folders` owner or through the bit flag only the oracle answers.
+const BIT_FLAG_SCHEMA: &str = "CREATE TABLE folders(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
+                               CREATE TABLE docs(id UUID PRIMARY KEY, folder_id UUID REFERENCES folders(id));\n\
+                               ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+                               CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\
+                               SELECT 1 FROM folders f WHERE f.id = docs.folder_id \
+                               AND (f.owner_id = current_user OR (f.bits & 2) = 2)));\n";
+
 /// A refusal sits two levels down here: the parent join is recognized, its parent-side
 /// rule is an `OR`, and only one branch of that `OR` is refused. A walk that knows only
 /// composites never reaches it, and nothing says so: the model just denies.
 #[test]
 fn a_refusal_nested_under_a_parent_join_reaches_the_oracle() {
-    let schema = "CREATE TABLE folders(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
-                  CREATE TABLE docs(id UUID PRIMARY KEY, folder_id UUID REFERENCES folders(id));\n\
-                  ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\
-                  SELECT 1 FROM folders f WHERE f.id = docs.folder_id \
-                  AND (f.owner_id = current_user OR (f.bits & 2) = 2)));\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = parse_schema(BIT_FLAG_SCHEMA).expect("schema parses");
 
     let mut classified = translator().classify(&db);
     let answered = consult_oracle(&mut classified, &BitFlagIsPublic);
@@ -125,13 +127,7 @@ fn a_refusal_nested_under_a_parent_join_reaches_the_oracle() {
 /// dragged it to, and the filter drops the clause for a refusal that no longer exists.
 #[test]
 fn every_pattern_enclosing_an_answered_refusal_is_regraded() {
-    let schema = "CREATE TABLE folders(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
-                  CREATE TABLE docs(id UUID PRIMARY KEY, folder_id UUID REFERENCES folders(id));\n\
-                  ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\
-                  SELECT 1 FROM folders f WHERE f.id = docs.folder_id \
-                  AND (f.owner_id = current_user OR (f.bits & 2) = 2)));\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = parse_schema(BIT_FLAG_SCHEMA).expect("schema parses");
 
     let mut classified = translator().classify(&db);
     let before = classified[0]
@@ -183,13 +179,7 @@ fn an_oracle_answer_below_the_threshold_is_still_dropped() {
         }
     }
 
-    let schema = "CREATE TABLE folders(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
-                  CREATE TABLE docs(id UUID PRIMARY KEY, folder_id UUID REFERENCES folders(id));\n\
-                  ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\
-                  SELECT 1 FROM folders f WHERE f.id = docs.folder_id \
-                  AND (f.owner_id = current_user OR (f.bits & 2) = 2)));\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = parse_schema(BIT_FLAG_SCHEMA).expect("schema parses");
 
     let mut classified = translator().classify(&db);
     let answered = consult_oracle(&mut classified, &Unsure);
