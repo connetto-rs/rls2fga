@@ -7,6 +7,7 @@ use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::{FunctionRegistry, SessionAttribute};
 use crate::classifier::patterns::*;
 use crate::classifier::readability::{table_readability, ReadGate, TableReadability};
+use crate::generator::caller_roles::{CallerRoles, Settlement};
 use crate::generator::db_lookup::{
     column_is_nullable, column_kind, composite_primary_key_columns, resolve_row_identity,
     row_uniquely_keys, single_identity_column,
@@ -594,6 +595,9 @@ pub struct GeneratorSettings {
     pub well_known: WellKnownTypes,
     /// Who completes a comparison against a declared caller set.
     pub caller_set: CallerSetCompletion,
+    /// The roles every caller runs as, against which each `TO` clause is settled.
+    /// Without them a `TO` clause asks the consumer to load every role it names.
+    pub caller_roles: Option<CallerRoles>,
 }
 
 impl Default for GeneratorSettings {
@@ -602,6 +606,7 @@ impl Default for GeneratorSettings {
             request_time_parameter: ConditionParameterName::derived(REQUEST_TIME_PARAMETER),
             well_known: WellKnownTypes::default(),
             caller_set: CallerSetCompletion::Request,
+            caller_roles: None,
         }
     }
 }
@@ -1307,6 +1312,15 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                 return;
             }
         }
+        let settled = match &self.settings.caller_roles {
+            Some(callers) if !scope_unknowable && !cp.scoped_roles().is_empty() => {
+                match self.settle_scope(callers, cp) {
+                    Some(roles) => Some(roles),
+                    None => return,
+                }
+            }
+            _ => None,
+        };
         if let Some(ref c) = cp.using_classification {
             self.confidence_summary
                 .push((cp.name().to_string(), c.confidence));
@@ -1319,7 +1333,7 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
         let scoped_roles: &[String] = if scope_unknowable {
             &[]
         } else {
-            cp.scoped_roles()
+            settled.as_deref().unwrap_or(cp.scoped_roles())
         };
         // A barrier is folded as `(base and rule) or (base but not member from scope)`, so
         // an unfillable scope excuses everyone from it. Binding everyone instead denies
@@ -1454,6 +1468,39 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
             );
         });
         dedup_notes_added_since(self.notes, notes_before);
+    }
+
+    /// The caller roles `cp`'s `TO` clause reaches, empty where it reaches every caller or
+    /// binds every caller, and [`None`] where nothing of the policy is left to translate.
+    fn settle_scope(
+        &mut self,
+        callers: &CallerRoles,
+        cp: &ClassifiedPolicy,
+    ) -> Option<Vec<String>> {
+        match callers.settle(cp.scoped_roles(), self.db) {
+            Settlement::Everyone => Some(Vec::new()),
+            Settlement::Callers(roles) => Some(roles),
+            Settlement::Nobody => {
+                self.notes
+                    .push(TranslationNote::PolicyAppliesToNoCallerRole {
+                        policy: cp.name().to_string(),
+                        roles: cp.scoped_roles().to_vec(),
+                    });
+                None
+            }
+            Settlement::Unsettled(roles) => {
+                self.notes.push(TranslationNote::PolicyRoleUnsettled {
+                    policy: cp.name().to_string(),
+                    roles,
+                });
+                if cp.mode() == PolicyMode::Permissive {
+                    mark_narrowed(self.plan, &targets_a_policy_feeds(cp));
+                    None
+                } else {
+                    Some(Vec::new())
+                }
+            }
+        }
     }
 
     /// Compose each action's rule from its buckets and assign the relations it answers for.

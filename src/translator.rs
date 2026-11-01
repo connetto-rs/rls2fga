@@ -9,6 +9,7 @@ use crate::classifier::function_registry::{FunctionRegistry, RegistryLoadError, 
 use crate::classifier::patterns::{ClassifiedPolicy, ConfidenceLevel};
 use crate::classifier::policy_classifier::classify_policies_with_effective_registry_and_settings;
 use crate::generator::action_relations::action_relations;
+use crate::generator::caller_roles::CallerRoles;
 use crate::generator::json_model::{json_model_from_plan, AuthorizationModel};
 use crate::generator::model_generator::{
     build_filtered_schema_plan, render_dsl_from_plan, GeneratorSettings, SchemaPlan,
@@ -127,6 +128,17 @@ impl TranslatorBuilder {
     #[must_use]
     pub fn with_min_confidence(mut self, min_confidence: ConfidenceLevel) -> Self {
         self.min_confidence = min_confidence;
+        self
+    }
+
+    /// Declare the database roles every caller's transaction runs as.
+    ///
+    /// Each `TO` clause is then settled against them through the role memberships the
+    /// schema declares. A policy every caller role reaches reads as unscoped, one some
+    /// reach is scoped to those caller roles, and one none reaches is left out.
+    #[must_use]
+    pub fn with_caller_roles(mut self, roles: CallerRoles) -> Self {
+        self.generator.caller_roles = Some(roles);
         self
     }
 
