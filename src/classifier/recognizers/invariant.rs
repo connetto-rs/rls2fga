@@ -10,7 +10,7 @@ use core::cmp::Ordering;
 use core::ops::ControlFlow;
 use sqlparser::ast::{
     BinaryOperator, Expr, Ident, InTarget, ObjectName, ObjectNamePart, Query, SelectItem, SetExpr,
-    TableAlias, TableFactor, TableInheritance, Value, Visit, VisitMut, Visitor, VisitorMut,
+    TableAlias, TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 use super::attribute::{attribute_operator, ROW_PURE_FUNCTIONS};
@@ -180,7 +180,8 @@ fn type_family_is(data_type: &str, families: &[&str]) -> bool {
     families.iter().any(|family| terminal.starts_with(family))
 }
 
-/// The plain table a `TableFactor` names, or `None` where a clause thins the rows it reads.
+/// The table a `FROM` item names, or `None` where the item adds more than an alias or an
+/// inheritance marker.
 ///
 /// Spelled exhaustively so a field the parser adds to a table name is a compile error here
 /// rather than a read admitted without a proof.
@@ -196,7 +197,8 @@ pub(crate) fn plain_table(factor: &TableFactor) -> Option<PlainTable<'_>> {
         with_ordinality: false,
         partitions,
         index_directives,
-        inheritance,
+        // Rows inheriting tables add are read under the parent's policies.
+        inheritance: _,
     } = factor
     else {
         return None;
@@ -207,19 +209,16 @@ pub(crate) fn plain_table(factor: &TableFactor) -> Option<PlainTable<'_>> {
     Some(PlainTable {
         name,
         alias: alias.as_ref(),
-        inheritance: inheritance.as_ref(),
     })
 }
 
-/// A table named in a `FROM` with no clause that thins the rows it reads.
+/// A table named in a `FROM`, with the alias the policy gave it.
 #[derive(Debug, Clone)]
 pub(crate) struct PlainTable<'a> {
     /// The table, as the policy spells it.
     pub(crate) name: &'a ObjectName,
     /// The alias the policy gave the table, absent where it gave none.
     pub(crate) alias: Option<&'a TableAlias>,
-    /// The `ONLY` or `*` marker, absent where the policy gave none.
-    pub(crate) inheritance: Option<&'a TableInheritance>,
 }
 
 /// Every relation named in a `FROM`, refusing non-plain tables and index directives.

@@ -320,13 +320,6 @@ fn plain_relation_sources(select: &Select) -> Option<Vec<(&TableFactor, Relation
 
 fn plain_relation_factor(factor: &TableFactor) -> Option<RelationSource> {
     let plain = plain_table(factor)?;
-    // ONLY keeps the child tables' rows out, which a plain read includes.
-    if !matches!(
-        plain.inheritance,
-        None | Some(TableInheritance::IncludeDescendants)
-    ) {
-        return None;
-    }
     if plain.alias.is_some_and(|alias| !alias.columns.is_empty()) {
         return None;
     }
