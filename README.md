@@ -161,7 +161,7 @@ Membership tuple relations are isolated by table, correlation, user column, pred
 
 ## Runtime data you have to supply
 
-A policy scoped `TO analyst` keeps that scope through a `pg_role` type, so load `usage` tuples mapping users to `pg_role` objects or those policies match nobody. A consumer that runs every caller as one of a few database roles names them with `TranslatorBuilder::with_caller_roles`. Each `TO` clause is then settled through the role memberships the schema declares, so the scope names only those caller roles, a policy every caller role reaches reads as unscoped, and one none reaches is left out with an `Exempt` note.
+A policy scoped `TO analyst` keeps that scope through a `pg_role` type, so load `usage` tuples mapping users to `pg_role` objects or those policies match nobody. A consumer that runs every caller as one of a few database roles names them with `TranslatorBuilder::with_caller_roles`. Each `TO` clause is then settled through the role memberships the schema declares, so the scope names only those caller roles, a policy every caller role reaches reads as unscoped, and one none reaches is left out with an `Exempt` note. The roles a membership table's read policies name are settled the same way, and a membership table no caller role may read grants nothing.
 
 A guard against statement time such as `expires_at > now()` cannot be a tuple, since whatever it decided when written stays decided. It becomes an `OpenFGA` condition instead: the row's value travels with the tuple and every check must carry the time in its context under `request_time`, renamed by `TranslatorBuilder::with_request_time_parameter`. Nothing computes it for you, so the clock reading stays where it can be audited.
 
