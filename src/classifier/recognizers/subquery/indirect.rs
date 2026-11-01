@@ -184,17 +184,16 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
     for conjunct in &link_residuals {
         let mut normalized = (*conjunct).clone();
         strip_qualifier_from_expr(&mut normalized, &link.name, link.alias.as_deref());
-        let relations =
-            residual_relations(&mut normalized, Some(db), registry, &link_scope, state)?;
-        let residual = residual_predicate_reading(&normalized, relations);
+        let residual = residual_admitted(
+            &mut normalized,
+            Some(db),
+            registry,
+            &link_scope,
+            state,
+            &link_zoned,
+        )?;
         // A request filter here would gate every member of the owner.
         if residual.request.is_some() {
-            return None;
-        }
-        if residual.relations.is_empty()
-            && residual.request.is_none()
-            && !conjunct_reads_only_the_row(&normalized, &link.columns, &link_zoned)
-        {
             return None;
         }
         link_extras.push(residual);
@@ -718,14 +717,8 @@ fn far_variant_extras<DB: DatabaseLike>(
                 right: Box::new(item.clone()),
             };
             strip_qualifier_from_expr(&mut equality, scope.table, scope.alias);
-            let relations = residual_relations(&mut equality, Some(db), registry, scope, state)?;
-            let residual = residual_predicate_reading(&equality, relations);
-            if residual.relations.is_empty()
-                && residual.request.is_none()
-                && !conjunct_reads_only_the_row(&equality, scope.columns, zoned)
-            {
-                return None;
-            }
+            let residual =
+                residual_admitted(&mut equality, Some(db), registry, scope, state, zoned)?;
             group.push(residual);
         }
         groups.push(group);
