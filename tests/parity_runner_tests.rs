@@ -15,7 +15,12 @@ use rls2fga::types::{ActionAnswer, ActionStatement};
 
 mod support;
 
+use support::footgun::{
+    QUOTED_NESTED_MEMBERSHIP_SCHEMA, TWO_MEMBERSHIP_COLUMNS_SCHEMA, TWO_ROLE_THRESHOLD_REGISTRY,
+    TWO_ROLE_THRESHOLD_SCHEMA,
+};
 use support::parity::{assert_agrees, Cluster, Mutations, ParityCase, Principal};
+use support::EXPIRING_SHARE_SCHEMA;
 
 /// One case, ready to run, beside the name a failure reports.
 type Case = (&'static str, Pin<Box<dyn Future<Output = ()> + Send>>);
@@ -419,23 +424,7 @@ CREATE POLICY docs_update ON docs FOR UPDATE
 async fn a_nested_protected_read_denies_on_both_sides(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-quoted-nested-membership",
-        r#"
-CREATE TABLE docs(id TEXT PRIMARY KEY);
-CREATE TABLE memberships(doc_id TEXT REFERENCES docs(id), user_id TEXT);
-CREATE TABLE "Memberships"(doc_id TEXT REFERENCES docs(id));
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE "Memberships" ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_members ON docs FOR SELECT USING (
-  EXISTS (
-    SELECT 1 FROM memberships m
-    WHERE m.doc_id = docs.id
-      AND m.user_id = current_user
-      AND EXISTS (
-        SELECT 1 FROM "Memberships"
-      )
-  )
-);
-"#,
+        QUOTED_NESTED_MEMBERSHIP_SCHEMA,
         &[
             r#"INSERT INTO docs(id) VALUES ('d1');
                INSERT INTO memberships(doc_id, user_id) VALUES ('d1', 'app_reader');
@@ -2720,26 +2709,7 @@ CREATE POLICY docs_grace ON docs FOR SELECT USING (expires_at > now() - interval
 async fn an_expiring_share_leaves_the_owner_arm_alone(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-expiring-share-condition",
-        r"
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (
-    paper_id INT,
-    viewer TEXT,
-    expires_at TIMESTAMPTZ,
-    PRIMARY KEY (paper_id, viewer)
-);
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_p ON papers FOR SELECT USING (
-    owner = current_setting('app.user_id', true)
-    OR EXISTS (
-        SELECT 1
-        FROM paper_shares s
-        WHERE s.paper_id = papers.id
-          AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
-          AND s.expires_at > now()
-    )
-);
-",
+        EXPIRING_SHARE_SCHEMA,
         &[
             "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, 'bob');
              INSERT INTO paper_shares (paper_id, viewer, expires_at) VALUES
@@ -4080,27 +4050,7 @@ CREATE POLICY refused_insert ON refused FOR INSERT
 async fn a_witness_link_and_a_caller_set_gate_do_not_share_a_tupleset(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-witness-link-caller-set-gate",
-        "
-CREATE TABLE principals (id TEXT PRIMARY KEY);
-CREATE TABLE owners (id TEXT PRIMARY KEY);
-CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT REFERENCES owners(id));
-CREATE TABLE projects (id TEXT PRIMARY KEY, owner_id TEXT REFERENCES owners(id));
-CREATE TABLE memberships (
-    id TEXT NOT NULL,
-    owner_id TEXT NOT NULL REFERENCES owners(id),
-    lead_id TEXT NOT NULL REFERENCES owners(id),
-    user_id TEXT NOT NULL REFERENCES principals(id),
-    expires_at TIMESTAMPTZ,
-    PRIMARY KEY (id));
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_select ON docs FOR SELECT USING (
-    EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = docs.owner_id
-        AND m.user_id = current_setting('app.user_id', true) AND m.expires_at > now()));
-CREATE POLICY projects_select ON projects FOR SELECT USING (
-    EXISTS (SELECT 1 FROM memberships m WHERE m.lead_id = projects.owner_id
-        AND m.user_id = ANY(string_to_array(current_setting('app.subjects', true), ','))));
-",
+        TWO_MEMBERSHIP_COLUMNS_SCHEMA,
         &[
             "INSERT INTO principals VALUES ('alice'), ('bob'), ('carol')",
             "INSERT INTO owners VALUES ('A'), ('B')",
@@ -4211,51 +4161,12 @@ async fn distinct_team_membership_tables_do_not_share_access(cluster: Arc<Cluste
     const OWNER_B: &str = "00000000-0000-0000-0000-0000000000b2";
     let case = ParityCase::reading(
         "runner-distinct-team-membership-tables",
-        "
-CREATE TABLE users(id UUID PRIMARY KEY);
-CREATE TABLE teams(id UUID PRIMARY KEY);
-CREATE TABLE team_members_a(team_id UUID NOT NULL REFERENCES teams(id),
-    user_id UUID NOT NULL REFERENCES users(id), PRIMARY KEY(team_id, user_id));
-CREATE TABLE team_members_b(team_id UUID NOT NULL REFERENCES teams(id),
-    user_id UUID NOT NULL REFERENCES users(id), PRIMARY KEY(team_id, user_id));
-CREATE TABLE owner_grants_a(grantee_owner_id UUID NOT NULL, granted_owner_id UUID NOT NULL,
-    role_id INTEGER NOT NULL);
-CREATE TABLE owner_grants_b(grantee_owner_id UUID NOT NULL, granted_owner_id UUID NOT NULL,
-    role_id INTEGER NOT NULL);
-CREATE TABLE docs_a(id UUID PRIMARY KEY, owner_id UUID NOT NULL);
-CREATE TABLE docs_b(id UUID PRIMARY KEY, owner_id UUID NOT NULL);
-CREATE FUNCTION auth_current_user_id() RETURNS UUID
-    LANGUAGE sql STABLE AS 'SELECT current_setting(''app.current_user_id'')::uuid';
-CREATE FUNCTION get_role_a(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
-    LANGUAGE sql STABLE AS '
-    SELECT COALESCE(MAX(role), 0) FROM (
-        SELECT og.role_id AS role FROM owner_grants_a og
-        WHERE og.granted_owner_id = target_owner_id
-        AND (og.grantee_owner_id = user_uuid OR og.grantee_owner_id IN (
-            SELECT tm.team_id FROM team_members_a tm WHERE tm.user_id = user_uuid))
-    ) sub';
-CREATE FUNCTION get_role_b(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
-    LANGUAGE sql STABLE AS '
-    SELECT COALESCE(MAX(role), 0) FROM (
-        SELECT og.role_id AS role FROM owner_grants_b og
-        WHERE og.granted_owner_id = target_owner_id
-        AND (og.grantee_owner_id = user_uuid OR og.grantee_owner_id IN (
-            SELECT tm.team_id FROM team_members_b tm WHERE tm.user_id = user_uuid))
-    ) sub';
-ALTER TABLE docs_a ENABLE ROW LEVEL SECURITY;
-ALTER TABLE docs_b ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_a_select ON docs_a FOR SELECT TO PUBLIC
-    USING (get_role_a(auth_current_user_id(), owner_id) >= 2);
-CREATE POLICY docs_b_select ON docs_b FOR SELECT TO PUBLIC
-    USING (get_role_b(auth_current_user_id(), owner_id) >= 2);
-",
+        TWO_ROLE_THRESHOLD_SCHEMA,
         &[
             &format!("INSERT INTO users (id) VALUES ('{ALICE}'), ('{BOB}')"),
             &format!("INSERT INTO teams (id) VALUES ('{TEAM}')"),
             // Alice joins the team through function A's table only.
-            &format!(
-                "INSERT INTO team_members_a (team_id, user_id) VALUES ('{TEAM}', '{ALICE}')"
-            ),
+            &format!("INSERT INTO team_members_a (team_id, user_id) VALUES ('{TEAM}', '{ALICE}')"),
             // Bob joins the same team id, but through function B's table only.
             &format!("INSERT INTO team_members_b (team_id, user_id) VALUES ('{TEAM}', '{BOB}')"),
             // Only function B's grant table gives the team viewer access to owner_b.
@@ -4273,25 +4184,7 @@ CREATE POLICY docs_b_select ON docs_b FOR SELECT TO PUBLIC
             Principal::with_setting(BOB, "app_reader", "app.current_user_id", BOB),
         ],
     )
-    .with_registry(
-        r#"{
-          "get_role_a": {
-            "kind": "role_threshold", "user_param_index": 0, "resource_param_index": 1,
-            "role_levels": {"viewer": 2, "editor": 3, "admin": 4},
-            "grant_table": "owner_grants_a", "grant_grantee_col": "grantee_owner_id",
-            "grant_resource_col": "granted_owner_id", "grant_role_col": "role_id",
-            "team_membership": {"table": "team_members_a", "user_col": "user_id", "team_col": "team_id"}
-          },
-          "get_role_b": {
-            "kind": "role_threshold", "user_param_index": 0, "resource_param_index": 1,
-            "role_levels": {"viewer": 2, "editor": 3, "admin": 4},
-            "grant_table": "owner_grants_b", "grant_grantee_col": "grantee_owner_id",
-            "grant_resource_col": "granted_owner_id", "grant_role_col": "role_id",
-            "team_membership": {"table": "team_members_b", "user_col": "user_id", "team_col": "team_id"}
-          },
-          "auth_current_user_id": {"kind": "current_user_accessor", "returns": "uuid"}
-        }"#,
-    );
+    .with_registry(TWO_ROLE_THRESHOLD_REGISTRY);
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, allowed) in [
         // Alice joined the team only through function A's table, which function B never

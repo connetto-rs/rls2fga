@@ -13,7 +13,7 @@ use rls2fga::types::{records_from_row, ActionStatement, ConfidenceLevel, RowDeci
 
 mod support;
 
-use support::footgun::{db_of, gated_tables};
+use support::footgun::{db_of, gated_tables, OPEN_PLUS_CAP_BOT_LIST_GATES};
 use support::parity::{
     assert_agrees, assert_postgres, request_predicate_holds, Cluster, Mutations, ParityCase,
     Principal,
@@ -198,7 +198,9 @@ async fn request_gate_parity() {
 
 /// A grant whose residual compares against aggregates over two tables the request gates,
 /// the share table the membership reads and a second table only the residual reads.
-const AGGREGATES: &str = "
+fn gated_aggregate_schema() -> String {
+    format!(
+        "
 CREATE TABLE papers (id TEXT PRIMARY KEY);
 CREATE TABLE paper_shares (paper_id TEXT REFERENCES papers(id), viewer TEXT, weight NUMERIC,
                            PRIMARY KEY (paper_id, viewer));
@@ -211,19 +213,9 @@ CREATE POLICY paper_read ON papers FOR SELECT USING (
               AND s.viewer = current_setting('app.user_id', true)
               AND s.weight > (SELECT avg(weight) FROM paper_shares)
               AND s.weight > (SELECT max(cutoff) FROM tiers)));
-
-ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
-CREATE POLICY shares_open ON paper_shares FOR SELECT USING (true);
-CREATE POLICY shares_cap ON paper_shares AS RESTRICTIVE FOR SELECT USING (
-    'paper_shares:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
-    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
-
-ALTER TABLE tiers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tiers_open ON tiers FOR SELECT USING (true);
-CREATE POLICY tiers_cap ON tiers AS RESTRICTIVE FOR SELECT USING (
-    'tiers:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
-    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
-";
+{OPEN_PLUS_CAP_BOT_LIST_GATES}"
+    )
+}
 
 #[tokio::test]
 #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
@@ -254,7 +246,7 @@ async fn gated_aggregate_parity() {
             } else {
                 "aggregates"
             },
-            AGGREGATES,
+            &gated_aggregate_schema(),
             &[
                 &format!("{rows}INSERT INTO tiers VALUES ('gold', 5);"),
                 "CREATE ROLE app_rw LOGIN;
