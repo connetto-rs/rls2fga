@@ -1,4 +1,5 @@
 use super::*;
+use crate::classifier::recognizers::invariant::plain_table;
 use crate::types::AttributeLiteral;
 
 /// Recognize membership reached through a closure table.
@@ -318,29 +319,15 @@ fn plain_relation_sources(select: &Select) -> Option<Vec<(&TableFactor, Relation
 }
 
 fn plain_relation_factor(factor: &TableFactor) -> Option<RelationSource> {
-    let TableFactor::Table {
-        name: _,
-        alias,
-        args: None,
-        with_hints,
-        version: None,
-        with_ordinality: false,
-        partitions,
-        json_path: None,
-        sample: None,
-        index_directives,
-        inheritance: None | Some(TableInheritance::IncludeDescendants),
-    } = factor
-    else {
+    let plain = plain_table(factor)?;
+    // ONLY keeps the child tables' rows out, which a plain read includes.
+    if !matches!(
+        plain.inheritance,
+        None | Some(TableInheritance::IncludeDescendants)
+    ) {
         return None;
-    };
-    if !with_hints.is_empty()
-        || !partitions.is_empty()
-        || !index_directives.is_empty()
-        || alias
-            .as_ref()
-            .is_some_and(|alias| !alias.columns.is_empty())
-    {
+    }
+    if plain.alias.is_some_and(|alias| !alias.columns.is_empty()) {
         return None;
     }
     relation_source_from_table_factor(factor)

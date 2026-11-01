@@ -10,7 +10,7 @@ use core::cmp::Ordering;
 use core::ops::ControlFlow;
 use sqlparser::ast::{
     BinaryOperator, Expr, Ident, InTarget, ObjectName, ObjectNamePart, Query, SelectItem, SetExpr,
-    TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
+    TableAlias, TableFactor, TableInheritance, Value, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 use super::attribute::{attribute_operator, ROW_PURE_FUNCTIONS};
@@ -180,6 +180,48 @@ fn type_family_is(data_type: &str, families: &[&str]) -> bool {
     families.iter().any(|family| terminal.starts_with(family))
 }
 
+/// The plain table a `TableFactor` names, or `None` where a clause thins the rows it reads.
+///
+/// Spelled exhaustively so a field the parser adds to a table name is a compile error here
+/// rather than a read admitted without a proof.
+pub(crate) fn plain_table(factor: &TableFactor) -> Option<PlainTable<'_>> {
+    let TableFactor::Table {
+        name,
+        alias,
+        args: None,
+        version: None,
+        sample: None,
+        json_path: None,
+        with_hints,
+        with_ordinality: false,
+        partitions,
+        index_directives,
+        inheritance,
+    } = factor
+    else {
+        return None;
+    };
+    if !with_hints.is_empty() || !partitions.is_empty() || !index_directives.is_empty() {
+        return None;
+    }
+    Some(PlainTable {
+        name,
+        alias: alias.as_ref(),
+        inheritance: inheritance.as_ref(),
+    })
+}
+
+/// A table named in a `FROM` with no clause that thins the rows it reads.
+#[derive(Debug, Clone)]
+pub(crate) struct PlainTable<'a> {
+    /// The table, as the policy spells it.
+    pub(crate) name: &'a ObjectName,
+    /// The alias the policy gave the table, absent where it gave none.
+    pub(crate) alias: Option<&'a TableAlias>,
+    /// The `ONLY` or `*` marker, absent where the policy gave none.
+    pub(crate) inheritance: Option<&'a TableInheritance>,
+}
+
 /// Every relation named in a `FROM`, refusing non-plain tables and index directives.
 ///
 /// A sample, a version, a derived table or a table function reads rows no flag was proven
@@ -191,25 +233,10 @@ impl Visitor for RelationNames {
     type Break = ();
 
     fn pre_visit_table_factor(&mut self, factor: &TableFactor) -> ControlFlow<()> {
-        let TableFactor::Table {
-            name,
-            args: None,
-            version: None,
-            sample: None,
-            json_path: None,
-            with_hints,
-            partitions,
-            index_directives,
-            with_ordinality: false,
-            ..
-        } = factor
-        else {
+        let Some(plain) = plain_table(factor) else {
             return ControlFlow::Break(());
         };
-        if !with_hints.is_empty() || !partitions.is_empty() || !index_directives.is_empty() {
-            return ControlFlow::Break(());
-        }
-        self.0.insert(name.to_string());
+        self.0.insert(plain.name.to_string());
         ControlFlow::Continue(())
     }
 }
@@ -635,25 +662,8 @@ fn from_tables<DB: DatabaseLike>(query: &Query, db: &DB) -> Option<BTreeSet<Tabl
         for factor in
             core::iter::once(&item.relation).chain(item.joins.iter().map(|join| &join.relation))
         {
-            let TableFactor::Table {
-                name,
-                args: None,
-                version: None,
-                sample: None,
-                json_path: None,
-                with_hints,
-                partitions,
-                index_directives,
-                with_ordinality: false,
-                ..
-            } = factor
-            else {
-                return None;
-            };
-            if !with_hints.is_empty() || !partitions.is_empty() || !index_directives.is_empty() {
-                return None;
-            }
-            let table = lookup_table(db, &name.to_string())?;
+            let plain = plain_table(factor)?;
+            let table = lookup_table(db, &plain.name.to_string())?;
             tables.insert(table_identity(table));
         }
     }
