@@ -18,6 +18,8 @@ pub mod model_generator;
 // `notes` carries its own `//!` docs, so no outer doc here.
 pub(crate) mod notes;
 pub(crate) mod relations;
+// `privileges` carries its own module documentation.
+pub(crate) mod privileges;
 /// Shared helpers for stable and valid role-based relation naming.
 pub(crate) mod role_relations;
 pub(crate) mod row_naming;

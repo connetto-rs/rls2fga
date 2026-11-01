@@ -1,0 +1,38 @@
+---
+source: tests/table_privileges_tests.rs
+expression: "rls2fga::generator::tuple_generator::format_tuples(outputs.tuple_queries())"
+---
+SET TIME ZONE 'UTC';
+SET DateStyle = 'ISO, MDY';
+SET bytea_output = 'hex';
+
+-- Constant TRUE policy (all rows are visible)
+SELECT 'notes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'public_viewer' AS relation, 'user:*' AS subject
+FROM "public"."notes"
+WHERE "id" IS NOT NULL;
+
+-- User ownership (owner references users)
+SELECT 'notes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner' AS relation, 'user:' || CASE WHEN "owner"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner"::text ELSE '~' || encode(convert_to("owner"::text, 'UTF8'), 'hex') END AS subject
+FROM "public"."notes"
+WHERE "owner" IS NOT NULL
+AND "id" IS NOT NULL
+AND octet_length('user:' || CASE WHEN "owner"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner"::text ELSE '~' || encode(convert_to("owner"::text, 'UTF8'), 'hex') END) <= 512;
+
+-- Every notes row is judged by the scope scope_usage_kind_anon_kind_user_e973d519
+SELECT 'notes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'scope_usage_kind_anon_kind_user_e973d519' AS relation, 'pg_role_scope:scope_usage_kind_anon_kind_user_e973d519' AS subject
+FROM "public"."notes"
+WHERE "id" IS NOT NULL;
+
+-- Scope scope_usage_kind_anon_kind_user_e973d519 admits PostgreSQL role 'kind_anon', which the schema decides rather than any row
+SELECT 'pg_role_scope:scope_usage_kind_anon_kind_user_e973d519' AS object, 'roles' AS relation, 'pg_role:kind_anon' AS subject;
+
+-- Scope scope_usage_kind_anon_kind_user_e973d519 admits PostgreSQL role 'kind_user', which the schema decides rather than any row
+SELECT 'pg_role_scope:scope_usage_kind_anon_kind_user_e973d519' AS object, 'roles' AS relation, 'pg_role:kind_user' AS subject;
+
+-- Every notes row is judged by the scope scope_usage_kind_user_2fc08e8e
+SELECT 'notes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'scope_usage_kind_user_2fc08e8e' AS relation, 'pg_role_scope:scope_usage_kind_user_2fc08e8e' AS subject
+FROM "public"."notes"
+WHERE "id" IS NOT NULL;
+
+-- Scope scope_usage_kind_user_2fc08e8e admits PostgreSQL role 'kind_user', which the schema decides rather than any row
+SELECT 'pg_role_scope:scope_usage_kind_user_2fc08e8e' AS object, 'roles' AS relation, 'pg_role:kind_user' AS subject;
