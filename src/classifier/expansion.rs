@@ -686,19 +686,12 @@ fn qualifier_idents(table: &str) -> Vec<Ident> {
     let Some(target) = crate::parser::names::parse_target(table) else {
         return Vec::new();
     };
-    let ident = |value: &str, quoted: bool| {
-        if quoted {
-            Ident::with_quote('"', value)
-        } else {
-            Ident::new(value)
-        }
-    };
     match target.schema() {
         Some(schema) => vec![
-            ident(schema, target.schema_is_quoted()),
-            ident(target.name(), target.name_is_quoted()),
+            declared_ident(schema, target.schema_is_quoted()),
+            declared_ident(target.name(), target.name_is_quoted()),
         ],
-        None => vec![ident(target.name(), target.name_is_quoted())],
+        None => vec![declared_ident(target.name(), target.name_is_quoted())],
     }
 }
 
