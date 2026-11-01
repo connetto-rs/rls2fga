@@ -628,6 +628,20 @@ fn declared(
         .collect()
 }
 
+/// `papers` read through `paper_shares`, the caller's held set read from the request.
+const PAPER_SHARES: &str = r"
+CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
+CREATE TABLE paper_shares (paper_id INT, viewer TEXT, PRIMARY KEY (paper_id, viewer));
+ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON papers FOR SELECT USING (
+    EXISTS (
+        SELECT 1 FROM paper_shares s
+        WHERE s.paper_id = papers.id
+          AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
+    )
+);
+";
+
 /// Inventory row 1 and `shares_read`: the caller's held set against a row column.
 #[test]
 fn a_declared_set_holds_the_rows_value() {
@@ -881,20 +895,8 @@ CREATE POLICY p ON notes FOR SELECT USING (
 /// is a request-completed gate on the parent, keyed by the sharing row's parent column.
 #[test]
 fn a_declared_set_inside_a_membership_subquery_grants_through_the_parent() {
-    let sql = r"
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (paper_id INT, viewer TEXT, PRIMARY KEY (paper_id, viewer));
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON papers FOR SELECT USING (
-    EXISTS (
-        SELECT 1 FROM paper_shares s
-        WHERE s.paper_id = papers.id
-          AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
-    )
-);
-";
     let classified = declared(
-        sql,
+        PAPER_SHARES,
         vec![SessionAttribute::setting(
             "app.subjects",
             SessionAttributeKind::SetAttribute,
@@ -926,19 +928,7 @@ CREATE POLICY p ON papers FOR SELECT USING (
 /// where a deployment said so.
 #[test]
 fn an_undeclared_set_inside_a_membership_subquery_yields_unknown() {
-    let sql = r"
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (paper_id INT, viewer TEXT, PRIMARY KEY (paper_id, viewer));
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON papers FOR SELECT USING (
-    EXISTS (
-        SELECT 1 FROM paper_shares s
-        WHERE s.paper_id = papers.id
-          AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
-    )
-);
-";
-    let classified = declared(sql, Vec::new());
+    let classified = declared(PAPER_SHARES, Vec::new());
     assert!(
         matches!(
             &classified[0].1,

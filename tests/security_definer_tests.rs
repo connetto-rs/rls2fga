@@ -87,6 +87,19 @@ SET search_path TO public, pg_catalog, pg_temp AS
 CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
 ";
 
+/// Probe A with the membership table's own policy calling the definer with its `doc_id`.
+const SELF_REFERENTIAL_DEFINER_MEMBERSHIP: &str = r"
+CREATE TABLE docs(id UUID PRIMARY KEY);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
+CREATE FUNCTION is_member(d UUID) RETURNS BOOLEAN LANGUAGE sql SECURITY DEFINER
+SET search_path TO public, pg_catalog, pg_temp AS
+'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true)::uuid)';
+CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
+CREATE POLICY members_self ON doc_members FOR SELECT USING (is_member(doc_id));
+";
+
 #[test]
 fn a_definer_wrapped_membership_expands_to_the_body_membership() {
     let pattern = docs_using_pattern(DEFINER_MEMBERSHIP);
@@ -412,18 +425,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
 /// outer table's.
 #[test]
 fn a_substituted_column_is_not_captured_by_the_body_scope() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
-CREATE FUNCTION is_member(d UUID) RETURNS BOOLEAN LANGUAGE sql SECURITY DEFINER
-SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true)::uuid)';
-CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
-CREATE POLICY members_self ON doc_members FOR SELECT USING (is_member(doc_id));
-";
-    let db = db_of(sql);
+    let db = db_of(SELF_REFERENTIAL_DEFINER_MEMBERSHIP);
     let classified = translator(ConfidenceLevel::B).classify(&db);
     let policy = classified
         .iter()
@@ -609,18 +611,7 @@ CREATE POLICY p ON docs FOR SELECT USING (cleared(coalesce(level, 0)));
 /// definer, the membership table's rows keyed by their own doc.
 #[test]
 fn the_probe_a_idiom_grants_both_tables() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
-CREATE FUNCTION is_member(d UUID) RETURNS BOOLEAN LANGUAGE sql SECURITY DEFINER
-SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true)::uuid)';
-CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
-CREATE POLICY members_self ON doc_members FOR SELECT USING (is_member(doc_id));
-";
-    let db = db_of(sql);
+    let db = db_of(SELF_REFERENTIAL_DEFINER_MEMBERSHIP);
     let translation = translator(ConfidenceLevel::B)
         .translate(&db)
         .expect("translation should plan");

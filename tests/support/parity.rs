@@ -7,6 +7,8 @@
 //! The comparison is the full cross product of principal, object and statement, in both
 //! directions, so a case cannot check only the pairs its author thought of.
 
+use core::time::Duration;
+
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
@@ -1160,6 +1162,13 @@ fn asked_context(principal: &Principal, clock: &Instant) -> serde_json::Value {
 /// Apply the case and compare every pair, taking the translation's answers as they are.
 pub(crate) async fn run(cluster: &Cluster, case: &ParityCase) -> Run {
     run_with(cluster, case, Class::Exact, |answers| answers).await
+}
+
+/// Run [`run`] under a deadline, panicking with the case name when the deadline passes.
+pub(crate) async fn run_before(cluster: &Cluster, case: &ParityCase, deadline: Duration) -> Run {
+    tokio::time::timeout(deadline, run(cluster, case))
+        .await
+        .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name))
 }
 
 /// Apply a case the translation says it diverges on, and answer with what both sides said.

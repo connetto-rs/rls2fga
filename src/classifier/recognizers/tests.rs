@@ -4256,49 +4256,40 @@ fn recognize_pg_has_role_returns_none_for_no_arg_list() {
     );
 }
 
-// Additional: selection_references_current_user with IsDistinctFrom/IsNotDistinctFrom
-// and catch-all arm
+/// A `WHERE` that spells the caller in any comparison references it, a bare
+/// `current_user` references it too, and a selection without a `WHERE` references nobody.
 #[test]
-fn selection_references_current_user_via_is_not_distinct_from() {
+fn selection_references_current_user_across_its_where_clause_spellings() {
     let registry = FunctionRegistry::new();
-    let select =
-        parse_select("SELECT 1 FROM doc_members WHERE user_id IS NOT DISTINCT FROM current_user");
-    assert!(
-        selection_references_current_user(&select, &registry),
-        "IS NOT DISTINCT FROM current_user should be detected"
-    );
-}
-
-#[test]
-fn selection_references_current_user_via_is_distinct_from() {
-    let registry = FunctionRegistry::new();
-    let select =
-        parse_select("SELECT 1 FROM doc_members WHERE user_id IS DISTINCT FROM current_user");
-    assert!(
-        selection_references_current_user(&select, &registry),
-        "IS DISTINCT FROM current_user should be detected"
-    );
-}
-
-#[test]
-fn selection_references_current_user_catch_all_with_bare_current_user() {
-    let registry = FunctionRegistry::new();
-    // This is unusual but tests the `_ =>` branch
-    let select = parse_select("SELECT 1 FROM doc_members WHERE current_user");
-    assert!(
-        selection_references_current_user(&select, &registry),
-        "bare current_user in WHERE should be detected via catch-all"
-    );
-}
-
-#[test]
-fn selection_references_current_user_returns_false_without_selection() {
-    let registry = FunctionRegistry::new();
-    let select = parse_select("SELECT 1 FROM doc_members");
-    assert!(
-        !selection_references_current_user(&select, &registry),
-        "no WHERE clause should return false"
-    );
+    for (sql, references, note) in [
+        (
+            "SELECT 1 FROM doc_members WHERE user_id IS NOT DISTINCT FROM current_user",
+            true,
+            "IS NOT DISTINCT FROM current_user should be detected",
+        ),
+        (
+            "SELECT 1 FROM doc_members WHERE user_id IS DISTINCT FROM current_user",
+            true,
+            "IS DISTINCT FROM current_user should be detected",
+        ),
+        (
+            "SELECT 1 FROM doc_members WHERE current_user",
+            true,
+            "bare current_user in WHERE should be detected via catch-all",
+        ),
+        (
+            "SELECT 1 FROM doc_members",
+            false,
+            "no WHERE clause should return false",
+        ),
+    ] {
+        let select = parse_select(sql);
+        assert_eq!(
+            selection_references_current_user(&select, &registry),
+            references,
+            "{note}"
+        );
+    }
 }
 
 /// The same caller comparison written in both `ON` and `WHERE` is one condition.

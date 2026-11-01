@@ -11,8 +11,8 @@ use rls2fga::types::TranslationNote;
 mod support;
 
 use support::footgun::{
-    assert_model_is_internally_consistent, db_of, membership_translation, relation_definition,
-    translation, translator, tuples_reading_from, type_names,
+    assert_model_is_internally_consistent, can_delete_walk, db_of, membership_translation,
+    relation_definition, translation, translator, tuples_reading_from, type_names,
 };
 
 /// A parent table also has to be resolved through the disambiguated names: a
@@ -267,20 +267,10 @@ CREATE POLICY docs_del ON docs FOR DELETE USING (
         .outputs_accepting_gaps()
         .model();
 
-    let can_delete =
-        relation_definition(&dsl, "docs", "can_delete").expect("docs should define can_delete");
-    let (read, tupleset) = can_delete
-        .split_once(" from ")
-        .unwrap_or_else(|| panic!("can_delete should walk a tupleset, got '{can_delete}':\n{dsl}"));
-    let tupleset = tupleset.split(" and ").next().unwrap_or(tupleset).trim();
+    let (read, tupleset) = can_delete_walk(&dsl);
     assert!(
-        relation_definition(&dsl, "docs", tupleset).is_some(),
+        relation_definition(&dsl, "docs", &tupleset).is_some(),
         "can_delete walks '{tupleset}', which docs does not define:\n{dsl}"
-    );
-    let read = read.rsplit("and ").next().unwrap_or(read).trim();
-    assert!(
-        relation_definition(&dsl, "docs", read).is_some(),
-        "can_delete reads '{read}', which docs does not define:\n{dsl}"
     );
     assert_ne!(
         read, "no_access",
@@ -531,13 +521,8 @@ CREATE POLICY docs_del ON docs FOR DELETE USING (
         .expect("translation should plan")
         .outputs_accepting_gaps()
         .model();
-    let can_delete =
-        relation_definition(&dsl, "docs", "can_delete").expect("docs should define can_delete");
-    let Some((read, _)) = can_delete.split_once(" from ") else {
-        panic!("can_delete should walk a tupleset, got '{can_delete}':\n{dsl}");
-    };
-    let read = read.rsplit("and ").next().unwrap_or(read).trim();
-    let rule = relation_definition(&dsl, "docs", read)
+    let (read, _) = can_delete_walk(&dsl);
+    let rule = relation_definition(&dsl, "docs", &read)
         .unwrap_or_else(|| panic!("docs should define '{read}':\n{dsl}"));
     assert!(
         rule.contains("can_select"),

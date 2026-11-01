@@ -792,42 +792,36 @@ mod tests {
         );
     }
 
-    #[test]
-    fn analyze_body_accepts_accessor_when_literal_contains_keyword_substrings() {
-        let settings = AccessorInferenceSettings::from_keys(["app.from_user_id"]);
-        let semantic = FunctionSemantic::analyze_body_with_settings(
-            "SELECT current_setting('app.from_user_id')",
-            "UUID",
-            "sql",
-            &FunctionSecurity::Invoker,
-            &settings,
-        );
-        assert!(
-            matches!(
-                semantic,
-                Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "uuid"
-            ),
-            "keyword-like substrings inside literals should not trigger complex-body rejection"
-        );
-    }
-
+    /// A `current_setting` key that spells a SQL keyword as a substring is still a
+    /// literal read, so the body stays a direct accessor.
     #[test]
     fn analyze_body_ignores_keyword_substrings_inside_literals() {
-        let settings = AccessorInferenceSettings::from_keys(["custom.update_marker"]);
-        let semantic = FunctionSemantic::analyze_body_with_settings(
-            "SELECT current_setting('custom.update_marker')",
-            "UUID",
-            "sql",
-            &FunctionSecurity::Invoker,
-            &settings,
-        );
-        assert!(
-            matches!(
-                semantic,
-                Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "uuid"
+        for (key, note) in [
+            (
+                "app.from_user_id",
+                "keyword-like substrings inside literals should not trigger complex-body rejection",
             ),
-            "literal text containing update/from/etc must not be treated as SQL structure"
-        );
+            (
+                "custom.update_marker",
+                "literal text containing update/from/etc must not be treated as SQL structure",
+            ),
+        ] {
+            let settings = AccessorInferenceSettings::from_keys([key]);
+            let semantic = FunctionSemantic::analyze_body_with_settings(
+                &format!("SELECT current_setting('{key}')"),
+                "UUID",
+                "sql",
+                &FunctionSecurity::Invoker,
+                &settings,
+            );
+            assert!(
+                matches!(
+                    semantic,
+                    Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "uuid"
+                ),
+                "{note}, got: {semantic:?}"
+            );
+        }
     }
 
     #[test]
@@ -1037,32 +1031,6 @@ mod tests {
     }
 
     #[test]
-    fn analyze_body_rejects_uuid_array_return_type_for_accessor() {
-        let semantic = FunctionSemantic::analyze_body(
-            "SELECT current_setting('app.current_user_id')",
-            "UUID[]",
-            "sql",
-        );
-        assert!(
-            semantic.is_none(),
-            "array return types must not be inferred as scalar current-user accessors"
-        );
-    }
-
-    #[test]
-    fn analyze_body_rejects_setof_uuid_return_type_for_accessor() {
-        let semantic = FunctionSemantic::analyze_body(
-            "SELECT current_setting('app.current_user_id')",
-            "SETOF UUID",
-            "sql",
-        );
-        assert!(
-            semantic.is_none(),
-            "set-returning declarations must not be inferred as scalar current-user accessors"
-        );
-    }
-
-    #[test]
     fn analyze_body_accepts_direct_accessor_with_keyword_substring_alias() {
         let semantic = FunctionSemantic::analyze_body(
             "SELECT current_setting('app.current_user_id') AS from_id",
@@ -1097,55 +1065,55 @@ mod tests {
         );
     }
 
-    /// A declaration that says nothing says nothing about identifying the caller, and
-    /// `return_type_name` answers nothing for a body with no declared return.
+    /// A declaration that names no single identity refuses the body, whether it names
+    /// nothing, a row, a set, an array or a document.
     #[test]
-    fn analyze_body_rejects_an_absent_return_type() {
-        let semantic = FunctionSemantic::analyze_body(
-            "SELECT current_setting('app.user_id', true)",
-            "",
-            "sql",
-        );
+    fn analyze_body_rejects_a_return_declaration_naming_no_single_identity() {
+        let read = "SELECT current_setting('app.user_id', true)";
+        let legacy_read = "SELECT current_setting('app.current_user_id')";
+        let document = "SELECT current_setting('app.user_id', true)::jsonb";
+        for (body, declaration, note) in [
+            (
+                read,
+                "",
+                "an undeclared return type is not a scalar identity",
+            ),
+            (read, "TABLE", "`RETURNS TABLE` is not one identity"),
+            (
+                read,
+                "TABLE(id TEXT)",
+                "`RETURNS TABLE(id TEXT)` is not one identity",
+            ),
+            (
+                read,
+                "SETOF TEXT",
+                "`RETURNS SETOF TEXT` is a set, not one identity",
+            ),
+            (
+                legacy_read,
+                "SETOF UUID",
+                "`RETURNS SETOF UUID` is a set, not one identity",
+            ),
+            (read, "TEXT[]", "`RETURNS TEXT[]` is not one identity"),
+            (
+                legacy_read,
+                "UUID[]",
+                "`RETURNS UUID[]` is an array, not one identity",
+            ),
+            (
+                document,
+                "JSON",
+                "`RETURNS JSON` is a document, not an identity",
+            ),
+            (
+                document,
+                "JSONB",
+                "`RETURNS JSONB` is a document, not an identity",
+            ),
+        ] {
+            let semantic = FunctionSemantic::analyze_body(body, declaration, "sql");
 
-        assert!(
-            semantic.is_none(),
-            "an undeclared return type is not a scalar identity, got: {semantic:?}"
-        );
-    }
-
-    /// A row is not one identity. `RETURNS TABLE(...)` reaches here as `"TABLE"`, which
-    /// carries no `setof` token to notice.
-    #[test]
-    fn analyze_body_rejects_a_row_returning_declaration() {
-        for declaration in ["TABLE", "TABLE(id TEXT)", "SETOF TEXT", "TEXT[]"] {
-            let semantic = FunctionSemantic::analyze_body(
-                "SELECT current_setting('app.user_id', true)",
-                declaration,
-                "sql",
-            );
-
-            assert!(
-                semantic.is_none(),
-                "`RETURNS {declaration}` is not one identity, got: {semantic:?}"
-            );
-        }
-    }
-
-    /// A body handing back the whole login token names nobody: the identity is one field
-    /// of it, and the declaration does not say which.
-    #[test]
-    fn analyze_body_rejects_a_document_returning_declaration() {
-        for declaration in ["JSON", "JSONB"] {
-            let semantic = FunctionSemantic::analyze_body(
-                "SELECT current_setting('app.user_id', true)::jsonb",
-                declaration,
-                "sql",
-            );
-
-            assert!(
-                semantic.is_none(),
-                "`RETURNS {declaration}` is a document, not an identity, got: {semantic:?}"
-            );
+            assert!(semantic.is_none(), "{note}, got: {semantic:?}");
         }
     }
 

@@ -742,6 +742,10 @@ INSERT INTO announcements (id, body) VALUES ('a1', 'hello'), ('a2', 'world');
 INSERT INTO audits (id, body) VALUES ('au1', 'secret');
 ";
 
+/// The accessor these inline schemas declare.
+const ACCESSOR: &str =
+    r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#;
+
 #[tokio::test]
 #[ignore = "requires Docker: starts a PostgreSQL 18 container"]
 async fn every_row_shape_description_matches_its_own_sql() {
@@ -756,10 +760,7 @@ async fn every_row_shape_description_matches_its_own_sql() {
 
     // Without the accessor the ownership, list, field and membership policies fall
     // below the threshold and the schema exercises only three shapes.
-    let (classified, db, registry) = support::classify_sql(
-        ROW_SHAPES_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) = support::classify_sql(ROW_SHAPES_SCHEMA, Some(ACCESSOR));
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
@@ -1322,10 +1323,7 @@ async fn holder_shapes_match_their_own_sql() {
     conn.batch_execute(HOLDER_SEED)
         .expect("failed to seed the holder schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        HOLDER_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) = support::classify_sql(HOLDER_SCHEMA, Some(ACCESSOR));
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
@@ -1487,10 +1485,8 @@ async fn a_composite_key_membership_matches_its_own_sql() {
     conn.batch_execute(COMPOSITE_KEY_MEMBERSHIP_SEED)
         .expect("failed to seed the composite-key membership schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        COMPOSITE_KEY_MEMBERSHIP_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) =
+        support::classify_sql(COMPOSITE_KEY_MEMBERSHIP_SCHEMA, Some(ACCESSOR));
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
@@ -1658,10 +1654,8 @@ async fn a_compound_identity_matches_between_the_sql_and_the_evaluator() {
     conn.batch_execute(COMPOUND_IDENTITY_SEED)
         .expect("failed to seed the compound identity schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        COMPOUND_IDENTITY_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) =
+        support::classify_sql(COMPOUND_IDENTITY_SCHEMA, Some(ACCESSOR));
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
@@ -1690,10 +1684,8 @@ async fn a_timestamptz_identity_matches_between_the_sql_and_the_evaluator() {
     conn.batch_execute(TIMESTAMPTZ_IDENTITY_SEED)
         .expect("failed to seed the timestamp identity schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        TIMESTAMPTZ_IDENTITY_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) =
+        support::classify_sql(TIMESTAMPTZ_IDENTITY_SCHEMA, Some(ACCESSOR));
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
@@ -1893,10 +1885,7 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
     conn.batch_execute(RECIPE_SEED)
         .expect("failed to seed the recipe schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        RECIPE_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) = support::classify_sql(RECIPE_SCHEMA, Some(ACCESSOR));
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let reported = planned.translation().relations();
 
@@ -2019,10 +2008,8 @@ async fn a_compound_identity_loads_and_answers_against_the_service() {
     conn.batch_execute(COMPOUND_IDENTITY_SEED)
         .expect("failed to seed the compound identity schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        COMPOUND_IDENTITY_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) =
+        support::classify_sql(COMPOUND_IDENTITY_SCHEMA, Some(ACCESSOR));
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
 
     let mut tuples: BTreeSet<Record> = BTreeSet::new();
@@ -2115,10 +2102,7 @@ async fn a_row_naming_entry_spells_the_object_its_own_sql_writes() {
     conn.batch_execute(NAMING_SEED)
         .expect("failed to seed the naming schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        NAMING_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) = support::classify_sql(NAMING_SCHEMA, Some(ACCESSOR));
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let naming = planned.translation().row_naming().to_vec();
     assert_eq!(
@@ -2224,10 +2208,7 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
     conn.batch_execute(PARTITION_SEED)
         .expect("failed to seed the partitions");
 
-    let (classified, db, registry) = support::classify_sql(
-        PARTITION_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) = support::classify_sql(PARTITION_SCHEMA, Some(ACCESSOR));
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let naming = planned.translation().row_naming().to_vec();
 
@@ -2311,10 +2292,7 @@ async fn every_judgement_together_answers_as_the_action_relation_does() {
     conn.batch_execute(REPLACEMENT_SEED)
         .expect("failed to seed the replacement schema");
 
-    let (classified, db, registry) = support::classify_sql(
-        REPLACEMENT_SCHEMA,
-        Some(r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#),
-    );
+    let (classified, db, registry) = support::classify_sql(REPLACEMENT_SCHEMA, Some(ACCESSOR));
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let reported = planned.translation().action_relations();
 
