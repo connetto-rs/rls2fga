@@ -146,28 +146,16 @@ pub fn recognize_p5<DB: DatabaseLike>(
         // requirement: "you may do this over a parent row you can already see". P5 gates
         // on the parent's `can_select` regardless, so the inherited rule adds nothing.
         let inner_classified = match rule {
-            Some(mut inner_expr) => {
-                // Nested queries use parent alias from outer scope.
-                strip_qualifier_from_expr_deep(
-                    &mut inner_expr,
+            Some(rule) => {
+                let Some(inner_expr) = inherited_rule_on_parent(
+                    rule,
+                    select,
                     &parent_table,
                     parent_alias.as_deref(),
-                );
-                // What survives the strip reads a joined relation. Where the join makes
-                // that reference equal to one of the parent's own columns for every row
-                // the subquery returns, say so and carry on. Otherwise refuse: resolving
-                // the bare name against the parent grants rows the database refuses.
-                if predicate_references_other_table(&inner_expr, &parent_table, None)
-                    && !rewrite_through_join(
-                        &mut inner_expr,
-                        select,
-                        &parent_table,
-                        parent_alias.as_deref(),
-                        db,
-                    )
-                {
+                    db,
+                ) else {
                     continue;
-                }
+                };
                 crate::classifier::policy_classifier::classify_expr_in_state(
                     &inner_expr,
                     db,
@@ -215,6 +203,25 @@ pub fn recognize_p5<DB: DatabaseLike>(
         return matches.into_iter().next();
     }
     None
+}
+
+/// The inherited rule read onto the parent's own columns, or [`None`] where it reads a
+/// joined relation the join does not equate with a parent column.
+fn inherited_rule_on_parent<DB: DatabaseLike>(
+    mut rule: Expr,
+    select: &Select,
+    parent_table: &str,
+    parent_alias: Option<&str>,
+    db: &DB,
+) -> Option<Expr> {
+    strip_qualifier_from_expr_deep(&mut rule, parent_table, parent_alias);
+    // Resolving a joined column's bare name against the parent grants rows the database refuses.
+    if predicate_references_other_table(&rule, parent_table, None)
+        && !rewrite_through_join(&mut rule, select, parent_table, parent_alias, db)
+    {
+        return None;
+    }
+    Some(rule)
 }
 
 /// Whether the parent positively enforces row security, which is what gives a bare
@@ -1656,21 +1663,22 @@ pub(crate) fn diagnose_p5_parent_inheritance_ambiguity<DB: DatabaseLike>(
             db,
         ) && !resolve_table_id(db, &candidate.parent_table)
             .is_some_and(|parent| parent_enforces_row_security(db, &parent));
-        let Some(mut inner) = rule else {
+        let Some(rule) = rule else {
             return reached.then(|| nothing_to_inherit(&candidate.parent_table));
         };
-        strip_qualifier_from_expr_deep(
-            &mut inner,
+        let Some(inner) = inherited_rule_on_parent(
+            rule,
+            select,
             &candidate.parent_table,
             candidate.parent_alias.as_deref(),
-        );
-        if predicate_references_other_table(&inner, &candidate.parent_table, None) {
+            db,
+        ) else {
             return Some(format!(
                 "The rule inherited from '{}' reads another relation of the subquery, \
                  which one relation cannot carry",
                 candidate.parent_table
             ));
-        }
+        };
         match crate::classifier::policy_classifier::classify_expr_in_state(
             &inner,
             db,
