@@ -68,6 +68,7 @@ mod request_gate_recipe_parity_tests;
 mod request_gate_tests;
 mod row_naming_tests;
 mod security_definer_tests;
+mod table_privileges_tests;
 mod translation_object_tests;
 mod translator_builder_tests;
 mod tuple_row_tests;

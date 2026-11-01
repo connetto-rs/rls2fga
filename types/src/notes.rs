@@ -572,6 +572,54 @@ pub enum TranslationNote {
         /// ownership records none, and the note then cannot name the exempt principal.
         owner: Option<String>,
     },
+    /// Table privileges became a role scope the action relations intersect with.
+    TablePrivilegeScope {
+        /// Table whose commands the scope gates.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// Commands those roles hold.
+        commands: Vec<String>,
+        /// Roles holding them.
+        roles: Vec<String>,
+        /// Relation the scope became.
+        relation: RelationName,
+    },
+    /// Roles hold a command on some columns of the table only, which the model denies them.
+    ColumnPrivilegeOnly {
+        /// Table the column grant names.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// Command granted on columns only.
+        command: String,
+        /// Roles holding it on columns only, `PUBLIC` for a grant to every role.
+        roles: Vec<String>,
+    },
+    /// A grantee spelling `PostgreSQL` resolves to whoever runs the `GRANT`.
+    TablePrivilegeGrantedToDdlTimeRole {
+        /// Table the grant names.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// Commands granted.
+        commands: Vec<String>,
+        /// The spellings, as written.
+        spellings: Vec<String>,
+    },
+    /// A table binding its owner by its rules names no owner, which the model then does not answer for.
+    TableOwnerUnnamed {
+        /// Table whose owner is whoever ran `CREATE TABLE`.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+    },
+    /// Grant holders the schema never creates, so which caller roles reach them cannot be known.
+    TablePrivilegeRoleUnsettled {
+        /// Table the grant names.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// Commands whose gate leaves those holders out.
+        commands: Vec<String>,
+        /// Roles whose memberships the schema cannot show.
+        roles: Vec<String>,
+    },
 }
 
 impl TranslationNote {
@@ -594,6 +642,7 @@ impl TranslationNote {
             Self::RoleBypassesPolicies { .. }
             | Self::TableOwnerBypassesPolicies { .. }
             | Self::PolicyAppliesToNoCallerRole { .. }
+            | Self::TableOwnerUnnamed { .. }
             | Self::PartitionReadDirectlyIsUnfiltered { .. } => NoteSeverity::Exempt,
             Self::CoveringPoliciesBelowThreshold { .. } | Self::ClauseBelowThreshold { .. } => {
                 NoteSeverity::BelowThreshold
@@ -601,7 +650,10 @@ impl TranslationNote {
             Self::MembershipTableGuarded { .. }
             | Self::NullableBooleanFlagNarrowed { .. }
             | Self::AttributeNeedsRuntimeEnforcement { .. }
-            | Self::InheritanceParentReadsOwnRowsOnly { .. } => NoteSeverity::Partial,
+            | Self::InheritanceParentReadsOwnRowsOnly { .. }
+            | Self::ColumnPrivilegeOnly { .. }
+            | Self::TablePrivilegeGrantedToDdlTimeRole { .. }
+            | Self::TablePrivilegeRoleUnsettled { .. } => NoteSeverity::Partial,
             Self::ReadsDeniedSoWritesCannotName { .. }
             | Self::PolicyRoleScope { .. }
             | Self::RoleGateScope { .. }
@@ -609,7 +661,8 @@ impl TranslationNote {
             | Self::RowIdentifierBudget { .. }
             | Self::MembershipReadScope { .. }
             | Self::TypeNameCollision { .. }
-            | Self::PolicyClauseIllegal { .. } => NoteSeverity::ActionRequired,
+            | Self::PolicyClauseIllegal { .. }
+            | Self::TablePrivilegeScope { .. } => NoteSeverity::ActionRequired,
             Self::PolicyReadRecursion { .. }
             | Self::NoPermissivePolicy { .. }
             | Self::PolicyClauseAbsent { .. }
@@ -656,7 +709,20 @@ impl TranslationNote {
             }
             | Self::ReadsDeniedSoWritesCannotName {
                 table: spelling, ..
-            } => Cow::Owned(spelling.to_string()),
+            }
+            | Self::TablePrivilegeScope {
+                table: spelling, ..
+            }
+            | Self::ColumnPrivilegeOnly {
+                table: spelling, ..
+            }
+            | Self::TablePrivilegeGrantedToDdlTimeRole {
+                table: spelling, ..
+            }
+            | Self::TablePrivilegeRoleUnsettled {
+                table: spelling, ..
+            }
+            | Self::TableOwnerUnnamed { table: spelling } => Cow::Owned(spelling.to_string()),
             Self::RoleBypassesPolicies { role } => Cow::Borrowed(role),
             Self::ClauseBelowThreshold { policy, .. }
             | Self::UnresolvedPolicyTable { policy, .. }
@@ -1004,6 +1070,65 @@ impl fmt::Display for TranslationNote {
                      subjects them to it"
                 )
             }
+            Self::TablePrivilegeScope {
+                table,
+                commands,
+                roles,
+                relation,
+            } => write!(
+                f,
+                "{} on '{table}' {is} held by ({}) alone, through relation '{relation}', which \
+                 reads pg_role '{}', so load that pg_role relation with each role's inheriting \
+                 members",
+                commands.join(", "),
+                roles.join(", "),
+                RolePrivilege::Usage.relation_name(),
+                is = if commands.len() == 1 { "is" } else { "are" }
+            ),
+            Self::ColumnPrivilegeOnly {
+                table,
+                command,
+                roles,
+            } => write!(
+                f,
+                "({}) hold {command} on some columns of '{table}' only, which the model cannot \
+                 express, so it denies them {command} where PostgreSQL admits a statement \
+                 touching only those columns",
+                roles.join(", ")
+            ),
+            Self::TablePrivilegeGrantedToDdlTimeRole {
+                table,
+                commands,
+                spellings,
+            } => write!(
+                f,
+                "{} on '{table}' {is} granted to ({}), which PostgreSQL resolves to whoever \
+                 runs the GRANT, so a schema file cannot know the role and the model grants it \
+                 to nobody. Name the role explicitly.",
+                commands.join(", "),
+                spellings.join(", "),
+                is = if commands.len() == 1 { "is" } else { "are" }
+            ),
+            Self::TableOwnerUnnamed { table } => write!(
+                f,
+                "The schema names no owner of '{table}', so its owner is whoever ran CREATE \
+                 TABLE and holds every privilege on it, and the model answers for nobody \
+                 connecting as that role. ALTER TABLE '{table}' OWNER TO names it"
+            ),
+            Self::TablePrivilegeRoleUnsettled {
+                table,
+                commands,
+                roles,
+            } => write!(
+                f,
+                "{} on '{table}' {is} held through ({}), which the schema never creates, so \
+                 no caller role is known to reach {them} and the gate leaves {them} out. \
+                 Create the roles and their memberships in the schema",
+                commands.join(", "),
+                roles.join(", "),
+                is = if commands.len() == 1 { "is" } else { "are" },
+                them = if roles.len() == 1 { "it" } else { "them" }
+            ),
         }
     }
 }

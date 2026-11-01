@@ -204,6 +204,9 @@ pub(crate) struct ParityCase {
     pub(crate) future: Option<FutureInstant>,
     /// The roles every caller runs as, which the translation settles `TO` clauses against.
     pub(crate) caller_roles: Option<rls2fga::generator::caller_roles::CallerRoles>,
+    /// Whether the translation models table privileges, so a caller lacking one is a pair
+    /// both sides must refuse rather than one left uncompared.
+    pub(crate) table_privileges: bool,
 }
 
 /// A moment the database cannot be asked about, and what it would answer there.
@@ -243,12 +246,19 @@ impl ParityCase {
             loading_from_rows: false,
             future: None,
             caller_roles: None,
+            table_privileges: false,
         }
     }
 
     /// The same case, loading its tuples by evaluating each row's own description.
     pub(crate) fn loading_from_rows(mut self) -> Self {
         self.loading_from_rows = true;
+        self
+    }
+
+    /// The same case, translated with table privileges modelled.
+    pub(crate) fn modelling_table_privileges(mut self) -> Self {
+        self.table_privileges = true;
         self
     }
 
@@ -553,10 +563,10 @@ struct Granted {
 
 /// Whether `role` holds `privilege` on `table`.
 ///
-/// A table privilege is not row-level security and the model says nothing about it, so a
-/// pair the caller cannot reach at all is not one to compare. Asked of `PostgreSQL` rather
-/// than inferred from an error, so a missing privilege on a table a *policy* reads still
-/// raises and is reported.
+/// A model translated without table privileges says nothing about them, so for such a case
+/// a pair the caller cannot reach at all is not one to compare. Asked of `PostgreSQL`
+/// rather than inferred from an error, so a missing privilege on a table a *policy* reads
+/// still raises and is reported.
 fn holds_privilege(conn: &mut PgConnection, role: &str, table: &str, privilege: &str) -> bool {
     let answered: Granted = diesel::sql_query("SELECT has_table_privilege($1, $2, $3) AS granted")
         .bind::<diesel::sql_types::Text, _>(role)
@@ -604,9 +614,12 @@ fn postgres_allows(
         ActionStatement::InsertOnConflictUpdate => &["INSERT", "UPDATE"],
         _ => return None,
     };
-    if !privileges
-        .iter()
-        .all(|privilege| holds_privilege(conn, &principal.login_role, table, privilege))
+    // Where the model carries privileges, a caller lacking one is a refusal both sides
+    // must give, and the statement itself says so with `42501`.
+    if !case.table_privileges
+        && !privileges
+            .iter()
+            .all(|privilege| holds_privilege(conn, &principal.login_role, table, privilege))
     {
         return None;
     }
@@ -672,6 +685,8 @@ fn postgres_allows(
             *raised = true;
             Some(false)
         }
+        // The privilege check runs before any policy, and refuses the whole statement.
+        Err(error) if case.table_privileges && lacks_a_table_privilege(&error) => Some(false),
         // Otherwise a plain read never raises, so an error is a case that granted no
         // privilege or named no column, and calling it a denial would hide the mistake.
         Err(error) if statement == ActionStatement::Select => panic!(
@@ -697,6 +712,12 @@ fn reads_as_a_policy_refusal(error: &diesel::result::Error) -> bool {
 fn reads_an_unset_setting(error: &diesel::result::Error) -> bool {
     matches!(error, diesel::result::Error::DatabaseError(_, info)
         if info.message().contains("unrecognized configuration parameter"))
+}
+
+/// Whether `error` is a table privilege refusing the statement, `42501`.
+fn lacks_a_table_privilege(error: &diesel::result::Error) -> bool {
+    matches!(error, diesel::result::Error::DatabaseError(_, info)
+        if info.message().contains("permission denied for table"))
 }
 
 /// The model under test, as the three things every question about it needs.
@@ -1011,17 +1032,10 @@ fn plan_case(
     );
     let settings = rls2fga::generator::model_generator::GeneratorSettings {
         caller_roles: case.caller_roles.clone(),
+        table_privileges: case.table_privileges,
         ..rls2fga::generator::model_generator::GeneratorSettings::default()
     };
-    let planned = rls2fga::translator::Translation::plan(
-        classified,
-        &db,
-        &registry,
-        ConfidenceLevel::B,
-        &settings,
-    )
-    .expect("translation should plan")
-    .outputs_accepting_gaps();
+    let planned = super::plan_with(classified, &db, &registry, ConfidenceLevel::B, &settings);
     let disclosed: Vec<Disclosure> = planned
         .notes()
         .iter()
@@ -1083,9 +1097,16 @@ async fn provision(
             None => openfga::make_tuple(&tuple.object, &tuple.relation, &tuple.subject),
         })
         .collect();
-    // Role membership lives outside the policy tables, so no generated query can produce it
-    // and the case says which roles a caller holds.
-    for principal in &case.principals {
+    // Role membership lives outside the policy tables, so the case says which roles a caller holds.
+    // The service refuses a tuple naming a relation the model does not declare.
+    let reads_memberships = model.type_definitions.iter().any(|definition| {
+        definition.type_name.as_str() == "pg_role"
+            && definition
+                .relations
+                .as_ref()
+                .is_some_and(|relations| relations.keys().any(|name| name.as_str() == "usage"))
+    });
+    for principal in case.principals.iter().filter(|_| reads_memberships) {
         for role in &principal.pg_roles {
             writes.push(openfga::make_tuple(
                 &format!("pg_role:{role}"),
@@ -1630,6 +1651,7 @@ fn attempt_write(
             *raised = true;
             false
         }
+        Err(error) if case.table_privileges && lacks_a_table_privilege(&error) => false,
         Err(error) => {
             let rendered = error.to_string();
             assert!(
@@ -1813,7 +1835,12 @@ fn licence_of(note: &TranslationNote) -> Disclosure {
         // denies what the database may grant.
         TranslationNote::InheritanceParentReadsOwnRowsOnly { table, .. }
         | TranslationNote::BridgeColumnMissing { table, .. }
-        | TranslationNote::RowsCannotBeNamed { table, .. } => Licence::Located {
+        | TranslationNote::RowsCannotBeNamed { table, .. }
+        // A privilege the model cannot carry denies its holders the command, and every
+        // statement reading rows needs `SELECT`, so the whole table may come out narrower.
+        | TranslationNote::ColumnPrivilegeOnly { table, .. }
+        | TranslationNote::TablePrivilegeGrantedToDdlTimeRole { table, .. }
+        | TranslationNote::TablePrivilegeRoleUnsettled { table, .. } => Licence::Located {
             table: table.sql_name(),
             commands: Vec::new(),
             direction: Direction::Narrower,
