@@ -1202,6 +1202,16 @@ pub(super) fn session_zoned_columns<DB: DatabaseLike>(table: &DB::Table, db: &DB
         .collect()
 }
 
+/// The names of `table`'s columns, as the schema stores them.
+fn stored_column_names<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> Vec<String> {
+    table
+        .columns(db)
+        .into_iter()
+        .flatten()
+        .map(|column| column.stored_column_name().into_owned())
+        .collect()
+}
+
 /// A qualified or quoted spelling names the same type as the bare one.
 fn type_carries_a_zone(data_type: &str) -> bool {
     let lowered = data_type.to_ascii_lowercase();
@@ -1239,12 +1249,7 @@ fn analyze_uncorrelated_membership<DB: DatabaseLike>(
         return None;
     }
     let member = lookup_table(db, &source.table_name)?;
-    let columns: Vec<String> = member
-        .columns(db)
-        .into_iter()
-        .flatten()
-        .map(|c| c.stored_column_name().into_owned())
-        .collect();
+    let columns = stored_column_names(member, db);
     let session_zoned_columns = session_zoned_columns(member, db);
 
     select.selection.as_ref()?;
@@ -1281,25 +1286,20 @@ fn analyze_uncorrelated_membership<DB: DatabaseLike>(
         }
         let mut normalized = predicate.clone();
         strip_qualifier_from_expr(&mut normalized, &source.table_name, source.alias.as_deref());
-        let relations = residual_relations(
+        let scope = MembershipScope {
+            table: &source.table_name,
+            alias: source.alias.as_deref(),
+            columns: &columns,
+            guarded_table: outer_table,
+        };
+        let residual = residual_admitted(
             &mut normalized,
             Some(db),
             registry,
-            &MembershipScope {
-                table: &source.table_name,
-                alias: source.alias.as_deref(),
-                columns: &columns,
-                guarded_table: outer_table,
-            },
+            &scope,
             state,
+            &session_zoned_columns,
         )?;
-        let residual = residual_predicate_reading(&normalized, relations);
-        if residual.relations.is_empty()
-            && residual.request.is_none()
-            && !conjunct_reads_only_the_row(&normalized, &columns, &session_zoned_columns)
-        {
-            return None;
-        }
         extras.push(residual);
     }
 
@@ -1730,12 +1730,7 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
     let outer_table_meta = lookup_table(db, outer_table)?;
     let selection = select.selection.as_ref()?;
 
-    let outer_cols: Vec<String> = outer_table_meta
-        .columns(db)
-        .into_iter()
-        .flatten()
-        .map(|c| c.stored_column_name().into_owned())
-        .collect();
+    let outer_cols = stored_column_names(outer_table_meta, db);
     let mut predicates = Vec::new();
     flatten_and_predicates(selection, &mut predicates);
 
@@ -1745,12 +1740,7 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
         let Some(parent_table) = lookup_table(db, &source.table_name) else {
             continue;
         };
-        let parent_cols: Vec<String> = parent_table
-            .columns(db)
-            .into_iter()
-            .flatten()
-            .map(|c| c.stored_column_name().into_owned())
-            .collect();
+        let parent_cols = stored_column_names(parent_table, db);
 
         let mut fk_column: Option<ColumnName> = None;
         let mut inner_predicates = Vec::new();
@@ -1917,12 +1907,7 @@ fn membership_matches<'a, DB: DatabaseLike>(
         let Some(table) = lookup_table(db, &source.table_name) else {
             continue;
         };
-        let col_names: Vec<String> = table
-            .columns(db)
-            .into_iter()
-            .flatten()
-            .map(|c| c.stored_column_name().into_owned())
-            .collect();
+        let col_names = stored_column_names(table, db);
         let predicates = analyze_membership_predicates(
             select,
             &source.table_name,
@@ -2313,18 +2298,14 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
         // SQL literal forms that text-based rewriting would mangle.
         let mut normalized_pred = pred.clone();
         strip_qualifier_from_expr(&mut normalized_pred, join_table, join_alias);
-        // The loader answers this query as itself, once, so a conjunct it cannot decide
-        // from the row alone would answer a different question than the caller's check
-        // does, unless every relation it reads answers everybody alike. A recognized
-        // request value keeps its own route.
-        let relations = residual_relations(&mut normalized_pred, db, registry, scope, state)?;
-        let residual = residual_predicate_reading(&normalized_pred, relations);
-        if residual.relations.is_empty()
-            && residual.request.is_none()
-            && !conjunct_reads_only_the_row(&normalized_pred, join_cols, &session_zoned_columns)
-        {
-            return None;
-        }
+        let residual = residual_admitted(
+            &mut normalized_pred,
+            db,
+            registry,
+            scope,
+            state,
+            &session_zoned_columns,
+        )?;
         extras.push(residual);
     }
 
@@ -2372,6 +2353,25 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
     })
 }
 
+/// The conjunct's residual, or `None` when it reads relations no proof covers, or reads
+/// none and is decided by neither a request value nor the membership row.
+fn residual_admitted<DB: DatabaseLike>(
+    expr: &mut Expr,
+    db: Option<&DB>,
+    registry: &FunctionRegistry,
+    scope: &MembershipScope<'_>,
+    state: &ExpansionState,
+    zoned: &[String],
+) -> Option<ResidualPredicate> {
+    // The loader answers once, as itself, so what the row cannot decide must read alike for everybody.
+    let relations = residual_relations(expr, db, registry, scope, state)?;
+    let residual = residual_predicate_reading(expr, relations);
+    let admit = !residual.relations.is_empty()
+        || residual.request.is_some()
+        || conjunct_reads_only_the_row(expr, scope.columns, zoned);
+    admit.then_some(residual)
+}
+
 /// Record the column naming the member, or report that a different one already does.
 ///
 /// A membership carries one member column. The same comparison written twice is one
@@ -2392,14 +2392,7 @@ fn is_join_column_ref(
     join_alias: Option<&str>,
     join_cols: &[String],
 ) -> bool {
-    if !join_cols.iter().any(|c| c == column) {
-        return false;
-    }
-
-    match qualifier {
-        None => true,
-        Some(q) => qualifier_matches_table(q, join_table, join_alias),
-    }
+    is_scan_column_ref(qualifier, column, join_table, join_alias, join_cols, None)
 }
 
 /// Drop `join_table` or `join_alias` qualifiers, leaving bare identifiers that a
@@ -2659,14 +2652,14 @@ fn is_parent_column_ref(
     parent_cols: &[String],
     outer_cols: &[String],
 ) -> bool {
-    if !parent_cols.iter().any(|c| c == column) {
-        return false;
-    }
-
-    match qualifier {
-        Some(q) => qualifier_matches_table(q, parent_table, parent_alias),
-        None => !outer_cols.iter().any(|c| c == column),
-    }
+    is_scan_column_ref(
+        qualifier,
+        column,
+        parent_table,
+        parent_alias,
+        parent_cols,
+        Some(outer_cols),
+    )
 }
 
 fn is_outer_column_ref(
@@ -2676,13 +2669,33 @@ fn is_outer_column_ref(
     outer_cols: &[String],
     parent_cols: &[String],
 ) -> bool {
-    if !outer_cols.iter().any(|c| c == column) {
+    is_scan_column_ref(
+        qualifier,
+        column,
+        outer_table,
+        None,
+        outer_cols,
+        Some(parent_cols),
+    )
+}
+
+/// Whether the reference names a column of `table` the scan reads, a bare name binding
+/// only while no sibling scan names it.
+fn is_scan_column_ref(
+    qualifier: Option<&str>,
+    column: &str,
+    table: &str,
+    alias: Option<&str>,
+    scan_cols: &[String],
+    sibling_cols: Option<&[String]>,
+) -> bool {
+    if !scan_cols.iter().any(|c| c == column) {
         return false;
     }
 
     match qualifier {
-        Some(q) => qualifier_matches_table(q, outer_table, None),
-        None => !parent_cols.iter().any(|c| c == column),
+        Some(q) => qualifier_matches_table(q, table, alias),
+        None => sibling_cols.is_none_or(|sibling| !sibling.iter().any(|c| c == column)),
     }
 }
 
@@ -2698,7 +2711,28 @@ fn fk_targets_column<DB: DatabaseLike>(
     table: &str,
     target: &str,
 ) -> bool {
-    parent
+    has_fk_pointing_to(parent, db, column, table, Some(target))
+}
+
+fn table_has_fk_to_parent<DB: DatabaseLike>(
+    outer_table: &DB::Table,
+    db: &DB,
+    fk_column: &str,
+    parent_table_name: &str,
+) -> bool {
+    has_fk_pointing_to(outer_table, db, fk_column, parent_table_name, None)
+}
+
+/// Whether `column` of `table` hosts a declared foreign key into `referenced_table`,
+/// naming `referenced_column` when given.
+fn has_fk_pointing_to<DB: DatabaseLike>(
+    table: &DB::Table,
+    db: &DB,
+    column: &str,
+    referenced_table: &str,
+    referenced_column: Option<&str>,
+) -> bool {
+    table
         .foreign_keys(db)
         .into_iter()
         .flatten()
@@ -2710,41 +2744,17 @@ fn fk_targets_column<DB: DatabaseLike>(
         })
         .any(|fk| {
             let table_matches = fk.referenced_table(db).is_ok_and(|referenced| {
-                qualifier_matches_table(referenced.stored_table_name().as_ref(), table, None)
-            });
-            table_matches
-                && fk.referenced_column(db).is_ok_and(|referenced| {
-                    referenced.is_some_and(|column| column.stored_column_name() == target)
-                })
-        })
-}
-
-fn table_has_fk_to_parent<DB: DatabaseLike>(
-    outer_table: &DB::Table,
-    db: &DB,
-    fk_column: &str,
-    parent_table_name: &str,
-) -> bool {
-    outer_table
-        .foreign_keys(db)
-        .into_iter()
-        .flatten()
-        .any(|fk| {
-            let host_col_matches = fk
-                .host_column(db)
-                .ok()
-                .flatten()
-                .is_some_and(|col| col.stored_column_name() == fk_column);
-            if !host_col_matches {
-                return false;
-            }
-
-            fk.referenced_table(db).is_ok_and(|referenced| {
                 qualifier_matches_table(
                     referenced.stored_table_name().as_ref(),
-                    parent_table_name,
+                    referenced_table,
                     None,
                 )
-            })
+            });
+            let column_matches = referenced_column.is_none_or(|target| {
+                fk.referenced_column(db).is_ok_and(|referenced| {
+                    referenced.is_some_and(|column| column.stored_column_name() == target)
+                })
+            });
+            table_matches && column_matches
         })
 }
