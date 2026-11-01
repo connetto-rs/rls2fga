@@ -1024,9 +1024,7 @@ pub fn records_from_row<R: RowValues + ?Sized>(
             Eval::Value(()) => {}
             Eval::Empty => return Ok(Vec::new()),
             Eval::Refuse(error) => {
-                if refusal.is_none() {
-                    refusal = Some(error);
-                }
+                refusal.get_or_insert(error);
             }
         }
     }
@@ -1035,9 +1033,7 @@ pub fn records_from_row<R: RowValues + ?Sized>(
         Eval::Value(object) => object,
         Eval::Empty => return Ok(Vec::new()),
         Eval::Refuse(error) => {
-            if refusal.is_none() {
-                refusal = Some(error);
-            }
+            refusal.get_or_insert(error);
             String::new()
         }
     };
@@ -1052,9 +1048,7 @@ pub fn records_from_row<R: RowValues + ?Sized>(
                     }
                     Eval::Empty => return Ok(Vec::new()),
                     Eval::Refuse(error) => {
-                        if refusal.is_none() {
-                            refusal = Some(error);
-                        }
+                        refusal.get_or_insert(error);
                     }
                 }
             }
@@ -1070,9 +1064,7 @@ pub fn records_from_row<R: RowValues + ?Sized>(
         Eval::Value(subjects) => subjects,
         Eval::Empty => return Ok(Vec::new()),
         Eval::Refuse(error) => {
-            if refusal.is_none() {
-                refusal = Some(error);
-            }
+            refusal.get_or_insert(error);
             Vec::new()
         }
     };
