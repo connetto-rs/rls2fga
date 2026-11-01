@@ -703,10 +703,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             ))
         }
 
-        // The record is a function of the row alone: the comparison happens
-        // at check time, and what the row contributes to it travels in the
-        // record's context, exactly as the sibling session-attribute gate
-        // carries it.
+        // A session gate's row value is the SQL text its tuple query writes, a conditional gate's is JSON.
         TupleSource::ConditionalAttributeGate {
             table,
             identity_cols,
@@ -714,56 +711,42 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             condition,
             row_parameter,
             column,
-        } => Some(described(
-            table,
-            RecordTemplate {
-                object_type: owner_type.clone(),
-                object_key: ObjectKey::new(key_parts(table, identity_cols, db)),
-                relation: relation.clone(),
-                subject_type: well_known.user.clone(),
-                subject_key: SubjectKey::wildcard(),
-                context: Some(RecordContext {
-                    condition: condition.clone(),
-                    entries: vec![RecordContextEntry {
-                        key: row_parameter.clone(),
-                        value: value_column(table, column, db),
-                        rendering: ContextRendering::Json,
-                    }],
-                }),
-            },
-            vec![not_null(table, column, db)],
-        )),
-
-        // The row carries its side of the comparison, so the description carries the
-        // same key the tuple SQL puts in the context. The request supplies the rest, and
-        // the recipe rather than the record says how the two meet.
-        TupleSource::SessionAttributeGate {
+            ..
+        }
+        | TupleSource::SessionAttributeGate {
             table,
             identity_cols,
             relation,
+            condition,
             row_parameter,
             column,
-            condition,
             ..
-        } => Some(described(
-            table,
-            RecordTemplate {
-                object_type: owner_type.clone(),
-                object_key: ObjectKey::new(key_parts(table, identity_cols, db)),
-                relation: relation.clone(),
-                subject_type: well_known.user.clone(),
-                subject_key: SubjectKey::wildcard(),
-                context: Some(RecordContext {
-                    condition: condition.clone(),
-                    entries: vec![RecordContextEntry {
-                        key: row_parameter.clone(),
-                        value: value_column(table, column, db),
-                        rendering: ContextRendering::SqlText,
-                    }],
-                }),
-            },
-            vec![not_null(table, column, db)],
-        )),
+        } => {
+            let rendering = if matches!(source, TupleSource::ConditionalAttributeGate { .. }) {
+                ContextRendering::Json
+            } else {
+                ContextRendering::SqlText
+            };
+            Some(described(
+                table,
+                RecordTemplate {
+                    object_type: owner_type.clone(),
+                    object_key: ObjectKey::new(key_parts(table, identity_cols, db)),
+                    relation: relation.clone(),
+                    subject_type: well_known.user.clone(),
+                    subject_key: SubjectKey::wildcard(),
+                    context: Some(RecordContext {
+                        condition: condition.clone(),
+                        entries: vec![RecordContextEntry {
+                            key: row_parameter.clone(),
+                            value: value_column(table, column, db),
+                            rendering,
+                        }],
+                    }),
+                },
+                vec![not_null(table, column, db)],
+            ))
+        }
 
         // The record is a function of the share row alone: the object is keyed on the
         // share's own primary key, and the comparison the request completes travels in
