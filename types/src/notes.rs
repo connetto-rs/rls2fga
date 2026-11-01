@@ -324,6 +324,22 @@ pub enum TranslationNote {
         /// The spellings, as written.
         spellings: Vec<String>,
     },
+    /// No caller role is or inherits a role the `TO` clause names, so the policy applies
+    /// to no caller and is left out.
+    PolicyAppliesToNoCallerRole {
+        /// Policy carrying the clause.
+        policy: String,
+        /// Roles it names.
+        roles: Vec<String>,
+    },
+    /// The schema never creates these roles, so which caller roles the `TO` clause
+    /// reaches is unknown.
+    PolicyRoleUnsettled {
+        /// Policy carrying the clause.
+        policy: String,
+        /// Roles the schema never creates.
+        roles: Vec<String>,
+    },
     /// The policy stores a clause `PostgreSQL` refuses for its command.
     PolicyClauseIllegal {
         /// Policy carrying the clause.
@@ -573,9 +589,11 @@ impl TranslationNote {
             | Self::FunctionMissingMetadata { .. }
             | Self::RowsCannotBeNamed { .. }
             | Self::BridgeColumnMissing { .. }
-            | Self::PolicyBoundToDdlTimeRole { .. } => NoteSeverity::Unhandled,
+            | Self::PolicyBoundToDdlTimeRole { .. }
+            | Self::PolicyRoleUnsettled { .. } => NoteSeverity::Unhandled,
             Self::RoleBypassesPolicies { .. }
             | Self::TableOwnerBypassesPolicies { .. }
+            | Self::PolicyAppliesToNoCallerRole { .. }
             | Self::PartitionReadDirectlyIsUnfiltered { .. } => NoteSeverity::Exempt,
             Self::CoveringPoliciesBelowThreshold { .. } | Self::ClauseBelowThreshold { .. } => {
                 NoteSeverity::BelowThreshold
@@ -646,6 +664,8 @@ impl TranslationNote {
             | Self::RestrictiveBarrierBindsEveryone { policy, .. }
             | Self::PolicyClauseAbsent { policy, .. }
             | Self::PolicyBoundToDdlTimeRole { policy, .. }
+            | Self::PolicyAppliesToNoCallerRole { policy, .. }
+            | Self::PolicyRoleUnsettled { policy, .. }
             | Self::PolicyClauseIllegal { policy, .. }
             | Self::PolicyRoleScope { policy, .. }
             | Self::RoleGateScope { policy, .. }
@@ -779,6 +799,19 @@ impl fmt::Display for TranslationNote {
                  grants nobody here and a restrictive one binds everyone. Name the role \
                  explicitly.",
                 spellings.join(", ")
+            ),
+            Self::PolicyAppliesToNoCallerRole { roles, .. } => write!(
+                f,
+                "The TO clause names ({}), which no caller role is or inherits, so the policy \
+                 applies to no caller and the model leaves it out",
+                roles.join(", ")
+            ),
+            Self::PolicyRoleUnsettled { roles, .. } => write!(
+                f,
+                "The schema never creates ({}), so which caller roles the TO clause reaches is \
+                 unknown. A permissive policy grants nobody here and a restrictive one binds \
+                 everyone. Create the roles in the schema.",
+                roles.join(", ")
             ),
             Self::PolicyClauseIllegal { rule, .. } => write!(
                 f,

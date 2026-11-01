@@ -202,6 +202,8 @@ pub(crate) struct ParityCase {
     pub(crate) loading_from_rows: bool,
     /// A second instant to compare at, where the case names the oracle.
     pub(crate) future: Option<FutureInstant>,
+    /// The roles every caller runs as, which the translation settles `TO` clauses against.
+    pub(crate) caller_roles: Option<rls2fga::generator::caller_roles::CallerRoles>,
 }
 
 /// A moment the database cannot be asked about, and what it would answer there.
@@ -240,6 +242,7 @@ impl ParityCase {
             not_read_directly: Vec::new(),
             loading_from_rows: false,
             future: None,
+            caller_roles: None,
         }
     }
 
@@ -302,6 +305,15 @@ impl ParityCase {
     /// The same case, with what a write on `table` would attempt.
     pub(crate) fn writing(mut self, table: &str, mutations: Mutations) -> Self {
         self.mutations.insert(table.to_string(), mutations);
+        self
+    }
+
+    /// The same case, translated with `roles` as the roles every caller runs as.
+    pub(crate) fn with_caller_roles(mut self, roles: &[&str]) -> Self {
+        self.caller_roles = Some(
+            rls2fga::generator::caller_roles::CallerRoles::new(roles.iter().copied())
+                .expect("a case names its caller roles"),
+        );
         self
     }
 }
@@ -992,7 +1004,19 @@ fn plan_case(
         case.registry_json.as_deref(),
         case.attributes_json.as_deref(),
     );
-    let planned = super::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    let settings = rls2fga::generator::model_generator::GeneratorSettings {
+        caller_roles: case.caller_roles.clone(),
+        ..rls2fga::generator::model_generator::GeneratorSettings::default()
+    };
+    let planned = rls2fga::translator::Translation::plan(
+        classified,
+        &db,
+        &registry,
+        ConfidenceLevel::B,
+        &settings,
+    )
+    .expect("translation should plan")
+    .outputs_accepting_gaps();
     let disclosed: Vec<Disclosure> = planned
         .notes()
         .iter()
