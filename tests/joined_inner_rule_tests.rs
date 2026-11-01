@@ -5,6 +5,7 @@
 //! condition making the two equal is required, and each one alone has a case here,
 //! because a rewrite that holds only usually is a grant `PostgreSQL` refuses.
 
+use rls2fga::classifier::patterns::{PatternClass, UnclassifiedExpr};
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
 use rls2fga::translator::TranslatorBuilder;
@@ -220,4 +221,42 @@ fn a_join_that_filters_is_answered_even_when_the_rule_ignores_it() {
         "without the key an order may name a customer that is not there, which the join \
          drops and the model would grant:\n{unkeyed}"
     );
+}
+
+/// A refused rule is explained as the rule the join folds it into, so naming the joined
+/// key or the parent's own column yields one reason.
+#[test]
+fn a_refused_rule_through_the_join_is_explained_as_the_parent_rule() {
+    let on_parent = refusal_reason(&format!(
+        "order_id IN (SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id \
+         WHERE NOT (o.customer_id = {CALLER}))"
+    ));
+    let through_join = refusal_reason(&format!(
+        "order_id IN (SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id \
+         WHERE NOT (c.id = {CALLER}))"
+    ));
+    assert!(
+        !on_parent.contains("another relation"),
+        "the parent's own column reads no other relation: {on_parent}"
+    );
+    assert_eq!(through_join, on_parent);
+}
+
+fn refusal_reason(using: &str) -> String {
+    let sql = format!(
+        "{}\nCREATE POLICY p ON line_items FOR SELECT USING ({using});",
+        schema(WITH_FK)
+    );
+    let db: ParserDB = parse_schema(&sql).expect("the schema should parse");
+    let classified = TranslatorBuilder::new()
+        .with_current_user_setting_keys(["app.user_id"])
+        .build()
+        .classify(&db);
+    let [policy] = classified.as_slice() else {
+        panic!("expected one policy");
+    };
+    match &policy.using_classification().expect("USING").pattern {
+        PatternClass::Unknown(UnclassifiedExpr { reason, .. }) => reason.clone(),
+        other => panic!("expected a refusal, got {other:?}"),
+    }
 }
