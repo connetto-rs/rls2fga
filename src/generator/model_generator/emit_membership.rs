@@ -921,7 +921,7 @@ fn indirect_read_scope<'a, DB: DatabaseLike>(
     if ctx.membership_reads_bypass_rls {
         return Some(&TableReadability::Open);
     }
-    let scope = join_table_readability(table, ctx.db, ctx.registry, memo);
+    let scope = join_table_readability(table, ctx, memo, notes);
     match scope {
         TableReadability::Open | TableReadability::RequestGated { .. } => Some(scope),
         TableReadability::Guarded { .. } => {
@@ -1135,7 +1135,7 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
     let link_scope = if ctx.membership_reads_bypass_rls {
         &TableReadability::Open
     } else {
-        join_table_readability(link_table, db, ctx.registry, readability)
+        join_table_readability(link_table, ctx, readability, notes)
     };
     apply_membership_read_scope(
         membership,

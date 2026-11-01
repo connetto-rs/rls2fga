@@ -2126,14 +2126,38 @@ fn types_bearing_name<DB: DatabaseLike>(
 }
 
 /// Readability of one membership table, computed once per plan per table.
+///
+/// With caller roles declared, the roles its read policies are scoped to are settled
+/// against them, so a read scope names only roles a caller runs as.
 fn join_table_readability<'a, DB: DatabaseLike>(
     join_table: &TableId,
-    db: &DB,
-    registry: &FunctionRegistry,
+    ctx: &PatternCtx<'_, DB>,
     memo: &'a mut BTreeMap<TableId, TableReadability>,
+    notes: &mut Vec<TranslationNote>,
 ) -> &'a TableReadability {
-    memo.entry(join_table.clone())
-        .or_insert_with(|| table_readability(join_table, db, registry, &ExpansionState::new()))
+    memo.entry(join_table.clone()).or_insert_with(|| {
+        let scope = table_readability(join_table, ctx.db, ctx.registry, &ExpansionState::new());
+        let (Some(callers), TableReadability::Guarded { roles }) =
+            (&ctx.settings.caller_roles, &scope)
+        else {
+            return scope;
+        };
+        if roles.is_empty() {
+            return scope;
+        }
+        match callers.settle(roles, ctx.db) {
+            Settlement::Everyone => TableReadability::Guarded { roles: Vec::new() },
+            Settlement::Callers(roles) => TableReadability::Guarded { roles },
+            Settlement::Nobody => TableReadability::Unreadable,
+            Settlement::Unsettled(roles) => {
+                notes.push(TranslationNote::PolicyRoleUnsettled {
+                    policy: ctx.policy_name.to_string(),
+                    roles,
+                });
+                TableReadability::Unreadable
+            }
+        }
+    })
 }
 
 /// Returns the membership read constraints, or `None` when no row is visible.
@@ -2146,7 +2170,7 @@ fn noted_membership_read_scope<'a, DB: DatabaseLike>(
     if ctx.membership_reads_bypass_rls {
         return Some(&TableReadability::Open);
     }
-    let scope = join_table_readability(join_table, ctx.db, ctx.registry, memo);
+    let scope = join_table_readability(join_table, ctx, memo, notes);
     match scope {
         TableReadability::Unreadable => {
             notes.push(TranslationNote::MembershipTableGrantsNoReads {

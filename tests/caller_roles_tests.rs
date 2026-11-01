@@ -236,13 +236,85 @@ fn caller_roles_cannot_be_empty() {
     assert!(CallerRoles::new(core::iter::empty::<&str>()).is_err());
 }
 
+/// A docs grant through a membership table whose rows only `members_to` may read.
+fn membership(members_to: &str) -> String {
+    format!(
+        "CREATE TABLE members (doc_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (doc_id, user_id));
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY members_read ON members FOR SELECT TO {members_to} USING (true);
+CREATE POLICY shared ON docs FOR SELECT
+  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
+"
+    )
+}
+
+#[test]
+fn a_membership_read_scope_names_only_caller_roles() {
+    let outputs = kinds(&membership("auditors"));
+    assert_eq!(
+        pg_roles_named(&outputs),
+        BTreeSet::from(["authenticated".to_string()]),
+        "{}",
+        outputs.model()
+    );
+}
+
+#[test]
+fn a_membership_table_every_caller_role_reads_needs_no_scope() {
+    let outputs = kinds(&membership("anon, authenticated"));
+    assert_eq!(
+        pg_roles_named(&outputs),
+        BTreeSet::new(),
+        "{}",
+        outputs.model()
+    );
+}
+
+#[test]
+fn a_membership_table_no_caller_role_reads_grants_nothing() {
+    let outputs = kinds(&membership("support_staff"));
+    assert_eq!(
+        pg_roles_named(&outputs),
+        BTreeSet::new(),
+        "{}",
+        outputs.model()
+    );
+    assert!(
+        notes_about(&outputs, "shared")
+            .iter()
+            .any(|note| matches!(note, TranslationNote::MembershipTableGrantsNoReads { .. })),
+        "{:#?}",
+        outputs.notes()
+    );
+}
+
+#[test]
+fn an_unsettled_membership_read_role_is_refused() {
+    let outputs = kinds(&membership("ghost"));
+    assert_eq!(
+        pg_roles_named(&outputs),
+        BTreeSet::new(),
+        "{}",
+        outputs.model()
+    );
+    assert!(
+        notes_about(&outputs, "shared").iter().any(|note| matches!(
+            note,
+            TranslationNote::PolicyRoleUnsettled { roles, .. } if roles == &["ghost"]
+        )),
+        "{:#?}",
+        outputs.notes()
+    );
+}
+
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 mod parity {
     use rls2fga::types::ActionStatement;
 
-    use super::KINDS;
+    use super::{membership, KINDS};
     use crate::support::parity::{
-        assert_agrees, assert_postgres, run, Cluster, ParityCase, Principal,
+        assert_agrees, assert_disclosed_where_noted, assert_postgres, run, run_disclosing, Cluster,
+        ParityCase, Principal,
     };
 
     const ATTRIBUTES: &str = r#"[{"key":"app.user_id","kind":"caller_id"}]"#;
@@ -262,8 +334,8 @@ CREATE POLICY anon_barrier ON docs AS RESTRICTIVE FOR SELECT TO anon USING (stat
         "GRANT SELECT ON docs TO anon, authenticated",
     ];
 
-    fn case(name: &str, callers: Option<&[&str]>) -> ParityCase {
-        let principals = [
+    fn callers() -> Vec<Principal> {
+        [
             ("alice", "authenticated"),
             ("bob", "authenticated"),
             ("visitor", "anon"),
@@ -272,8 +344,11 @@ CREATE POLICY anon_barrier ON docs AS RESTRICTIVE FOR SELECT TO anon USING (stat
         .map(|(subject, kind)| {
             Principal::with_setting(subject, kind, "app.user_id", subject).holding(&[kind])
         })
-        .collect();
-        let case = ParityCase::reading(name, &format!("{KINDS}{POLICIES}"), SEED, principals)
+        .collect()
+    }
+
+    fn case(name: &str, callers: Option<&[&str]>) -> ParityCase {
+        let case = ParityCase::reading(name, &format!("{KINDS}{POLICIES}"), SEED, self::callers())
             .with_attributes(ATTRIBUTES);
         match callers {
             Some(callers) => case.with_caller_roles(callers),
@@ -326,5 +401,57 @@ CREATE POLICY anon_barrier ON docs AS RESTRICTIVE FOR SELECT TO anon USING (stat
         })
         .await
         .expect("caller-roles-1 must finish within 300 seconds");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires Docker, PostgreSQL and OpenFGA"]
+    async fn a_membership_table_read_by_some_caller_roles_agrees_with_postgres() {
+        tokio::time::timeout(core::time::Duration::from_secs(300), async {
+            let cluster = Cluster::start().await;
+            for from_rows in [false, true] {
+                let mut case = ParityCase::reading(
+                    &format!("caller-roles-membership-{from_rows}"),
+                    &format!("{KINDS}{}", membership("auditors")),
+                    &[
+                        "INSERT INTO docs VALUES
+                           ('d1', 'alice', 'published'), ('d2', 'bob', 'draft'),
+                           ('d3', 'carol', 'published'), ('d4', 'visitor', 'draft')",
+                        "INSERT INTO members VALUES ('d2', 'alice'), ('d3', 'visitor')",
+                        "GRANT SELECT ON docs, members TO anon, authenticated",
+                    ],
+                    callers(),
+                )
+                .with_attributes(ATTRIBUTES)
+                .with_caller_roles(&["anon", "authenticated"]);
+                if from_rows {
+                    case = case.loading_from_rows();
+                }
+                let run = run_disclosing(&cluster, &case).await;
+                for (subject, object, visible) in [
+                    ("alice", "docs:d2", true),
+                    ("visitor", "docs:d3", false),
+                    ("visitor", "docs:d4", true),
+                ] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        object,
+                        ActionStatement::Select,
+                        visible,
+                    );
+                }
+                assert!(
+                    run.observations
+                        .iter()
+                        .all(|pair| !pair.disagrees() || pair.table != "docs"),
+                    "{:#?}",
+                    run.observations
+                );
+                assert_disclosed_where_noted(&case, &run);
+            }
+        })
+        .await
+        .expect("caller-roles-membership-1 must finish within 300 seconds");
     }
 }
