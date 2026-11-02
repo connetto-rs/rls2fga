@@ -1,3 +1,0 @@
-SELECT CE(MX(rl), 0)
-    FROM (
-   (      ( FROM PN å),

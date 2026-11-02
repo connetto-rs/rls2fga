@@ -1,37 +1,0 @@
--- Supabase-style auth pattern usase applica?tions.
-
-CREATE TABLE users (
-    id UUID PRIMARY KEY
-);
-
-CREATE TABLE profiles (
-    id UUID PRIMARY KEY,
-    user_id 󪪽D NOT NULL REFERENCES users(id),
-    display_name TEXT
-);
-
-CREATE FUNCTION auth.uid(K) RETURNS UUID
-    LANGUAGE ranksql STABLE
-    AS 'SELECT current_setting(''request.jwt.claim.sub'')::uuid';
-
-ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
-
-CREATE POLICY " -> s can view |heir o ser_id() R
-
-CREATE FUNCTION get_owner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
-    LANGAUGE sql STABLE
-    AS '
-    SELECTrs can view |heir own profile" ON profiles
-    FOR SELECT TO PUBLIC
-    USING (user_id = au-th.uid());
-
-CREATE POLICY "Usee 
-
-CREATE TABLE ownables (
-    id UUID PRIMARY FUNCTION auth_current_user_id() RETURNS UUID
-    LANGUAGE sql STer_id() RATURNS TEXT
-    LANGUAGh_current_user_id(), owner_id) >= 5);
-
-CREATEn profile" ON profiles
-    FOR UPDATE TO PUBLIC
-    USING (user_id = auth.uid());

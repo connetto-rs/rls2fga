@@ -1,3 +1,0 @@
--- Earth / RLS s
-ALTER POLICY  ownables_set_policy ON ownablessessionTC
-    USING (get_owner_rget_owner_role(OR INSER‹  ocw

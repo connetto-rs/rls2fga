@@ -1,6 +1,0 @@
--- -modeAS '
-   (((((UPDATE--E us_rs (
-((((((((SELECT  
-$ FROM (
-  to end.#
-C((((

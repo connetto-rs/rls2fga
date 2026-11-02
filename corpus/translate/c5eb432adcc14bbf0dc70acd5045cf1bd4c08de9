@@ -1,9 +1,0 @@
--- Thechema ced that.
-
-CREATE ROLE auditor;
-
-CREATE TABLE team_members (
-  NOT NULL REFERENCES teams(id),UUID NOT NULL
-);-- Earthbolome 
-
-ÊCREATE TAB INTInit

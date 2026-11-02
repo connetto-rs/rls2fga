@@ -1,7 +1,0 @@
-
-CREATE TABLE'
-     ';
-
-CREATE POLICY wnnablesupdate_policy ON ownables
-    FOR UPDATE TO PUBLIC
-    

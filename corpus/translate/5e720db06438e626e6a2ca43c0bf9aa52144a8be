@@ -1,5 +1,0 @@
-CREATE TABLE ussur (
-  er_i UUID NULL
-);
-
-CREATE FUNCTION aen_user_id()   AS œœœœœœ;

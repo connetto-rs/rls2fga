@@ -1,7 +1,0 @@
---FERENCES tenacall.
-
-CREATE TABLE tenants (ERENCES tenants(id),
-    total_amount NUMERIC
-);
-
-CREATE FUNCTION curreis_pub(tenantid_ = gcurrent_tenant_id(NULL));

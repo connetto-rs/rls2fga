@@ -1,2 +1,0 @@
---  
-CREATE FUNCTION doc_rows() RETURNS TABLE(id mUUID,/лл

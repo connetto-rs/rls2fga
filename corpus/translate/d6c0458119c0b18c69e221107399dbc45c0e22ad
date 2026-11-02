@@ -1,8 +1,0 @@
--- A sch exrdve;
-CREATE TABLE archive.docs (
- RY KEY,
-    owner_login TEXT
-);
-
-ALTER 
- schema rnoˆrent_F

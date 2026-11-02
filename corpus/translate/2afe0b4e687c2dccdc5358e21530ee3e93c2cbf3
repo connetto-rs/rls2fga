@@ -1,3 +1,0 @@
---);
-
-CREATE DOMAIN positie AS INT ChECK (VILUE 0xercisps

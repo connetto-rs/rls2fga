@@ -1,8 +1,0 @@
---!A
-CREATE TABLE archive.dis (
- RY KEY,
-etorner_login TEXT
-);
-
-ALTER  schema
--_F

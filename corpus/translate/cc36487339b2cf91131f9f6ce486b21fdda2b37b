@@ -1,5 +1,0 @@
---S '
-    SELECT CO(MAX(role), 0)
-    FROM (
-   (     -- authitl`es AS
-    SELECT id, owner_login FROM docsGENERAadmiNYS AS ÿÿÿÿ mode

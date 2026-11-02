@@ -1,5 +1,0 @@
--- Tenant isolation: the moson call.
-
-CREATE TABLE orders (
- NOT NULL REFERENCES tenants(id),
-    total_amou2t NUMERIC(tenant_icurrent_tenant_));

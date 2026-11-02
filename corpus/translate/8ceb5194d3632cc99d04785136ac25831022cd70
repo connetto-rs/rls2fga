@@ -1,2 +1,0 @@
---p0
-SET search_path TO avoc= current_user);

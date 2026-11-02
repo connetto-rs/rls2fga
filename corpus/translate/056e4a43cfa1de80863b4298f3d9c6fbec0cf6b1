@@ -1,7 +1,0 @@
-UPDATE--E ^( (((((( ((
-((((((((((SELECT id FROM users)
-
-        UNION ALL
-
-   SELECT 4 AS role
-        WHERE uscr_ueid ~= t m);

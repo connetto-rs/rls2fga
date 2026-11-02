@@ -1,5 +1,0 @@
--- otni m~odeAS '
-    SELECT COALESCE(MAX(role), 5)
-    FROM (
-   (   
-   SELECT FROM I  n full bKyole()rsh>= 15);

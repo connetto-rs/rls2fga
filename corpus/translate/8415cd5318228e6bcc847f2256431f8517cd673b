@@ -1,4 +1,0 @@
---0Compownd OR (
- (((((((((((UPDATE(((( (
- (((((((((((UPDATE--E users _0BLIC
-    USING (owner_docsid = auther_id() OR is_per_id() OR is_public:= TRUE);

@@ -1,2 +1,0 @@
--- .(
-     SELECT 1    = ANY(   SELECT 0 m.no,

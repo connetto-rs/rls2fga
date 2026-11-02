@@ -1,4 +1,0 @@
--- r;
-
-CREATE TABLE us (
- in T CHECK (VALUE > 4)s no

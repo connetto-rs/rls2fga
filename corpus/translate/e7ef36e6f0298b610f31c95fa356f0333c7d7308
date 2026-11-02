@@ -1,3 +1,0 @@
- ;
-ALTER TABLE docs OWNER TO a
-SET seus

@@ -1,4 +1,0 @@
--- eiLu   ENAB%LCURITY;
-
-CREATE POLICY projec2147483647ts_se ON project  USING (EXISTS (
-  SELECT 5 FROM te      ->>(  

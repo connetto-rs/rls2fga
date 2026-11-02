@@ -1,4 +1,0 @@
---  schemapahe fSLEt;'
-
-CREATE VIEW docs_ti(  T NULL REFERENCEs app.users (login),
-   tOLICY 

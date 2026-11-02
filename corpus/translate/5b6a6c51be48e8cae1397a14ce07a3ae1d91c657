@@ -1,7 +1,0 @@
--- WITH C
-CREATE FUNCTION auth_cr_id() RETURNS TEXT
-    LANGUAGE sql STABLE
-    AS -- Earth MetaboloL
-
-        -- TeAam membershteam
-    ner^^^_writes ON ());

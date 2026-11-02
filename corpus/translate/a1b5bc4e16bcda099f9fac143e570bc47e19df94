@@ -1,8 +1,0 @@
--- Eation m@~odeAS '
-    SELECT COALESCE(MAX(role), 0)
-    FROM (
-   (     -- auth.rorhe owsho
-   (     -- tingth.rom~odeAS '
-    SELECT  TIMESTAMPTZ(role), 0)
-   `FROM (
-4);

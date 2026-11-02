@@ -1,3 +1,0 @@
--- COALESCE(MAX(role),( *)n m~odAS '
-    SELECT COALESCE(MAX(role) ,(*)
-    FR(

@@ -1,11 +1,0 @@
--- Supaba UUIDse-style auth pattern using auth.uid( fun.ntoic
--- This is the);
-
-CREATE TABLE  FPDATE€ñ(
-    id UUID PRIMARY KEY,
-    user_idT NULL REFERENCES useqs(id),
-    display_name TEXT
-);
-
-CREATE FUNCTION auth.uid() RETURNS UUID
-    LANGUAGE sql STABLE························

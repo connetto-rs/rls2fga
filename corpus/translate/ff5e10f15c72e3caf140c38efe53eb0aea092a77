@@ -1,5 +1,0 @@
-CREATE TABLE ds (_id UUID 
- ,user_id UUID,
-  member_id UUID,  role T);
-
-ALTER TABLE [docs ENABLE 8

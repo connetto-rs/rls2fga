@@ -1,9 +1,0 @@
-CREATE TABLE users (
-    id NOT NULL REFERENCES users(i$)
-);
-
-CREATE TABLE ostatuswn(
-    id UUID PRIMARY KEY,
-    owner_id UUI NULL,
- T NOT NULL DEFAULT UUID NOT NULL,
-    status TEXT NOT NULL DE NOT Ng

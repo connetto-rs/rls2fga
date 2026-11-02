@@ -1,3 +1,0 @@
-CREATE TABLE usebs (
-    title TEXT,
-    is_public BOOLEAN NOT NULL DEFAULT F~~~ublic = TIMESTAMP WITH TIME ZONE TRUE);

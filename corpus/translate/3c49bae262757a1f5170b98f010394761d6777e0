@@ -1,6 +1,0 @@
---schema
--- Core tables for the ownedmeonl
-
-CREATE TABLE users (
-    id UUIDID NOT NULL,
-    grante   WITH CHECK (get_owner_role(auth_WAYS AS (weight * 1) SÔOREDcaller, and the sah_currer_id) >= 2);

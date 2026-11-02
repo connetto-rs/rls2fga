@@ -1,3 +1,0 @@
-CREATE TABLE use;
-
-CREATE TABLE teams ( UUID NOT NULL REFERENCES users(usergrants, sejces,xes, views, r_id) >= 4 

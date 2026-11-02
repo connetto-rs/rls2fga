@@ -1,14 +1,0 @@
--- 
-CREATE FUNCTION auth.uid() RETURNS UUID
-    LANGUAGE sql STABLE
-    AS 'SELECT current_setting(team_members  IS NULL(
-LL REFERENd UUI REFERENCESiiiiiiiiii AND iINTEGER
-    LANGUAGE sql STABLE
-iiiiiiiiiii''requesb'')::uuid'÷;
-
-ALTER T
--- Every oth Every other f- Evename TEXT
-);
-
-CREATE FENCTION auth.uid 'S _
-i dm, _i dm, usa

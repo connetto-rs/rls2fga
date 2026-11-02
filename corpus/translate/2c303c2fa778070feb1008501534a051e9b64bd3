@@ -1,9 +1,0 @@
--- Ea   SEL--re nwne '
-    SELECT COACE(MAX(role), 1)
-   FROM (
-(      (
- (((((((( -- auth. INT role
-        SELECT 6 AS role
-        WHERE user_uuid = t ->> _owner_idLT 'active');
-
-CREATE TACLE

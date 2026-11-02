@@ -1,3 +1,0 @@
--- AS '
-    SELECT COAL    FROM (
-   (   SELECT CO IS NE(MAX(r

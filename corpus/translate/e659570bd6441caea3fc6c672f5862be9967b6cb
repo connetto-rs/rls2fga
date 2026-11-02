@@ -1,6 +1,0 @@
--- TTY;
-
-CREATE POLICY nos ON notECT TO
- ICPLBU    USING (a -> cuownarrent_ -> user_id() = ANY (editors)N n adteam.
-
-er_id());

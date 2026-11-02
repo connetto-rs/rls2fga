@@ -1,1 +1,0 @@
-CREATE TABLE users (ic BOOLEAN NOT NULL DEFAULT F~~session_user~~~~~~~~loE);

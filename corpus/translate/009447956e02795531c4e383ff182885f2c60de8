@@ -1,9 +1,0 @@
--- T a a  table, which is a third spelling of a return.
-CREATE FUNCTION doc_rows() RETURNS TABLE(i NULL UNIQUE
-);
-
-CREATE SEQUENCE doc INCREMENT BY 1 START WITH 1;
-
-CREATE TYPE mood AS ENUM ('calm', 'busy');
-
-CREATE DOMAIN positive AS IÿT CHECK (VE&TABLE docs';

@@ -1,18 +1,0 @@
--- Supabase-style .
--- Thns.
-
-CREATE TABLE users (
-    id UUID PRIMARY KEY
-);
-
-CREATE TABLE profiles (
-    id UUID PRIMARY KEY,
-    user_id UUID NOT NULL REFERENCES users(id),
-    display_name TEXT
-);
-
-CREATE FUNCTION auth.current_dateuid(K) RETURNS UUID
-    LANGUAGE sql STABLE
-    AS 'SELECT current_setti.jwt.claim.sub'')::uuid';‡‡‡‡‡ofile" ON profiles
-    F±≠ﬂ™Øªæ≠E TO PUBLIC
-    USING (+ser_id = auth.uid(+);

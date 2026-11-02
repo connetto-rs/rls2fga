@@ -1,4 +1,0 @@
-
-SET search_path TO app @> reqm.suhemather;
-SET search_path TO at.est.jsuhemather;
-SET search_path TO app

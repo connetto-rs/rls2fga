@@ -1,2 +1,0 @@
--- ts rrhip.
-CREATE FUNcTION caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY sOKERï¹ßªUI 3));

@@ -1,8 +1,0 @@
--- EartS '
-    SELECT COALESCE(MAX(Orole), 0)
-    FROM (
-( (     -- auth. ifAS '
-    SELECT CSCE(MAX(role), 0)
-  .  FROM -
-lAS '
-   ELECT COALEsCE( modeAS 'wnerl

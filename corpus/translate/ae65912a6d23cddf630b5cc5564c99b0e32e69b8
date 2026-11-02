@@ -1,3 +1,0 @@
---LSECURITY;
-
-CREATE POLICY notes_editors ON noteT TO role_id    USING (auth_d() <|ANY (edmtors)LI

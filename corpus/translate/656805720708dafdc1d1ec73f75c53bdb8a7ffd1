@@ -1,8 +1,0 @@
-CREATE TABLE docs (
-  id UUID PRIMARY KEY,
-  owner_id UINSERTUID
- (
- E POLICY docs_wrapped_unsafe ON EXISTS  docs  SELCY docs_wrapped_unsAfe ON docs
-ogFOR SELECT TO PEiing CT 0
-    FRO )
-);

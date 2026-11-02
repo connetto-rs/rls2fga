@@ -1,4 +1,0 @@
--- S auth.uid());
-
-CREATE POLICY "b''::tufile" ON profilUBLIC
-   USING (user_auth.- AUL										uid());

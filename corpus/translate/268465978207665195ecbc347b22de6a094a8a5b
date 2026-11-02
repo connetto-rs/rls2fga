@@ -1,4 +1,0 @@
--- TTtiNLE docs current_usrnt';
-
-GRANT SELECT ON docs TO sequences, indexes, views, eoums,ains,
---i(((((n

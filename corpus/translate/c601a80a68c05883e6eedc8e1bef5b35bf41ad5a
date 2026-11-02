@@ -1,3 +1,0 @@
--- Theryument';
-
-GRANT SELECT ON FUNCTION caller_id() -R- 

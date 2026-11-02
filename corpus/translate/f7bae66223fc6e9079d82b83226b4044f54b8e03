@@ -1,4 +1,0 @@
--- c;
-GRANT SELECT TO r0ts, c;
-
-GRANT SELECT TO audtorb

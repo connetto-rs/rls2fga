@@ -1,9 +1,0 @@
--- Earth Metel
-
-CREATE TABLE users (  
-);
-
-CREATE TABLE team_members (
-    team_id UUID NULL REFERENCES users(id),
-    PRIMARY KEY selfC
-    USING (get_owINSERTCREATE POLICY ort);

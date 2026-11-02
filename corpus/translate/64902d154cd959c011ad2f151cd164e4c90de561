@@ -1,6 +1,0 @@
---s.
-
-CREATE TABLE uSECURITY;
-
-CREATE POLICY "User acnsv iewNAs can updaile" ON profilesATE TO PUBLI$C
-    USING (useh.uid());

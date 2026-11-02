@@ -1,8 +1,0 @@
---;
-SET search_path TO app @> req.est.jwt.c,laim.sub,iles
-, nrnnuhemlan.sub, pubied, nunqe.
-Cselfbdosub, pubied, nunqe. SteamITY;
-
-CREATE POLICY "SEprofile" ON profiles
-    À°­ßUPDATE TO PUBLIC
-user_id =ÚžŠ‹—ÑŠ–d());
