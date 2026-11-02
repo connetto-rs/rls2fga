@@ -1,0 +1,262 @@
+---
+source: tests/it/generator_tests.rs
+assertion_line: 56
+expression: model
+---
+{
+  "schema_version": "1.1",
+  "type_definitions": [
+    {
+      "type": "user"
+    },
+    {
+      "type": "ownables",
+      "relations": {
+        "can_delete": {
+          "tupleToUserset": {
+            "tupleset": {
+              "relation": "owner_id"
+            },
+            "computedUserset": {
+              "relation": "role_admin"
+            }
+          }
+        },
+        "can_insert": {
+          "tupleToUserset": {
+            "tupleset": {
+              "relation": "owner_id"
+            },
+            "computedUserset": {
+              "relation": "role_editor"
+            }
+          }
+        },
+        "can_select": {
+          "tupleToUserset": {
+            "tupleset": {
+              "relation": "owner_id"
+            },
+            "computedUserset": {
+              "relation": "role_viewer"
+            }
+          }
+        },
+        "can_select_for_update": {
+          "computedUserset": {
+            "relation": "can_update"
+          }
+        },
+        "can_update": {
+          "tupleToUserset": {
+            "tupleset": {
+              "relation": "owner_id"
+            },
+            "computedUserset": {
+              "relation": "role_editor"
+            }
+          }
+        },
+        "can_update_without_reading": {
+          "tupleToUserset": {
+            "tupleset": {
+              "relation": "owner_id"
+            },
+            "computedUserset": {
+              "relation": "role_editor"
+            }
+          }
+        },
+        "owner_id": {
+          "this": {}
+        }
+      },
+      "metadata": {
+        "relations": {
+          "owner_id": {
+            "directly_related_user_types": [
+              {
+                "type": "owner_grants_owner"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "owner_grants_owner",
+      "relations": {
+        "grant_admin": {
+          "this": {}
+        },
+        "grant_editor": {
+          "this": {}
+        },
+        "grant_viewer": {
+          "this": {}
+        },
+        "owner_team": {
+          "this": {}
+        },
+        "owner_user": {
+          "this": {}
+        },
+        "role_admin": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "owner_user"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "owner_team"
+                  },
+                  "computedUserset": {
+                    "relation": "member"
+                  }
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "grant_admin"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "grant_admin"
+                  },
+                  "computedUserset": {
+                    "relation": "member"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "role_editor": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "role_admin"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "grant_editor"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "grant_editor"
+                  },
+                  "computedUserset": {
+                    "relation": "member"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        "role_viewer": {
+          "union": {
+            "child": [
+              {
+                "computedUserset": {
+                  "relation": "role_editor"
+                }
+              },
+              {
+                "computedUserset": {
+                  "relation": "grant_viewer"
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "grant_viewer"
+                  },
+                  "computedUserset": {
+                    "relation": "member"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "metadata": {
+        "relations": {
+          "grant_admin": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "team_members_team"
+              }
+            ]
+          },
+          "grant_editor": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "team_members_team"
+              }
+            ]
+          },
+          "grant_viewer": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              },
+              {
+                "type": "team_members_team"
+              }
+            ]
+          },
+          "owner_team": {
+            "directly_related_user_types": [
+              {
+                "type": "team_members_team"
+              }
+            ]
+          },
+          "owner_user": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "team_members_team",
+      "relations": {
+        "member": {
+          "this": {}
+        }
+      },
+      "metadata": {
+        "relations": {
+          "member": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

@@ -9,6 +9,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Translate PostgreSQL RLS policies into OpenFGA authorization models"
 readme = "README.md"
+autotests = false
 
 [features]
 default = ["std"]
@@ -46,31 +47,11 @@ testcontainers = "0.27"
 # by sleeping through its own backoff.
 tokio = { version = "1", features = ["full", "test-util"] }
 
-# The server-backed suites write a model through the `client` feature, so they build
-# only with it.
+# Every integration suite is a module of this one binary, since each binary links the
+# whole dependency graph. The server-backed modules are gated on `client` inside it.
 [[test]]
-name = "openfga_client_tests"
-required-features = ["client"]
-
-[[test]]
-name = "openfga_integration_tests"
-required-features = ["client"]
-
-[[test]]
-name = "openfga_semantic_tests"
-required-features = ["client"]
-
-[[test]]
-name = "per_row_record_parity_tests"
-required-features = ["client"]
-
-[[test]]
-name = "dump_round_trip_tests"
-required-features = ["client"]
-
-[[test]]
-name = "parity_runner_tests"
-required-features = ["client"]
+name = "it"
+path = "tests/it/main.rs"
 
 [lints.rust]
 unsafe_code = "forbid"

@@ -1,0 +1,21 @@
+---
+source: tests/it/generator_tests.rs
+expression: model.model().trim()
+---
+model
+  schema 1.1
+
+type user
+
+type nobody
+
+type resources
+  relations
+    define no_access: [nobody]
+    define owner: [user]
+    define can_delete: owner
+    define can_insert: no_access
+    define can_select: owner
+    define can_select_for_update: can_update
+    define can_update: no_access
+    define can_update_without_reading: can_update

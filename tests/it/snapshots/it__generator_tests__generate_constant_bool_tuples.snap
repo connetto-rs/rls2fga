@@ -1,0 +1,5 @@
+---
+source: tests/it/generator_tests.rs
+expression: "tuple_generator::format_tuples(tuples)"
+---
+

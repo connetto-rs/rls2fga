@@ -139,8 +139,8 @@ jobs:
       - name: Verify Docker availability
         run: docker version
 
-      # The server-backed targets carry `required-features = ["client"]`, and cargo omits
-      # such a target silently, so without the feature they would neither run nor count.
+      # The server-backed modules of the `it` test binary are gated on `client`, so without
+      # the feature they would neither run nor count.
       - name: Run the in-process suites
         run: cargo llvm-cov --no-report --features client --lib --tests
 

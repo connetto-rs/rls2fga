@@ -1,0 +1,21 @@
+---
+source: tests/it/generator_tests.rs
+expression: model.model().trim()
+---
+model
+  schema 1.1
+
+type user
+
+type articles
+  relations
+    define no_access: [nobody]
+    define public_when_is_public: [user:*]
+    define can_delete: no_access
+    define can_insert: no_access
+    define can_select: public_when_is_public
+    define can_select_for_update: can_update
+    define can_update: no_access
+    define can_update_without_reading: can_update
+
+type nobody

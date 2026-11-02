@@ -1,0 +1,13 @@
+---
+source: tests/it/generator_tests.rs
+expression: "tuple_generator::format_tuples(tuples)"
+---
+SET TIME ZONE 'UTC';
+SET DateStyle = 'ISO, MDY';
+SET bytea_output = 'hex';
+
+-- User ownership (owner_id references users)
+SELECT 'resources:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner' AS relation, 'user:' || CASE WHEN "owner_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner_id"::text ELSE '~' || encode(convert_to("owner_id"::text, 'UTF8'), 'hex') END AS subject
+FROM "public"."resources"
+WHERE "owner_id" IS NOT NULL
+AND "id" IS NOT NULL;

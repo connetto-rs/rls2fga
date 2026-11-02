@@ -1,0 +1,13 @@
+---
+source: tests/it/generator_tests.rs
+expression: "tuple_generator::format_tuples(tuples)"
+---
+SET TIME ZONE 'UTC';
+SET DateStyle = 'ISO, MDY';
+SET bytea_output = 'hex';
+
+-- Public access flag (is_public)
+SELECT 'articles:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'public_when_is_public' AS relation, 'user:*' AS subject
+FROM "public"."articles"
+WHERE "id" IS NOT NULL
+AND "is_public" = TRUE;
