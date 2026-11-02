@@ -1,0 +1,30 @@
+---
+source: tests/it/generator_tests.rs
+expression: model.model().trim()
+---
+model
+  schema 1.1
+
+type user
+
+type docs
+  relations
+    define no_access: [nobody]
+    define scope_member_editor_89c73e0a: [pg_role_scope]
+    define can_delete: no_access
+    define can_insert: no_access
+    define can_select: member from scope_member_editor_89c73e0a
+    define can_select_for_update: can_update
+    define can_update: no_access
+    define can_update_without_reading: can_update
+
+type nobody
+
+type pg_role
+  relations
+    define member: [user]
+
+type pg_role_scope
+  relations
+    define roles: [pg_role]
+    define member: member from roles

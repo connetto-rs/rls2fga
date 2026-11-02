@@ -1,0 +1,35 @@
+---
+source: tests/it/generator_tests.rs
+assertion_line: 27
+expression: outputs.model().trim()
+---
+model
+  schema 1.1
+
+type user
+
+type nobody
+
+type ownables
+  relations
+    define no_access: [nobody]
+    define owner_id: [owner_grants_owner]
+    define can_delete: no_access
+    define can_insert: no_access
+    define can_select: roles_viewer_editor_admin from owner_id
+    define can_select_for_update: can_update
+    define can_update: no_access
+    define can_update_without_reading: can_update
+
+type owner_grants_owner
+  relations
+    define grant_admin: [user, team_members_team]
+    define grant_editor: [user, team_members_team]
+    define grant_viewer: [user, team_members_team]
+    define owner_team: [team_members_team]
+    define owner_user: [user]
+    define roles_viewer_editor_admin: grant_viewer or member from grant_viewer or grant_editor or member from grant_editor or grant_admin or member from grant_admin or owner_user or member from owner_team
+
+type team_members_team
+  relations
+    define member: [user]

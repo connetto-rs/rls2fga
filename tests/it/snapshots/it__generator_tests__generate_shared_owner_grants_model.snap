@@ -1,0 +1,48 @@
+---
+source: tests/it/generator_tests.rs
+assertion_line: 462
+expression: dsl.trim()
+---
+model
+  schema 1.1
+
+type user
+
+type nobody
+
+type owner_grants_owner
+  relations
+    define grant_admin: [user, team_members_team]
+    define grant_editor: [user, team_members_team]
+    define grant_viewer: [user, team_members_team]
+    define owner_team: [team_members_team]
+    define owner_user: [user]
+    define role_admin: owner_user or member from owner_team or grant_admin or member from grant_admin
+    define role_editor: role_admin or grant_editor or member from grant_editor
+    define role_viewer: role_editor or grant_viewer or member from grant_viewer
+
+type samples
+  relations
+    define no_access: [nobody]
+    define owner_id: [owner_grants_owner]
+    define can_delete: no_access
+    define can_insert: no_access
+    define can_select: role_viewer from owner_id
+    define can_select_for_update: can_update
+    define can_update: no_access
+    define can_update_without_reading: can_update
+
+type spectra
+  relations
+    define no_access: [nobody]
+    define owner_id: [owner_grants_owner]
+    define can_delete: no_access
+    define can_insert: no_access
+    define can_select: role_editor from owner_id
+    define can_select_for_update: can_update
+    define can_update: no_access
+    define can_update_without_reading: can_update
+
+type team_members_team
+  relations
+    define member: [user]

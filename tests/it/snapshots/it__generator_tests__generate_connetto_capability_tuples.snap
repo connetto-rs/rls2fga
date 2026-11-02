@@ -1,0 +1,49 @@
+---
+source: tests/it/generator_tests.rs
+assertion_line: 28
+expression: "tuple_generator::format_tuples(outputs.tuple_queries())"
+---
+SET TIME ZONE 'UTC';
+SET DateStyle = 'ISO, MDY';
+SET bytea_output = 'hex';
+
+-- Constant TRUE policy (all rows are visible)
+SELECT 'paper_shares:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'public_viewer' AS relation, 'user:*' AS subject
+FROM "public"."paper_shares"
+WHERE "paper_id" IS NOT NULL AND "viewer" IS NOT NULL AND length('paper_shares:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 256;
+
+-- paper_shares to papers bridge for tuple-to-userset
+SELECT 'paper_shares:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'papers' AS relation, 'papers:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END AS subject
+FROM "public"."paper_shares"
+WHERE "paper_id" IS NOT NULL
+AND "viewer" IS NOT NULL
+AND "paper_id" IS NOT NULL
+AND length('paper_shares:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 256;
+
+-- Request-scoped gate carrying the row's viewer, evaluated by condition when_viewer_in_app_subjects_394712ea
+SELECT 'paper_shares:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'gate_shares_read_abbc62d2' AS relation, 'user:*' AS subject,
+  'when_viewer_in_app_subjects_394712ea' AS condition, jsonb_build_object('viewer', "viewer"::text) AS context
+FROM "public"."paper_shares"
+WHERE "paper_id" IS NOT NULL AND "viewer" IS NOT NULL AND length('paper_shares:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 256
+AND "viewer" IS NOT NULL;
+
+-- Caller-set share on paper_shares_share carrying paper_shares.viewer, evaluated by condition when_viewer_in_app_subjects_394712ea
+SELECT 'paper_shares_share:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'gate_papers_p_3b273139' AS relation, 'user:*' AS subject,
+  'when_viewer_in_app_subjects_394712ea' AS condition, jsonb_build_object('viewer', "viewer"::text) AS context
+FROM "public"."paper_shares"
+WHERE "paper_id" IS NOT NULL AND "viewer" IS NOT NULL
+AND length('paper_shares_share:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 256;
+
+-- User ownership (owner references users)
+SELECT 'papers:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner' AS relation, 'user:' || CASE WHEN "owner"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner"::text ELSE '~' || encode(convert_to("owner"::text, 'UTF8'), 'hex') END AS subject
+FROM "public"."papers"
+WHERE "owner" IS NOT NULL
+AND "id" IS NOT NULL
+AND octet_length('user:' || CASE WHEN "owner"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner"::text ELSE '~' || encode(convert_to("owner"::text, 'UTF8'), 'hex') END) <= 512;
+
+-- papers to paper_shares_share bridge for tuple-to-userset
+SELECT 'papers:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END AS object, 'paper_shares_share' AS relation, 'paper_shares_share:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS subject
+FROM "public"."paper_shares"
+WHERE "paper_id" IS NOT NULL
+AND "viewer" IS NOT NULL
+AND octet_length('paper_shares_share:' || CASE WHEN "paper_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 512;
