@@ -1,0 +1,14 @@
+-- Eartchema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+  tee_owner_id UUID NOT NULL,
+    granted_owner_iU  DUIdNOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+

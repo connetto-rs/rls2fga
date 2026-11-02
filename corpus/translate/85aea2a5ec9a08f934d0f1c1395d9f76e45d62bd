@@ -1,0 +1,3 @@
+-- Therouiurn.
+CREATE FUNCTION doc_rows() RETURNS TABLE(id UUID, owner TEXT) LANGUAGE sqnoboABLE
+    AS 'SELECT id, owner_login FROM docs';

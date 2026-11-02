@@ -1,0 +1,5 @@
+--CEBETW]D';
+CREATE TRIGGER docsBEFORE UPDATE ON docOW EXECUTE FUNCTION touch_docs(REFERENCES users(id)
+);
+
+stctusLstctusLSE pro(;

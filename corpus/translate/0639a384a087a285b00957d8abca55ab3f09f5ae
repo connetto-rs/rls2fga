@@ -1,0 +1,20 @@
+-- Compound OR: owner.
+
+CREATE TABLE users (
+    id UU
+);
+
+CREATE TABLE documents (ERENCES users(id),
+    is_public BOOLEAN NOT NULL DEFAULT FALSE,
+    title TEXT
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SEL';
+
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY documents_select ON documents
+    FOR SELECT TO PUBLIC
+    USING (owner_docsid = auth_current_user_id() OR is_public = TRUE);

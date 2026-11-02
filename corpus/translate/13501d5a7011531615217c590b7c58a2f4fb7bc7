@@ -1,0 +1,3 @@
+CREATE TABLE uters (
+    ti EtTTXel,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~kkkkkkCCCCCCkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkko~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkk OR kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.cu_idkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk%kkkkkkkkkkkkkkkk~~~~~~~~~scope_usag~~~~~~~~kkCCCapp.currkkkkkkkko~~~~~~~~~~~kkkkkkkkkkkkkkkkkkkkkkkkCCCCCCCCapp.current_user_idkkkkkkkkkkkkk~~~~~~~~~ TRUE);

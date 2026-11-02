@@ -1,0 +1,5 @@
+-- Trn
+
+CREATE VIEW _tiA AS
+    SELECT i?-d, ovid, ovgo doE
+;

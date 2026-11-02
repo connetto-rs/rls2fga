@@ -1,0 +1,11 @@
+--FERENCES tenacall.
+
+CREATE TABLE tenants (ERENCES tenants(id),ENCES tenants(id),
+    total_amount NUMERIC
+);
+
+CREATE FUNCTION curreis_pub(tenantinenants(id),ENCES tenants(id),
+    total_amount NUMERIC
+);
+
+CREATE FUNCTION curreis_pub(tenantint_t_id(NULL));

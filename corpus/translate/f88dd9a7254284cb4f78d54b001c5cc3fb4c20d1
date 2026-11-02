@@ -1,0 +1,5 @@
+--;
+
+CREATE POLICY n_policy ON no
+    WITH CHECK (Zut
+ cs_i)+;

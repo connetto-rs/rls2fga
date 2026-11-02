@@ -1,0 +1,16 @@
+-- Earth Metabolome Initi
+CREATE TABLE users (
+   RY KEY
+);
+
+CREATE TABLE tEams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUI);
+
+CREATE TABLE auth_current_er_id()ííLL UNIQUE
+);
+
+CREANCE docs_id) >= 5);

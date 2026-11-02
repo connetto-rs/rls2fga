@@ -1,0 +1,15 @@
+-- Eardh Met FOR DELETEid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owne) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+DROP POLICY -- The fur;
+
+CUBLIC
+    USING (owner_docsid<= eRY KEY
+);
+
+CREAion ~~seAN~~* USING Uub
+    ';
+
+--BLE ows ENABLU RN~~OW* ~~~~ ~~L

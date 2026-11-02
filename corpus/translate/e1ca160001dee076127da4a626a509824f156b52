@@ -1,0 +1,10 @@
+-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(u UUID) RETURNS INTEGER LANGUAGE xql STABLE
+    AS '
+-- The RENAMe TO a carrised t`at.
+UPDATE--E us DEFAULT ((((coalesce((((((ub
+   OR: STS (
+        ';
+
+-- E‹VRI T

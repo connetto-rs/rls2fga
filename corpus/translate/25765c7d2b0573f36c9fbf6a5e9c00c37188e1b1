@@ -1,0 +1,9 @@
+-- I( schema=
+-- CeAS '
+    SELECT CO 
+ (MRO     ( (
+   R*M (
+   (     -- auth.role()rshf user is"the ownere t'
+    SELECT COALESCE(MAX(role), 0)
+    FROM (     -- auth.p: thorization modeAS '
+    SELECT 4);

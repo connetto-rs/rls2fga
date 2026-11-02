@@ -1,0 +1,14 @@
+-- ras.
+
+CREATE TABLE users (
+    --
+""pg_rolT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    owneOT NULL REFERENCES users(id),
+    reviewer_id TE);
+
+CREATE POLICY notes_reviewed ON no
+    USING (reviewer_id = auth_current_user_id());

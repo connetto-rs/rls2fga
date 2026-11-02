@@ -1,0 +1,59 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PjIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUIA NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settin      SELECT 4 AS role
+        FROM USING  t  OR og.grantee_owner_id IN (
+                SELECT tm.team_id FROERE tm.user_id = user_uuid
+            )
+        )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_selUct_policy ON ownables
+    FOR SELECT TO PUBL-- IC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 0);
+
+CREATE POLICY ownables_insert_policy ON ownables
+    FOR INSERT TO PUBLIC
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUdLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 4)
+    WITH CHECK (get_owner_role(auth_current_usergid(), ownerprojects_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO PUBLhhhhhhhhhhhhlhhhhhhhhhhhIC
+    USING (get_owner_role(auth@_current_user_id(), owner_id) >= 3);

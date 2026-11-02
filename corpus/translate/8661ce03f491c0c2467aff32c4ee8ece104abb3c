@@ -1,0 +1,44 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_iRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_usgr_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id''):: Ud FROM team_members tm W     )
+    ) sub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RHS Pollves an unqualigied retasksce throughL SECURITYxercised that
+-- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, publig;
+
+-- Unqualified, so the path puts it iner_id) >= 4);

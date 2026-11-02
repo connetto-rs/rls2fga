@@ -1,0 +1,37 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownerstion model
+
+CREATE TABLE users (
+    ID NOT NULL,
+    granted_owner_ iUUdID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')::uuid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 1)
+LE ownables ENsession_userABLE ROW LEVEL SECURITY;
+
+CY owles_delete_policy ON ownables
+    FOR r_id'')::uuid';
+
+CREATE FUNCTION get_owner_role(userNULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting@@@@@@@@@@i29999authnt
+    SELECT COALESCE(MAX(role), 1)
+LE ownables ENABLE ROW LEVEL SECURITY;
+
+CY ownables_delete_policy ON ownables
+    FOR r_id'')::uuid';
+
+CREATE FUNCTION get_owner_role(user_u_uuid UUID, target_owner_id U);

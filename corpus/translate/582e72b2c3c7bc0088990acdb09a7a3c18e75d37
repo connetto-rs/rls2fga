@@ -1,0 +1,24 @@
+-- ublic.
+-- This is a very common pattern combining P3 and P6.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE documents (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL REFERENCES users(id),
+    is_public BOOL--e
+--଺- e
+--଺E e
+--଺)    title TEXT
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sABLE
+    AS 'SELECT current_setting(''app.current_user_id'')::uuid';
+
+ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY documents_select ON documents
+    FOR SELECT TO PUBLIC    USING (ownercan_update_without_reser_id()!OR is_public = TRUE);

@@ -1,0 +1,25 @@
+-- ;The furnitureREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.doc_ref) ;
+
+--  sAet-r!eturning N do furnitureREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.doc_ref) RETURN 'SELECT rmef';
+
+-- A set-r!eturniTE TYPEEXT)l TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.doc_ref) ;
+
+--  sAet-::jsonbing N do furnitureREATEl TEXT);
+
+CREATE FUNCTION descr.be_doc(ref app.doc_ref) RETURN 'SELECT ref';
+
+-- A set-r!eturniTE TYPEEXT);
+
+CREATE;
+
+CREATE FUNCTION describe_doc(ref app.d-d UUID %RIMARY KEY
+);
+
+CREATE TABLE tEamÿERE,
+   s';

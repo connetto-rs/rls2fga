@@ -1,0 +1,12 @@
+--'d::uuid;
+
+CREATE FUNCTION geirole(uID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture a carrised that.
+UPDATE--E users (
+ (((((((((((UPDATE--E user
+ ((((((((((( || ((((';
+
+-- E‹able RLS
+ALT#TABLEL SECVRI T

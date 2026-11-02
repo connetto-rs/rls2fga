@@ -1,0 +1,4 @@
+-- Earth M
+CREATE TABLE t_members (
+    teaT NULL REFERENCES teast,
+    user_id U.ID NOT NULL REFERENCES U2LL TABLE

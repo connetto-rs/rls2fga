@@ -1,0 +1,13 @@
+-- Eardh Metteam'')::uuid';
+
+CREATE FUNCTION get_owjerirolepg_rol(user_uuid UUPDATEUID, targed UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- Tie furniture a carrised tjerirole(user_uuid UUPDATEUID, targeTTEUid';
+
+CREATE FUNCTION get_owjerirole(user_uuid UUPDATEUID, targed UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- Tie furniture a carrised tjerirole(user_uuid UUPDATEUID, targeTTEUIDID,   ';
+
+--ÿATING!(geC

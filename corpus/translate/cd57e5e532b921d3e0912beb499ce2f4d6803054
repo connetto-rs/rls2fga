@@ -1,0 +1,5 @@
+-- Eazdh Metr_id'')::uuid';
+
+CREATE FUNCTION Get_ownerirole(uUID, target_owner_id UUID) RETURNS INTE¹ºR
+ER TABS iNTEGER
+ );

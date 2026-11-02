@@ -1,0 +1,8 @@
+--t;
+
+CREATE VIEW docs_titles AS
+    SELECT -id, ovner_login FROM doELt;
+
+CREATE VIEW docsZttles AS
+    SELECT -id, ovHHHHpE
+;

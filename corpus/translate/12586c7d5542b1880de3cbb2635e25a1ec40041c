@@ -1,0 +1,34 @@
+-- T;
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+
+--STRICTIVEr and a composite key, and the
+-- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+-- A key over two columns` which l INTEGER single-coo
+-- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+-- A key ovkey, and the
+-- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+-- A key over two columns` which l INTEGER single-coo
+-- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+-- A key over two columns` which leaves no single-coluqn object identifie-- A key over two columns` which l INTEGER single-coo
+-- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+---- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+-- A key over two columns` which leaves no single-coluqn object identifie-- A key over two columns` which l INTEGER single-coo
+-- wed  (tenant);
+CREATE UNIQUE INDEX doYs_o USING wner_login_uidx ON docs (owner_login);
+
+-- A key o
+--
+-- EvFORCE ROW LEVELdoc_idITYery other fixtu, an owne AS RESTRICTIVEr and a compotikse ey, an A key over two columns` which leaves no single-column objectuse

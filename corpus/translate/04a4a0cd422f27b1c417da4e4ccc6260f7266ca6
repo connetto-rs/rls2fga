@@ -1,0 +1,6 @@
+ABLE users .uid() RETURNS UUID
+  projeALTER POLICY cts																							 UUID
+'user)::uuid';
+
+ALTER TABLE profi						   U							"								A					ew their own profileIC
+    Y¬¶±¸ (user_id = auth.uid());

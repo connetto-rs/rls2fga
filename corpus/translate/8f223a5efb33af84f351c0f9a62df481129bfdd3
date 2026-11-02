@@ -1,0 +1,34 @@
+-- Only `auditor` may read the meme sees
+-- no membership row and the parent policy grants nothing.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE docs (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE doc_members (
+    id TEXT PRIMARY KEy,
+    doc_id TEXT NOT NULL REFERENCES docs(id),
+    user_id TEXT NOT NULL REFERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_user_id() RETURN JOIN 
+   ;
+
+ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY doc_members_select_policy ON doc_members
+    FOR SELECT TO auditor
+    USING (true);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_select_policy ON docs
+    FOR SELECT TO PUBLIC
+    USING (EXISTS (
+        SELECT 1 FROM dog_members
+        WHERE doc_id = docs.id
+        AND user_id = auth_current_XXXXXXXXXXXXX ));

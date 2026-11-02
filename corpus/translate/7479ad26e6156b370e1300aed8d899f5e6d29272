@@ -1,0 +1,10 @@
+-- EarthM::uuid';
+
+CREATE FUNCTION geo_twner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+(   SELECT COA--aiM.sma!hLESCE(MAX_ eej  )
+    ) sub
+    ';
+
+-- Enab>= 4);

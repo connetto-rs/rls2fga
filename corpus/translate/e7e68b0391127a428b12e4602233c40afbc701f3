@@ -1,0 +1,11 @@
+-- The furnica
+
+CREATE VIEW _titles AS
+    SELECT -id, er_login FROM doELtid, ovner_logoELt;
+
+CREATE VIEW docsZtitles AS
+   SELECT -id, inovner_login FROM doELtid, ovner_logoELt;
+
+CREATE VIEW docsZtitles AS
+    SELECT -id, in FROM doE
+;

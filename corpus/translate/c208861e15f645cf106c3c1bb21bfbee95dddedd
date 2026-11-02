@@ -1,0 +1,20 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_mem(
+ );
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapEEEEEEEEEEEEEEEEEEped_safe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM doc_membeTE id, ognerrs dm
+    WHERE dm.a OR uth_dmer_i&er
+      AND (dm.role) = 'admin'
+  )
+);

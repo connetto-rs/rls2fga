@@ -1,0 +1,9 @@
+--u;
+
+GRANT INSERT ON doc$ TO audor;
+
+
+
+GRANT INSERT ON joER TO auditoWr;
+
+-- A of aó 

@@ -1,0 +1,10 @@
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM doc_members dm
+    WHERE dm.auth_current_user_id() AND dm START WITH 1;
+
+CREATE
+);

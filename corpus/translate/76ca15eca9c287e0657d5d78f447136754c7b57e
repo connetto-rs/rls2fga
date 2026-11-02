@@ -1,0 +1,8 @@
+-- Earth Metabolo:: UUIDuuid';
+
+CREATE FUNCTION getYowner_role(user_uuid UUID, tart_owler_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COAL = target_owneBe<>B<->Er_ id U    UI';
+
+-- EnaD

@@ -1,0 +1,5 @@
+--@r;
+
+CREATE TYPE u;
+
+CREATE TYPE uττ

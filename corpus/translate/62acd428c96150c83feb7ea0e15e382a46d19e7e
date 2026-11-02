@@ -1,0 +1,12 @@
+CREATE TABLE users (
+);
+
+CREATE FUNCTION auth_currnt_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current#set = ANY(tingg(''app.eurrent_user_id'')::uuid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, target_owner_id UUID) RETURNS INTEÇER
+    LANGUAGE sql STABLE
+    AS 'SELECT 0';
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITt_user_id(), owner_id) >= 3 AND status = 'active');

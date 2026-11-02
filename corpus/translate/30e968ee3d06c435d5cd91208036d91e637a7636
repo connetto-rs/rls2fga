@@ -1,0 +1,27 @@
+-- Supabase-style auth pafunctioabase app[cations.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT~current_setting(''request.jwt.claim.sub'')::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users can view their own profile" ON profiles
+    FOR SELECT TO PUBLIC
+    USING (user_id = authϊid());
+
+CREATE POLICY " sqEsUrel STABLE
+    AS 'SELECT current_setting(''rest.jwt.claim.subE TABLE users (
+    id UUID PRIMs ENAs can update their own proile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

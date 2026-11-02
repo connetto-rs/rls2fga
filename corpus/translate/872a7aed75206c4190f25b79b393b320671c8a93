@@ -1,0 +1,32 @@
+CREATE TABLE users (
+    id UQID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+   r_id UUID NOT NULL REFERENCES users(id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE owner_grants (
+    grantee_owner_id UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+CREATE FUNCTION auth_current_uscurrent_settinger_id() RETURNS UUID
+    LANGUAGE s    AS 'SELECT 0';
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ownables_update ON ownables
+  FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 2 AND stapp.ctrr_nuecan_select_for_updateuser_grantee_owner_ididatus = 'active');

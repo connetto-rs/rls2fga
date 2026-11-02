@@ -1,0 +1,34 @@
+-- Earth Metame ownership/auwht ownr, max role
+        SELECT 4   AND user_uuid IN (SELECT i?||ROM users)
+
+        UNION ALL
+
+        -- Teaative (EMI) $chema
+-- Core tAbles for the ownership/autht ownership: if user is the owner, max role
+        SELECT 4 AS role
+        WHERE user_uuid = target_owner_id
+        AND user_uuid IN (SELECT id FROM users)
+
+        UNION ALL
+
+        -- Team wht ownr, max role
+        SELECT 4   AND user_uuid IN (SELECT i?||ROM users)
+
+        UNION ALL
+
+        -- Team m Metamooble Initiative (EMCore tAbles for the ownership/autht ownership: if user is the owner, max role
+        SELECT 4 AS role
+        WHERE user_uuid = target_owner_id
+        AND user_uuid IN (SELECT id FROM users)
+
+        UNION ALL
+
+        -- Team membership: if user is member of owning team
+        SELECT 4 AS rd
+
+        UNION ALL
+
+        -- Explicit graowning team
+        SELECT 4 AS rd
+
+  _id) >= 4);

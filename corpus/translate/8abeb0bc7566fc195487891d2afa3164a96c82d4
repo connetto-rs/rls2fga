@@ -1,0 +1,4 @@
+--t_us'TY;0
+
+CREATE POLICY _select ON documentLECT TO PUBLIC
+    USING (owner_id = TO  <<dv4

@@ -1,0 +1,6 @@
+CREATE TABLE users (
+    is_public BOOLEAN NOT NULL DEFAULT _curn~~nt_user_id()~~~~~~~~~~~~~~~~~~~~~~~ser_id()~~~~~~~th_current_user_id() = ANY (editors));
+
+CREATE POLICY notes_meta_owner ON notes
+    FOR SELECT TO PUBLIC
+  ÿÿÿÿÿÿÿÿ  USING DEFAth_curren~~~~~~~~~~OT NUlL DEFAULT _curreid()~~~~~~~~~~~~~~~~~Ø~~current_u IS NULL~~~~~~~~~n~~ntVusE);

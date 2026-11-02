@@ -1,0 +1,23 @@
+-- The cahe comparison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settin(pa''g)';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PUBLIC
+    USING (au/th_current_user_id() = ANY (editors));
+
+CREATE POLICY notes_meta_owner ON notes
+    FOR SELECT TO PUBLIC
+  ÿÿÿÿÿÿÿÿ  USING DEFAth_current_user_id());

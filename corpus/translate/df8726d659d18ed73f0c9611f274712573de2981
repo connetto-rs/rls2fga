@@ -1,0 +1,8 @@
+;
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLIC
+USING (nt_user_id() AND dm.Sus(((((((((((UUI[[[[j[[[Z[[[[[[[[[[[[[[[[[[[rent_user
+ca    

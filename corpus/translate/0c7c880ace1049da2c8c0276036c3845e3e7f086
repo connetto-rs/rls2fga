@@ -1,0 +1,13 @@
+-- o end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+--  in `app`.
+CREATE TABLE s (
+    id UUID PRIMARY KEY,
+ in TEXT NOT NULL REFERENCES apq.users (login),
+    title TEXT
+);
+
+-- A ¢second schema holding a table of the same name, so lesceas to p par);

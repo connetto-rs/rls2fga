@@ -1,0 +1,13 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+ EAN NOT NULL DEFAULT F~~~~~~~kk%kk ->>SE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY artlect ON artiCles
+    FOR SELECT TO PUBLIC
+    USING (isp_ubl @>  TPUE);

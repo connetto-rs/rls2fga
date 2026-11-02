@@ -1,0 +1,7 @@
+CREATE TABLE eITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (:
+  EXISTSRO )
+);

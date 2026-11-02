@@ -1,0 +1,24 @@
+-- 'SupabAse-style auth pattern using autstpabase applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+  me TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settbied, nunqe.
+Cb,@ pubied, nuneditorqe.
+Cersnuhemamher;
+SET searcreq.est.jwt.c,laim.sub, pubied, nunqe.
+current_role nuneneditor s)::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "SECQRITY;
+docs_wraown profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

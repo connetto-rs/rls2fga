@@ -1,0 +1,24 @@
+-- A ead.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    ownerREFERENCES users(id)
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+   AS 'Snt_setting(''app.current_u)';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_readable ON notes
+    FOR SELECT TO PUBLIC
+    USING (TRUE);
+
+CREATE POLICY notes_owner_writes ON notes
+    FOR UPDATE TO PUBLIC
+    USING (owner_idtasks = auth_current_user_id())
+    WITH CHECK (TRUE);

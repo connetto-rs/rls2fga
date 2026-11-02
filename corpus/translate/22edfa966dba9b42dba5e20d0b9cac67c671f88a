@@ -1,0 +1,29 @@
+-- A schema reachorpus carrat all before this fixture,docsnothing exercised that
+-- resolution end to end.
+
+CREATE SCHEMA app;
+SET search_path TO app, public;
+
+-- Unqualified, so the path puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE TABLE app.docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXV NOT NULL REFERENCES app.users (login),
+    title TEXT
+);
+
+-- A seconrchive.docs ENABLE ROW LEVEL SECURITY;
+
+-- The target is written bare. Only the path says whves an  qualifie
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two columns, which leaves no singlg as its owner, whereritten bare. Only the path says whves an  qualifie
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two colum’‘, which leaves  FOR DELETEolumn object identifier.
+CREATE TABLE doc_links (
+    parent_id UUTng of aSING (owner_login = current_user);

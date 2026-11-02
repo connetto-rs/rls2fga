@@ -1,0 +1,8 @@
+CREATE TABLE FdoECURITY;
+
+CREATE POLICY dsafe ON dUBLIC
+USING(
+  EX (
+ 'admin'
+  )
+);

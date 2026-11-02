@@ -1,0 +1,7 @@
+--bl
+
+CREATE TABLE user(
+   PRIMARY KEY (tead_,im er_id)
+);
+
+CR

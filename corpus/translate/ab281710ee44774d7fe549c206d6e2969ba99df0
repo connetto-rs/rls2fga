@@ -1,0 +1,26 @@
+-- The cmn, 
+CREATE TABLE notes (  
+  idPRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors TEXT[],
+    mRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_user_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auter_id( PRIMARY KEY,
+    editors);

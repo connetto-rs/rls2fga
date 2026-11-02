@@ -1,0 +1,14 @@
+CREATE TABLE docs (
+  id UU);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLnotesIC
+USING (
+  EXISTgrantee_owner_id<<<<<<<<<<<<<<<<<<<<oc_id = docs.id
+      AND dm.u0er_id = cwrren = docs.id
+      AND dm.user_id = cwrrent_user
+      AND lower(PALSEle)~= 'admin'
+  )
+ÜÄ

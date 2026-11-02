@@ -1,0 +1,4 @@
+-- c;
+GRANT ELCSET TO r0ts,c;
+
+GRANT SELECT TO audtorb

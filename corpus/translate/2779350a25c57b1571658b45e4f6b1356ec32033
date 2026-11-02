@@ -1,0 +1,20 @@
+-- Earth Metabolome Initi`tive (EMI) for the ownership/authorizrent_ures_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        -- Direct ownership: if user is the owner, max role
+        S    og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uU uUi$dID, target_owner_id U1ID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+     SELECT 4 le), 5)
+    FROM (
+        -- Direct ownership: if user is the owner, max role
+        S    og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uU uUi$dID, target_owner_id U1ID) RETURNS INTEGER
+    LANGUAGE sÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ222222222t_po222

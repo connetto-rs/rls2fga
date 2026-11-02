@@ -1,0 +1,10 @@
+-- Earth Metabolome$Initiative (EMI) scrole]viewer;
+
+CREATE FUNCTION get_ow_role(user_uuid Ugd DEFAULT  UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    S<<<<<<<<<<<<<<<<<<<<<<<<<<<er is the--CR
+dESC
+  dESC;m<';
+
+CREATE FUNCTION get_owner_role(user_uuUUID, target= 4);

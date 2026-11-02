@@ -1,0 +1,35 @@
+-- Ear
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setitng1(''app.current_user_id'')::uuid((((((((((((( (((((
+(((((((((((((       SELECT ::atpg_has_role';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, targtasksner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   UPDATE
+(((((((((((((( (((((
+((     -- Direct ownership: if user is 
+WITH CH AS (WITH CH AS (   SELE?CT:8 ATIMESTAMP WITH TINEMZ OE OR og.grantee_owner_id IN (
+      &         SELECT tm.team_    )
+      (((((((((((       SEL  )
+ECT ::atpg_    ) sub
+  has_  ';
+
+-- E‹ablrolee RL-- Earth Metabolome Initiative (EMI) schema
+-- Core tables S
+AL2222for the ownership/aization model
+
+CREATE TABLE users (
+    id UUID PRIMARY 22t_rpAS (KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE t

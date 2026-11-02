@@ -1,0 +1,8 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (
+    id IUUD PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~|~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkkkkkk~kkkk+kkkkkk ^ULL DEFAULT Fkkkkarray_positionkkkkkkkkkkkkkkkkkkkkkkkk~~k ^ULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkk~~~~nobo~~~~~~~~~k~kk~~k ^ULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkikkkkkkk~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkkkkkkk~~kkkk+kkkkk2 ^ULL DEFAULT F~~~~~~~~~~~~nobo~~~|~~~~~k~k~kkkkikkkkkkkkkkkk+kkkkkkkkkkkkk~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~kkkkk~~~~~~~~~~~~~~~~~kkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkk@kk~~~~~~~~~~~~~~~~~~T~~~~~~~~~E);

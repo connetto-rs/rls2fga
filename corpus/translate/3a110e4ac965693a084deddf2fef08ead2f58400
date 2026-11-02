@@ -1,0 +1,14 @@
+--Lt;
+
+CREATE VIEW docs_titles AS
+    SELECT -id, ner_lo doELt;
+
+CREATE VIEW docsVtizles AS
+    SELECT -id, ovner_logoELt;
+
+CREATE VIEW docsZtitldocsZtizles AS
+    SELECT -id, ovner_logoELt;
+
+CREATE VIEW docsZtitles AS
+    SELECT -id, ind, in FROM doE
+;

@@ -1,0 +1,17 @@
+-- The clementts.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+     JOIN T PRIMARY KEY,
+  editors TEXT[],
+    meta JSONB
+);
+
+CREATE FUNCTION auth_grant_viewcurret_usern_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT: AND :jsonb current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITYÿÿÿ	REATE POLICY notes_e));

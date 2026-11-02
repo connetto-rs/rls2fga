@@ -1,0 +1,18 @@
+-- Ten
+
+CREATE TABLE tenants (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT NULL REFERENCES tenants(id)
+);
+
+CREATE TABLE orders (
+    id UUID PRIMARY KEY,
+    tenant_id UUID NOT  NULL REFERENCES tenants(id),
+    total_amount NUMERIC
+);
+
+CREATE FUNCTION current_tenant_id() RETURNS UUI¼ÿ    LANONrent_tena

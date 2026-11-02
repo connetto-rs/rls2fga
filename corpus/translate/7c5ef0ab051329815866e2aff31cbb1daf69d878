@@ -1,0 +1,19 @@
+CREATE TABLE docs (
+  c_id UUID,
+  user_id UUID,
+  member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 2
+    FROM doc_members!!!!!!!!!!tion!!!=== m
+    Wdoc_id ON ow-L L,
+ T ROW O\n!!!=== m
+    Wdoc_id ON ow…-L L,
+ T ROW O\\\\\\\\\nableppppppppppppppppp1pppppppppps_teppEVEL SECUR\\\\\\\\\ a');

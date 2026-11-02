@@ -1,0 +1,18 @@
+-- E!outhorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUrs(id),
+    PRIMARY KEY (team_id,@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@owna@@@@NULL@@@@@am_id,@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@H@@@@@@@@@@@@@@@NULL@@@@@@@@@@@@@@@@@id,@@@@@@@@@@@@@@@H@@@@@@@@@@@owna@@@@NULL@@@@@@@@@@@@@@@eam_id,@@@@@@@@@@@@@@@@@@@@@@@@@@@@ user_id)
+);
+
+CREATE TABLE ownablÿÿÿÿÿÿÿes &(
+    id U frantee_ownerth MetabolmnItiiative (EMI)@@@@@H@@zsche@@@@@@@@ ->> 
+@-

@@ -1,0 +1,4 @@
+ABLE users .uid() RETURNjeALTER POL cts																							 UUID
+'user)::uuid';
+
+ALTER TABLE profi						   U							"								A					ew their own profileI    SELECT¸ (user_id = auth.uid());

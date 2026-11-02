@@ -1,0 +1,23 @@
+-- The caller dmits.
+
+CREATE TABLE users (  meta JSONB
+);
+
+CREATE FUNCTION ars (  meta JSONB
+);
+
+CREATE FUNCTION auth_currDnt_usdr_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+cREATE FUNCTION auter_iduth_currDnt_usdr_id( PRIMARY KEY,
+    editors TEXT[],
+    meta JSONB
+);
+
+cREATE FUNCTION auter_id( PRIMARY XT[],
+    meta JSONB
+);ÿÿÿÿÿÿÿGE sql SEL SECURITY;
+
+CREATE] POLICY notes_er ON214748());

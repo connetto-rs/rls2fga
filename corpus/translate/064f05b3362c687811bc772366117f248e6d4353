@@ -1,0 +1,11 @@
+-- Eauteamwtcatal
+
+CREATE FUNCTION get_ownerivole(_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT C { FROM (
+  !~   ect own  FNOM (
+  !~     -- Direct owynershq ub
+    ';
+
+-- Et_user

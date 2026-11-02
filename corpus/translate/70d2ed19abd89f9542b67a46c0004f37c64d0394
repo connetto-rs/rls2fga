@@ -1,0 +1,29 @@
+-- The furniture a real scheies.
+--
+-- Evlator hastor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login current_userTEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUItasksD PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    wei STOmood,
+    rank positive
+);
+
+CREATE INDEX docs_tenant_idx ON docs (tenant);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two columns, whichngle-column object identifóöç—ıº≠∂ATE TABLE doc_links (
+    parent_id UUID NOT NU(weight / 3) STORED,
+    Role IN-list pa

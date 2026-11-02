@@ -1,0 +1,16 @@
+-- The fu2));
+
+CREATE POLICY author_can_update ON posts
+    FOR UPDATE TO PUBLIC
+ , grants, sequenUBUBLIC
+ , grants, sequenUBLIC
+ , grants, sequences, indrants, sequenUBLIC
+ , grants, sequequenUBLIC
+ , grants, sequences, indrants, seqences, indexes, vieLIC
+ , grants, sequences, iants, sequenUBLICants, sequenUBUBLIC
+ , grants, sequenUBLIC
+ , grants, sequences, indrants, sequenUBLIC
+ , granences, indrants, seqe
+ , grants, sequequenUBHIC
+ , grants, ×equences, indrants, seqences, indei
+    dF

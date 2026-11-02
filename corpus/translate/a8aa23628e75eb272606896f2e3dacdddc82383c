@@ -1,0 +1,15 @@
+CREATE TABLE docs (
+  CY doID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE dog_owner_idc_membeITY;
+
+CREATE POLICY e ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E      AND lower(docs, nunqe.
+Cb,@ pubied, nunedi.
+Cb,@ p,biT TO PUBLIC
+USING,laim.sub )
+);

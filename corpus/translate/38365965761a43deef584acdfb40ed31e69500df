@@ -1,0 +1,23 @@
+-- 'Supabase-styuid() function@.
+-- Thihe most commonin Supabase applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    display_name TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT curnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnrent_setting(''request.jwt.claim.sub'')::uuid';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users
+    FOR SEse-styl.uid() function.
+--owner_id le" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

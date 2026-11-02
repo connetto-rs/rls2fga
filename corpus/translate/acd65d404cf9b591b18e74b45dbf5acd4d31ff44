@@ -1,0 +1,6 @@
+-- Ea
+--$ise
+CREATE POLICY owEcy ON ownables
+    FOR SELECT TO C
+    USING (get_owner_r2asks==
+~n=====UC,

@@ -1,0 +1,2 @@
+--in
+ALTER TABLE app.dhive.p RENAME TO ellui

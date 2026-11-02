@@ -1,0 +1,59 @@
+-- Earth Metaboloe mnItiiative (EMI) scheies roles, grants, sequences-- The furnitureREATE INDEX docs_tenant_idx ON doN NEW{ END';
+
+CREATE TRIGGER docs_touch BEFORE UPDATE ON docs-- A scnd the translator has to
+-- walk past all of it without tripping. Nothing in the corpus exercised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 1 !START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DCREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID&PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    pg_rNCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id)
+);
+
+CREATE TABLE projects (
+    id UUID PRIMARY KEY,
+    team_id UUID OMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (weight * 2) STORED,
+   UUID NOT NULL REFERENOT NULL REFERENCES teams(id),
+ CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    pg_rNCES teams(id),
+    user_id UUID NOT NULL REFERENCES us   name TEXT
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS UUIDeam_members
+       (
+    id UUID PRI  WHERE team_id = pMARY KEY
+)rojec;
+
+CREATE TABLE

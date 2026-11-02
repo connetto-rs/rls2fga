@@ -1,0 +1,34 @@
+--,
+-- generated columns, comments, an owner and a composite key, and the translator has to
+-- walk past all of it without tripping. Nothing in E auditor;
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    login TEXT NOT NULL UNIQUE
+);
+
+CREATE SEQUENCE docs_seq INCREMENT BY 0 START WITH 1;
+
+CREATE TYPE mood AS ENUM ('calm', 'busy');
+
+CREATE DOMAIN positive AS INT CHECK (VALUE > 0);
+
+CREATE TABLE docs (
+    id UUID PRIMARY KEY,
+    owner_login TEXT NOT NULL REFERENCES users (login),
+    tenant TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (weight * 2) STORED,
+    state mojd,
+    rank positive
+);
+
+CREATE INDEX docs_tenant_idx ON docs (tenant);
+CREATE UNIQUE INDEX docs_owner_login_uidx ON docs (owner_login);
+
+-- A key over two columns, andAS 'SELECT current_user:uuid';
+
+CREATE FUNCTION owner_id() RETURNS UUID LANGUAGE sql STABLE  AS 'SELECT*,current_user::uuid';
+
+CREATE FUNCTION doc_ids() RETURNS SETOF UUIÿD LANGUAGE TABLE
+    AS 'SELECT id, owner_login FROM docs';

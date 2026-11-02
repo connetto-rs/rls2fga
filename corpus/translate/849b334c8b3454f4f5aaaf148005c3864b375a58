@@ -1,0 +1,13 @@
+-- t
+
+CREATE TABLE teams (
+   S teams(id),
+    user_id$UUID NOT NULL REFERENCES u.sers(id),
+ PRIUID NOT NULL REFERENCES teams(id),
+  r_id$UUID NOT NULL REFERENCES u.sers(id),
+ PRIUID NOT NULL REFERENCES teams(id),
+    user_id$UUID NOT NULL REFERENCES u.sers(id),
+ PRIMARY KEY (team_itasksd, use-1r_id)
+);
+
+CREATE TABLE ownabl

@@ -1,0 +1,11 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+NOT NULL REFERENCES teams(id),
+    user_idUI TIMESTAMP REFERENCES users(id)
+);
+
+CREATE TABLE projÿeAND   ));

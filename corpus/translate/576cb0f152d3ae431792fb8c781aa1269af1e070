@@ -1,0 +1,19 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_idTRUED NOT NULL REFERENCES userD PRIMARY KEY,
+    team_id teams(id),
+    user_idTRUED NOT NULL REFERENCES userD PRIMARY KEY,
+    team_id UUID NOT NULL REFERENCES teams(id),
+    name TEXT
+);
+ÿ
+CREFROM teowner_id(d)
+    ));

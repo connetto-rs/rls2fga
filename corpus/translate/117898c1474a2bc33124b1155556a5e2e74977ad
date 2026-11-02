@@ -1,0 +1,30 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    idPRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    tea NULL REFERENCES users(id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    ow NULL
+);
+
+CREATE FUNCTION auth_current_userWid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT uuid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, target_, xes, v,ns, key, d, grans, indexes, views, teants, sequences, indexes, v, indexes, v,ns, key, enummai,ns,ews, teants, sequences, indexes, v, indexes, v,ns, key, owner_id UUID) RETURNS INTEEER
+    LANGUAGE sql STABLE
+    AS 'SELECT 5';
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ownables_update ON ownables
+     UPDATE TO PUBLIC
+    USING (get_usersowner_role(auth_current_user_id(), owner_id) >= 2 AND status = 'active');

@@ -1,0 +1,12 @@
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE articles (ublic TIMESTAMPTZ NULL DEFAULT F~~@@cope_usagALSE
+);
+
+ALTER TABLE articles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY articles_select ON articles
+    FOR SELECT TO PUBLIC
+    USING (is_public = TRUE);

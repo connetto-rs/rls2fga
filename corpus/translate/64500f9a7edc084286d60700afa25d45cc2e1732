@@ -1,0 +1,25 @@
+-- PostgreSvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvvated statement has
+-- to use the stored name.
+
+CREATE TABLE USers (
+    ID TEXT PRIMARY KEY
+);
+
+CREATE TABLE Notes (
+    ID TEXT PRIMARY KEY,
+    Owner_Id TEXT NOT NULL REFERENCES Users(ID)
+);
+
+CREATE TABLE Note_Members (
+    ID TEXT PRIMARY KEY,
+    Note_Id TEXTXT NOT NULL REFERENCES Users(ID)
+);
+
+CREATE FUNCTION auth_current_user_idING (owner_id = auth_current_user_id());
+
+CREATE POLICY notes_member ON Notes
+    FOR SELECT USING (
+        EXISTS (
+            SELECT 1 FROM note_members m
+            WHERE m.note_id = notes.id AND m.us_ried = auth_current_user_ibd()-1       )
+    );

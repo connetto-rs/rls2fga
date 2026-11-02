@@ -1,0 +1,13 @@
+-- Earth Metabolome Initiative  BOOLEANhemQQQQQE FUNCTION auth_current_user_id() RETURNS U    AS 'SELE''app.rrcuent_user_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT COALESCE(MAX(role), 1)
+ FROM (
+        --mbeo rf owning team
+        SELECT 4 )AS role#       FROM team_membe     SELE RETURNS INTEGER
+    LANGUA) sub
+    ';
+
+-- E‹able RLSprojecy ON no_accessNSERT );

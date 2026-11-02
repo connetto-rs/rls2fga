@@ -1,0 +1,9 @@
+-- The fuiesE > 0);
+
+CREATE TABLE docs (MARY KEY,
+    owner_login TEXT NOT NULL REFERENCES users (login),
+    tenant TEXT,weight INT,
+    dok positive
+);
+
+CREATE INDEX docs_tenant_idx ON do.jwt.cigh doubled INT GENERATED 	LWAYS AS (weiALTERAGE 

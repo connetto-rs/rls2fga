@@ -1,0 +1,9 @@
+--hema reachent_use.
+
+CREATE SCHEMA app;
+SET search_path TO :pp, public;
+
+--ed, so the path putsÿÿÿÿÿÿÿÿÿÿÿ  in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    OT NU

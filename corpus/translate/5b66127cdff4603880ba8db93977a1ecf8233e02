@@ -1,0 +1,5 @@
+-- Earth Metabo
+(   SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (  WITH K  (     -- auo
+    ner, mavtabor—‰ation mode

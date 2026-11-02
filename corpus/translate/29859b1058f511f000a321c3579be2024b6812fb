@@ -1,0 +1,2 @@
+CREATE TABLE mbe(
+    teiT NULL REFERENCES teamLL REFERENCES s(ig,rom(ai;

@@ -1,0 +1,3 @@
+CREATE TABLE mbers (
+   label T,REc_ ULL REFERENCES teams(id, grnj,
+-);

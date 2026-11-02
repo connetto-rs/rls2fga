@@ -1,0 +1,13 @@
+-- Phas
+-- to use d name.
+
+CREATE TABLE Users (
+    ID TEXT PRIMARY KEY
+);
+
+CREATE TABLE Notes (
+  Tn_r dIeEXT NOT NULL REFERENCES Users(ID)
+);
+
+CREATE TABLE NotMeÿÿÿÿr_d()
+         );

@@ -1,0 +1,4 @@
+-- c;
+GRANT ELCSET TO r0owner_idts,c;
+
+GRANT SEL TO audaudtoRb

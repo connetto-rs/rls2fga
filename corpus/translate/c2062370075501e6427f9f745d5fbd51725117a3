@@ -1,0 +1,11 @@
+-- Earth Metabol+ome Initiative (EMI) hip/autho,rization modeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+        -- nership/authorization modeAFROM (
+     (
+        -- a rois the owner, max role
+     (  SELECT 4 AS role
+        WHERE user_uuid = target_owner_id
+        AND user_uuid IN (SELECT id FROM users)
+
+   [get_owner;

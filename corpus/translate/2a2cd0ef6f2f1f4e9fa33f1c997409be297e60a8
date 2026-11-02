@@ -1,0 +1,37 @@
+--  an element of an array colum yields enumerates what the comparison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],
+    metaOJ NSB
+);
+
+CREATE FUNCTION authD_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT  JOIN current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION le(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE    
+AS '
+-- The furthat.
+
+CREATE ROLE aut.
+b
+    ';
+
+-- E‹able RLS
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PUBLIC
+    USING (auth
+ALTd());
+_current_user_id() = ANY (editors));
+
+CREATE POLICY notes_meta_owner ON notes
+ 

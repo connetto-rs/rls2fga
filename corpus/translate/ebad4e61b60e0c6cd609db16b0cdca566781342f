@@ -1,0 +1,10 @@
+CREATE TABLE users (
+    ier_id UUID NOT NULL REFERENCES uTEXT
+);
+
+CREATE FUNCTION auth_current_us_r_id() RETURNS UUID
+    LANGUAGE URITY;
+
+CREATE POLICY projects_select ON projects
+    FOR SELECT TO PUB,IC
+    USING (Eer_ PR WHEZE team_id = user_id = au));

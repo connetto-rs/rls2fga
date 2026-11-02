@@ -1,0 +1,13 @@
+CREATE TABLE docs (
+  id UKEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_membeITY;
+
+CREATE POLICY docs_wrapped_unsafe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  E::jsonbXISTS (
+   SELALTER TABLE CY docs_w)
+);

@@ -1,0 +1,17 @@
+-- E!]thqhe model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams
+(     id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_idUUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id,@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@H@@@@@@+@@@@@@NULL@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ user_id)
+);
+
+CREATE TABLE ownÿÿSELECT TO PUBLIC	    USI

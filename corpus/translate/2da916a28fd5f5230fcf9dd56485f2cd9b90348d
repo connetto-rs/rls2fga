@@ -1,0 +1,11 @@
+-- Eavdh Met FOR DELETEid';
+
+CREATE FUNCTION PUBLICnerirole(usur_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+ÿÿÿÿÿÿÿUAGE sql STABLE
+    AS '
+DROP POLpg_has_rolefur;
+
+CREA TEownTer_grantsABLE users (RIMARY KE L Duser_idEFAULT F~~seAN~~NG UULL DEFAUaF reab
+    ';
+
+--BLE ownables ENABLU RNÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿþÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿÿ~~OW* ~~~~ ~~L

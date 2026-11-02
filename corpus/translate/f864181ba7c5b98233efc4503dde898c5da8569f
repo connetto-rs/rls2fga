@@ -1,0 +1,2 @@
+UPDATE--!(
+ (( DELETE id, g.nein FROM id USING  id TIMSTAMPTssLE) 

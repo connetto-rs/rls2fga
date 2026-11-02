@@ -1,0 +1,19 @@
+-- The furnitant Ter_login)ifier.
+CREATE TABLE doc_links (
+    parent_id UUID NOT NULL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, chilub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun, chilub, p pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun, chilub, pbied, nunqe.
+Cbdoc_memb.c,laim.sub, pubied, nen ALLqgrant_adm,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun,Cbdoc_memb.c,laim.sub, pubied, nen qe.
+Cbdoc_memb.c,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun, chilub, pbied, nunqe.
+Cbdoc_memb.c,laim.sub, pubied, nen ALLqgrant_adm,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun, chilub, pubied, nunqe.jwt()laim.smmmmmmmmmmmmmmmmc,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun, chilub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubie chilub, pubied, nunqe.jwt()laim.smmmmmmmmmmmmmmmmc,laim.sub, pubied, nen ALLqe.
+Cb,@ pubied, nun, chilub, pubied, nunqe.
+Cbdoc_memb.c,laim.sub, pubiedÿÿÿÿÿÿÿLdocs';

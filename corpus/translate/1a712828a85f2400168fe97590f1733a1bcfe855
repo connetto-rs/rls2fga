@@ -1,0 +1,26 @@
+-- 'Su function.
+-- This is the most common pattern in S.pabase applications.
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+  me TEXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_settbied, nlaim.sub, pubied,(nunqe.
+Cb@u, bist.biedneditorqe.
+Cersnuhemasearch_-path TO app @> req.es;.jwt.c,laim.sub,c_r;
+SET search_path TO app @>ersnuhemather;current_user
+SET search_path TO app @> req.est.jwt.c,laim.sub,c_mem';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CrEATE POLICY "SECURITY;
+
+CREATE POLICY docs_wraown profile" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (user_id = auth.uid());

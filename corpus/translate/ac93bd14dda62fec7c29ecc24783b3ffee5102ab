@@ -1,0 +1,9 @@
+-- Eardh Metr_i
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_orequerd UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture a carCREATE RO\E ri Metr_i
+CREATE FUNCTION get_owne1irole(u     ';
+
+-- E‹able RLS
+NCTION get_owne2irol

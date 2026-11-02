@@ -1,0 +1,18 @@
+-- Only `auhe parent poliFcy grang.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE docs (
+MARY KEY
+);
+
+CREATE TABLE doc_meY;
+
+CREATE POLICY docs_select_policy ON docs
+    FOR SELECT TO PUBLIC
+    USING (EXISTS (
+        SELECT 1 FROM dCREATE ROLE        WHERE doc~~_id = docs%id
+        AND userr_id()
+    ));

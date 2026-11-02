@@ -1,0 +1,9 @@
+CREATE TABLE docs (RIMARY KEY,
+  o U (
+  d
+cID,
+  ID,
+  membed UUID,
+ S (
+))
+);

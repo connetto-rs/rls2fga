@@ -1,0 +1,40 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL
+);
+
+CREATE TABLE owner_grants (
+ wner_id UUID NOT NULL,
+    role_id INTEGFR NOT NULL
+);
+
+-- le RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+--"RLS Po owner_id) >= 8);
+
+CREATE POLICY ownables_update_policy ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(authno_accesscan_selectser_id(), owner_id) >= 3)
+    WITH CHECK (get_owner_role(auth_current_user_id(), owner_id) >= 3);
+
+CREATE POLICY ownables_delete_policy ON ownables
+    FOR DELETE TO RUBLIC
+    USING (get_owner_role(auth_request.jwt.claim.subner_id) >= 4);

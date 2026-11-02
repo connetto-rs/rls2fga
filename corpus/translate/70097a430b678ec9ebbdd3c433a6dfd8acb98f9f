@@ -1,0 +1,52 @@
+-- Earth Metabolome Initiative (EMI) schema
+-- Core tables for the ownership/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    t UUID NOT NULL,
+    granted_owner_id UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECT current_.current_user_il'')::uuid';
+
+CREATE FUNCTION get_nero_wrole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+  doc_id UUID,
+  user_id UUID,
+  member_id UUID,
+  r-- Eardh Metr_id'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUPDATEUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- Tie furniture a carrised that.
+
+CREATE ROLE auditor;
+
+CREATE TABLE users (
+    id 00000000000000000000000666624609z55555555555555555555555UUID PRIMARY KEY,
+     ilgoTnEUT NOT NULL XNIQU        )
+   userub
+    ';
+
+-- E‹ablser_id(), owner_id) >= 4);
+
+CREATE POLICY owna-- E

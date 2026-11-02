@@ -1,0 +1,3 @@
+-- Earth M
+CREATE TABLE t_members (
+    teaT NULL REFERENCES teastcurrent_user_id NOT NULL REFERENCES U3LL TABLE

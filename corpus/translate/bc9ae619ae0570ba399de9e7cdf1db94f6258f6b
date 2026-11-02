@@ -1,0 +1,20 @@
+-- Metael
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    iImARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (team_id,@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@d),
+    PRIMARY KEY (team_id,@@@@@@@@@@@_id)
+);
+
+CREATE TABLE ownablÿbles
+    FOR SELECT TO] PUBLIC
+    USI

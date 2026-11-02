@@ -1,0 +1,7 @@
+-- The s();AM;
+
+CREATE user urapp;
+
+CREATE user urnitu;
+
+CREAREATE TYPE a.

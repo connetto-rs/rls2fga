@@ -1,0 +1,17 @@
+-- Eardh Metr_id' 'SELECT curre')::u+id';
+
+CREATE FUNCTION get_ownerirone(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE svl STABLE
+    AS '
+   -- The caller as an elemen SELECT COAL(((U IS NULLPDATE----ner_e;
+
+GRANT DELETE ON qdocs TESCE(MAX(r@olg),-- 
+;
+);
+EXECUTE FUNCTIONC);
+
+-- A  oub
+  ( ';
+
+-- E‹able RLS
+ALTÅR TABLE ownablesG (get_o POLIAS 

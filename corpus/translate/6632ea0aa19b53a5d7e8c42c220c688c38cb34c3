@@ -1,0 +1,10 @@
+-- E!rtb (E/;
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+      PRIMARY KEY (team_id,@@@@@@@-@@@@@@@@@@@@@@@@@@ DATE@@@@@@@@@@@@@@@@@@@@@@@-@@@@@@E TABLE ownablÿÿÿÿÿÿ.d LIC
+  USI

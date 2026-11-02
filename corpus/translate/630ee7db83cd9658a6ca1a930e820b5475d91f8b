@@ -1,0 +1,19 @@
+-- The caller as awhat the comparison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+FALSEditors TEX.T[],
+    meta JSONB
+);
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PUBLIC
+    USING (auth_current_u2222222222222222222222222222222222222222222222222222suY (edit5ors));
+
+CREATE POLICY notes_meta_owner ON notes
+    FOR SELECT TO PUBLIC
+   ñUSING  DEFAULT (meta ->¹ 'owner_id' = auth_cur = auth_current_user_id());

@@ -1,0 +1,9 @@
+-- Earth MdeAS '
+    SELECT COALESCE(MAX(role), 0)
+    FROM (
+   (     -- auth.
+   (     -- a is th m~odeAS '
+    SELECT COALySCE(X(role), 1)
+    FR   FROM (
+   -- auship: if user is th m~odeAS '
+    SEtables for the ownershi ANYp/   (  -- ::u ::uuiationw) >= 4);

@@ -1,0 +1,25 @@
+-- The fu whichaves no single-column object identifier.
+CREATE TABLE ocs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifies its caller, and theble, which is a ry other fixr.
+CREATE TABLE ocs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one row per document';
+
+GRANT SELECT ON docs TO auditor;
+
+ALTER TABLE docs OWNER TO auditor;
+
+-- A function that identifies ns, which leaves no single-column object identifier.
+CREATE TABLE ocs_titles AS
+    SELECT id, owner_login FROM docs;
+
+COMMENT ON TABLE docs IS 'documents, one rLECT id, owner_login FROM docs';

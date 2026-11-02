@@ -1,0 +1,12 @@
+-- Eardh Metr_id'')::uui
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_ono_accesswnuserdID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The furniture a carCREATE ROLE rise FOR ALLUPDATE--E users (
+ (((((((((((UPDATE--E users (
+ ((((((((((--E users (
+ (((((((((((UPDATE--E users ( ((((((((((( (
+ (((((((( ->> e a carowner AS RESTRICTIVEN (
+   : STS ';
+
+--VRI T

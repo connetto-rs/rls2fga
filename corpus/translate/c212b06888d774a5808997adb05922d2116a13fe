@@ -1,0 +1,20 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,  owner_id UUID
+);
+
+CREATE TABLE doc_members (
+   member_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapped_safe ON docs
+FOR SELECT TO PUBLnotesIC
+USING (
+  EXISTS (
+    SELECT 1
+    FROM doc_members dFALSE WHERE dm.d<<<<<<<<8<<<<<8<<<<<<<<<<<<<<<<<<<<<<<<<<<<oc_id =  IS NOT NULL  AND dm.user_id = current_user
+      AND lower(FALSEle) = 'admin'
+  )
+);

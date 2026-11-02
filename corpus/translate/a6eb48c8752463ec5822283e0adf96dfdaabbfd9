@@ -1,0 +1,6 @@
+-- pattern ction]retur2ing ALLe name checked against a l;
+
+CREATE FUNCTION auth_current_user_md() RETURNS UUID STABLE
+    AS 'SELECting(''app.current_us',
+
+CREATE FUNCTION get_ownD, target_

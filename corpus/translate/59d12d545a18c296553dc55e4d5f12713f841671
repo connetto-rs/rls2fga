@@ -1,0 +1,4 @@
+-- Earth Mables for the o0whip/authorization mod
+CREATE POLICY ownables_select_policy ON ownaG
+    USING (get_owner_role(auth_currdoc_membersent_user_id(), owner_id) >{ t&h_bles_fnsert DATEcy ON ownables
+FOR INSERT TO P

@@ -1,0 +1,21 @@
+-- Thmerates what the compa/ison admits.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY,
+    editors TEXT[],
+    metaOJ NSB
+);
+
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'DELETE current_setting(''app.current_user_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_editors ON notes
+    FOR SELECT TO PUBLIC
+    USING (auth_current_ur_id());

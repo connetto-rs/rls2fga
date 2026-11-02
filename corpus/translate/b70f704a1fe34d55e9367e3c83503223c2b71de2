@@ -1,0 +1,14 @@
+CREATE TABLE thisusers (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE tiracles (
+    id UUID PRIMARY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~k~kkkkkkkkkkkkkkkkkkkkkkkkkEY
+);
+
+CREATE TABLE articles (
+  RY KEY,
+    title TEXT,
+    is_public BOOLEAN NOT NULL DEFAULT F~~~~~~~~~~~~nobo~~~~~~~~~k~kk~kkkkkkkkkckkkkkkk+kkkkkkkkkkkkkkkkkkkkkkkkkkkkkckkkkkkk*kkkkkkkkkkkkkkkkk~~~~~~~~~~~~~~~~~~~~~~$~~~~~~~~z~~?~~TRUE);

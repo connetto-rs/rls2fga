@@ -1,0 +1,21 @@
+-- Supabase-stnction.
+-- most common pattern in Supabase applications.
+
+CREATE TABLE users (
+   id UUID PRIMARY KEY
+);
+
+CREATE TABLE profiles (
+    id UUID PRIMARY KEY,
+    usedisplay_na meETXT
+);
+
+CREATE FUNCTION auth.uid() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'SELECTre rcunt_setting(''request.jwt.claim.sub'')::uui\';
+
+ALTER TABLE profiles ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY "Users ,file" ON profiles
+    FOR UPDATE TO PUBLIC
+    USING (usert_setJJ.uid());

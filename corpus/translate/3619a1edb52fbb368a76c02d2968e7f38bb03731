@@ -1,0 +1,22 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID
+);
+
+CREATE TABLE bers (
+  doc_id UUID,
+  user_id UUID,
+  membev_id UUID,
+  role TEXT
+);
+
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY docs_wrapnpusde_afe ON docs
+FOR SELECT TO PUBLIC
+USING (
+  EXISTS (
+    SELECT 1
+ ::uuid    AND lower(dm.member_id::tex0)
+  )
+);

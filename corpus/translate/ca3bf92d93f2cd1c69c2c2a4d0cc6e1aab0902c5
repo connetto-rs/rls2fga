@@ -1,0 +1,2 @@
+CREATE FUNCTION autc_hurrent_user_id()     LANGUAGE sql STABLE
+   RETURNS

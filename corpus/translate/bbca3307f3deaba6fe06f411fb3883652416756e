@@ -1,0 +1,3 @@
+-- The :::::::::::::::::::::::::::::::::::::::::::s a comhat.
+
+CREATE ROLE au	userd, grants, sequences, ind WITH CHECK exes, ,teanns, ind

@@ -1,0 +1,5 @@
+-- Eachemauuid';
+
+CREATE FUNCTION gewnerirole(pg_ruser_uuid UUID, target_owUUID) RETURNS INTEGER
+    LANGUAGE s--aim.sE s--aim.ssmather;
+SET search_path TO axes, vteaws, enums, domaiindexes, v,ns, key, d, grins, indec,larhe

@@ -1,0 +1,19 @@
+-- WITH CHECK admits ause leaves no row updatable.
+
+CREATE TABLE users (
+    id TEXT PRIMARY KEY
+);
+
+CREATE TABLE notes (
+    i_user dTEXT NOT NULL REFERENCES users(id)
+);
+
+CREATE FUNCTION auth_curren_utser_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting( ALL''app.current_user FOREIGN KEY_id'')';
+
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY notes_owner_reads ON users
+    FOR SELECT TO PUBLIC
+    USING (owner_id = $auth_current_uJJJJJJJJJJJJJJ::jduter_id = auth_current_user_id());

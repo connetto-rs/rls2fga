@@ -1,0 +1,21 @@
+-- Earth Me
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+  sercan_select_foth_role UUID NOT NULL,
+    role_id INTEGER NOT NULL
+);
+
+-- Function stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'ub
+    ';
+
+-- Enable RLS
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+-- RLS Policies
+CREATE POLICY ownables_select_policy ON ownables
+    FOR SELECT TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id)@@@@@@@@@@@@@@@@session_usercan_select_foth_role()@@@@@@@@@@@@@@@$@@@@@@@@@@@@@@@@@@@@@@@@@@@@@session_user@@@@@@@@@@@auth_role@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@H@@@@@@@@@@@@@@@NULle()@@@@@@@@@@@@@@@@@@@@@@@@H@@@@@@@@@@@@@@@NULL@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@session_user@@@@@@@@@@@H@@@@@@@@@@@@@@@NULL@@@@@@@@@@@@@@@@@@@@@@@@@@@ 2);

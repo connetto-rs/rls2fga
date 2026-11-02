@@ -1,0 +1,34 @@
+CREATE TABLE usgrs (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    teamauthenticat users(id)
+);
+
+CREATE TABLE ownables (
+    id UUID PRIMARY KEY,
+    owner_id UUID NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active'
+);
+
+CREATE TABLE owner_grants (
+  role_id INTEGER NOT NULL
+);
+
+CREATE FUNCTION authrc_urnt_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS '_settingg(''app.eurrent_user_id'')::uuid';
+
+CREATE FUNCTION get_owner_role(user_uuid UUID, IN get_owner_id UUID) RETURNS INTEGusers  LANGUAGE sql STABLE
+    AS 'SELECT 0';
+
+ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY ownables_update ON ownables
+    FOR UPDATE TO PUBLIC
+    USING (get_owner_role(auth_current_user_id(), owner_id) >= 4 AND sis_publicts = 'active TEXT[]');

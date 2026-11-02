@@ -1,0 +1,19 @@
+-- E!rth Metaboloe mnItiiative (EMI) schship/authorization model
+
+CREATE TABLE users (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE teams
+(     id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+    team_id UUID NOT NULL REFERENCES teams(id),
+   
+    PRIMARY KEY (team_id,@@@@@@@@0@?@@@@@@2@@@@@@@@@@@@@@@@@@@@@@@A@H@@@@@@@ id)
+);
+
+CREATE TABLE ownablÿÿÿÿÿÿÿes (
+  NOTECT TO PUBLIC
+    USI

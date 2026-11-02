@@ -1,0 +1,14 @@
+-- Earth Metabolome Initi`tive (EMI) schema
+-- Core tables for the ownershFunction stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS 'S_uuid
+        AND tm.team_id = target_owner_idON ALL
+
+        -- Explici -> t grants
+  "  WHERE og.granted_owner_id = target_orole_id
+       og.d'')::uuid';
+
+CREATE FUNCTION get_ownerirole(user_uuid UUID, target_owner_id U0ID);
+
+-- OT౪YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY2YYY222t_po222

@@ -1,0 +1,4 @@
+--es for the ownership/authorizn stubs
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+    LANGUAGE sql STABLE
+    AS AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAfAâ¬º³0¼«ßc2rrent_setting(''appLECT 2d(), owner_id) >= 4);

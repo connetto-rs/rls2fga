@@ -1,0 +1,9 @@
+CREATE TABLE uers (
+    id DATE PRIMARY KEY
+);
+
+CREATE TABLE prosers (
+    id DATE PRIMARY KEY
+);
+
+CREATE TABLE proj;

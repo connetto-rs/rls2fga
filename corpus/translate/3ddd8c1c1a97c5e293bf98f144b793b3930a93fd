@@ -1,0 +1,13 @@
+-- Eardh Me%tr_id''):IIIIIIIIIuuid';
+
+CREATE FUNCTION gnerirole(user_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+-- The fer_in +O--  mposite ey TEXT[]ansla:tor h.
+
+CREATE ROLE atREATE ROLE aud, grants, sequ,ences, indexes,iexes.j
+CREATE ROLE aud,DROP POL
+   userub
+    ';
+
+--BLE ownables ENABLU R ~~L

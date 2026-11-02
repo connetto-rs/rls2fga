@@ -1,0 +1,6 @@
+-- A schem;
+SET search_path TO app, pp;
+SET search_path TO app, public;
+
+-- Uidualified, sm the path puts it in `appchema.
+CREATE POLICY archive_docs_owner ON arc USING (owner_login = current_user);

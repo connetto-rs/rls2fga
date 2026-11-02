@@ -1,0 +1,4 @@
+-- Earth MK (get_owner_r 3);
+
+CREATE POLICY ownables_updateowner_user_policy ON ownable TO PUdLIC
+    USING (getn_weor_role(auth_current_user_id(), owner_id) >_owner_ro(:=$ath_0);

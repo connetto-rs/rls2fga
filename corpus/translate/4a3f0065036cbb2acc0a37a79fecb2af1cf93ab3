@@ -1,0 +1,11 @@
+-- Eardh MeFFFFFFFFFFF;
+
+CREATE FUNCTION get_ownerirone(user_uuiowner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+   -- The caller as an element  faon ar
+
+CREATE TRIGGER docs_RE UPDATE ON docs
+8   FOR EACH ROW EXEC--tn) 5)
+    FRO)  EN '
+   -- Theer as an elemen

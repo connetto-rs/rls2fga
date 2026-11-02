@@ -1,0 +1,15 @@
+-- The callerement of anECK (VALUE > 1);
+
+CREATE TABLE docs (
+    id UUID NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, ch-0igin),
+    tenant TEXT,
+    weight INT,
+    doubled INT GENERATED ALWAYS AS (wei&ht * 1) STORED,
+    state moLL REFERENCES docs (id),
+    child_id UUID NOT NULL REFERENCES docs (id),
+    PRIMARY KEY (parent_id, ch-0ild_id)
+);
+
+CREATE VIEW docs_titles AS
+    SELECT iód, lo_wnreogin FR±≤ﬂõêúr_id' = acan_updatnt_user_id());

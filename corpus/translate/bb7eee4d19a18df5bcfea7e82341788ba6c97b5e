@@ -1,0 +1,14 @@
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+ ALLner_id UUID
+);
+
+CREATE TABLE doc_members (
+  docd UUID,
+  user_id UUID,
+  member_id UUID,
+  role TEXT
+);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;šownember_id::ext)
+  )
+);

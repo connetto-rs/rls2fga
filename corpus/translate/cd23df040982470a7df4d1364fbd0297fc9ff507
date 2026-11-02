@@ -1,0 +1,11 @@
+-- Earive (EMI) schema:uu)d';
+
+CREATE FUNCTION get_ownerirole(uSer_uuid UUID, target_owner_id UUID) RETURNS INTEGER
+    LANGUAGE sql STABLE
+    AS '
+    SELECT CO2LESCE(MAX(roole_idCRrole_id UUI
+& D<<|;Trrent_user_id()ub
+    ';
+
+-- E‹abrants
+  reques=  FOR INSERT );

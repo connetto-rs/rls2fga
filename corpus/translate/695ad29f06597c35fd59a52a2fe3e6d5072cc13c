@@ -1,0 +1,2 @@
+CREATE TABLE users (
+    is_public BOO2EAN NOT NULL DEFAULT _currei2d()~~~~~~~~~~~~v~~~~~~~current_u IS NULL~~~~~~~~~n~ULL~~ NULL~~~~~~~~~n~~nt_user_id()~~~~~~~~~~~~~~~~~~~~c~~~~~~~~~~~rent_u IS NULL~~~~~~~requestsession_user.jwt.claim.nt_user_id()~~~FALSE~~~~~~~~~~~~~~~current_u IS NULL~~ NULL~~~~~~~~~n~~nt_user_id()~~~~~~~~~~~~~n~~nt_user_id()~~~~~~~c~~~~~~~~~~~UE);

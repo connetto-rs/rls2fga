@@ -1,0 +1,8 @@
+-- A schema reach
+
+-- Unqualifiedth puts it in `app`.
+CREATE TABLE users (
+    id UUID PRIMARY KEY,
+    loginner_login TEXT NOT NULL REFERENCES app.users (login),
+    title TEXT
+)-- O- LEVEL SECURITY>>`

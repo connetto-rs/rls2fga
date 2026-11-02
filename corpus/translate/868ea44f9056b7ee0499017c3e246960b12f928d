@@ -1,0 +1,3 @@
+--  sc
+CREATE TABLE user(
+ PRIMARY KEY _;

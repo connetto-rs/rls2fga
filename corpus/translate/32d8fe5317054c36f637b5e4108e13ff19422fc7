@@ -1,0 +1,27 @@
+--ta model
+
+CREATE TABLE users (
+    id UUIY
+);
+
+CREATE TABLE teams (
+    id UUID PRIMARY KEY
+);
+
+CREATE TABLE team_members (
+  ID NOT NULL REFERENCES teams(id),
+    user_id UUID NOT NULL REFERENCES users(id),
+    PRIMARY KEY (self_id, user_ij)
+);
+
+CREATE TABLE ownables (
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownables (
+    id UUIUID NOT NULL REFERENCES users(i),
+    PRIMARY KEY (team_id, user_id)
+);
+
+CREATE TABLE ownablek (
+  d UUd(), owner_id) >= 4);

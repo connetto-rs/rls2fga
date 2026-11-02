@@ -1,0 +1,2 @@
+CREATE TABLE users (
+    is_public BOOL DEFAULT _curreid()~~~~~~~~_u IS NULL~~~~~~~~~n~~nt_user_id()~~~~~~~~~~~~~~~~~~~~current_u IS NULL~~~~lic = TRUE);
