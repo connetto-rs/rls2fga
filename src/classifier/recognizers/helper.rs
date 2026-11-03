@@ -99,14 +99,6 @@ pub(crate) enum HelperRefusal {
         /// The table the helper returns keys of.
         level: String,
     },
-    /// A value the body keeps is no literal a relation can be named for.
-    #[error("declared helper '{function}' keeps the value {value}, which no relation can name")]
-    UnnamedValue {
-        /// The helper.
-        function: String,
-        /// The value, as SQL spells it.
-        value: String,
-    },
 }
 
 /// Recognize `<column> = ANY (ARRAY(SELECT h(...)))`, `<column> = ANY (SELECT h(...))`
@@ -121,27 +113,36 @@ pub(crate) fn recognize_declared_helper<DB: DatabaseLike>(
     table: &str,
 ) -> Option<ClassifiedExpr> {
     let (compared, query) = helper_set_operands(expr)?;
-    let call = called_helper(query)?;
-    let FunctionArguments::List(list) = &call.args else {
-        return None;
-    };
+    let (call, arguments) = called_helper(query)?;
     let mut reached = db
         .functions()
         .filter(|declared| call_matches_declared(&call.name, *declared, db))
-        .filter(|declared| declared.stored_argument_names(db).count() == list.args.len());
+        .filter(|declared| declared.stored_argument_names(db).count() == arguments.len());
     let function = reached.next()?;
     if !registry.declares_helper(function) {
         return None;
     }
     let column = compared_column(compared, table)?;
     let guarded = lookup_table(db, table)?;
+    let guarded_column = guarded
+        .columns(db)
+        .ok()?
+        .find(|candidate| candidate.stored_column_name() == column.as_str())?;
 
     let pattern = if reached.next().is_some() {
         Err(HelperRefusal::Overloaded {
             function: function.target_name().to_string(),
         })
     } else {
-        declared_helper(function, &list.args, column, guarded, db, registry)
+        declared_helper(
+            function,
+            arguments,
+            column,
+            guarded,
+            guarded_column,
+            db,
+            registry,
+        )
     };
     Some(match pattern {
         Ok(helper) => ClassifiedExpr {
@@ -158,10 +159,10 @@ pub(crate) fn recognize_declared_helper<DB: DatabaseLike>(
     })
 }
 
-/// The compared value and the query of the three spellings of set membership.
+/// The compared value and the query of the three spellings of set membership, the
+/// classifier having already taken the parentheses around the whole off.
 fn helper_set_operands(expr: &Expr) -> Option<(&Expr, &Query)> {
     match expr {
-        Expr::Nested(inner) => helper_set_operands(inner),
         Expr::In {
             expr: compared,
             target: InTarget::Subquery(query),
@@ -187,8 +188,9 @@ fn helper_set_operands(expr: &Expr) -> Option<(&Expr, &Query)> {
     }
 }
 
-/// The one call `SELECT h(...)` makes, reading no table and keeping its one row.
-fn called_helper(query: &Query) -> Option<&sqlparser::ast::Function> {
+/// The one call `SELECT h(...)` makes and its arguments, reading no table and keeping
+/// its one row.
+fn called_helper(query: &Query) -> Option<(&sqlparser::ast::Function, &[FunctionArg])> {
     let select = projected_select(query)?;
     let [SelectItem::UnnamedExpr(Expr::Function(call))
     | SelectItem::ExprWithAlias {
@@ -208,7 +210,7 @@ fn called_helper(query: &Query) -> Option<&sqlparser::ast::Function> {
         && matches!(call.parameters, FunctionArguments::None)
         && list.duplicate_treatment.is_none()
         && list.clauses.is_empty();
-    plain_call.then_some(call)
+    plain_call.then_some((call, list.args.as_slice()))
 }
 
 /// The guarded table's column the set is compared with, uncast.
@@ -216,18 +218,27 @@ fn compared_column(expr: &Expr, table: &str) -> Option<ColumnName> {
     let column = match expr {
         Expr::Nested(inner) => return compared_column(inner, table),
         Expr::Identifier(column) => column,
-        Expr::CompoundIdentifier(parts) => {
-            let [qualifier, column] = parts.as_slice() else {
-                return None;
-            };
-            if stored_ident_name(qualifier) != stored_relation_name(table) {
-                return None;
+        Expr::CompoundIdentifier(parts) => match parts.as_slice() {
+            [qualifier, column] if stored_ident_name(qualifier) == stored_relation_name(table) => {
+                column
             }
-            column
-        }
+            _ => return None,
+        },
         _ => return None,
     };
     Some(ColumnName::from_stored(stored_ident_name(column)))
+}
+
+/// The value an argument passes, a literal under any parentheses and casts that render
+/// it as text, which is how `pg_dump` spells `'read'` (`'read'::text`).
+fn argument_value(argument: &FunctionArg) -> Option<&Value> {
+    let FunctionArg::Unnamed(FunctionArgExpr::Expr(argument)) = argument else {
+        return None;
+    };
+    match peeled_as_text(argument)? {
+        Expr::Value(value) => Some(&value.value),
+        _ => None,
+    }
 }
 
 /// The pattern for one call of `function` compared with `column` of `guarded`.
@@ -236,19 +247,18 @@ fn declared_helper<DB: DatabaseLike>(
     arguments: &[FunctionArg],
     column: ColumnName,
     guarded: &DB::Table,
+    guarded_column: &DB::Column,
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<DeclaredHelper, HelperRefusal> {
     let name = function.target_name().to_string();
     let mut values = Vec::with_capacity(arguments.len());
     for argument in arguments {
-        let FunctionArg::Unnamed(FunctionArgExpr::Expr(Expr::Value(value))) = argument else {
-            return Err(HelperRefusal::NonLiteralArgument {
-                function: name,
-                argument: argument.to_string(),
-            });
-        };
-        values.push(value.value.clone());
+        let value = argument_value(argument).ok_or_else(|| HelperRefusal::NonLiteralArgument {
+            function: name.clone(),
+            argument: argument.to_string(),
+        })?;
+        values.push(value.clone());
     }
     let deployment = registry.helper_deployment()?;
     let set = function
@@ -256,14 +266,6 @@ fn declared_helper<DB: DatabaseLike>(
         .map_err(|source| HelperRefusal::Unanswered {
             function: name.clone(),
             source,
-        })?;
-
-    let guarded_column = guarded
-        .columns(db)?
-        .find(|candidate| candidate.stored_column_name() == column.as_str())
-        .ok_or_else(|| HelperRefusal::NamesNoRows {
-            table: table_identity(guarded).to_string(),
-            column: column.to_string(),
         })?;
     let named = rows_named_by(guarded, guarded_column, db)?;
     let call = helper_call(function, &values, &set, &column, &named, db, registry)?;
@@ -287,7 +289,7 @@ fn helper_call<DB: DatabaseLike>(
         let (returned, arm) = match arm {
             HelperArm::Grant(grant) => (
                 rows_named_by(grant.table(), grant.column(), db)?,
-                HelperSetArm::Grant(helper_grant(&name, grant, db)?),
+                HelperSetArm::Grant(helper_grant(grant, db)?),
             ),
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
@@ -325,8 +327,10 @@ fn helper_parent<DB: DatabaseLike>(
             called: called.target_name().to_string(),
         });
     }
-    let fk_column = ColumnName::from_stored(parent.foreign_key_column().stored_column_name());
-    let referenced = rows_named_by(parent.table(), parent.foreign_key_column(), db)?;
+    let fk_column = ColumnName::from_stored(parent.column().stored_column_name());
+    // A column with no foreign key, typed by the set alone, names no rows here and is
+    // refused.
+    let referenced = rows_named_by(parent.table(), parent.column(), db)?;
     let call = helper_call(
         called,
         parent.arguments(),
@@ -340,7 +344,6 @@ fn helper_parent<DB: DatabaseLike>(
 }
 
 fn helper_grant<DB: DatabaseLike>(
-    function: &str,
     grant: &GrantArm<'_, DB>,
     db: &DB,
 ) -> Result<HelperGrant, HelperRefusal> {
@@ -355,7 +358,7 @@ fn helper_grant<DB: DatabaseLike>(
         (Some(kept), Some((column, domain)))
             if kept.column().stored_column_name() == column.as_str() =>
         {
-            let values = kept_literals(function, kept)?;
+            let values = kept_literals(kept);
             GrantRows::Roles {
                 column,
                 values: domain
@@ -367,7 +370,7 @@ fn helper_grant<DB: DatabaseLike>(
         (Some(kept), _) => GrantRows::Matching {
             predicate: Some(AttributePredicate {
                 column: ColumnName::from_stored(kept.column().stored_column_name()),
-                test: AttributeTest::In(kept_literals(function, kept)?),
+                test: AttributeTest::In(kept_literals(kept)),
             }),
         },
     };
@@ -379,19 +382,13 @@ fn helper_grant<DB: DatabaseLike>(
     })
 }
 
-fn kept_literals<DB: DatabaseLike>(
-    function: &str,
-    kept: &LiteralSet<'_, DB>,
-) -> Result<Vec<AttributeLiteral>, HelperRefusal> {
-    kept.values()
-        .iter()
-        .map(|value| {
-            literal(value).ok_or_else(|| HelperRefusal::UnnamedValue {
-                function: function.to_string(),
-                value: value.to_string(),
-            })
-        })
-        .collect()
+/// The values a condition keeps, as literals.
+///
+/// `sql-traits` keeps only the literal kinds [`literal`] reads, and a value it ever
+/// kept otherwise is dropped, which narrows, since the relations load no row for an
+/// empty list.
+fn kept_literals<DB: DatabaseLike>(kept: &LiteralSet<'_, DB>) -> Vec<AttributeLiteral> {
+    kept.values().iter().filter_map(literal).collect()
 }
 
 /// The table whose rows the values of `column` name, which are the rows its one
@@ -406,30 +403,30 @@ fn rows_named_by<DB: DatabaseLike>(
         table: table_identity(table).to_string(),
         column: column.stored_column_name().into_owned(),
     };
-    let mut single_column_keys = Vec::new();
+    let mut referenced: Option<TableId> = None;
     for foreign_key in table.foreign_keys(db)? {
         let mut host = foreign_key.host_columns(db)?;
-        if host.next().is_some_and(|host| core::ptr::eq(host, column)) && host.next().is_none() {
-            single_column_keys.push(foreign_key);
+        if !(host.next().is_some_and(|host| core::ptr::eq(host, column)) && host.next().is_none()) {
+            continue;
         }
+        let parent = table_identity(foreign_key.referenced_table(db)?);
+        let names_key = foreign_key
+            .referenced_columns(db)?
+            .map(|column| ColumnName::from_stored(column.stored_column_name()))
+            .eq(single_identity_column(&parent, db));
+        // Two keys referencing different tables leave the rows the value names open.
+        if !names_key || referenced.as_ref().is_some_and(|held| *held != parent) {
+            return Err(names_no_rows());
+        }
+        referenced = Some(parent);
     }
-    match single_column_keys.as_slice() {
-        [foreign_key] => {
-            let referenced = table_identity(foreign_key.referenced_table(db)?);
-            let names_key = foreign_key
-                .referenced_columns(db)?
-                .map(|column| ColumnName::from_stored(column.stored_column_name()))
-                .eq(single_identity_column(&referenced, db));
-            names_key.then_some(referenced).ok_or_else(names_no_rows)
-        }
-        [] => {
-            let own = table_identity(table);
-            let is_key = single_identity_column(&own, db)
-                .is_some_and(|key| key.as_str() == column.stored_column_name());
-            is_key.then_some(own).ok_or_else(names_no_rows)
-        }
-        _ => Err(names_no_rows()),
+    if let Some(referenced) = referenced {
+        return Ok(referenced);
     }
+    let own = table_identity(table);
+    let is_key = single_identity_column(&own, db)
+        .is_some_and(|key| key.as_str() == column.stored_column_name());
+    is_key.then_some(own).ok_or_else(names_no_rows)
 }
 
 /// The one column of `table` both `NOT NULL` and closed by a validated `CHECK` to
@@ -489,11 +486,9 @@ fn closed_domain(check: &Expr, column: &str) -> Option<Vec<AttributeLiteral>> {
         },
         _ => return None,
     };
-    let Expr::Identifier(tested) = peeled_as_text(tested)? else {
-        return None;
-    };
-    if stored_ident_name(tested) != column {
-        return None;
+    match peeled_as_text(tested)? {
+        Expr::Identifier(tested) if stored_ident_name(tested) == column => {}
+        _ => return None,
     }
     let mut values: Vec<AttributeLiteral> = Vec::with_capacity(listed.len());
     for element in listed {

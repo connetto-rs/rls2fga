@@ -1517,10 +1517,9 @@ fn helper_call_relation<DB: DatabaseLike>(
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
                 let columns = core::slice::from_ref(&parent.fk_column);
+                // The arm's key is the level's primary key and its column a single-column
+                // foreign key, so the bridge is always buildable.
                 let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
-                if !bridge_is_buildable(plan, &call.level, columns, &parent_type, ctx.db) {
-                    continue;
-                }
                 let tupleset = parent_bridge_relation(plan, &call.level, columns, &parent_type);
                 plan.add_source(TupleSource::ParentBridge {
                     table: call.level.clone(),
@@ -1571,6 +1570,8 @@ fn helper_call_relation_name(call: &HelperCall) -> String {
 
 /// One relation per role a grant arm keeps, or one for the rows it keeps where the
 /// grant table has no role column, each with the source loading it.
+///
+/// A condition with no SQL spelling loads nothing rather than every row.
 fn helper_grant_relations(
     grant: &HelperGrant,
     level_type: &TypeName,
@@ -1579,20 +1580,20 @@ fn helper_grant_relations(
     let fk_cols = vec![grant.object_column.clone()];
     let subject = DirectSubject::Type(plan.well_known.user.clone());
     let mut relation = |base: String, predicate: Option<AttributePredicate>| {
-        let extra_predicates = ResidualPredicates::new(
-            predicate
-                .into_iter()
-                .filter_map(|predicate| {
-                    let test = render_attribute_test(&predicate.test)?;
-                    Some(ResidualPredicate {
-                        sql: format!("{} {test}", quote_sql_identifier(predicate.column.as_str())),
-                        guard: Some(ResidualGuard::Compare(predicate)),
-                        request: None,
-                        relations: Vec::new(),
-                    })
-                })
-                .collect(),
-        );
+        let conjuncts = match predicate {
+            Some(predicate) => vec![ResidualPredicate {
+                sql: format!(
+                    "{} {}",
+                    quote_sql_identifier(predicate.column.as_str()),
+                    render_attribute_test(&predicate.test)?
+                ),
+                guard: Some(ResidualGuard::Compare(predicate)),
+                request: None,
+                relations: Vec::new(),
+            }],
+            None => Vec::new(),
+        };
+        let extra_predicates = ResidualPredicates::new(conjuncts);
         let key = membership_source_key(
             &grant.table,
             &fk_cols,
@@ -1610,18 +1611,16 @@ fn helper_grant_relations(
             extra_predicates,
             gate: None,
         });
-        relation
+        Some(relation)
     };
     match &grant.rows {
         GrantRows::Roles { column, values } => values
             .iter()
-            .map(|value| {
-                // A literal of a later kind keeps the generic name, which the source key
-                // disambiguates like any other.
+            .filter_map(|value| {
+                // A role spelled as text names its relation, any other literal the
+                // generic name the source key disambiguates.
                 let base = match value {
                     AttributeLiteral::Text(text) => text.clone(),
-                    AttributeLiteral::Number(number) => number.clone(),
-                    AttributeLiteral::Boolean(flag) => flag.to_string(),
                     _ => member_relation().to_string(),
                 };
                 relation(
@@ -1637,7 +1636,9 @@ fn helper_grant_relations(
             })
             .collect(),
         GrantRows::Matching { predicate } => {
-            vec![relation(member_relation().to_string(), predicate.clone())]
+            relation(member_relation().to_string(), predicate.clone())
+                .into_iter()
+                .collect()
         }
     }
 }
