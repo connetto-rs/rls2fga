@@ -132,6 +132,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P17 | `CallerScalarEqualsConstant` | `(SELECT auth.jwt() ->> 'aal') = 'aal2'` | A test of the caller's value, held once per table, see below |
 | P18 | `MembershipInCallerSet` | `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND s.viewer = ANY(...))` | The gate on each share row, reached through the same parent P4 bridges to |
 | P19 | `IndirectMembership` | Nested `EXISTS` or an inner `JOIN` through a closure table | `member from ancestor`, with both hops referencing the same declared owner key |
+| P20 | `DeclaredHelper` | `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))` | One relation per role and per call, `projects_with_read from projects` |
 | - | `MembershipExclusion` | Positive grant `AND NOT EXISTS (...)`, caller `NOT IN (...)`, caller `<> ALL (...)` | Grant `but not blocked`, with independent relations per blocklist |
 | - | `Unknown` | Anything else | Denied, with a TODO, unless an oracle classifies it |
 
@@ -148,6 +149,8 @@ Every test of one kind shares one condition (`required_value in app_bot_list`), 
 An unrecognised expression is denied rather than guessed at, which is safe but narrower than the policy. Implement `PolicyOracle` and call `consult_oracle` to answer for your own shapes: each refusal is offered with its reason, and bailing is the default, so an oracle implementing nothing changes nothing. Use it rather than rewriting classifications yourself, since a refusal nests inside composites and every enclosing pattern has to be regraded. `classifier::oracle` documents the traps with a worked example.
 
 Two refusals are deliberate. Reading the body of a `SECURITY DEFINER` function would defeat the marking, since it sees rows the caller cannot. A jsonb field read by position, `data -> 0 ->> 'owner'`, would name a permission after an offset that unrelated code can repoint. Both reach you through the oracle.
+
+A definer helper you declare with `TranslatorBuilder::with_declared_helpers` is the exception. It has to be a `STABLE` SQL function returning `SETOF` one type, with a pinned `search_path`, owned by a role the schema declares that holds `SELECT` on what it reads and is exempt from those tables' policies, its body a `UNION` of the caller's grant rows and of rows whose parent another declared helper returns. Its owner then reads what the tuple queries read. Each value of a grant table's role column, its one `NOT NULL` column a `CHECK` closes to literals, becomes a relation, each call a relation on the table whose keys it returns, and each parent arm `<call> from <parent>`. A helper outside that shape is refused naming why. Declaring one asserts that every role a request runs as may execute it, since a caller lacking `EXECUTE` gets an error where the model grants.
 
 ## Reads gate the other commands
 

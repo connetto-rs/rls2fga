@@ -100,8 +100,14 @@ where
 /// A `PostgreSQL` 18 container, ready to accept connections.
 #[cfg(feature = "client")]
 pub(crate) async fn start_postgres() -> ContainerAsync<GenericImage> {
-    start_with_retry("PostgreSQL 18", || {
-        GenericImage::new("postgres", "18")
+    start_postgres_version("18").await
+}
+
+/// A container of `PostgreSQL` major version `major`, ready to accept connections.
+#[cfg(feature = "client")]
+pub(crate) async fn start_postgres_version(major: &str) -> ContainerAsync<GenericImage> {
+    start_with_retry(&format!("PostgreSQL {major}"), || {
+        GenericImage::new("postgres", major)
             .with_exposed_port(5432.tcp())
             .with_wait_for(WaitFor::message_on_stderr(
                 "database system is ready to accept connections",

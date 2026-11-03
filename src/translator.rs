@@ -123,6 +123,29 @@ impl TranslatorBuilder {
         self
     }
 
+    /// Declare `SECURITY DEFINER` helpers a policy may compare a column with, named as a
+    /// call spells them (`authz.projects_with`).
+    ///
+    /// A helper is otherwise refused, since its body reads rows the caller cannot. A
+    /// declared one translates to the grants its body reads where `sql-traits` can answer
+    /// what it returns, which takes a `STABLE` SQL helper returning `SETOF` one type, with a
+    /// pinned `search_path`, owned by a declared role holding `SELECT` on what it reads and
+    /// exempt from those tables' policies, whose body is a `UNION` of grant and parent
+    /// reads. Every helper it calls has to be declared too.
+    ///
+    /// Declaring one asserts that every role a request runs as may execute it. A caller
+    /// lacking `EXECUTE` gets an error from `PostgreSQL` where the model grants, and no
+    /// such check is made here.
+    #[must_use]
+    pub fn with_declared_helpers<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.registry.declare_helpers(names);
+        self
+    }
+
     /// Set the output confidence threshold used by model/tuple/report generation.
     #[must_use]
     pub fn with_min_confidence(mut self, min_confidence: ConfidenceLevel) -> Self {

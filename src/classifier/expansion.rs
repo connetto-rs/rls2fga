@@ -820,7 +820,7 @@ fn call_argument_column(arg: &Expr, table: &str) -> Option<ColumnName> {
 /// that is the schema a dump's qualified call spells, so the effective schema is compared
 /// rather than the stored one. The registry canonicalizes an unqualified declaration by
 /// the same search-path entry.
-fn call_matches_declared<DB: DatabaseLike>(
+pub(crate) fn call_matches_declared<DB: DatabaseLike>(
     call: &ObjectName,
     declared: &DB::Function,
     db: &DB,
