@@ -36,6 +36,7 @@ mod identifiers;
 pub mod identity;
 mod notes;
 mod patterns;
+mod policy_reads;
 mod records;
 mod relations;
 mod row_naming;
@@ -52,8 +53,9 @@ pub use identifiers::{
 pub use notes::{NoteSeverity, TranslationNote};
 pub use patterns::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ConfidenceLevel,
-    ContextWitness, RolePrivilege,
+    ContextWitness, PolicyCommand, RolePrivilege,
 };
+pub use policy_reads::PolicyReads;
 pub use records::{
     records_from_row, BoundQuery, BoundQueryError, ColumnKind, ColumnRead, ContextRendering, Guard,
     ObjectKey, Record, RecordContext, RecordContextEntry, RecordContextValue, RecordDerivation,

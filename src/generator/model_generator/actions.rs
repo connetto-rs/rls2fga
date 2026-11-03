@@ -417,7 +417,7 @@ pub(crate) fn policies_missing_a_clause<P: PolicyLike>(
 ) -> Vec<(String, String, &'static str)> {
     let mut missing = Vec::new();
     for policy in declared {
-        let command = PolicyCommand::from(policy.command());
+        let command = policy_command(policy.command());
         // An illegal clause gets its own note, and an absent-clause line beside it
         // would send the operator hunting for a legal policy that never existed.
         if clause_illegal_for_command(

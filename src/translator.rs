@@ -13,6 +13,7 @@ use crate::generator::json_model::{json_model_from_plan, AuthorizationModel};
 use crate::generator::model_generator::{
     build_filtered_schema_plan, render_dsl_from_plan, GeneratorSettings, SchemaPlan,
 };
+use crate::generator::policy_reads::policy_reads;
 use crate::generator::relations::relation_shapes;
 use crate::generator::row_naming::row_naming;
 use crate::generator::tuple_generator::{
@@ -26,11 +27,11 @@ use crate::output::formatter::{write_output, WriteError};
 use crate::output::report::build_report;
 use crate::parser::function_analyzer::AccessorInferenceSettings;
 use crate::parser::sql_parser::DatabaseLike;
-use crate::types::UnrestrictedTable;
 use crate::types::{
     ActionRelations, NoteSeverity, Record, RelationShapes, RowNaming, TranslationNote,
 };
 use crate::types::{ConditionParameterName, ConditionParameterNameError};
+use crate::types::{PolicyReads, UnrestrictedTable};
 
 pub use crate::generator::model_generator::PlanningError;
 
@@ -212,10 +213,16 @@ struct DerivedOutputs {
     row_naming: Vec<RowNaming>,
     action_relations: Vec<ActionRelations>,
     unrestricted_tables: Vec<UnrestrictedTable>,
+    policy_reads: Vec<PolicyReads>,
 }
 
 impl DerivedOutputs {
-    fn build<DB: DatabaseLike>(plan: &SchemaPlan, bounds: &UnboundedColumns, db: &DB) -> Self {
+    fn build<DB: DatabaseLike>(
+        plan: &SchemaPlan,
+        policies: &[ClassifiedPolicy],
+        bounds: &UnboundedColumns,
+        db: &DB,
+    ) -> Self {
         let generated = generate_tuple_queries_from_plan(plan, bounds, db);
         let relations = relation_shapes(plan, &generated.descriptions, db);
         Self {
@@ -224,6 +231,7 @@ impl DerivedOutputs {
             row_naming: row_naming(plan, db),
             action_relations: action_relations(plan, db),
             unrestricted_tables: unrestricted_tables(db),
+            policy_reads: policy_reads(policies, db),
         }
     }
 }
@@ -250,7 +258,7 @@ impl Translation {
         let bounds = UnboundedColumns::resolve(db);
         let plan =
             build_filtered_schema_plan(&policies, db, registry, min_confidence, settings, &bounds)?;
-        let derived = Arc::new(DerivedOutputs::build(&plan, &bounds, db));
+        let derived = Arc::new(DerivedOutputs::build(&plan, &policies, &bounds, db));
         Ok(Self {
             plan,
             derived,
@@ -317,6 +325,20 @@ impl Translation {
         &self.derived.unrestricted_tables
     }
 
+    /// The tables each policy's clauses read, one entry per translated policy ordered by
+    /// table and then name, for a consumer refusing a table it can no longer follow to
+    /// refuse every policy reading it.
+    ///
+    /// Reports what the database reads, whatever the model enforces, and errs toward naming
+    /// more. A clause the translation dropped or left unclassified counts, so does every
+    /// function body the clauses reach, and a read the schema cannot name is listed in
+    /// [`PolicyReads::unresolved`]. A policy whose table the catalog cannot place has no
+    /// entry.
+    #[must_use]
+    pub fn policy_reads(&self) -> &[PolicyReads] {
+        &self.derived.policy_reads
+    }
+
     /// The outputs, refused while any note's severity [`diverges_from_database`](NoteSeverity::diverges_from_database).
     ///
     /// # Errors
@@ -350,8 +372,9 @@ pub struct Outputs(Translation);
 impl Outputs {
     /// The translation these outputs were rendered from, for the analysis
     /// surface ([`Translation::relations`], [`Translation::row_naming`],
-    /// [`Translation::action_relations`], [`Translation::unrestricted_tables`])
-    /// without cloning before [`Translation::outputs`] consumes it.
+    /// [`Translation::action_relations`], [`Translation::unrestricted_tables`],
+    /// [`Translation::policy_reads`]) without cloning before
+    /// [`Translation::outputs`] consumes it.
     #[must_use]
     pub fn translation(&self) -> &Translation {
         &self.0
