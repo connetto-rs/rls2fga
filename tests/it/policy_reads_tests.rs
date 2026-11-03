@@ -222,3 +222,63 @@ CREATE POLICY e ON events
         ["events", "events_2026", "tenants", "vip_tenants"]
     );
 }
+
+/// A foreign partition holds no rows of its own, so no change stream carries it.
+#[test]
+fn a_foreign_partition_below_the_guarded_table_is_not_read() {
+    let translation = translate(
+        "
+CREATE EXTENSION postgres_fdw;
+CREATE SERVER remote FOREIGN DATA WRAPPER postgres_fdw;
+CREATE TABLE events (id INT, tenant TEXT, region TEXT) PARTITION BY LIST (region);
+CREATE TABLE events_eu PARTITION OF events FOR VALUES IN ('eu');
+CREATE FOREIGN TABLE events_us PARTITION OF events FOR VALUES IN ('us') SERVER remote;
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY e ON events USING (tenant = current_user);
+",
+    );
+    let entry = entry(&translation, "e");
+    assert_eq!(reads(entry), ["events", "events_eu"]);
+    assert!(entry.unresolved.is_empty(), "{:?}", entry.unresolved);
+}
+
+/// A child inheriting from two tables below the guarded one is one read.
+#[test]
+fn a_child_reached_through_two_parents_is_read_once() {
+    let translation = translate(
+        "
+CREATE TABLE docs (id INT, owner TEXT);
+CREATE TABLE drafts (draft_note TEXT) INHERITS (docs);
+CREATE TABLE shared (share_note TEXT) INHERITS (docs);
+CREATE TABLE shared_drafts () INHERITS (drafts, shared);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY d ON docs USING (owner = current_user);
+",
+    );
+    assert_eq!(
+        reads(entry(&translation, "d")),
+        ["docs", "drafts", "shared", "shared_drafts"]
+    );
+}
+
+#[test]
+fn a_relation_name_the_catalog_cannot_look_up_leaves_the_policy_unresolved() {
+    let translation = translate(
+        "
+CREATE TABLE docs (id INT PRIMARY KEY);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY d ON docs
+  USING (id IN (SELECT doc_id FROM elsewhere.public.extra.members));
+",
+    );
+    let entry = entry(&translation, "d");
+    assert_eq!(reads(entry), ["docs"]);
+    assert!(
+        entry
+            .unresolved
+            .iter()
+            .any(|reason| reason.contains("members")),
+        "the unreadable relation is named: {:?}",
+        entry.unresolved
+    );
+}
