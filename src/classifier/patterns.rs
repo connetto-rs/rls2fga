@@ -10,23 +10,8 @@ use crate::parser::names::{stored_ident_name, table_identity};
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
 pub(crate) use crate::types::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ColumnName,
-    ConfidenceLevel, RolePrivilege, TableId,
+    ConfidenceLevel, PolicyCommand, RolePrivilege, TableId,
 };
-
-/// The command a policy applies to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum PolicyCommand {
-    /// Policy applies to SELECT queries only.
-    Select,
-    /// Policy applies to INSERT queries only.
-    Insert,
-    /// Policy applies to UPDATE queries only.
-    Update,
-    /// Policy applies to DELETE queries only.
-    Delete,
-    /// Policy applies to all DML commands.
-    All,
-}
 
 /// Policy combination mode in `PostgreSQL` RLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -62,18 +47,6 @@ pub enum ThresholdOperator {
     Gte,
     /// `> N`
     Gt,
-}
-
-impl fmt::Display for PolicyCommand {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            PolicyCommand::Select => write!(f, "SELECT"),
-            PolicyCommand::Insert => write!(f, "INSERT"),
-            PolicyCommand::Update => write!(f, "UPDATE"),
-            PolicyCommand::Delete => write!(f, "DELETE"),
-            PolicyCommand::All => write!(f, "ALL"),
-        }
-    }
 }
 
 /// Boolean operator for composite patterns.
@@ -664,15 +637,14 @@ pub fn exclusion_confidence(base: Option<&ClassifiedExpr>) -> ConfidenceLevel {
     base.map_or(ConfidenceLevel::A, |base| base.confidence)
 }
 
-impl From<CreatePolicyCommand> for PolicyCommand {
-    fn from(cmd: CreatePolicyCommand) -> Self {
-        match cmd {
-            CreatePolicyCommand::All => PolicyCommand::All,
-            CreatePolicyCommand::Select => PolicyCommand::Select,
-            CreatePolicyCommand::Insert => PolicyCommand::Insert,
-            CreatePolicyCommand::Update => PolicyCommand::Update,
-            CreatePolicyCommand::Delete => PolicyCommand::Delete,
-        }
+/// The command a catalog's policy statement restricts, `ALL` when it names none.
+pub(crate) fn policy_command(command: CreatePolicyCommand) -> PolicyCommand {
+    match command {
+        CreatePolicyCommand::All => PolicyCommand::All,
+        CreatePolicyCommand::Select => PolicyCommand::Select,
+        CreatePolicyCommand::Insert => PolicyCommand::Insert,
+        CreatePolicyCommand::Update => PolicyCommand::Update,
+        CreatePolicyCommand::Delete => PolicyCommand::Delete,
     }
 }
 
@@ -688,7 +660,7 @@ pub fn derive_policy_mode<P: PolicyLike>(policy: &P) -> PolicyMode {
 /// apply, and a command rule spelled twice can be widened in one place only.
 pub(crate) fn policy_covers_reads<P: PolicyLike>(policy: &P) -> bool {
     matches!(
-        PolicyCommand::from(policy.command()),
+        policy_command(policy.command()),
         PolicyCommand::Select | PolicyCommand::All
     )
 }
@@ -779,7 +751,8 @@ pub fn clause_illegal_for_command(
 /// [`consult_oracle`](crate::classifier::oracle::consult_oracle).
 ///
 /// ```compile_fail
-/// # use rls2fga::classifier::patterns::{ClassifiedPolicy, PolicyCommand, PolicyMode};
+/// # use rls2fga::classifier::patterns::{ClassifiedPolicy, PolicyMode};
+/// # use rls2fga::types::PolicyCommand;
 /// let policy = ClassifiedPolicy {
 ///     name: "p".to_string(),
 ///     table: "docs".to_string(),
@@ -842,7 +815,7 @@ impl ClassifiedPolicy {
                 .ok()
                 .flatten()
                 .map(table_identity),
-            command: PolicyCommand::from(policy.command()),
+            command: policy_command(policy.command()),
             mode: derive_policy_mode(policy),
             scoped_roles,
             ddl_time_roles,
@@ -1101,24 +1074,21 @@ mod tests {
         assert_eq!(format!("{}", PolicyMode::Permissive), "PERMISSIVE");
         assert_eq!(format!("{}", PolicyMode::Restrictive), "RESTRICTIVE");
 
+        assert_eq!(policy_command(CreatePolicyCommand::All), PolicyCommand::All);
         assert_eq!(
-            PolicyCommand::from(CreatePolicyCommand::All),
-            PolicyCommand::All
-        );
-        assert_eq!(
-            PolicyCommand::from(CreatePolicyCommand::Select),
+            policy_command(CreatePolicyCommand::Select),
             PolicyCommand::Select
         );
         assert_eq!(
-            PolicyCommand::from(CreatePolicyCommand::Insert),
+            policy_command(CreatePolicyCommand::Insert),
             PolicyCommand::Insert
         );
         assert_eq!(
-            PolicyCommand::from(CreatePolicyCommand::Update),
+            policy_command(CreatePolicyCommand::Update),
             PolicyCommand::Update
         );
         assert_eq!(
-            PolicyCommand::from(CreatePolicyCommand::Delete),
+            policy_command(CreatePolicyCommand::Delete),
             PolicyCommand::Delete
         );
 

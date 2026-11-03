@@ -25,7 +25,7 @@ use rls2fga::classifier::function_registry::{
     FunctionRegistry, SessionAttribute, SessionAttributeKind,
 };
 use rls2fga::classifier::patterns::{
-    ClassifiedExpr, DirectOwnership, MembershipJoinPair, PatternClass, PolicyCommand,
+    ClassifiedExpr, DirectOwnership, MembershipJoinPair, PatternClass,
 };
 use rls2fga::classifier::policy_classifier::{classify_expr, classify_policies};
 use rls2fga::generator::model_generator::GeneratorSettings;
@@ -35,8 +35,8 @@ use rls2fga::parser::sql_parser::{
     parse_schema, ColumnLike, DatabaseLike, ForeignKeyLike, ParserDB, PolicyLike, TableLike,
 };
 use rls2fga::translator::{Translation, TranslatorBuilder};
-use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationShapes;
+use rls2fga::types::{ConfidenceLevel, PolicyCommand};
 
 const SCHEMA: &str = "
 CREATE TABLE public.users (id UUID PRIMARY KEY);

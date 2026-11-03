@@ -194,6 +194,33 @@ pub struct AttributePredicate {
     pub test: AttributeTest,
 }
 
+/// The command a policy applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PolicyCommand {
+    /// Policy applies to SELECT queries only.
+    Select,
+    /// Policy applies to INSERT queries only.
+    Insert,
+    /// Policy applies to UPDATE queries only.
+    Update,
+    /// Policy applies to DELETE queries only.
+    Delete,
+    /// Policy applies to all DML commands.
+    All,
+}
+
+impl fmt::Display for PolicyCommand {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            PolicyCommand::Select => write!(f, "SELECT"),
+            PolicyCommand::Insert => write!(f, "INSERT"),
+            PolicyCommand::Update => write!(f, "UPDATE"),
+            PolicyCommand::Delete => write!(f, "DELETE"),
+            PolicyCommand::All => write!(f, "ALL"),
+        }
+    }
+}
+
 /// Confidence level for a classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum ConfidenceLevel {

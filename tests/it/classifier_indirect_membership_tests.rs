@@ -4,10 +4,11 @@ use rls2fga::classifier::function_registry::{
     FunctionRegistry, SessionAttribute, SessionAttributeKind,
 };
 use rls2fga::classifier::patterns::{
-    ClassifiedExpr, IndirectMembership, MembershipJoinPair, PatternClass, PolicyCommand,
+    ClassifiedExpr, IndirectMembership, MembershipJoinPair, PatternClass,
 };
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
 use rls2fga::translator::TranslatorBuilder;
+use rls2fga::types::PolicyCommand;
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Select, Value};
 
 use crate::support::{

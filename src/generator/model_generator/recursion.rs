@@ -15,7 +15,7 @@ use super::actions::{
     policy_uses_using_for_missing_with_check, using_targets, with_check_targets, ActionTarget,
 };
 use super::TableTypes;
-use crate::classifier::patterns::PolicyCommand;
+use crate::classifier::patterns::{policy_command, PolicyCommand};
 use crate::parser::expr::reads_relation;
 use crate::parser::names::resolve_table_id;
 use crate::parser::sql_parser::{DatabaseLike, PolicyLike};
@@ -43,7 +43,7 @@ impl PolicyReadRecursion {
 
         for policy in db.policies() {
             if !matches!(
-                PolicyCommand::from(policy.command()),
+                policy_command(policy.command()),
                 PolicyCommand::Select | PolicyCommand::All
             ) {
                 continue;
@@ -131,7 +131,7 @@ pub(super) fn declared_clause_targets<'p, P: PolicyLike>(
     policy: &'p P,
     db: &'p P::DB,
 ) -> [(Option<&'p Expr>, Vec<ActionTarget>); 2] {
-    let command = PolicyCommand::from(policy.command());
+    let command = policy_command(policy.command());
     let check = policy.check_expression(db);
     let mut using = using_targets(command);
     if check.is_none() && policy_uses_using_for_missing_with_check(command) {

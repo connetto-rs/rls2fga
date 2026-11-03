@@ -57,6 +57,7 @@ mod per_row_record_parity_tests;
 mod per_row_witness_tests;
 mod policy_composition_tests;
 mod policy_oracle_tests;
+mod policy_reads_tests;
 mod relation_shapes_tests;
 mod request_gate_parity_tests;
 mod request_gate_recipe_parity_tests;
