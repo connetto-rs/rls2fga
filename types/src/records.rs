@@ -1107,12 +1107,23 @@ fn compare_holds<R: RowValues + ?Sized>(
     row: &R,
 ) -> Eval<()> {
     let cell = match checked_cell(row, column) {
-        Eval::Value(RowCell::Null) | Eval::Empty => return Eval::Empty,
         Eval::Value(cell) => cell,
+        Eval::Empty => return Eval::Empty,
         Eval::Refuse(error) => return Eval::Refuse(error),
     };
     let undecided = || Eval::Refuse(RecordError::ComparisonNeedsQuery(column.to_string()));
+    let holds = |admitted: bool| {
+        if admitted {
+            Eval::Value(())
+        } else {
+            Eval::Empty
+        }
+    };
     match &predicate.test {
+        AttributeTest::IsNull => holds(matches!(cell, RowCell::Null)),
+        AttributeTest::IsNotNull => holds(!matches!(cell, RowCell::Null)),
+        // SQL compares NULL against nothing, so only a null test admits it.
+        _ if matches!(cell, RowCell::Null) => Eval::Empty,
         AttributeTest::Compare { operator, value } => {
             // Text orders by collation, which only the database knows.
             let ordered = matches!(value, AttributeLiteral::Text(_))
@@ -2328,6 +2339,46 @@ mod tests {
             ),
             Eval::Empty
         ));
+    }
+
+    #[test]
+    fn a_null_test_guard_reads_only_whether_the_cell_is_null() {
+        let tested = |test: AttributeTest| Guard::Compare {
+            column: read("team_id", ColumnKind::Text),
+            predicate: AttributePredicate {
+                column: ColumnName::from_stored("team_id"),
+                test,
+            },
+        };
+        let null = FullRow::default().with_cell("team_id", RowCell::Null);
+        let set = FullRow::default().with_cell("team_id", RowCell::Text(Cow::Borrowed("t1")));
+        let mistyped = FullRow::default().with_cell("team_id", RowCell::Bool(true));
+
+        for (test, on_null, on_set) in [
+            (AttributeTest::IsNull, true, false),
+            (AttributeTest::IsNotNull, false, true),
+        ] {
+            let guard = tested(test);
+            for (row, holds) in [(&null, on_null), (&set, on_set)] {
+                let outcome = guard_holds(&guard, row);
+                assert!(
+                    if holds {
+                        matches!(outcome, Eval::Value(()))
+                    } else {
+                        matches!(outcome, Eval::Empty)
+                    },
+                    "{guard:?}"
+                );
+            }
+            assert!(matches!(
+                guard_holds(&guard, &FullRow::default()),
+                Eval::Refuse(RecordError::ColumnAbsent(_))
+            ));
+            assert!(matches!(
+                guard_holds(&guard, &mistyped),
+                Eval::Refuse(RecordError::ColumnTypeMismatch { .. })
+            ));
+        }
     }
 
     #[test]

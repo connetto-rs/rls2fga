@@ -4438,6 +4438,26 @@ fn residual_predicate_keeps_a_literal_list_as_a_row_guard() {
 }
 
 #[test]
+fn residual_predicate_keeps_a_null_test_as_a_row_guard() {
+    let conjunct = residual_predicate(&parse_expr("(left_at) IS NULL"));
+    let Some(ResidualGuard::Compare(predicate)) = conjunct.guard else {
+        panic!("a null test is row data, got {:?}", conjunct.guard);
+    };
+    assert_eq!(predicate.column.as_str(), "left_at");
+    assert_eq!(predicate.test, AttributeTest::IsNull);
+}
+
+#[test]
+fn a_null_test_on_the_caller_column_yields_no_literal_predicate() {
+    for sql in ["owner_id IS NULL", "owner_id IS NOT NULL"] {
+        assert!(
+            attribute_literal_predicate(&parse_expr(sql)).is_none(),
+            "`{sql}`"
+        );
+    }
+}
+
+#[test]
 fn a_list_no_gate_may_carry_yields_no_literal_predicate() {
     for sql in [
         "owner_id IN ('alice', 'bob')",

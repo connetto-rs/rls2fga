@@ -1153,6 +1153,10 @@ fn compare_guard<DB: DatabaseLike>(
         AttributeTest::In(values) => {
             !values.is_empty() && values.iter().all(|value| literal_row_decides(kind, value))
         }
+        // The evaluator refuses these kinds before it reads the cell.
+        AttributeTest::IsNull | AttributeTest::IsNotNull => {
+            !matches!(kind, ColumnKind::Unsupported | ColumnKind::Json)
+        }
     };
     row_decides.then_some(Guard::Compare {
         column,

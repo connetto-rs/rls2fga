@@ -76,6 +76,8 @@ fn attribute_gate_key(predicate: &AttributePredicate) -> Option<String> {
             }
             key
         }
+        AttributeTest::IsNull => "null".to_string(),
+        AttributeTest::IsNotNull => "notnull".to_string(),
     };
     Some(format!("attr:{}:{column}:{test}", column.len()))
 }

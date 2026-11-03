@@ -201,7 +201,7 @@ fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
     let schema = |restriction: &str| {
         format!(
             "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, deleted_at TIMESTAMP, \
-             tenant_id UUID);\n\
+             tenant_id UUID, title TEXT);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);\n\
              CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT USING ({restriction});\n"
@@ -218,17 +218,17 @@ fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
             .unwrap_or_else(|| panic!("docs should define can_select for '{restriction}'"))
     };
 
-    let barrier_only = body("deleted_at IS NULL");
+    let barrier_only = body("title LIKE 'draft%'");
     assert!(
         barrier_only.contains("no_access"),
         "an inexpressible restriction must deny, got '{barrier_only}'"
     );
 
     // Anding a relationship onto the same barrier must not discard the barrier.
-    let with_relationship = body("deleted_at IS NULL AND tenant_id = current_user");
+    let with_relationship = body("title LIKE 'draft%' AND tenant_id = current_user");
     assert!(
         with_relationship.contains("no_access"),
-        "the 'deleted_at IS NULL' barrier vanished, leaving '{with_relationship}'"
+        "the 'title LIKE' barrier vanished, leaving '{with_relationship}'"
     );
     assert_ne!(
         with_relationship,
@@ -238,14 +238,21 @@ fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
 
     // The same holds when the barrier hides inside a branch of a union.
     let nested =
-        body("(deleted_at IS NULL AND tenant_id = current_user) OR owner_id = current_user");
+        body("(title LIKE 'draft%' AND tenant_id = current_user) OR owner_id = current_user");
     assert!(
         nested.contains("no_access"),
         "a barrier nested in a union vanished, leaving '{nested}'"
     );
 
+    // A barrier the row decides is kept as its gate rather than denied.
+    let row_decided = body("deleted_at IS NULL");
+    assert!(
+        row_decided.contains(" and public_where_deleted_at_") && !row_decided.contains("no_access"),
+        "the row decides 'deleted_at IS NULL', got '{row_decided}'"
+    );
+
     // A denied barrier must not also ask for runtime enforcement.
-    let db = db_of(&schema("deleted_at IS NULL AND tenant_id = current_user"));
+    let db = db_of(&schema("title LIKE 'draft%' AND tenant_id = current_user"));
     let model = translator(ConfidenceLevel::C)
         .translate(&db)
         .expect("translation should plan")
