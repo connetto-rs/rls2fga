@@ -622,3 +622,46 @@ fn a_dollar_quoted_role_reads_as_the_quoted_one() {
         model(&body("'admin'"), &["authz.admins"])
     );
 }
+
+/// A helper returning the keys of the rows naming the caller, R100's
+/// `installations_of_bot`, grants every such row, on the table those keys belong to.
+#[test]
+fn a_grant_arm_on_its_own_level_loads_every_row_naming_the_caller() {
+    let sql = "
+CREATE TABLE installations (id TEXT PRIMARY KEY, bot TEXT NOT NULL);
+CREATE TABLE optional_tables (installation TEXT NOT NULL REFERENCES installations (id),
+  table_name TEXT NOT NULL, PRIMARY KEY (installation, table_name));
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE FUNCTION installations_of_bot() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT i.id FROM installations i WHERE i.bot = current_setting('app.user_id', true)
+$$;
+ALTER FUNCTION installations_of_bot() OWNER TO authz_owner;
+GRANT SELECT ON installations TO authz_owner;
+ALTER TABLE optional_tables ENABLE ROW LEVEL SECURITY;
+CREATE POLICY optional_read ON optional_tables FOR SELECT USING (
+  installation = ANY (ARRAY(SELECT installations_of_bot())));
+";
+    let outputs = translator(ConfidenceLevel::B, &["installations_of_bot"])
+        .translate(&db_of(sql))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    assert_eq!(
+        relation_definition(&dsl, "optional_tables", "can_select").as_deref(),
+        Some("installations_of_bot from installations")
+    );
+    let bots: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .filter(|sql| sql.contains("FROM \"public\".\"installations\"") && sql.contains("\"bot\""))
+        .collect();
+    assert_eq!(bots.len(), 1, "{bots:#?}");
+    assert!(
+        !bots[0].contains("\nAND ("),
+        "every row naming a bot loads: {}",
+        bots[0]
+    );
+}
