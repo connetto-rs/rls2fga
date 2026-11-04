@@ -3,6 +3,7 @@ mod support;
 mod absent_column_tests;
 mod action_relations_tests;
 mod attribute_in_list_tests;
+mod attribute_null_test_tests;
 mod blocklist_exclusion_tests;
 mod builtin_shadow_tests;
 mod caller_cast_tests;

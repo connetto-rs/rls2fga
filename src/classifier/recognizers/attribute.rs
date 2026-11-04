@@ -175,7 +175,8 @@ fn cel_duration(seconds: i64) -> String {
     }
 }
 
-/// The guard as structure, but only when every compared value is a literal constant.
+/// The guard as structure, but only when every compared value is a literal constant
+/// or the guard tests the column for NULL.
 ///
 /// [`is_attribute_check`] deliberately also accepts a well-known temporal function,
 /// so `expires_at > now()` is an attribute guard too. That one is not decided by the
@@ -186,6 +187,16 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     let expr = unparenthesize(expr);
     if let Some((column, list)) = constant_in_list(expr) {
         return literal_list_predicate(column, list);
+    }
+    let null_test = match expr {
+        Expr::IsNull(operand) => Some((operand, AttributeTest::IsNull)),
+        Expr::IsNotNull(operand) => Some((operand, AttributeTest::IsNotNull)),
+        _ => None,
+    };
+    if let Some((operand, test)) = null_test {
+        let column = extract_column_name(operand)?;
+        return (!is_user_related_column_name(column.as_str()))
+            .then_some(AttributePredicate { column, test });
     }
     let Expr::BinaryOp { left, op, right } = expr else {
         return None;

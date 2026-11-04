@@ -1830,6 +1830,8 @@ pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
             Some(format!("IN ({})", rendered.join(", ")))
         }
         AttributeTest::In(_) => None,
+        AttributeTest::IsNull => Some("IS NULL".to_string()),
+        AttributeTest::IsNotNull => Some("IS NOT NULL".to_string()),
     }
 }
 

@@ -171,7 +171,7 @@ pub enum AttributeLiteral {
     Boolean(bool),
 }
 
-/// What an attribute guard asks of its column, against literal constants only.
+/// What an attribute guard asks of its column, against literal constants or NULL only.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AttributeTest {
     /// The column compares as stated against one literal.
@@ -183,9 +183,13 @@ pub enum AttributeTest {
     },
     /// The column equals one of the literals, as SQL `IN` decides it.
     In(Vec<AttributeLiteral>),
+    /// The column is SQL NULL.
+    IsNull,
+    /// The column is not SQL NULL.
+    IsNotNull,
 }
 
-/// A column tested against literal constants, which the row alone decides.
+/// A column tested against literal constants or NULL, which the row alone decides.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AttributePredicate {
     /// Column the guard reads, folded to its stored name.
