@@ -400,7 +400,13 @@ pub(super) fn apply_membership_read_scope<DB: DatabaseLike>(
             .iter()
             .filter(|relation| *relation != join_table)
             .filter_map(|relation| {
-                match table_readability(relation, ctx.db, ctx.registry, &ExpansionState::new()) {
+                match table_readability(
+                    relation,
+                    ctx.db,
+                    ctx.registry,
+                    &ExpansionState::new(),
+                    ctx.settings.caller_roles.as_ref(),
+                ) {
                     TableReadability::RequestGated { gates } => Some(gates),
                     _ => None,
                 }

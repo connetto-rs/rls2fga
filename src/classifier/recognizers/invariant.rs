@@ -85,7 +85,7 @@ pub(crate) fn residual_relations<DB: DatabaseLike>(
             // table is request-gated. The caller the gate excludes sees it empty, so the
             // residual must hold for no row then, or the gate would hide rows it may read.
             if !matches!(
-                table_readability(&identity, db, registry, state),
+                table_readability(&identity, db, registry, state, None),
                 TableReadability::RequestGated { .. }
             ) {
                 return None;

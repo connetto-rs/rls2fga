@@ -8,7 +8,7 @@ use rls2fga::classifier::function_registry::{
     FunctionRegistry, SessionAttribute, SessionAttributeKind,
 };
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::term::{describe_membership_term, TermCaller, TermChain, TermShapes};
+use rls2fga::term::{describe_membership_term, TermCaller, TermChain, TermRefusal, TermShapes};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationName;
@@ -58,7 +58,7 @@ fn registry() -> FunctionRegistry {
 
 fn compile_on(schema: &str, table: &str, term: &str, min: ConfidenceLevel) -> TermShapes {
     let db: ParserDB = parse_schema(schema).expect("the schema should parse");
-    describe_membership_term(&parse_term(term), &db, &registry(), table, min)
+    describe_membership_term(&parse_term(term), &db, &registry(), table, min, None)
         .unwrap_or_else(|refusal| panic!("the term should compile, refused: {}", refusal.reason))
 }
 
@@ -74,7 +74,7 @@ fn refuse_with(
     registry: &FunctionRegistry,
 ) -> String {
     let db: ParserDB = parse_schema(schema).expect("the schema should parse");
-    match describe_membership_term(&parse_term(term), &db, registry, table, min) {
+    match describe_membership_term(&parse_term(term), &db, registry, table, min, None) {
         Ok(shapes) => panic!("the term should be refused, compiled to {:?}", shapes.chain),
         Err(refusal) => refusal.reason,
     }
@@ -545,6 +545,7 @@ ALTER TABLE a.notes ENABLE ROW LEVEL SECURITY;
         &registry,
         "b.notes",
         ConfidenceLevel::B,
+        None,
     )
     .expect("the filter compiles");
 
@@ -591,8 +592,15 @@ CREATE TABLE line_items (id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES ord
         "tenant = current_setting('app.tenant_id', true) \
          AND order_id IN (SELECT id FROM orders WHERE customer_id = {CALLER})"
     ));
-    let refusal = describe_membership_term(&term, &db, &registry, "line_items", ConfidenceLevel::B)
-        .expect_err("half the filter cannot be dropped");
+    let refusal = describe_membership_term(
+        &term,
+        &db,
+        &registry,
+        "line_items",
+        ConfidenceLevel::B,
+        None,
+    )
+    .expect_err("half the filter cannot be dropped");
     assert!(
         refusal.reason.contains("narrows"),
         "the refusal says the filter asks for more than the chain, got: {}",
@@ -808,6 +816,7 @@ CREATE FUNCTION current_user_id() RETURNS TEXT LANGUAGE sql SECURITY DEFINER
         &enriched,
         "docs",
         ConfidenceLevel::B,
+        None,
     )
     .expect("unused enforcement metadata does not affect the filter");
     assert_eq!(actual, expected);
@@ -817,6 +826,7 @@ CREATE FUNCTION current_user_id() RETURNS TEXT LANGUAGE sql SECURITY DEFINER
         &enriched,
         "docs",
         ConfidenceLevel::B,
+        None,
     )
     .expect_err("an owner-bound accessor cannot identify the caller");
 }
@@ -851,8 +861,15 @@ CREATE POLICY docs_p ON docs {policy} (
     let membership = parse_term(&format!(
         "project_id IN (SELECT project_id FROM project_members WHERE user_id = {CALLER})"
     ));
-    describe_membership_term(&membership, &db, &registry(), "docs", ConfidenceLevel::B)
-        .expect_err("a read term cannot ignore row security on its membership table");
+    describe_membership_term(
+        &membership,
+        &db,
+        &registry(),
+        "docs",
+        ConfidenceLevel::B,
+        None,
+    )
+    .expect_err("a read term cannot ignore row security on its membership table");
 }
 
 #[test]
@@ -882,6 +899,7 @@ CREATE POLICY members_p ON project_members FOR ALL USING (TRUE);"
             &registry(),
             "docs",
             ConfidenceLevel::B,
+            None,
         )
         .expect_err("membership-table read rules cannot be ignored");
     }
@@ -901,8 +919,9 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_p ON docs {policy};"
         );
         let db: ParserDB = parse_schema(&schema).expect("the schema should parse");
-        let refusal = describe_membership_term(&term, &db, &registry(), "docs", ConfidenceLevel::A)
-            .expect_err("the read term must satisfy its own confidence threshold");
+        let refusal =
+            describe_membership_term(&term, &db, &registry(), "docs", ConfidenceLevel::A, None)
+                .expect_err("the read term must satisfy its own confidence threshold");
         assert_eq!(refusal.classified.confidence, ConfidenceLevel::B);
     }
 }
@@ -1047,5 +1066,85 @@ fn an_undeclared_set_is_refused_naming_the_declaration() {
             !reason.contains("string_to_array"),
             "{spelling}: the splitter is not what is missing, got: {reason}"
         );
+    }
+}
+
+/// connetto's shape: a membership table under row-level security with one open policy,
+/// and a read cap only `bot` runs under.
+const TEAMS: &str = "
+CREATE ROLE authenticated NOLOGIN;
+CREATE ROLE bot NOLOGIN;
+CREATE ROLE bot_installation NOLOGIN;
+GRANT bot TO bot_installation;
+CREATE TABLE team_members (team_id TEXT NOT NULL, member_id TEXT NOT NULL, PRIMARY KEY (team_id, member_id));
+CREATE TABLE team_notes (id UUID PRIMARY KEY, team_id TEXT NOT NULL, author_id TEXT NOT NULL, body TEXT NOT NULL);
+ALTER TABLE team_notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY team_notes_p ON team_notes USING (
+  team_id IN (SELECT team_id FROM team_members WHERE member_id = current_setting('app.user_id', true))
+);
+ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY team_members_open ON team_members FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY team_members_cap_read ON team_members AS RESTRICTIVE FOR SELECT TO bot
+  USING ('team_members:read' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
+";
+
+fn team_term(schema: &str, role: Option<&str>) -> Result<TermShapes, TermRefusal> {
+    let db: ParserDB = parse_schema(schema).expect("the schema should parse");
+    describe_membership_term(
+        &parse_term(&format!(
+            "team_id IN (SELECT team_id FROM team_members WHERE member_id = {CALLER})"
+        )),
+        &db,
+        &registry(),
+        "team_notes",
+        ConfidenceLevel::B,
+        role,
+    )
+}
+
+/// A role no policy of the membership table narrows reads it as if row-level security
+/// were off, so the filter compiles to the same records.
+#[test]
+fn a_membership_table_no_policy_narrows_for_the_role_compiles_as_unguarded() {
+    let unguarded = TEAMS.replace("ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;", "");
+    let expected = team_term(&unguarded, Some("authenticated"))
+        .unwrap_or_else(|refusal| panic!("refused without row security: {}", refusal.reason));
+    let actual = team_term(TEAMS, Some("authenticated"))
+        .unwrap_or_else(|refusal| panic!("refused for authenticated: {}", refusal.reason));
+    assert_eq!(actual, expected);
+    assert!(
+        matches!(&actual.chain, TermChain::Through { through_type, .. } if through_type.as_str() == "team"),
+        "{:?}",
+        actual.chain
+    );
+}
+
+/// Any membership read rule that reaches the role, or no caller role at all, keeps the
+/// refusal, and a refusal for a role names it.
+#[test]
+fn a_membership_table_narrowing_the_role_is_refused_naming_it() {
+    let narrowing_open = TEAMS.replace(
+        "FOR ALL USING (true)",
+        "FOR ALL USING (member_id = current_setting('app.user_id', true))",
+    );
+    let scoped_open = TEAMS.replace(
+        "team_members FOR ALL USING (true)",
+        "team_members FOR ALL TO bot USING (true)",
+    );
+    for (schema, role, expected) in [
+        (TEAMS, Some("bot"), "'team_members' carries read rules for role bot, so the same filter run as SQL answers differently for a reader they narrow"),
+        (TEAMS, Some("bot_installation"), "'team_members' carries read rules for role bot_installation"),
+        (TEAMS, None, "'team_members' carries its own read rules"),
+        (narrowing_open.as_str(), Some("authenticated"), "'team_members' carries read rules for role authenticated"),
+        (scoped_open.as_str(), Some("authenticated"), "'team_members' carries read rules for role authenticated"),
+    ] {
+        match team_term(schema, role) {
+            Ok(shapes) => panic!("{role:?}: compiled to {:?}", shapes.chain),
+            Err(refusal) => assert!(
+                refusal.reason.starts_with(expected),
+                "{role:?}: expected {expected:?}, got: {}",
+                refusal.reason
+            ),
+        }
     }
 }

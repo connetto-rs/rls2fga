@@ -2136,7 +2136,13 @@ fn join_table_readability<'a, DB: DatabaseLike>(
     notes: &mut Vec<TranslationNote>,
 ) -> &'a TableReadability {
     memo.entry(join_table.clone()).or_insert_with(|| {
-        let scope = table_readability(join_table, ctx.db, ctx.registry, &ExpansionState::new());
+        let scope = table_readability(
+            join_table,
+            ctx.db,
+            ctx.registry,
+            &ExpansionState::new(),
+            ctx.settings.caller_roles.as_ref(),
+        );
         let (Some(callers), TableReadability::Guarded { roles }) =
             (&ctx.settings.caller_roles, &scope)
         else {

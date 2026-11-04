@@ -303,6 +303,48 @@ fn an_unsettled_membership_read_role_is_refused() {
     );
 }
 
+/// A docs grant through a membership table every role reads, under a read cap that only
+/// `anon` runs under.
+const CAPPED_FOR_ANON: &str = "
+CREATE TABLE members (doc_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (doc_id, user_id));
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY members_open ON members FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY members_cap ON members AS RESTRICTIVE FOR SELECT TO anon
+  USING ('members:read' = ANY(string_to_array(current_setting('app.read_caps', true), ',')));
+CREATE POLICY shared ON docs FOR SELECT
+  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
+";
+
+fn membership_guarded(outputs: &Outputs) -> bool {
+    notes_about(outputs, "shared")
+        .iter()
+        .any(|note| matches!(note, TranslationNote::MembershipTableGuarded { .. }))
+}
+
+#[test]
+fn a_membership_read_cap_no_caller_role_runs_under_leaves_the_table_open() {
+    let callers: &[&str] = &["authenticated"];
+    let outputs = translate(CAPPED_FOR_ANON, Some(callers)).outputs_accepting_gaps();
+    assert!(!membership_guarded(&outputs), "{:#?}", outputs.notes());
+    let unguarded = translate(
+        &CAPPED_FOR_ANON.replace("ALTER TABLE members ENABLE ROW LEVEL SECURITY;", ""),
+        Some(callers),
+    )
+    .outputs_accepting_gaps();
+    assert_eq!(
+        relation_definition(&outputs.model(), "docs", "can_select"),
+        relation_definition(&unguarded.model(), "docs", "can_select"),
+        "{}",
+        outputs.model()
+    );
+}
+
+#[test]
+fn a_membership_read_cap_some_caller_roles_run_under_keeps_the_table_guarded() {
+    let outputs = kinds(CAPPED_FOR_ANON);
+    assert!(membership_guarded(&outputs), "{:#?}", outputs.notes());
+}
+
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 mod parity {
     use rls2fga::types::ActionStatement;

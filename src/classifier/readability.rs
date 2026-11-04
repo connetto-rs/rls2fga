@@ -11,11 +11,12 @@ use alloc::collections::BTreeSet;
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
-    derive_policy_mode, derive_scoped_roles, policy_covers_reads, PatternClass, PolicyCommand,
-    PolicyMode,
+    derive_ddl_time_scoped_roles, derive_policy_mode, derive_scoped_roles, policy_covers_reads,
+    PatternClass, PolicyCommand, PolicyMode,
 };
 use crate::classifier::policy_classifier::classify_expr_in_state;
 use crate::classifier::recognizers::{constant_bool_value, is_constantly_false};
+use crate::generator::caller_roles::{CallerRoles, Settlement};
 use crate::parser::names::{lookup_table_id, table_identity};
 use crate::parser::sql_parser::{DatabaseLike, PolicyLike, TableLike};
 use crate::types::TableId;
@@ -45,6 +46,10 @@ pub(crate) enum TableReadability {
 /// The read determination for `table`, the shared policy walk behind both the classifier's
 /// residual check and the generator's membership scope.
 ///
+/// With `callers` declared, each policy's `TO` roles are settled against them. A policy
+/// every caller role reaches reads as `TO PUBLIC`, and one no caller role reaches is
+/// skipped, since no read runs under it.
+///
 /// A policy of `table` can hold a residual whose check asks for this very answer, so a walk
 /// reached from inside its own walk answers [`TableReadability::Guarded`], having proven
 /// nothing row independent.
@@ -53,6 +58,7 @@ pub(crate) fn table_readability<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
     state: &ExpansionState,
+    callers: Option<&CallerRoles>,
 ) -> TableReadability {
     let Some(table) = lookup_table_id(db, table) else {
         return TableReadability::Open;
@@ -64,7 +70,15 @@ pub(crate) fn table_readability<DB: DatabaseLike>(
     let identity = table_identity(table);
     state
         .deciding_readability(&identity, || {
-            walk_policies(table, &identity, rls == Ok(true), db, registry, state)
+            walk_policies(
+                table,
+                &identity,
+                rls == Ok(true),
+                db,
+                registry,
+                state,
+                callers,
+            )
         })
         .unwrap_or(TableReadability::Guarded { roles: Vec::new() })
 }
@@ -76,6 +90,7 @@ fn walk_policies<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
     state: &ExpansionState,
+    callers: Option<&CallerRoles>,
 ) -> TableReadability {
     let mut roles = BTreeSet::new();
     let mut grants_read = false;
@@ -86,6 +101,11 @@ fn walk_policies<DB: DatabaseLike>(
         if !policy_covers_reads(policy) {
             continue;
         }
+        let reach = reach(policy, callers, db);
+        if reach == Reach::Nobody {
+            continue;
+        }
+        let public = reach == Reach::Everyone;
         let Some(using) = policy.using_expression(db) else {
             row_independent = false;
             continue;
@@ -93,10 +113,10 @@ fn walk_policies<DB: DatabaseLike>(
         let admits_nothing = is_constantly_false(using);
 
         if derive_policy_mode(policy) == PolicyMode::Restrictive {
-            if admits_nothing && policy.applies_to_public() {
+            if admits_nothing && public {
                 return TableReadability::Unreadable;
             }
-            if !policy.applies_to_public() {
+            if !public {
                 row_independent = false;
             } else if row_independent && constant_bool_value(using) != Some(true) {
                 let pattern = classify_expr_in_state(
@@ -119,13 +139,17 @@ fn walk_policies<DB: DatabaseLike>(
             }
             continue;
         }
-        row_independent &= policy.applies_to_public() && constant_bool_value(using) == Some(true);
+        row_independent &= public && constant_bool_value(using) == Some(true);
         if admits_nothing {
             continue;
         }
 
         grants_read = true;
-        let scoped = derive_scoped_roles(policy, db);
+        let scoped = if public {
+            Vec::new()
+        } else {
+            derive_scoped_roles(policy, db)
+        };
         if scoped.is_empty() {
             grants_read_unscoped = true;
         } else {
@@ -149,6 +173,40 @@ fn walk_policies<DB: DatabaseLike>(
                 roles.into_iter().collect()
             },
         }
+    }
+}
+
+/// Which readers a policy applies to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Every reader, as `TO PUBLIC` does.
+    Everyone,
+    /// Some readers, or readers the schema cannot name.
+    Some,
+    /// No caller role, so no read runs under the policy.
+    Nobody,
+}
+
+/// Which readers `policy` applies to, its `TO` roles settled against `callers` when they
+/// are declared.
+///
+/// A `TO` clause naming a role `PostgreSQL` resolved when the DDL ran says nothing about
+/// who it binds, so it reaches some readers whatever the callers are.
+fn reach<P: PolicyLike>(policy: &P, callers: Option<&CallerRoles>, db: &P::DB) -> Reach {
+    if policy.applies_to_public() {
+        return Reach::Everyone;
+    }
+    let Some(callers) = callers else {
+        return Reach::Some;
+    };
+    let named = derive_scoped_roles(policy, db);
+    if named.is_empty() || !derive_ddl_time_scoped_roles(policy, db).is_empty() {
+        return Reach::Some;
+    }
+    match callers.settle(&named, db) {
+        Settlement::Everyone => Reach::Everyone,
+        Settlement::Nobody => Reach::Nobody,
+        Settlement::Callers(_) | Settlement::Unsettled(_) => Reach::Some,
     }
 }
 
