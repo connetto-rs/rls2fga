@@ -5,10 +5,10 @@ use core::fmt::Write;
 use crate::classifier::patterns::{
     apply_threshold, AbacAnd, ArrayMembership, AttributeCondition, BooleanFlag,
     CallerScalarEqualsConstant, ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel,
-    ConstantBool, ConstantInCallerSet, DirectOwnership, ExistsMembership, ExpandedFunction,
-    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
-    ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
-    UnclassifiedExpr, UncorrelatedMembership,
+    ConstantBool, ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership,
+    ExpandedFunction, JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet,
+    NumericThreshold, ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar,
+    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -189,6 +189,13 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         }
         PatternClass::P19IndirectMembership(membership) => {
             format!("P19 (membership through {})", membership.link_table)
+        }
+        PatternClass::P20DeclaredHelper(DeclaredHelper { column, call }) => {
+            format!(
+                "P20 ({column} in {}({}))",
+                call.function,
+                call.arguments.join(", ")
+            )
         }
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {
             member_table, ..

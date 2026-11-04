@@ -13,6 +13,8 @@ mod common_patterns_tests;
 mod composite_key_membership_tests;
 mod confidence_filtering_tests;
 mod container_startup_tests;
+mod declared_helper_parity_tests;
+mod declared_helper_tests;
 mod diagnostic_reach_tests;
 #[cfg(feature = "client")]
 mod dump_round_trip_tests;

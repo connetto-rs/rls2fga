@@ -7,6 +7,7 @@ use super::*;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
+use crate::generator::tuple_generator::{quote_sql_identifier, render_attribute_test};
 
 pub(super) struct MembershipSourceGate<'a> {
     pub condition: &'a ConditionName,
@@ -1446,5 +1447,198 @@ pub(crate) fn emit_composite<DB: DatabaseLike>(
     match op {
         BoolOp::Or => combine_union(child_exprs).unwrap_or_else(|| deny_expr(table_plan)),
         BoolOp::And => combine_intersection(child_exprs).unwrap_or_else(|| deny_expr(table_plan)),
+    }
+}
+
+/// A column compared with the set a declared helper returns, as the call's relation
+/// reached through the column's bridge, or as that relation itself where the column is
+/// the row's own key.
+///
+/// The helper reads as its owner, past every policy, and the tuple queries read the
+/// same rows, so no membership read scope or parent read gate applies.
+pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
+    helper: &DeclaredHelper,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> UsersetExpr {
+    let DeclaredHelper { column, call } = helper;
+    let Some(returned) = helper_call_relation(call, ctx, table_plan, all_types) else {
+        return deny_expr(table_plan);
+    };
+    let source_table = ctx.source_table;
+    if call.level == *source_table
+        && single_identity_column(source_table, ctx.db).as_ref() == Some(column)
+    {
+        return UsersetExpr::Computed(returned);
+    }
+    let level_type = ctx.table_types.resolve(&call.level);
+    let columns = core::slice::from_ref(column);
+    if !bridge_is_buildable(table_plan, source_table, columns, &level_type, ctx.db) {
+        return deny_expr(table_plan);
+    }
+    let tupleset = parent_bridge_relation(table_plan, source_table, columns, &level_type);
+    table_plan.add_source(TupleSource::ParentBridge {
+        table: source_table.clone(),
+        fk_cols: columns.to_vec(),
+        parent_type: level_type,
+        relation: tupleset.clone(),
+    });
+    UsersetExpr::TupleToUserset {
+        tupleset,
+        computed: returned,
+    }
+}
+
+/// The relation holding everyone `call` returns a row for, defined on its level's type
+/// with the relations and sources it reads. `None` where it returns nothing.
+fn helper_call_relation<DB: DatabaseLike>(
+    call: &HelperCall,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<RelationName> {
+    let level_type = ctx.table_types.resolve(&call.level);
+    let mut parts = Vec::with_capacity(call.arms.len());
+    for arm in &call.arms {
+        match arm {
+            HelperSetArm::Grant(grant) => {
+                let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
+                parts.extend(
+                    helper_grant_relations(grant, &level_type, plan)
+                        .into_iter()
+                        .map(UsersetExpr::Computed),
+                );
+            }
+            HelperSetArm::Parent(parent) => {
+                let Some(parents) = helper_call_relation(&parent.call, ctx, table_plan, all_types)
+                else {
+                    continue;
+                };
+                let parent_type = ctx.table_types.resolve(&parent.call.level);
+                let columns = core::slice::from_ref(&parent.fk_column);
+                // The arm's key is the level's primary key and its column a single-column
+                // foreign key, so the bridge is always buildable.
+                let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
+                let tupleset = parent_bridge_relation(plan, &call.level, columns, &parent_type);
+                plan.add_source(TupleSource::ParentBridge {
+                    table: call.level.clone(),
+                    fk_cols: columns.to_vec(),
+                    parent_type,
+                    relation: tupleset.clone(),
+                });
+                parts.push(UsersetExpr::TupleToUserset {
+                    tupleset,
+                    computed: parents,
+                });
+            }
+        }
+    }
+    let returned = combine_union(parts)?;
+    let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
+    Some(plan.ensure_computed(helper_call_relation_name(call), returned))
+}
+
+/// The plan of the type a helper's level names, which is the guarded table's own plan
+/// when the two coincide.
+fn helper_level_plan<'p>(
+    level_type: &TypeName,
+    level: &TableId,
+    table_plan: &'p mut TypePlan,
+    all_types: &'p mut BTreeMap<TypeName, TypePlan>,
+) -> &'p mut TypePlan {
+    if table_plan.type_name == *level_type {
+        return table_plan;
+    }
+    let plan = all_types.entry(level_type.clone()).or_insert_with(|| {
+        TypePlan::new_with_well_known(level_type.clone(), &table_plan.well_known)
+    });
+    plan.names_rows_of(level);
+    plan
+}
+
+/// The call spelled as a relation name, `projects_with_read` for
+/// `authz.projects_with('read')`.
+fn helper_call_relation_name(call: &HelperCall) -> String {
+    let mut name = stored_relation_name(&call.function);
+    for argument in &call.arguments {
+        name.push('_');
+        name.push_str(argument.trim_matches('\''));
+    }
+    clamp_relation_name(name)
+}
+
+/// One relation per role a grant arm keeps, or one for the rows it keeps where the
+/// grant table has no role column, each with the source loading it.
+///
+/// A condition with no SQL spelling loads nothing rather than every row.
+fn helper_grant_relations(
+    grant: &HelperGrant,
+    level_type: &TypeName,
+    plan: &mut TypePlan,
+) -> Vec<RelationName> {
+    let fk_cols = vec![grant.object_column.clone()];
+    let subject = DirectSubject::Type(plan.well_known.user.clone());
+    let mut relation = |base: String, predicate: Option<AttributePredicate>| {
+        let conjuncts = match predicate {
+            Some(predicate) => vec![ResidualPredicate {
+                sql: format!(
+                    "{} {}",
+                    quote_sql_identifier(predicate.column.as_str()),
+                    render_attribute_test(&predicate.test)?
+                ),
+                guard: Some(ResidualGuard::Compare(predicate)),
+                request: None,
+                relations: Vec::new(),
+            }],
+            None => Vec::new(),
+        };
+        let extra_predicates = ResidualPredicates::new(conjuncts);
+        let key = membership_source_key(
+            &grant.table,
+            &fk_cols,
+            &grant.user_column,
+            &extra_predicates,
+            None,
+        );
+        let relation = plan.membership_source_relation(&key, base, subject.clone());
+        plan.add_source(TupleSource::ExistsMembership {
+            join_table: grant.table.clone(),
+            fk_cols: fk_cols.clone(),
+            user_col: grant.user_column.clone(),
+            parent_type: level_type.clone(),
+            relation: relation.clone(),
+            extra_predicates,
+            gate: None,
+        });
+        Some(relation)
+    };
+    match &grant.rows {
+        GrantRows::Roles { column, values } => values
+            .iter()
+            .filter_map(|value| {
+                // A role spelled as text names its relation, any other literal the
+                // generic name the source key disambiguates.
+                let base = match value {
+                    AttributeLiteral::Text(text) => text.clone(),
+                    _ => member_relation().to_string(),
+                };
+                relation(
+                    base,
+                    Some(AttributePredicate {
+                        column: column.clone(),
+                        test: AttributeTest::Compare {
+                            operator: AttributeOperator::Eq,
+                            value: value.clone(),
+                        },
+                    }),
+                )
+            })
+            .collect(),
+        GrantRows::Matching { predicate } => {
+            relation(member_relation().to_string(), predicate.clone())
+                .into_iter()
+                .collect()
+        }
     }
 }

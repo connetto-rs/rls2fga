@@ -10,10 +10,17 @@ use crate::parser::function_analyzer::{
     AccessorInferenceSettings, FunctionSemantic,
 };
 use crate::parser::names::stored_relation_name;
-use crate::parser::sql_parser::{DatabaseLike, FunctionLike};
+use crate::parser::sql_parser::{
+    DatabaseLike, Deployment, FunctionLike, SessionSetting, SettingValue,
+};
 use crate::types::{ConditionParameterName, ConditionParameterNameError};
+use sql_traits::errors::DeploymentError;
 use sql_traits::structs::{IdentifierCase, TargetName};
-use sqlparser::ast::FunctionSecurity;
+use sqlparser::ast::{DataType, FunctionSecurity};
+
+/// The role [`FunctionRegistry::helper_deployment`] names, which `sql-traits` needs and
+/// never reads when answering what a helper returns.
+const HELPER_DEPLOYMENT_ROLE: &str = "rls2fga";
 
 /// What a declared request-scoped source holds.
 ///
@@ -392,6 +399,58 @@ impl FunctionRegistry {
             keys.into_iter()
                 .map(|key| SessionAttribute::setting(key, SessionAttributeKind::CallerId)),
         );
+    }
+
+    /// Declare `SECURITY DEFINER` helpers whose returned sets translate to the grants
+    /// their bodies read, each named as a call spells it (`authz.projects_with`).
+    ///
+    /// Declaring one asserts that every role a request runs as may execute it. A helper
+    /// another declared helper calls has to be declared too, or the caller is refused.
+    pub fn declare_helpers<I, S>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        for name in names {
+            let name = name.as_ref();
+            let key = FunctionKey::parse(name);
+            self.function_names.insert(key.clone(), name.to_string());
+            self.functions
+                .insert(key, FunctionSemantic::DeclaredHelper {});
+        }
+    }
+
+    /// True when `function` is a declared helper.
+    pub(crate) fn declares_helper<F: FunctionLike>(&self, function: &F) -> bool {
+        matches!(
+            self.get_target(&function.target_name()),
+            Some(FunctionSemantic::DeclaredHelper {})
+        )
+    }
+
+    /// The request settings as `sql-traits` describes them, for answering what a declared
+    /// helper returns.
+    ///
+    /// That answer asks only whether a setting the body compares with is the caller, so
+    /// each declared whole value is the caller or a text scalar, a field path names no
+    /// setting of its own, and the roles are a placeholder no answer reads. A key that is
+    /// no custom setting name is left out, since `sql-traits` takes the caller only from a
+    /// custom setting, and a body reading it is then refused as reading an undeclared one.
+    pub(crate) fn helper_deployment(&self) -> Result<Deployment, DeploymentError> {
+        let settings: Vec<SessionSetting> = self
+            .session_attributes
+            .values()
+            .filter(|attribute| attribute.path.is_empty())
+            .filter_map(|attribute| {
+                let value = if attribute.kind == SessionAttributeKind::CallerId {
+                    SettingValue::Caller(DataType::Text)
+                } else {
+                    SettingValue::Scalar(DataType::Text)
+                };
+                SessionSetting::value(attribute.key.as_str(), value).ok()
+            })
+            .collect();
+        Deployment::new(HELPER_DEPLOYMENT_ROLE, [HELPER_DEPLOYMENT_ROLE], settings)
     }
 
     /// Declare request-scoped values, replacing an earlier declaration for the same source.

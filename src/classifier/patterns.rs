@@ -512,6 +512,84 @@ pub struct IndirectMembership {
     pub extra_predicates: ResidualPredicates,
 }
 
+/// A column compared with the set a declared `SECURITY DEFINER` helper returns, as in
+/// `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))`.
+///
+/// The helper reads as its owner, past every policy, so what it returns is the grant
+/// rows and hierarchy rows its body names, which the tuple queries load the same way.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeclaredHelper {
+    /// Column of the guarded table the set has to hold, the table's own key or a foreign
+    /// key to the rows the set names.
+    pub column: ColumnName,
+    /// The call and what it returns.
+    pub call: HelperCall,
+}
+
+/// One call of a declared helper and the rows of `level` it returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperCall {
+    /// The helper, as declared.
+    pub function: String,
+    /// Its arguments, each a literal as SQL spells it.
+    pub arguments: Vec<String>,
+    /// The table whose keys the call returns.
+    pub level: TableId,
+    /// The sets the call returns the union of, none where it returns nothing.
+    pub arms: Vec<HelperSetArm>,
+}
+
+/// One `SELECT` of a helper's body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HelperSetArm {
+    /// The caller's rows of a grant table.
+    Grant(HelperGrant),
+    /// The rows of the level whose parent another call returns.
+    Parent(HelperParent),
+}
+
+/// `SELECT <object column> FROM <table> WHERE <user column> = <caller> [AND <rows>]`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperGrant {
+    /// The grant table.
+    pub table: TableId,
+    /// Column naming the level's row each grant is on.
+    pub object_column: ColumnName,
+    /// Column holding the caller.
+    pub user_column: ColumnName,
+    /// Which of the caller's grant rows count.
+    pub rows: GrantRows,
+}
+
+/// Which grant rows a grant arm keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub enum GrantRows {
+    /// Rows holding one of `values` in `column`, the one column of the grant table both
+    /// `NOT NULL` and closed by a `CHECK` to literals. Every value is a relation of its
+    /// own, so each grant row is one tuple whichever call reads it.
+    Roles {
+        /// The closed column.
+        column: ColumnName,
+        /// The values kept, each one the column can hold.
+        values: Vec<AttributeLiteral>,
+    },
+    /// Rows satisfying `predicate`, every row where it is absent, for a grant table with
+    /// no such column or a condition on another one.
+    Matching {
+        /// The condition the body puts on the row.
+        predicate: Option<AttributePredicate>,
+    },
+}
+
+/// `SELECT <level key> FROM <level> WHERE <fk column> IN (SELECT <call>)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperParent {
+    /// Column of the level referencing the rows `call` returns.
+    pub fk_column: ColumnName,
+    /// The call returning the parents.
+    pub call: HelperCall,
+}
+
 /// Correlated caller-identity memberships subtracted from a positive grant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MembershipExclusion {
@@ -593,6 +671,9 @@ pub enum PatternClass {
     P18MembershipInCallerSet(MembershipInCallerSet),
     /// Membership reached through a closure table.
     P19IndirectMembership(IndirectMembership),
+    /// A column compared with the set a declared `SECURITY DEFINER` helper returns, as in
+    /// `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))`.
+    P20DeclaredHelper(DeclaredHelper),
     /// A correlated blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

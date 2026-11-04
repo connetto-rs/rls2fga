@@ -278,7 +278,8 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { column, .. })
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
             column, ..
-        }) => Some(column),
+        })
+        | PatternClass::P20DeclaredHelper(DeclaredHelper { column, .. }) => Some(column),
         PatternClass::P5ParentInheritance(ParentInheritance { fk_column, .. }) => Some(fk_column),
         // Nothing these read belongs to the table being classified: a role function
         // takes the caller, a constant takes no row, a composite's parts and an
@@ -574,6 +575,12 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classified;
     }
 
+    // Try P20: a column compared with the set a declared definer helper returns. Before
+    // the membership recognizers, whose `IN` and `= ANY` spellings it shares.
+    if let Some(classified) = recognizers::recognize_declared_helper(expr, db, registry, table) {
+        return classified;
+    }
+
     // Try P5: parent inheritance via correlated EXISTS
     if let Some(classified) = recognizers::recognize_p5(expr, db, registry, table, command, state) {
         return classified;
@@ -821,6 +828,7 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P19IndirectMembership(IndirectMembership { .. }) => {
             "membership-through-a-second-table check"
         }
+        PatternClass::P20DeclaredHelper(DeclaredHelper { .. }) => "declared-helper check",
         PatternClass::Unknown(UnclassifiedExpr { .. }) => "unrecognized expression",
         PatternClass::ExpandedFunction(ExpandedFunction { .. }) => "expanded function call",
         PatternClass::MembershipExclusion(MembershipExclusion { .. }) => {
@@ -840,6 +848,7 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { .. })
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
+        | PatternClass::P20DeclaredHelper(DeclaredHelper { .. })
         // Membership of the holder is still a user-resource relationship, even though
         // the holder stands for the whole table.
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })

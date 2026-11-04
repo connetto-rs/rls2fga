@@ -27,6 +27,8 @@ use crate::types::ColumnName;
 mod attribute;
 /// Casts that can rename a value compared with a request value.
 mod casts;
+/// P20 calls to a declared `SECURITY DEFINER` helper.
+mod helper;
 /// Whether a residual answers every caller alike.
 mod invariant;
 /// Request-scoped values a deployment declared readable.
@@ -41,6 +43,7 @@ pub use attribute::{
 };
 pub(crate) use attribute::{conjunct_reads_only_the_row, residual_predicate_reading};
 pub(crate) use casts::{renaming_casts, renaming_reason};
+pub(crate) use helper::recognize_declared_helper;
 pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use session::recognize_session_attribute;
 pub(crate) use session::{
