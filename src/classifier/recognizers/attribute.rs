@@ -1,5 +1,6 @@
 use super::*;
-use sqlparser::ast::{DataType, TimezoneInfo};
+use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
+use sqlparser::ast::{DataType, DateTimeField, Interval, TimezoneInfo};
 
 /// The guard as structure when the compared value is one only the request knows.
 ///
@@ -36,7 +37,7 @@ pub fn attribute_request_predicate(expr: &Expr) -> Option<AttributeRequestPredic
 }
 
 /// A request side of a temporal comparison: `now()` and its spellings, optionally shifted
-/// by a fixed interval such as `now() - interval '30 days'`.
+/// by a fixed interval such as `now() - interval '36 hours'`.
 enum TemporalRequestSide {
     /// The bare request clock.
     Clock,
@@ -55,12 +56,78 @@ impl TemporalRequestSide {
 }
 
 /// The clock a temporal comparison reads, or `None` when the side is neither the clock
-/// nor the clock shifted by a fixed interval (a variable interval among them), so the
-/// caller leaves the guard in SQL and the shape stays joined.
+/// nor the clock shifted by an interval of fixed length, so the caller leaves the guard
+/// in SQL and the shape stays joined.
 fn temporal_request_side(expr: &Expr) -> Option<TemporalRequestSide> {
+    match clock_shift(expr)? {
+        ClockShift::Clock => Some(TemporalRequestSide::Clock),
+        ClockShift::Shifted { interval, subtract } => shifted_side(interval, subtract).ok(),
+    }
+}
+
+/// Why each `column op now() ± interval`, or `BETWEEN` bounded so, within `expr` falls
+/// closed, for every such interval that has no fixed length and so no CEL duration.
+pub(crate) fn clock_offset_refusals(expr: &Expr) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+        if let Some(refusal) = clock_offset_refusal(node) {
+            let reason = refusal.to_string();
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+        core::ops::ControlFlow::<()>::Continue(())
+    });
+    reasons
+}
+
+/// Why one `column op now() ± interval` or `BETWEEN` bounded so falls closed.
+fn clock_offset_refusal(expr: &Expr) -> Option<OffsetRefusal> {
+    let (column, bounds): (_, [&Expr; 2]) = match unparenthesize(expr) {
+        Expr::BinaryOp { left, op, right } => {
+            attribute_operator(op)?;
+            match extract_column_name(left) {
+                Some(column) => (column, [right, right]),
+                None => (extract_column_name(right)?, [left, left]),
+            }
+        }
+        Expr::Between {
+            expr,
+            low,
+            high,
+            negated: false,
+        } => (extract_column_name(expr)?, [low, high]),
+        _ => return None,
+    };
+    if is_user_related_column_name(column.as_str()) {
+        return None;
+    }
+    bounds
+        .into_iter()
+        .find_map(|bound| match clock_shift(bound)? {
+            ClockShift::Clock => None,
+            ClockShift::Shifted { interval, subtract } => shifted_side(interval, subtract).err(),
+        })
+}
+
+/// The request clock as written, bare or shifted by an interval literal.
+enum ClockShift<'e> {
+    /// `now()` and its spellings.
+    Clock,
+    /// The clock with an interval added or subtracted.
+    Shifted {
+        /// The interval literal.
+        interval: &'e Interval,
+        /// `true` for `now() - interval`.
+        subtract: bool,
+    },
+}
+
+/// The clock or the clock shifted by an interval literal, whatever the interval's length.
+fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
     let expr = unwrap_cast_or_nested(expr);
     if is_well_known_temporal_function(expr) {
-        return Some(TemporalRequestSide::Clock);
+        return Some(ClockShift::Clock);
     }
     let Expr::BinaryOp { left, op, right } = expr else {
         return None;
@@ -84,95 +151,204 @@ fn temporal_request_side(expr: &Expr) -> Option<TemporalRequestSide> {
     let Expr::Interval(interval) = interval else {
         return None;
     };
-    let seconds = interval_seconds(interval)?;
-    Some(TemporalRequestSide::Offset(TemporalOffset {
-        cel_duration: cel_duration(seconds),
-        subtract,
+    Some(ClockShift::Shifted { interval, subtract })
+}
+
+/// Why a clock shifted by an interval has no CEL duration.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum OffsetRefusal {
+    /// The interval is not written as a single-quoted string.
+    #[error("{interval} is not a single-quoted interval, so it has no fixed CEL duration")]
+    NotSingleQuoted {
+        /// The interval as written.
+        interval: String,
+    },
+    /// The field qualifier is one `PostgreSQL` does not accept on an interval literal.
+    #[error("PostgreSQL does not read the field qualifier of {interval}")]
+    UnreadableQualifier {
+        /// The interval as written.
+        interval: String,
+    },
+    /// `interval_in` refuses the text.
+    #[error("PostgreSQL does not read '{text}' as an interval ({source})")]
+    Unreadable {
+        /// The quoted text.
+        text: String,
+        /// The error `PostgreSQL` raises.
+        #[source]
+        source: IntervalError,
+    },
+    /// `infinity` or `-infinity`.
+    #[error("{interval} has no finite length, so it has no CEL duration")]
+    Infinite {
+        /// The interval as written.
+        interval: String,
+    },
+    /// A month or day count, which `PostgreSQL` adds on the calendar of the session zone.
+    #[error(
+        "{interval} counts {terms}, which PostgreSQL adds as calendar {terms} in the session \
+         TimeZone, so it has no fixed CEL duration"
+    )]
+    Calendar {
+        /// The interval as written.
+        interval: String,
+        /// The calendar terms it counts.
+        terms: CalendarTerms,
+    },
+    /// A length beyond the nanosecond count a CEL duration holds.
+    #[error("{interval} is longer than a CEL duration holds")]
+    TooLong {
+        /// The interval as written.
+        interval: String,
+    },
+}
+
+/// The calendar terms of an interval, each of which `PostgreSQL` adds in the session zone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CalendarTerms {
+    /// A nonzero month count.
+    Months,
+    /// A nonzero day count.
+    Days,
+    /// Both.
+    MonthsAndDays,
+}
+
+impl core::fmt::Display for CalendarTerms {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Months => "months",
+            Self::Days => "days",
+            Self::MonthsAndDays => "months and days",
+        })
+    }
+}
+
+/// The microseconds a CEL duration holds, a Go `time.Duration` of nanoseconds.
+const CEL_DURATION_MAX_MICROSECONDS: u64 = i64::MAX.unsigned_abs() / 1_000;
+
+/// The clock shifted by `interval`, when the interval has one length in every time zone.
+fn shifted_side(interval: &Interval, subtract: bool) -> Result<TemporalRequestSide, OffsetRefusal> {
+    let value = interval_value(interval)?;
+    let written = || interval.to_string();
+    if !value.is_finite() {
+        return Err(OffsetRefusal::Infinite {
+            interval: written(),
+        });
+    }
+    let terms = match (value.months != 0, value.days != 0) {
+        (false, false) => None,
+        (true, false) => Some(CalendarTerms::Months),
+        (false, true) => Some(CalendarTerms::Days),
+        (true, true) => Some(CalendarTerms::MonthsAndDays),
+    };
+    if let Some(terms) = terms {
+        return Err(OffsetRefusal::Calendar {
+            interval: written(),
+            terms,
+        });
+    }
+    let magnitude = value.microseconds.unsigned_abs();
+    if magnitude == 0 {
+        return Ok(TemporalRequestSide::Clock);
+    }
+    if magnitude > CEL_DURATION_MAX_MICROSECONDS {
+        return Err(OffsetRefusal::TooLong {
+            interval: written(),
+        });
+    }
+    Ok(TemporalRequestSide::Offset(TemporalOffset {
+        cel_duration: cel_duration(magnitude),
+        // `now() - interval '1 hour ago'` is an hour after the clock.
+        subtract: subtract != value.microseconds.is_negative(),
     }))
 }
 
-/// The fixed number of seconds a `PostgreSQL` interval spans, or `None` when it has no
-/// fixed length (months and years) or a spelling this does not carry.
-fn interval_seconds(interval: &sqlparser::ast::Interval) -> Option<i64> {
-    // Only the string spelling, `interval '30 days'`, is carried, so the
-    // field-qualified form `interval '30' day` falls back.
-    if interval.leading_field.is_some() {
-        return None;
-    }
+/// The interval literal as `PostgreSQL` stores it.
+fn interval_value(interval: &Interval) -> Result<sql_values::PgInterval, OffsetRefusal> {
     let Expr::Value(value) = interval.value.as_ref() else {
-        return None;
+        return Err(OffsetRefusal::NotSingleQuoted {
+            interval: interval.to_string(),
+        });
     };
     let Value::SingleQuotedString(text) = &value.value else {
-        return None;
+        return Err(OffsetRefusal::NotSingleQuoted {
+            interval: interval.to_string(),
+        });
     };
-    parse_interval_seconds(text)
-}
-
-/// Sum a `PostgreSQL` interval string of fixed-length units into seconds, rejecting a
-/// month or year term and any spelling that does not parse.
-fn parse_interval_seconds(text: &str) -> Option<i64> {
-    let mut total: i64 = 0;
-    let mut magnitude: Option<i64> = None;
-    for token in text.split_whitespace() {
-        if token.contains(':') {
-            if magnitude.is_some() {
-                return None;
-            }
-            total = total.checked_add(clock_seconds(token)?)?;
-            continue;
-        }
-        if let Ok(number) = token.parse::<i64>() {
-            if magnitude.replace(number).is_some() {
-                return None;
-            }
-            continue;
-        }
-        let number = magnitude.take()?;
-        total = total.checked_add(number.checked_mul(unit_seconds(token)?)?)?;
-    }
-    (magnitude.is_none() && total > 0).then_some(total)
-}
-
-/// Seconds in one fixed-length interval unit, or `None` for a variable-length unit.
-fn unit_seconds(unit: &str) -> Option<i64> {
-    Some(match unit.trim_end_matches('s') {
-        "second" | "sec" => 1,
-        "minute" | "min" => 60,
-        "hour" | "hr" => 3_600,
-        "day" => 86_400,
-        "week" => 604_800,
-        _ => return None,
+    let typmod = interval_typmod(interval).ok_or_else(|| OffsetRefusal::UnreadableQualifier {
+        interval: interval.to_string(),
+    })?;
+    parse_interval_typmod(text, typmod).map_err(|source| OffsetRefusal::Unreadable {
+        text: text.clone(),
+        source,
     })
 }
 
-/// Seconds in a `HH:MM:SS` (or `HH:MM`) interval time part.
-fn clock_seconds(token: &str) -> Option<i64> {
-    let mut parts = token.split(':');
-    let hours: i64 = parts.next()?.parse().ok()?;
-    let minutes: i64 = parts.next()?.parse().ok()?;
-    let seconds: i64 = match parts.next() {
-        Some(value) => value.parse().ok()?,
-        None => 0,
+/// The type modifier a field qualifier such as `day to second(3)` sets, or `None` for a
+/// qualifier `PostgreSQL`'s grammar does not accept on an interval literal.
+fn interval_typmod(interval: &Interval) -> Option<IntervalTypmod> {
+    let fields = match (&interval.leading_field, &interval.last_field) {
+        (None, None) => None,
+        (Some(DateTimeField::Year), None) => Some(IntervalFields::Year),
+        (Some(DateTimeField::Month), None) => Some(IntervalFields::Month),
+        (Some(DateTimeField::Day), None) => Some(IntervalFields::Day),
+        (Some(DateTimeField::Hour), None) => Some(IntervalFields::Hour),
+        (Some(DateTimeField::Minute), None) => Some(IntervalFields::Minute),
+        (Some(DateTimeField::Second), None) => Some(IntervalFields::Second),
+        (Some(DateTimeField::Year), Some(DateTimeField::Month)) => {
+            Some(IntervalFields::YearToMonth)
+        }
+        (Some(DateTimeField::Day), Some(DateTimeField::Hour)) => Some(IntervalFields::DayToHour),
+        (Some(DateTimeField::Day), Some(DateTimeField::Minute)) => {
+            Some(IntervalFields::DayToMinute)
+        }
+        (Some(DateTimeField::Day), Some(DateTimeField::Second)) => {
+            Some(IntervalFields::DayToSecond)
+        }
+        (Some(DateTimeField::Hour), Some(DateTimeField::Minute)) => {
+            Some(IntervalFields::HourToMinute)
+        }
+        (Some(DateTimeField::Hour), Some(DateTimeField::Second)) => {
+            Some(IntervalFields::HourToSecond)
+        }
+        (Some(DateTimeField::Minute), Some(DateTimeField::Second)) => {
+            Some(IntervalFields::MinuteToSecond)
+        }
+        _ => return None,
     };
-    if parts.next().is_some()
-        || hours < 0
-        || !(0..60).contains(&minutes)
-        || !(0..60).contains(&seconds)
-    {
-        return None;
-    }
-    Some(hours * 3_600 + minutes * 60 + seconds)
+    // `second(p)` alone puts its precision first, `… to second(p)` last.
+    let precision = match (
+        interval.leading_precision,
+        interval.fractional_seconds_precision,
+    ) {
+        (None, None) => None,
+        (Some(precision), None) if fields == Some(IntervalFields::Second) => Some(precision),
+        (None, Some(precision)) if interval.last_field == Some(DateTimeField::Second) => {
+            Some(precision)
+        }
+        _ => return None,
+    };
+    // A precision above six is clamped to six, as `PostgreSQL` does.
+    IntervalTypmod::new(
+        fields,
+        precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX)),
+    )
 }
 
-/// A fixed count of seconds as a CEL duration, using the coarsest whole unit.
-fn cel_duration(seconds: i64) -> String {
-    if seconds % 3_600 == 0 {
-        format!("{}h", seconds / 3_600)
-    } else if seconds % 60 == 0 {
-        format!("{}m", seconds / 60)
-    } else {
-        format!("{seconds}s")
-    }
+/// A positive count of microseconds as a CEL duration, in the coarsest unit holding it
+/// exactly.
+fn cel_duration(microseconds: u64) -> String {
+    let (size, unit) = [
+        (3_600_000_000, "h"),
+        (60_000_000, "m"),
+        (1_000_000, "s"),
+        (1_000, "ms"),
+    ]
+    .into_iter()
+    .find(|&(size, _)| microseconds.is_multiple_of(size))
+    .unwrap_or((1, "us"));
+    format!("{}{unit}", microseconds / size)
 }
 
 /// The guard as structure, but only when every compared value is a literal constant
@@ -760,7 +936,7 @@ fn is_literal_value(expr: &Expr) -> bool {
 
 /// Returns `true` when the expression is a literal value, a well-known temporal function
 /// call (`now()`, `current_timestamp`), or such a function shifted by a fixed interval
-/// (`now() - interval '30 days'`). Used in `is_attribute_check` so `valid_until > now()`
+/// (`now() - interval '36 hours'`). Used in `is_attribute_check` so `valid_until > now()`
 /// and its grace-period spellings are recognised as attribute conditions rather than
 /// falling through to Unknown.
 fn is_literal_or_temporal(expr: &Expr) -> bool {

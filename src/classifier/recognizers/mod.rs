@@ -41,7 +41,9 @@ pub use attribute::{
     attribute_literal_predicate, attribute_request_predicate, is_attribute_check,
     residual_predicate,
 };
-pub(crate) use attribute::{conjunct_reads_only_the_row, residual_predicate_reading};
+pub(crate) use attribute::{
+    clock_offset_refusals, conjunct_reads_only_the_row, residual_predicate_reading,
+};
 pub(crate) use casts::{renaming_casts, renaming_reason};
 pub(crate) use helper::recognize_declared_helper;
 pub(crate) use invariant::{residual_relations, MembershipScope};

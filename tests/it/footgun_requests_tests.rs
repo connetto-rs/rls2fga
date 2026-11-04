@@ -1051,33 +1051,72 @@ CREATE POLICY clock_guard ON docs FOR SELECT USING ("Foo" > now());
     }
 }
 
-/// A grace period spelled `expires_at > now() - interval '30 days'` is still the clock's
+/// A grace period spelled `expires_at > now() - interval '36 hours'` is still the clock's
 /// to judge, not the writer's: the row keeps its own boundary and the check reads the
 /// request clock, taking the fixed offset from it as a CEL duration. Leaving the
 /// arithmetic in SQL would fire no boundary event, so the tuple would keep answering
 /// allowed past the grace window.
+///
+/// Each literal sits beside the value `PostgreSQL` 18.6 stores for it. A finite interval of
+/// microseconds alone has one length in every time zone, so that length is the duration,
+/// in the coarsest unit that holds it exactly, and a negative one turns the shift around.
 #[test]
 fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
-    for (offset_sql, offset_cel) in [
+    for (offset_sql, stored, offset_cel) in [
         (
-            "now() - interval '30 days'",
-            "request_time - duration(\"720h\")",
+            "now() - interval '24 hours'",
+            "24:00:00",
+            "request_time - duration(\"24h\")",
+        ),
+        (
+            "now() - interval '36 hours'",
+            "36:00:00",
+            "request_time - duration(\"36h\")",
         ),
         (
             "now() + interval '2 hours'",
+            "02:00:00",
             "request_time + duration(\"2h\")",
         ),
         (
             "now() - interval '90 minutes'",
+            "01:30:00",
             "request_time - duration(\"90m\")",
         ),
         (
             "now() - interval '45 seconds'",
+            "00:00:45",
             "request_time - duration(\"45s\")",
         ),
         (
-            "now() - interval '1 week'",
-            "request_time - duration(\"168h\")",
+            "now() - interval '01:30:00'",
+            "01:30:00",
+            "request_time - duration(\"90m\")",
+        ),
+        (
+            "now() - interval '0.5 seconds'",
+            "00:00:00.5",
+            "request_time - duration(\"500ms\")",
+        ),
+        (
+            "now() - interval '90' minute",
+            "01:30:00",
+            "request_time - duration(\"90m\")",
+        ),
+        (
+            "now() - interval '1.5' second(3)",
+            "00:00:01.5",
+            "request_time - duration(\"1500ms\")",
+        ),
+        (
+            "now() - interval '1:30.5' minute to second(0)",
+            "00:01:31",
+            "request_time - duration(\"91s\")",
+        ),
+        (
+            "now() - interval '1 hour ago'",
+            "-01:00:00",
+            "request_time + duration(\"1h\")",
         ),
     ] {
         let schema = format!(
@@ -1088,7 +1127,7 @@ fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
         let (dsl, tuples) = translation(&schema);
         assert!(
             dsl.contains(&format!("expires_at > {offset_cel}")),
-            "`{offset_sql}` must ride the clock as `{offset_cel}`:\n{dsl}"
+            "`{offset_sql}` stores `{stored}`, so it must ride the clock as `{offset_cel}`:\n{dsl}"
         );
         assert!(
             tuples.contains("jsonb_build_object('expires_at', \"expires_at\")"),
@@ -1097,51 +1136,134 @@ fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
     }
 }
 
-/// A month or a year has no fixed number of seconds, so it cannot become a CEL duration.
-/// Rather than invent one, the offset stays in SQL and the shape falls back exactly as an
-/// inexpressible guard always has.
+/// An interval that counts days or months has no fixed length. `PostgreSQL` adds such a
+/// term to a `timestamptz` on the calendar of the session `TimeZone`, so across a
+/// daylight-saving change `now() - interval '1 day'` is 23 or 25 hours back. Nor does an
+/// infinite interval or text `PostgreSQL` does not read give a duration. Each falls closed,
+/// and the report names why, beside the value `PostgreSQL` 18.6 stores for the literal.
 #[test]
-fn a_variable_temporal_offset_stays_in_sql() {
-    for offset_sql in [
-        "now() - interval '1 month'",
-        "now() - interval '1 year'",
-        "now() - interval '2 mons'",
+fn an_offset_without_a_fixed_length_falls_closed_naming_why() {
+    const DAYS: &str = "counts days, which PostgreSQL adds as calendar days in the session \
+                        TimeZone, so it has no fixed CEL duration";
+    const MONTHS: &str = "counts months, which PostgreSQL adds as calendar months in the \
+                          session TimeZone, so it has no fixed CEL duration";
+    const BOTH: &str = "counts months and days, which PostgreSQL adds as calendar months and \
+                        days in the session TimeZone, so it has no fixed CEL duration";
+    for (interval_sql, stored, reason) in [
+        (
+            "interval '1 day'",
+            "1 day",
+            format!("INTERVAL '1 day' {DAYS}"),
+        ),
+        (
+            "interval '30 days'",
+            "30 days",
+            format!("INTERVAL '30 days' {DAYS}"),
+        ),
+        (
+            "interval '1.5 days'",
+            "1 day 12:00:00",
+            format!("INTERVAL '1.5 days' {DAYS}"),
+        ),
+        (
+            "interval '30' day",
+            "30 days",
+            format!("INTERVAL '30' DAY {DAYS}"),
+        ),
+        (
+            "interval 'P30D'",
+            "30 days",
+            format!("INTERVAL 'P30D' {DAYS}"),
+        ),
+        (
+            "interval '1 day ago'",
+            "-1 days",
+            format!("INTERVAL '1 day ago' {DAYS}"),
+        ),
+        (
+            "interval '1 week'",
+            "7 days",
+            format!("INTERVAL '1 week' {DAYS}"),
+        ),
+        (
+            "interval 'P1DT2H'",
+            "1 day 02:00:00",
+            format!("INTERVAL 'P1DT2H' {DAYS}"),
+        ),
+        (
+            "interval '1 mon'",
+            "1 mon",
+            format!("INTERVAL '1 mon' {MONTHS}"),
+        ),
+        (
+            "interval '1 year'",
+            "1 year",
+            format!("INTERVAL '1 year' {MONTHS}"),
+        ),
+        (
+            "interval '1 mon 2 days'",
+            "1 mon 2 days",
+            format!("INTERVAL '1 mon 2 days' {BOTH}"),
+        ),
+        (
+            "interval 'infinity'",
+            "infinity",
+            "INTERVAL 'infinity' has no finite length, so it has no CEL duration".to_string(),
+        ),
+        (
+            "interval '2562048 hours'",
+            "2562048:00:00",
+            "INTERVAL '2562048 hours' is longer than a CEL duration holds".to_string(),
+        ),
+        (
+            "interval 'fortnight'",
+            "an error",
+            "PostgreSQL does not read 'fortnight' as an interval \
+             (invalid input syntax for type interval)"
+                .to_string(),
+        ),
     ] {
-        let schema = format!(
-            "CREATE TABLE docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);\n\
-             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY docs_sel ON docs FOR SELECT USING (expires_at > {offset_sql});\n"
-        );
-        let (dsl, _tuples) = translation(&schema);
-        assert!(
-            !dsl.contains("duration("),
-            "`{offset_sql}` has no fixed length, so it must not become a duration:\n{dsl}"
-        );
+        for predicate in [
+            format!("expires_at > now() - {interval_sql}"),
+            format!("expires_at BETWEEN now() - {interval_sql} AND now()"),
+        ] {
+            let schema = format!(
+                "CREATE TABLE docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);\n\
+                 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
+                 CREATE POLICY docs_sel ON docs FOR SELECT USING ({predicate});\n"
+            );
+            let outputs = translator(ConfidenceLevel::B)
+                .translate(&db_of(&schema))
+                .expect("translation should plan")
+                .outputs_accepting_gaps();
+            let dsl = outputs.model();
+            assert_eq!(
+                relation_definition(&dsl, "docs", "can_select").as_deref(),
+                Some("no_access"),
+                "`{interval_sql}` stores `{stored}`, so `{predicate}` must fall closed:\n{dsl}"
+            );
+            let report = outputs.report();
+            assert!(
+                report.contains(&reason),
+                "`{predicate}` must be refused with `{reason}`:\n{report}"
+            );
+        }
     }
 }
 
-/// The offset carries across the spellings a policy may use: a `HH:MM:SS` time part, a
-/// compound of fixed-length terms, the interval leading the clock, and the column on the
-/// right mirroring the comparison. Each still yields the same duration on the request
-/// clock.
+/// The offset carries across the spellings a policy may use: the interval leading the
+/// clock, and the column on the right mirroring the comparison. Each still yields the same
+/// duration on the request clock.
 #[test]
 fn interval_offsets_carry_across_spellings() {
     for (predicate, fragment) in [
-        (
-            "expires_at > now() - interval '01:30:00'",
-            "expires_at > request_time - duration(\"90m\")",
-        ),
-        (
-            "expires_at > now() - interval '1 day 2 hours'",
-            "expires_at > request_time - duration(\"26h\")",
-        ),
         (
             "expires_at > interval '2 hours' + now()",
             "expires_at > request_time + duration(\"2h\")",
         ),
         (
-            "now() - interval '30 days' < expires_at",
-            "expires_at > request_time - duration(\"720h\")",
+            "now() - interval '36 hours' < expires_at",
+            "expires_at > request_time - duration(\"36h\")",
         ),
     ] {
         let schema = format!(
