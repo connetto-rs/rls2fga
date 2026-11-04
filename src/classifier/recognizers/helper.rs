@@ -73,10 +73,11 @@ pub(crate) enum HelperRefusal {
     /// A table or column of the answer cannot be looked up.
     #[error(transparent)]
     Lookup(#[from] LookupError),
-    /// A returned column keys no table's rows.
+    /// A column keys no one table's rows.
     #[error(
-        "column '{column}' of '{table}' names no row of a table, since it is neither the \
-         table's key nor a single-column foreign key to another table's key"
+        "column '{column}' of '{table}' names no row of one table, since it is not the \
+         table's key, its foreign keys do not reference one table's key, and nothing it is \
+         compared with covers a single table"
     )]
     NamesNoRows {
         /// The table.
@@ -267,7 +268,15 @@ fn declared_helper<DB: DatabaseLike>(
             function: name.clone(),
             source,
         })?;
-    let named = rows_named_by(guarded, guarded_column, db)?;
+    // A column with no foreign key, and not its table's key, names the rows of the one
+    // table the set covers, as membership in a set of that table's keys types it.
+    let named = match rows_named_by(guarded, guarded_column, db)? {
+        Some(named) => named,
+        None => set
+            .covered_table()
+            .map(table_identity)
+            .ok_or_else(|| names_no_rows(guarded, guarded_column))?,
+    };
     let call = helper_call(function, &values, &set, &column, &named, db, registry)?;
     Ok(DeclaredHelper { column, call })
 }
@@ -288,7 +297,8 @@ fn helper_call<DB: DatabaseLike>(
     for arm in set.arms() {
         let (returned, arm) = match arm {
             HelperArm::Grant(grant) => (
-                rows_named_by(grant.table(), grant.column(), db)?,
+                rows_named_by(grant.table(), grant.column(), db)?
+                    .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
                 HelperSetArm::Grant(helper_grant(grant, db)?),
             ),
             HelperArm::Parent(parent) => (
@@ -328,9 +338,9 @@ fn helper_parent<DB: DatabaseLike>(
         });
     }
     let fk_column = ColumnName::from_stored(parent.column().stored_column_name());
-    // A column with no foreign key, typed by the set alone, names no rows here and is
-    // refused.
-    let referenced = rows_named_by(parent.table(), parent.column(), db)?;
+    // Without a foreign key the parent is the table the called set covers.
+    let referenced = rows_named_by(parent.table(), parent.column(), db)?
+        .unwrap_or_else(|| table_identity(parent.parent_table()));
     let call = helper_call(
         called,
         parent.arguments(),
@@ -393,16 +403,12 @@ fn kept_literals<DB: DatabaseLike>(kept: &LiteralSet<'_, DB>) -> Vec<AttributeLi
 
 /// The table whose rows the values of `column` name, which are the rows its one
 /// single-column foreign key references, else its own table's where it is that table's
-/// key.
+/// key, and `None` where it is neither.
 fn rows_named_by<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
     db: &DB,
-) -> Result<TableId, HelperRefusal> {
-    let names_no_rows = || HelperRefusal::NamesNoRows {
-        table: table_identity(table).to_string(),
-        column: column.stored_column_name().into_owned(),
-    };
+) -> Result<Option<TableId>, HelperRefusal> {
     let mut referenced: Option<TableId> = None;
     for foreign_key in table.foreign_keys(db)? {
         let mut host = foreign_key.host_columns(db)?;
@@ -416,17 +422,24 @@ fn rows_named_by<DB: DatabaseLike>(
             .eq(single_identity_column(&parent, db));
         // Two keys referencing different tables leave the rows the value names open.
         if !names_key || referenced.as_ref().is_some_and(|held| *held != parent) {
-            return Err(names_no_rows());
+            return Err(names_no_rows(table, column));
         }
         referenced = Some(parent);
     }
-    if let Some(referenced) = referenced {
+    if referenced.is_some() {
         return Ok(referenced);
     }
     let own = table_identity(table);
     let is_key = single_identity_column(&own, db)
         .is_some_and(|key| key.as_str() == column.stored_column_name());
-    is_key.then_some(own).ok_or_else(names_no_rows)
+    Ok(is_key.then_some(own))
+}
+
+fn names_no_rows<T: TableLike, C: ColumnLike>(table: &T, column: &C) -> HelperRefusal {
+    HelperRefusal::NamesNoRows {
+        table: table_identity(table).to_string(),
+        column: column.stored_column_name().into_owned(),
+    }
 }
 
 /// The one column of `table` both `NOT NULL` and closed by a validated `CHECK` to

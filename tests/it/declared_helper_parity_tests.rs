@@ -7,7 +7,7 @@ use core::time::Duration;
 
 use rls2fga::types::ActionStatement;
 
-use crate::declared_helper_tests::{LEVELS, ORDERS, OWNER_READS};
+use crate::declared_helper_tests::{INSTALLATIONS, LEVELS, ORDERS, OWNER_READS};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -17,7 +17,8 @@ const ATTRIBUTES: &str = r#"[{ "key": "app.user_id", "kind": "caller_id" }]"#;
 
 const HELPERS: &str = r#"{
     "authz.projects_with": { "kind": "declared_helper" },
-    "authz.teams_with": { "kind": "declared_helper" }
+    "authz.teams_with": { "kind": "declared_helper" },
+    "authz.installations_administered": { "kind": "declared_helper" }
 }"#;
 
 /// Each level reads its own rows through its helper too.
@@ -40,15 +41,18 @@ fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
             "declared-helpers-pg{major}{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
-        &format!("{LEVELS}{OWNER_READS}{ORDERS}{LEVEL_READS}"),
+        &format!("{LEVELS}{OWNER_READS}{ORDERS}{LEVEL_READS}{INSTALLATIONS}"),
         &[
             "INSERT INTO teams VALUES ('T1'), ('T2');
              INSERT INTO projects VALUES ('P1', 'T1'), ('P2', 'T1'), ('P3', 'T2');
              INSERT INTO orders VALUES ('o1', 'P1', NULL), ('o2', 'P2', NULL), ('o3', 'P3', NULL);
-             INSERT INTO team_grants VALUES ('T1', 'bob', 'write'), ('T2', 'dave', 'read');
-             INSERT INTO project_grants VALUES ('P2', 'carol', 'read'), ('P3', 'frank', 'admin')",
+             INSERT INTO team_grants VALUES
+               ('T1', 'bob', 'write'), ('T2', 'dave', 'read'), ('T1', 'hank', 'admin');
+             INSERT INTO project_grants VALUES ('P2', 'carol', 'read'), ('P3', 'frank', 'admin');
+             INSERT INTO installations VALUES ('i1', 'T1'), ('i2', 'P3'), ('i3', 'elsewhere');
+             INSERT INTO installation_tables VALUES ('t1', 'i1', 'a'), ('t2', 'i2', 'b'), ('t3', 'i3', 'c')",
             "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT ON orders, projects, teams TO app_reader;
+             GRANT SELECT ON orders, projects, teams, installations, installation_tables TO app_reader;
              GRANT UPDATE ON orders TO app_reader;
              GRANT USAGE ON SCHEMA authz TO app_reader;
              REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
@@ -59,6 +63,7 @@ fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
             caller("carol"),
             caller("dave"),
             caller("frank"),
+            caller("hank"),
             caller("erin"),
             Principal::as_role("anonymous", "app_reader"),
         ],
@@ -103,9 +108,39 @@ async fn declared_helpers_agree_with_postgres_17_and_18() {
             expect("dave", "orders:o1", ActionStatement::Select, false);
             // A project admin writes.
             expect("frank", "orders:o3", ActionStatement::Update, true);
+            // An installation is read by an admin of the level its owner names.
+            expect("frank", "installations:i2", ActionStatement::Select, true);
+            expect("frank", "installations:i1", ActionStatement::Select, false);
+            expect("hank", "installations:i1", ActionStatement::Select, true);
+            expect("hank", "installations:i2", ActionStatement::Select, false);
+            expect("bob", "installations:i1", ActionStatement::Select, false);
+            expect(
+                "hank",
+                "installation_tables:t1",
+                ActionStatement::Select,
+                true,
+            );
+            expect(
+                "frank",
+                "installation_tables:t2",
+                ActionStatement::Select,
+                true,
+            );
+            expect(
+                "frank",
+                "installation_tables:t1",
+                ActionStatement::Select,
+                false,
+            );
             // No grant, and no caller at all, read nothing.
             expect("erin", "orders:o1", ActionStatement::Select, false);
             expect("anonymous", "orders:o1", ActionStatement::Select, false);
+            expect(
+                "anonymous",
+                "installations:i3",
+                ActionStatement::Select,
+                false,
+            );
             assert_agrees(&case, &run);
         }
     }

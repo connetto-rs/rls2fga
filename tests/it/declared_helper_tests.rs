@@ -410,8 +410,15 @@ fn every_unproven_call_is_refused() {
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT g.team_id FROM public.team_grants g WHERE g.principal_id = current_setting('app.tenant', true)
              $$;
+             CREATE FUNCTION authz.mixed() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT g.team_id FROM public.team_grants g WHERE g.principal_id = current_setting('app.user_id', true)
+               UNION
+               SELECT g.project_id FROM public.project_grants g WHERE g.principal_id = current_setting('app.user_id', true)
+             $$;
              ALTER FUNCTION authz.misparented(TEXT) OWNER TO authz_owner;
              ALTER FUNCTION authz.tenant_teams() OWNER TO authz_owner;
+             ALTER FUNCTION authz.mixed() OWNER TO authz_owner;
              ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
              ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
              CREATE POLICY orders_read ON orders FOR SELECT USING ({using});
@@ -423,6 +430,7 @@ fn every_unproven_call_is_refused() {
         "authz.teams_with",
         "authz.misparented",
         "authz.tenant_teams",
+        "authz.mixed",
     ];
     let named = [
         (
@@ -432,7 +440,7 @@ fn every_unproven_call_is_refused() {
         ),
         (
             "orders_read",
-            "title = ANY (ARRAY(SELECT authz.projects_with('read')))",
+            "title = ANY (ARRAY(SELECT authz.mixed()))",
             "names no row",
         ),
         (
@@ -663,5 +671,62 @@ CREATE POLICY optional_read ON optional_tables FOR SELECT USING (
         !bots[0].contains("\nAND ("),
         "every row naming a bot loads: {}",
         bots[0]
+    );
+}
+
+/// R100's installations, whose `owner` may be a team or a project and references
+/// neither, administered through a helper reading it once per level.
+pub(crate) const INSTALLATIONS: &str = "
+CREATE TABLE installations (id TEXT PRIMARY KEY, owner TEXT NOT NULL);
+CREATE TABLE installation_tables (id TEXT PRIMARY KEY,
+  installation TEXT NOT NULL REFERENCES installations (id), table_name TEXT NOT NULL);
+CREATE FUNCTION authz.installations_administered() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT i.id FROM public.installations i WHERE i.owner IN (SELECT authz.teams_with('admin'))
+  UNION
+  SELECT i.id FROM public.installations i WHERE i.owner IN (SELECT authz.projects_with('admin'))
+$$;
+ALTER FUNCTION authz.installations_administered() OWNER TO authz_owner;
+GRANT SELECT ON installations TO authz_owner;
+ALTER TABLE installations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY installations_read ON installations FOR SELECT USING (
+  owner = ANY (ARRAY(SELECT authz.teams_with('admin')))
+  OR owner = ANY (ARRAY(SELECT authz.projects_with('admin'))));
+ALTER TABLE installation_tables ENABLE ROW LEVEL SECURITY;
+CREATE POLICY installation_tables_read ON installation_tables FOR SELECT USING (
+  installation = ANY (ARRAY(SELECT authz.installations_administered())));
+";
+
+/// Every helper the installations read.
+pub(crate) const INSTALLATION_HELPERS: &[&str] = &[
+    "authz.projects_with",
+    "authz.teams_with",
+    "authz.installations_administered",
+];
+
+/// A column referencing nothing names the rows of the table the set it is compared
+/// with covers, so each level it is compared with is one parent of the row.
+#[test]
+fn a_column_with_no_foreign_key_is_a_parent_of_each_level_it_is_compared_with() {
+    let dsl = model(
+        &format!("{LEVELS}{OWNER_READS}{INSTALLATIONS}"),
+        INSTALLATION_HELPERS,
+    );
+    let definition = |type_name: &str, relation: &str| {
+        relation_definition(&dsl, type_name, relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(
+        definition("installations", "can_select"),
+        "teams_with_admin from teams or projects_with_admin from projects"
+    );
+    assert_eq!(
+        definition("installations", "installations_administered"),
+        "teams_with_admin from teams or projects_with_admin from projects"
+    );
+    assert_eq!(definition("installations", "teams"), "[teams]");
+    assert_eq!(definition("installations", "projects"), "[projects]");
+    assert_eq!(
+        definition("installation_tables", "can_select"),
+        "installations_administered from installations"
     );
 }
