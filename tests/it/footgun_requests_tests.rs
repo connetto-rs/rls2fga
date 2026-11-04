@@ -1118,6 +1118,32 @@ fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
             "-01:00:00",
             "request_time + duration(\"1h\")",
         ),
+        (
+            "now() - interval '5' hour",
+            "05:00:00",
+            "request_time - duration(\"5h\")",
+        ),
+        (
+            "now() - interval '2:03' hour to minute",
+            "02:03:00",
+            "request_time - duration(\"123m\")",
+        ),
+        (
+            "now() - interval '2:03:04' hour to second",
+            "02:03:04",
+            "request_time - duration(\"7384s\")",
+        ),
+        (
+            "now() - interval '0 2:03:04' day to second",
+            "02:03:04",
+            "request_time - duration(\"7384s\")",
+        ),
+        (
+            "now() - interval $$90 minutes$$",
+            "01:30:00",
+            "request_time - duration(\"90m\")",
+        ),
+        ("now() - interval '0'", "00:00:00", "request_time\n"),
     ] {
         let schema = format!(
             "CREATE TABLE public.docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);\n\
@@ -1199,6 +1225,52 @@ fn an_offset_without_a_fixed_length_falls_closed_naming_why() {
             "interval '1 year'",
             "1 year",
             format!("INTERVAL '1 year' {MONTHS}"),
+        ),
+        (
+            "interval '2' year",
+            "2 years",
+            format!("INTERVAL '2' YEAR {MONTHS}"),
+        ),
+        (
+            "interval '3' month",
+            "3 mons",
+            format!("INTERVAL '3' MONTH {MONTHS}"),
+        ),
+        (
+            "interval '1-2' year to month",
+            "1 year 2 mons",
+            format!("INTERVAL '1-2' YEAR TO MONTH {MONTHS}"),
+        ),
+        (
+            "interval '1 2' day to hour",
+            "1 day 02:00:00",
+            format!("INTERVAL '1 2' DAY TO HOUR {DAYS}"),
+        ),
+        (
+            "interval '1 2:03' day to minute",
+            "1 day 02:03:00",
+            format!("INTERVAL '1 2:03' DAY TO MINUTE {DAYS}"),
+        ),
+        (
+            "interval '1 2:03:04' day to second",
+            "1 day 02:03:04",
+            format!("INTERVAL '1 2:03:04' DAY TO SECOND {DAYS}"),
+        ),
+        (
+            "interval '1' day(3)",
+            "a syntax error",
+            "PostgreSQL does not read the field qualifier of INTERVAL '1' DAY (3)".to_string(),
+        ),
+        (
+            "interval '1' minute to hour",
+            "a syntax error",
+            "PostgreSQL does not read the field qualifier of INTERVAL '1' MINUTE TO HOUR"
+                .to_string(),
+        ),
+        (
+            "interval 1 hour",
+            "a syntax error",
+            "INTERVAL 1 HOUR is not a quoted string, so it has no fixed CEL duration".to_string(),
         ),
         (
             "interval '1 mon 2 days'",

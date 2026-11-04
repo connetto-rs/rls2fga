@@ -1,6 +1,6 @@
 use super::*;
 use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
-use sqlparser::ast::{DataType, DateTimeField, Interval, TimezoneInfo};
+use sqlparser::ast::{DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
 
 /// The guard as structure when the compared value is one only the request knows.
 ///
@@ -71,10 +71,7 @@ pub(crate) fn clock_offset_refusals(expr: &Expr) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
     let _ = sqlparser::ast::visit_expressions(expr, |node| {
         if let Some(refusal) = clock_offset_refusal(node) {
-            let reason = refusal.to_string();
-            if !reasons.contains(&reason) {
-                reasons.push(reason);
-            }
+            reasons.push(refusal.to_string());
         }
         core::ops::ControlFlow::<()>::Continue(())
     });
@@ -157,9 +154,9 @@ fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
 /// Why a clock shifted by an interval has no CEL duration.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum OffsetRefusal {
-    /// The interval is not written as a single-quoted string.
-    #[error("{interval} is not a single-quoted interval, so it has no fixed CEL duration")]
-    NotSingleQuoted {
+    /// The interval is not written as a quoted string.
+    #[error("{interval} is not a quoted string, so it has no fixed CEL duration")]
+    NotAString {
         /// The interval as written.
         interval: String,
     },
@@ -266,21 +263,26 @@ fn shifted_side(interval: &Interval, subtract: bool) -> Result<TemporalRequestSi
 
 /// The interval literal as `PostgreSQL` stores it.
 fn interval_value(interval: &Interval) -> Result<sql_values::PgInterval, OffsetRefusal> {
-    let Expr::Value(value) = interval.value.as_ref() else {
-        return Err(OffsetRefusal::NotSingleQuoted {
-            interval: interval.to_string(),
-        });
-    };
-    let Value::SingleQuotedString(text) = &value.value else {
-        return Err(OffsetRefusal::NotSingleQuoted {
-            interval: interval.to_string(),
-        });
+    let text = match interval.value.as_ref() {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(text),
+            ..
+        }) => text.as_str(),
+        Expr::Value(ValueWithSpan {
+            value: Value::DollarQuotedString(quoted),
+            ..
+        }) => quoted.value.as_str(),
+        _ => {
+            return Err(OffsetRefusal::NotAString {
+                interval: interval.to_string(),
+            })
+        }
     };
     let typmod = interval_typmod(interval).ok_or_else(|| OffsetRefusal::UnreadableQualifier {
         interval: interval.to_string(),
     })?;
     parse_interval_typmod(text, typmod).map_err(|source| OffsetRefusal::Unreadable {
-        text: text.clone(),
+        text: text.to_string(),
         source,
     })
 }
