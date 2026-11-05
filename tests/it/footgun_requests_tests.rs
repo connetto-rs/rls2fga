@@ -1482,6 +1482,141 @@ fn interval_offsets_carry_across_spellings() {
     }
 }
 
+/// The schema the cast tests guard, one column per family a cast can rename.
+const CAST_GUARDED: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, \
+                            level NUMERIC, amount NUMERIC, code TEXT, \
+                            starts_on TIMESTAMP, expires_at TIMESTAMPTZ);\n\
+                            ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n";
+
+/// A cast that can change a compared value makes `PostgreSQL` compare something other
+/// than the literal, the column or the clock as written. The tuple SQL and the request
+/// clock read them as written, so each falls closed and the report names the cast.
+/// Beside each is a row `PostgreSQL` 18.6 and the uncast reading answer differently.
+#[test]
+fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
+    const CHANGES: &str = "which can change the value PostgreSQL compares while the model \
+                           compares it as written, so compare it uncast or as text";
+    for (guard, diverging_row, cast) in [
+        ("level >= 2.7::int", "level 2.8", "2.7::INT is cast to int"),
+        (
+            "level >= CAST(2.7 AS integer)",
+            "level 2.8",
+            "CAST(2.7 AS INTEGER) is cast to integer",
+        ),
+        (
+            "amount::int > 5",
+            "amount 5.4",
+            "amount::INT is cast to int",
+        ),
+        (
+            "code = 'abc'::char(2)",
+            "code 'ab'",
+            "'abc'::CHAR(2) is cast to char(2)",
+        ),
+        (
+            "code IN ('abc'::char(2), 'x')",
+            "code 'ab'",
+            "'abc'::CHAR(2) is cast to char(2)",
+        ),
+        (
+            "code = 'ab'::varchar(1)",
+            "code 'a'",
+            "'ab'::VARCHAR(1) is cast to varchar(1)",
+        ),
+        (
+            "starts_on < '2026-01-01 23:00'::date",
+            "starts_on 2026-01-01 12:00",
+            "'2026-01-01 23:00'::DATE is cast to date",
+        ),
+        (
+            "expires_at > now()::date",
+            "expires_at earlier today",
+            "now()::DATE is cast to date",
+        ),
+        (
+            "expires_at > (now() - interval '1 hour')::date",
+            "expires_at earlier today",
+            "(now() - INTERVAL '1 hour')::DATE is cast to date",
+        ),
+        (
+            "expires_at BETWEEN now()::date AND now()",
+            "expires_at earlier today",
+            "now()::DATE is cast to date",
+        ),
+        (
+            "expires_at > now()::timestamptz(0)",
+            "expires_at within the second",
+            "now()::TIMESTAMPTZ(0) is cast to timestamptz(0)",
+        ),
+    ] {
+        let reason = format!("{cast}, {CHANGES}");
+        let schema = format!(
+            "{CAST_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n\
+             CREATE POLICY q ON docs FOR UPDATE USING \
+             (owner_id = current_user AND {guard});\n"
+        );
+        let outputs = translator(ConfidenceLevel::B)
+            .translate(&db_of(&schema))
+            .expect("translation should plan")
+            .outputs_accepting_gaps();
+        let dsl = outputs.model();
+        for action in ["can_select", "can_update"] {
+            assert_eq!(
+                relation_definition(&dsl, "docs", action).as_deref(),
+                Some("no_access"),
+                "`{guard}` answers {diverging_row} differently, so {action} must fall \
+                 closed:\n{dsl}"
+            );
+        }
+        let report = outputs.report();
+        assert!(
+            report.contains(&format!("| p (USING) | Unknown: {reason} |")),
+            "`{guard}` must be refused naming the cast with `{reason}`:\n{report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "| q (USING) | P8 (And of 2 parts, graded D by Unknown: {reason}) |"
+            )),
+            "the conjunction must name the cast too:\n{report}"
+        );
+    }
+}
+
+/// A cast that renders text, or the clock cast to its own type, compares the value as
+/// written, so the guard keeps translating.
+#[test]
+fn a_cast_that_keeps_a_compared_value_still_translates() {
+    for (guard, fragment) in [
+        ("code = 'x'::text", "AND \"code\" = 'x';"),
+        ("code = 'x'::varchar", "AND \"code\" = 'x';"),
+        ("code::text = 'x'", "AND \"code\" = 'x';"),
+        (
+            "code IN ('x'::text, 'y'::text)",
+            "AND \"code\" IN ('x', 'y');",
+        ),
+        (
+            "expires_at > now()::timestamptz",
+            "expires_at > request_time",
+        ),
+        (
+            "expires_at > CURRENT_TIMESTAMP::timestamp with time zone",
+            "expires_at > request_time",
+        ),
+        (
+            "expires_at > (now() - interval '1 hour')::timestamptz",
+            "expires_at > request_time - duration(\"1h\")",
+        ),
+    ] {
+        let (dsl, tuples) = translation(&format!(
+            "{CAST_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"
+        ));
+        assert!(
+            dsl.contains(fragment) || tuples.contains(fragment),
+            "`{guard}` must still translate with `{fragment}`:\n{dsl}\n{tuples}"
+        );
+    }
+}
+
 /// A condition name is global to the model while a `PostgreSQL` policy name is unique
 /// only per table, so one name reused across tables must not collapse two guards into
 /// one spec. Here the two guards compare opposite ways, so sharing a spec inverts one of

@@ -475,6 +475,9 @@ fn classify_expr_inner<DB: DatabaseLike>(
     if !renamings.is_empty() {
         return unknown_d(expr, renamings.join(". "));
     }
+    if let Some(reason) = recognizers::compared_cast_reason(expr) {
+        return unknown_d(expr, reason);
+    }
 
     // Handle NOT unary operator.
     if let Expr::UnaryOp {
