@@ -84,9 +84,6 @@ pub(crate) fn clock_offset_refusals(expr: &Expr) -> Vec<String> {
 
 /// Why one `column op now() ± interval` or `BETWEEN` bounded so falls closed.
 fn clock_offset_refusal(expr: &Expr) -> Option<OffsetRefusal> {
-    if comparison_renaming_cast(expr).is_some() {
-        return None;
-    }
     let (column, bounds): (_, [&Expr; 2]) = match unparenthesize(expr) {
         Expr::BinaryOp { left, op, right } => {
             attribute_operator(op)?;

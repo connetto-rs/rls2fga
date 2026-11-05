@@ -335,6 +335,27 @@ fn listed_roles_expand_into_one_membership_each() {
     }
 }
 
+/// A far list item cast so its value can change is not the literal written, so the list
+/// keeps its casts as one SQL condition. Deduplicated by the uncast value, the two items
+/// below collapsed into `role = 'read'::char(2)` alone, which denies a membership whose
+/// role is `'read'` although the policy's second item grants it.
+#[test]
+fn a_recast_far_list_item_keeps_the_list_in_sql() {
+    let c = classify(
+        "EXISTS (
+        SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
+        AND EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = a.owner
+            AND m.member_id = current_setting('app.user_id', true)
+            AND role IN ('read'::char(2), 'read')))",
+    );
+    let p19 = p19(&c);
+    assert_eq!(p19.memberships.len(), 1, "the list stays one condition");
+    assert_eq!(
+        p19.memberships[0].extra_predicates.sql(),
+        Some("role IN ('read'::CHAR(2), 'read')".to_string())
+    );
+}
+
 #[test]
 fn in_subquery_spelling_matches_the_exists_spelling() {
     let c = classify(
