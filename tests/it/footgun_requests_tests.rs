@@ -1144,6 +1144,46 @@ fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
             "request_time - duration(\"90m\")",
         ),
         ("now() - interval '0'", "00:00:00", "request_time\n"),
+        (
+            "now() - '1 hour'::interval",
+            "01:00:00",
+            "request_time - duration(\"1h\")",
+        ),
+        (
+            "now() - CAST('90 minutes' AS interval)",
+            "01:30:00",
+            "request_time - duration(\"90m\")",
+        ),
+        (
+            "now() - '90'::interval minute",
+            "01:30:00",
+            "request_time - duration(\"90m\")",
+        ),
+        (
+            "now() - ('90 seconds')::interval minute",
+            "00:01:00",
+            "request_time - duration(\"1m\")",
+        ),
+        (
+            "now() - '1:30.5'::interval minute to second(0)",
+            "00:01:31",
+            "request_time - duration(\"91s\")",
+        ),
+        (
+            "now() - $$2 hours$$::interval",
+            "02:00:00",
+            "request_time - duration(\"2h\")",
+        ),
+        (
+            "now() + '1 hour ago'::interval",
+            "-01:00:00",
+            "request_time - duration(\"1h\")",
+        ),
+        (
+            "now() - (interval '90 minutes')::interval",
+            "01:30:00",
+            "request_time - duration(\"90m\")",
+        ),
     ] {
         let schema = format!(
             "CREATE TABLE public.docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);\n\
@@ -1293,6 +1333,42 @@ fn an_offset_without_a_fixed_length_falls_closed_naming_why() {
             "PostgreSQL does not read 'fortnight' as an interval \
              (invalid input syntax for type interval)"
                 .to_string(),
+        ),
+        (
+            "'30 days'::interval",
+            "30 days",
+            format!("'30 days'::INTERVAL {DAYS}"),
+        ),
+        (
+            "CAST('1 mon' AS interval)",
+            "1 mon",
+            format!("CAST('1 mon' AS INTERVAL) {MONTHS}"),
+        ),
+        (
+            "'fortnight'::interval",
+            "an error",
+            "PostgreSQL does not read 'fortnight' as an interval \
+             (invalid input syntax for type interval)"
+                .to_string(),
+        ),
+        (
+            "'1.75'::text::interval minute",
+            "00:00:00, where '1.75'::interval minute stores 00:01:00",
+            "'1.75'::TEXT::INTERVAL MINUTE casts through another type before the interval, \
+             which this does not follow, so it has no fixed CEL duration"
+                .to_string(),
+        ),
+        (
+            "(interval '90 minutes')::interval hour",
+            "01:00:00",
+            "(INTERVAL '90 minutes')::INTERVAL HOUR casts the interval again, which this \
+             does not follow, so it has no fixed CEL duration"
+                .to_string(),
+        ),
+        (
+            "now()::interval",
+            "an error",
+            "now()::INTERVAL is not a quoted string, so it has no fixed CEL duration".to_string(),
         ),
     ] {
         for predicate in [

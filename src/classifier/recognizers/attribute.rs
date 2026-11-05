@@ -1,6 +1,7 @@
 use super::*;
+use crate::parser::expr::peel_noting_casts;
 use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
-use sqlparser::ast::{DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
+use sqlparser::ast::{self, DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
 
 /// The guard as structure when the compared value is one only the request knows.
 ///
@@ -69,7 +70,7 @@ fn temporal_request_side(expr: &Expr) -> Option<TemporalRequestSide> {
 /// closed, for every such interval that has no fixed length and so no CEL duration.
 pub(crate) fn clock_offset_refusals(expr: &Expr) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
-    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+    let _ = ast::visit_expressions(expr, |node| {
         if let Some(refusal) = clock_offset_refusal(node) {
             reasons.push(refusal.to_string());
         }
@@ -107,20 +108,20 @@ fn clock_offset_refusal(expr: &Expr) -> Option<OffsetRefusal> {
         })
 }
 
-/// The request clock as written, bare or shifted by an interval literal.
+/// The request clock as written, bare or shifted by an interval.
 enum ClockShift<'e> {
     /// `now()` and its spellings.
     Clock,
     /// The clock with an interval added or subtracted.
     Shifted {
-        /// The interval literal.
-        interval: &'e Interval,
+        /// The interval side as written, a literal or a value cast to an interval type.
+        interval: &'e Expr,
         /// `true` for `now() - interval`.
         subtract: bool,
     },
 }
 
-/// The clock or the clock shifted by an interval literal, whatever the interval's length.
+/// The clock or the clock shifted by an interval, whatever the interval's length.
 fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
     let expr = unwrap_cast_or_nested(expr);
     if is_well_known_temporal_function(expr) {
@@ -134,21 +135,22 @@ fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
         BinaryOperator::Plus => false,
         _ => return None,
     };
-    let left = unwrap_cast_or_nested(left);
-    let right = unwrap_cast_or_nested(right);
-    let interval = if is_well_known_temporal_function(left) {
+    let interval = if is_well_known_temporal_function(unwrap_cast_or_nested(left)) {
         right
-    } else if !subtract && is_well_known_temporal_function(right) {
+    } else if !subtract && is_well_known_temporal_function(unwrap_cast_or_nested(right)) {
         // Addition commutes here, while subtraction is one-sided because a timestamp
         // does not subtract from an interval.
         left
     } else {
         return None;
     };
-    let Expr::Interval(interval) = interval else {
-        return None;
-    };
-    Some(ClockShift::Shifted { interval, subtract })
+    let mut outermost_cast = None;
+    let peeled = peel_noting_casts(interval, |data_type| {
+        outermost_cast.get_or_insert(data_type);
+    });
+    let is_interval = matches!(peeled, Expr::Interval(_))
+        || matches!(outermost_cast, Some(DataType::Interval { .. }));
+    is_interval.then_some(ClockShift::Shifted { interval, subtract })
 }
 
 /// Why a clock shifted by an interval has no CEL duration.
@@ -157,6 +159,25 @@ pub(crate) enum OffsetRefusal {
     /// The interval is not written as a quoted string.
     #[error("{interval} is not a quoted string, so it has no fixed CEL duration")]
     NotAString {
+        /// The interval as written.
+        interval: String,
+    },
+    /// A cast to an interval type whose operand is itself cast, so `PostgreSQL` reads the
+    /// text as that other type first and only then applies the interval's fields.
+    #[error(
+        "{interval} casts through another type before the interval, which this does not \
+         follow, so it has no fixed CEL duration"
+    )]
+    CastChain {
+        /// The interval as written.
+        interval: String,
+    },
+    /// An interval literal cast again, which `PostgreSQL` rescales to the target's fields.
+    #[error(
+        "{interval} casts the interval again, which this does not follow, so it has no \
+         fixed CEL duration"
+    )]
+    Recast {
         /// The interval as written.
         interval: String,
     },
@@ -225,7 +246,7 @@ impl core::fmt::Display for CalendarTerms {
 const CEL_DURATION_MAX_MICROSECONDS: u64 = i64::MAX.unsigned_abs() / 1_000;
 
 /// The clock shifted by `interval`, when the interval has one length in every time zone.
-fn shifted_side(interval: &Interval, subtract: bool) -> Result<TemporalRequestSide, OffsetRefusal> {
+fn shifted_side(interval: &Expr, subtract: bool) -> Result<TemporalRequestSide, OffsetRefusal> {
     let value = interval_value(interval)?;
     let written = || interval.to_string();
     if !value.is_finite() {
@@ -261,25 +282,45 @@ fn shifted_side(interval: &Interval, subtract: bool) -> Result<TemporalRequestSi
     }))
 }
 
-/// The interval literal as `PostgreSQL` stores it.
-fn interval_value(interval: &Interval) -> Result<sql_values::PgInterval, OffsetRefusal> {
-    let text = match interval.value.as_ref() {
-        Expr::Value(ValueWithSpan {
-            value: Value::SingleQuotedString(text),
-            ..
-        }) => text.as_str(),
-        Expr::Value(ValueWithSpan {
-            value: Value::DollarQuotedString(quoted),
-            ..
-        }) => quoted.value.as_str(),
+/// The interval as `PostgreSQL` stores it, from `interval '…'` or from a quoted string
+/// cast once to an interval type, which `PostgreSQL` reads alike.
+fn interval_value(written: &Expr) -> Result<sql_values::PgInterval, OffsetRefusal> {
+    let mut casts: Vec<&DataType> = Vec::new();
+    let peeled = peel_noting_casts(written, |data_type| casts.push(data_type));
+    let interval = || written.to_string();
+    let (text, typmod) = match (peeled, casts.as_slice()) {
+        (Expr::Interval(literal), casts) => {
+            // Only the unqualified type leaves an interval as it is.
+            let identity = |cast: &&DataType| {
+                matches!(
+                    cast,
+                    DataType::Interval {
+                        fields: None,
+                        precision: None,
+                    }
+                )
+            };
+            if !casts.iter().all(identity) {
+                return Err(OffsetRefusal::Recast {
+                    interval: interval(),
+                });
+            }
+            (literal.value.as_ref(), literal_typmod(literal))
+        }
+        (operand, [DataType::Interval { fields, precision }]) => {
+            (operand, cast_typmod(fields.as_ref(), *precision))
+        }
         _ => {
-            return Err(OffsetRefusal::NotAString {
-                interval: interval.to_string(),
+            return Err(OffsetRefusal::CastChain {
+                interval: interval(),
             })
         }
     };
-    let typmod = interval_typmod(interval).ok_or_else(|| OffsetRefusal::UnreadableQualifier {
-        interval: interval.to_string(),
+    let text = quoted_text(text).ok_or_else(|| OffsetRefusal::NotAString {
+        interval: interval(),
+    })?;
+    let typmod = typmod.ok_or_else(|| OffsetRefusal::UnreadableQualifier {
+        interval: interval(),
     })?;
     parse_interval_typmod(text, typmod).map_err(|source| OffsetRefusal::Unreadable {
         text: text.to_string(),
@@ -287,9 +328,25 @@ fn interval_value(interval: &Interval) -> Result<sql_values::PgInterval, OffsetR
     })
 }
 
-/// The type modifier a field qualifier such as `day to second(3)` sets, or `None` for a
-/// qualifier `PostgreSQL`'s grammar does not accept on an interval literal.
-fn interval_typmod(interval: &Interval) -> Option<IntervalTypmod> {
+/// The text of a single- or dollar-quoted string, the spellings `PostgreSQL` reads as an
+/// interval's input.
+fn quoted_text(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Value(ValueWithSpan {
+            value: Value::SingleQuotedString(text),
+            ..
+        }) => Some(text),
+        Expr::Value(ValueWithSpan {
+            value: Value::DollarQuotedString(quoted),
+            ..
+        }) => Some(&quoted.value),
+        _ => None,
+    }
+}
+
+/// The type modifier a literal's field qualifier such as `day to second(3)` sets, or
+/// `None` for a qualifier `PostgreSQL`'s grammar does not accept on an interval literal.
+fn literal_typmod(interval: &Interval) -> Option<IntervalTypmod> {
     let fields = match (&interval.leading_field, &interval.last_field) {
         (None, None) => None,
         (Some(DateTimeField::Year), None) => Some(IntervalFields::Year),
@@ -331,7 +388,39 @@ fn interval_typmod(interval: &Interval) -> Option<IntervalTypmod> {
         }
         _ => return None,
     };
-    // A precision above six is clamped to six, as `PostgreSQL` does.
+    interval_typmod(fields, precision)
+}
+
+/// The type modifier of the interval type a value is cast to, as in
+/// `'90'::interval minute`, or `None` for a precision after fields not ending in `SECOND`.
+fn cast_typmod(
+    fields: Option<&ast::IntervalFields>,
+    precision: Option<u64>,
+) -> Option<IntervalTypmod> {
+    let fields = fields.map(|fields| match fields {
+        ast::IntervalFields::Year => IntervalFields::Year,
+        ast::IntervalFields::Month => IntervalFields::Month,
+        ast::IntervalFields::Day => IntervalFields::Day,
+        ast::IntervalFields::Hour => IntervalFields::Hour,
+        ast::IntervalFields::Minute => IntervalFields::Minute,
+        ast::IntervalFields::Second => IntervalFields::Second,
+        ast::IntervalFields::YearToMonth => IntervalFields::YearToMonth,
+        ast::IntervalFields::DayToHour => IntervalFields::DayToHour,
+        ast::IntervalFields::DayToMinute => IntervalFields::DayToMinute,
+        ast::IntervalFields::DayToSecond => IntervalFields::DayToSecond,
+        ast::IntervalFields::HourToMinute => IntervalFields::HourToMinute,
+        ast::IntervalFields::HourToSecond => IntervalFields::HourToSecond,
+        ast::IntervalFields::MinuteToSecond => IntervalFields::MinuteToSecond,
+    });
+    interval_typmod(fields, precision)
+}
+
+/// The type modifier of `fields` and `precision`, clamping a precision above six to six
+/// as `PostgreSQL` does.
+fn interval_typmod(
+    fields: Option<IntervalFields>,
+    precision: Option<u64>,
+) -> Option<IntervalTypmod> {
     IntervalTypmod::new(
         fields,
         precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX)),
