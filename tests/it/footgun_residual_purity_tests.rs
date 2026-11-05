@@ -7,7 +7,7 @@
 //! answers a different question there than `PostgreSQL` answers at check time.
 
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::types::ConfidenceLevel;
+use rls2fga::types::{ConfidenceLevel, RecordDerivation};
 
 use crate::support::footgun::{db_of, translator};
 
@@ -244,5 +244,59 @@ fn a_bare_clock_comparison_still_becomes_a_condition() {
     assert!(
         sql.contains("expires_at"),
         "the row's value still travels with the tuple:\n{sql}"
+    );
+}
+
+/// A membership conjunct cast so the value can change stays SQL with its cast, which the
+/// loader's `PostgreSQL` evaluates as the policy does. Read from the row instead, the
+/// record would compare `score` with 2.7 where the policy compares it with 3.
+#[test]
+fn a_value_changing_cast_keeps_the_conjunct_in_sql() {
+    let db = db_of(&membership_with("m.score >= 2.7::int"));
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let members = outputs
+        .tuple_queries()
+        .iter()
+        .filter_map(|query| {
+            query
+                .description
+                .as_ref()
+                .map(|description| (query, description))
+        })
+        .find(|(_, description)| {
+            description
+                .tables
+                .iter()
+                .any(|table| table.name() == "doc_members")
+        })
+        .expect("the membership still loads");
+    assert!(
+        members.0.sql.contains("score >= 2.7::INT"),
+        "the cast stays for the loader to evaluate:\n{}",
+        members.0.sql
+    );
+    assert!(
+        !matches!(members.1.derivation, RecordDerivation::FromRow { .. }),
+        "no record may be derived from the row against the uncast literal: {:?}",
+        members.1.derivation
+    );
+}
+
+/// The clock cast to a date is the session's midnight, which no request clock is, so a
+/// membership conjunct reading it falls closed.
+#[test]
+fn a_clock_cast_to_a_date_falls_closed_in_a_membership() {
+    let db = db_of(&membership_with("m.expires_at > now()::date"));
+    let dsl = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .model();
+    assert!(
+        dsl.contains("define can_select: no_access"),
+        "the session's midnight is no request clock:\n{dsl}"
     );
 }

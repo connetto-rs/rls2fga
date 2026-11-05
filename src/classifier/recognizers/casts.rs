@@ -1,4 +1,4 @@
-//! Casts that can rename a value compared with a request value.
+//! Casts that can rename a value compared with a request value, a literal or the clock.
 //!
 //! The model compares the value a request sends with the row's value rendered as text,
 //! while `PostgreSQL` compares whatever the casts made of both. The two agree only where
@@ -14,8 +14,8 @@ use sqlparser::ast::{BinaryOperator, Expr, InTarget};
 
 use super::session::{declared_read, set_read, sole_projection};
 use super::{
-    accessor_read, caller_renaming_cast, caller_session_attribute, is_coalesce_wrapped,
-    positional_function_arg, reads_the_caller,
+    accessor_read, caller_renaming_cast, caller_session_attribute, comparison_renaming_cast,
+    is_coalesce_wrapped, positional_function_arg, reads_the_caller,
 };
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::parser::expr::{element_type, CastChain};
@@ -88,6 +88,19 @@ pub(crate) fn renaming_casts(expr: &Expr, registry: &FunctionRegistry) -> Vec<St
         ControlFlow::<()>::Continue(())
     });
     reasons
+}
+
+/// Why the comparison `expr` cannot translate for a cast that can change a literal, the
+/// column or the clock it compares.
+///
+/// Asked of the clause's own comparison only. Inside a subquery such a conjunct stays SQL
+/// that `PostgreSQL` evaluates with its casts, so it costs the shape no correctness.
+pub(crate) fn compared_cast_reason(expr: &Expr) -> Option<String> {
+    let (operand, cast) = comparison_renaming_cast(expr)?;
+    Some(format!(
+        "{operand} is cast to {cast}, which can change the value PostgreSQL compares while \
+         the model compares it as written, so compare it uncast or as text"
+    ))
 }
 
 /// Why reading `subject` through a cast to `cast` cannot translate, and what makes it hold

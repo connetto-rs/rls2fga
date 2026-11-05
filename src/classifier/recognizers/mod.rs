@@ -42,9 +42,10 @@ pub use attribute::{
     residual_predicate,
 };
 pub(crate) use attribute::{
-    clock_offset_refusals, conjunct_reads_only_the_row, residual_predicate_reading,
+    clock_offset_refusals, comparison_renaming_cast, conjunct_reads_only_the_row,
+    residual_predicate_reading,
 };
-pub(crate) use casts::{renaming_casts, renaming_reason};
+pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use helper::recognize_declared_helper;
 pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use session::recognize_session_attribute;

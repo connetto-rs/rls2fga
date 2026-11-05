@@ -74,10 +74,17 @@ impl CastChain {
     /// An array cast is judged by its element type, since the declaration speaks of each
     /// element.
     pub(crate) fn renaming(&self, canonical_for: Option<&str>) -> Option<&str> {
+        self.renaming_beyond(canonical_for.as_slice())
+    }
+
+    /// The first cast that can rename the value, given the spellings of the types the
+    /// value already arrives canonical for.
+    pub(crate) fn renaming_beyond(&self, canonical_for: &[&str]) -> Option<&str> {
         self.0.iter().map(String::as_str).find(|cast| {
             !renders_as_text(cast)
-                && canonical_for
-                    .is_none_or(|declared| !element_type(cast).eq_ignore_ascii_case(declared))
+                && !canonical_for
+                    .iter()
+                    .any(|declared| element_type(cast).eq_ignore_ascii_case(declared))
         })
     }
 

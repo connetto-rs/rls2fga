@@ -8,6 +8,9 @@ use sqlparser::ast::{self, DataType, DateTimeField, Interval, TimezoneInfo, Valu
 /// `expires_at > now()` is decided by the row and the clock together, so it becomes a
 /// condition the authorization service evaluates per check rather than a tuple.
 pub fn attribute_request_predicate(expr: &Expr) -> Option<AttributeRequestPredicate> {
+    if comparison_renaming_cast(expr).is_some() {
+        return None;
+    }
     let Expr::BinaryOp { left, op, right } = unparenthesize(expr) else {
         return None;
     };
@@ -452,6 +455,9 @@ fn cel_duration(microseconds: u64) -> String {
 /// that turns a guard into tuples.
 pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     let expr = unparenthesize(expr);
+    if comparison_renaming_cast(expr).is_some() {
+        return None;
+    }
     if let Some((column, list)) = constant_in_list(expr) {
         return literal_list_predicate(column, list);
     }
@@ -830,11 +836,16 @@ fn mirrored(operator: AttributeOperator) -> AttributeOperator {
     }
 }
 
-/// A literal constant, and nothing a function or the clock supplies.
+/// A literal constant, and nothing a function or the clock supplies, read only through
+/// casts that keep its value.
 pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
-    let Expr::Value(value) = unwrap_cast_or_nested(expr) else {
+    let (casts, peeled) = CastChain::peeled(expr);
+    let Expr::Value(value) = peeled else {
         return None;
     };
+    if casts.renaming(None).is_some() {
+        return None;
+    }
     match &value.value {
         Value::SingleQuotedString(text) => Some(AttributeLiteral::Text(text.clone())),
         Value::Number(number, _) => Some(AttributeLiteral::Number(number.clone())),
@@ -860,6 +871,9 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     // A dump parenthesizes every conjunct, and the parentheses are not part
     // of the shape.
     let expr = unparenthesize(expr);
+    if comparison_renaming_cast(expr).is_some() {
+        return None;
+    }
     if let Expr::BinaryOp { left, op, right } = expr {
         if matches!(
             op,
@@ -1032,6 +1046,94 @@ fn is_literal_value(expr: &Expr) -> bool {
 /// falling through to Unknown.
 fn is_literal_or_temporal(expr: &Expr) -> bool {
     is_literal_value(expr) || temporal_request_side(expr).is_some()
+}
+
+/// The spellings of the request clock's own type, a cast to which leaves the clock as it
+/// is.
+const CLOCK_TYPE: &[&str] = &["timestamptz", "timestamp with time zone"];
+
+/// The operand of the comparison `expr` that `PostgreSQL` compares through a cast able to
+/// change its value, with that cast, when the comparison sets a column against literals
+/// or the request clock.
+///
+/// The tuple SQL and the request clock read each operand as written, so such a cast
+/// makes the model compare something else. A cast that renders text, or the clock cast
+/// to its own type, changes nothing.
+pub(crate) fn comparison_renaming_cast(expr: &Expr) -> Option<(&Expr, String)> {
+    match unparenthesize(expr) {
+        Expr::BinaryOp { left, op, right } if attribute_operator(op).is_some() => {
+            renaming_beside(left, [right.as_ref()])
+                .or_else(|| renaming_beside(right, [left.as_ref()]))
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => {
+            renaming_beside(left, [right.as_ref()])
+                .or_else(|| renaming_beside(right, [left.as_ref()]))
+        }
+        Expr::Between {
+            expr: column,
+            low,
+            high,
+            negated: false,
+        } => renaming_beside(column, [low.as_ref(), high.as_ref()]),
+        other => {
+            let (column, list) = constant_in_list(other)?;
+            renaming_beside(column, list)
+        }
+    }
+}
+
+/// The renaming cast among `column` and the `values` it is compared with, when `column`
+/// names a column and every value is a literal or the clock.
+fn renaming_beside<'e>(
+    column: &'e Expr,
+    values: impl IntoIterator<Item = &'e Expr, IntoIter: Clone>,
+) -> Option<(&'e Expr, String)> {
+    let values = values.into_iter();
+    if extract_column_name(column).is_none()
+        || !values
+            .clone()
+            .all(|value| is_literal_value(value) || is_clock_shaped(value))
+    {
+        return None;
+    }
+    core::iter::once(column)
+        .chain(values)
+        .find_map(operand_renaming_cast)
+}
+
+/// Whether `expr` is the clock, or the clock shifted by any interval, whatever its casts.
+fn is_clock_shaped(expr: &Expr) -> bool {
+    let expr = unwrap_cast_or_nested(expr);
+    is_well_known_temporal_function(expr) || shifted_clock(expr).is_some()
+}
+
+/// The clock operand of `now() ± interval`, read the way [`clock_shift`] reads it: the
+/// left operand, or the right one of an addition.
+fn shifted_clock(expr: &Expr) -> Option<&Expr> {
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    match op {
+        BinaryOperator::Minus | BinaryOperator::Plus if is_well_known_temporal_function(left) => {
+            Some(left)
+        }
+        BinaryOperator::Plus if is_well_known_temporal_function(right) => Some(right),
+        _ => None,
+    }
+}
+
+/// The cast around `operand` that can change its value, with the operand it wraps: any
+/// cast but text on a literal or a column, any but `timestamptz` on the clock or on a
+/// shifted clock.
+fn operand_renaming_cast(operand: &Expr) -> Option<(&Expr, String)> {
+    let (casts, peeled) = CastChain::peeled(operand);
+    if !is_clock_shaped(peeled) {
+        return casts.renaming(None).map(|cast| (operand, cast.to_string()));
+    }
+    if let Some(cast) = casts.renaming_beyond(CLOCK_TYPE) {
+        return Some((operand, cast.to_string()));
+    }
+    shifted_clock(peeled).and_then(operand_renaming_cast)
 }
 
 /// (within a statement) date/time value.
