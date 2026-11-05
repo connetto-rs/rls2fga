@@ -251,8 +251,17 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
         }
     }
 
-    let (mut body, string_body) = match (function.body_expression(), function.body()) {
-        (Some(parsed), _) => (parsed.clone(), false),
+    let parsed = match function.body_expression(db) {
+        Ok(parsed) => parsed,
+        Err(error) => {
+            return Some(refused(format!(
+                "The body of '{function_name}' does not parse back ({error}), so the call \
+                 is not expanded"
+            )))
+        }
+    };
+    let (mut body, string_body) = match (parsed, function.body()) {
+        (Some(parsed), _) => (parsed.into_owned(), false),
         (None, Some(text)) => match body_single_projection(text) {
             Some(projected) => (projected, true),
             None => {
