@@ -215,7 +215,20 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
             format!("P7 (ABAC: {attribute_part})")
         }
         PatternClass::P8Composite(Composite { op, parts }) => {
-            format!("P8 ({op:?} of {} parts)", parts.len())
+            let mut rendered = format!("P8 ({op:?} of {} parts", parts.len());
+            let grade = parts.iter().map(|part| part.confidence).min();
+            // A grade at or above `B` is the composite cap, which no part sets.
+            if let Some(grade) = grade.filter(|grade| *grade < ConfidenceLevel::B) {
+                let mut deciders = Vec::new();
+                grade_deciders(parts, grade, &mut deciders);
+                let _ = write!(rendered, ", graded {grade}");
+                for (at, decider) in deciders.into_iter().enumerate() {
+                    let joiner = if at == 0 { "" } else { " and" };
+                    let _ = write!(rendered, "{joiner} by {}", format_pattern(decider));
+                }
+            }
+            rendered.push(')');
+            rendered
         }
         PatternClass::P9AttributeCondition(AttributeCondition {
             column,
@@ -293,6 +306,24 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
             rendered
         }
         PatternClass::Unknown(UnclassifiedExpr { reason, .. }) => format!("Unknown: {reason}"),
+    }
+}
+
+/// The parts of a composite graded `grade`, reached through the nested composites that
+/// carry the same grade, so a chain of conjunctions names the part itself.
+fn grade_deciders<'p>(
+    parts: &'p [ClassifiedExpr],
+    grade: ConfidenceLevel,
+    deciders: &mut Vec<&'p crate::classifier::patterns::PatternClass>,
+) {
+    use crate::classifier::patterns::PatternClass;
+    for part in parts.iter().filter(|part| part.confidence == grade) {
+        match &part.pattern {
+            PatternClass::P8Composite(Composite { parts, .. }) => {
+                grade_deciders(parts, grade, deciders);
+            }
+            pattern => deciders.push(pattern),
+        }
     }
 }
 
@@ -503,5 +534,69 @@ CREATE POLICY p ON docs FOR SELECT USING (my_mystery(meta));
             !report.contains("other arms survive"),
             "nothing survives, so no partial wording:\n{report}"
         );
+    }
+
+    /// The report row for the USING clause `using`.
+    fn using_row(using: &str) -> String {
+        let sql = format!(
+            "
+CREATE TABLE docs(id uuid PRIMARY KEY, owner_id TEXT, expires_at TIMESTAMPTZ, meta TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT USING ({using});
+"
+        );
+        let db = parse_schema(&sql).expect("schema should parse");
+        let registry = crate::classifier::function_registry::FunctionRegistry::new();
+        let classified = crate::classifier::policy_classifier::classify_policies(&db, &registry);
+        let report = build_report(&[], &classified, ConfidenceLevel::B);
+        report
+            .lines()
+            .find(|line| line.starts_with("| p (USING)"))
+            .expect("the USING row is written")
+            .to_string()
+    }
+
+    /// A composite takes the grade of its weakest part, so its row names the parts that
+    /// set that grade, reaching through nested composites to the part itself. Without
+    /// them the operator reads only how many parts there were.
+    #[test]
+    fn a_composite_row_names_the_parts_that_set_its_grade() {
+        const CALENDAR: &str = "Unknown: INTERVAL '30 days' counts days, which PostgreSQL \
+                                adds as calendar days in the session TimeZone, so it has no \
+                                fixed CEL duration";
+        for (using, rendered) in [
+            (
+                "owner_id = current_user AND expires_at > now() - interval '30 days'",
+                format!("P8 (And of 2 parts, graded D by {CALENDAR})"),
+            ),
+            (
+                "owner_id = current_user AND (meta = 'x' AND \
+                 expires_at > now() - interval '30 days')",
+                format!("P8 (And of 2 parts, graded D by {CALENDAR})"),
+            ),
+            (
+                "expires_at > now() - interval '30 days' AND my_mystery(meta)",
+                format!(
+                    "P8 (And of 2 parts, graded D by {CALENDAR} and by Unknown: Function \
+                     'my_mystery' not in registry and body not available)"
+                ),
+            ),
+            (
+                "owner_id = current_user OR my_mystery(meta)",
+                "P8 (Or of 2 parts, graded D by Unknown: Function 'my_mystery' not in \
+                 registry and body not available)"
+                    .to_string(),
+            ),
+            (
+                "owner_id = current_user AND meta = 'x'",
+                "P8 (And of 2 parts)".to_string(),
+            ),
+        ] {
+            let row = using_row(using);
+            assert!(
+                row.starts_with(&format!("| p (USING) | {rendered} |")),
+                "`{using}` must render as `{rendered}`, got: {row}"
+            );
+        }
     }
 }
