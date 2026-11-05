@@ -432,7 +432,7 @@ fn schema_with_temporal_guards(count: usize) -> String {
             "CREATE TABLE t{index:02}(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);\n\
              ALTER TABLE t{index:02} ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY t{index:02}_sel ON t{index:02} FOR SELECT \
-             USING (expires_at > now() - interval '{offset} days');\n",
+             USING (expires_at > now() - interval '{offset} hours');\n",
             offset = index + 1,
         )
         .expect("schema writes");

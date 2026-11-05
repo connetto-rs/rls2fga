@@ -331,7 +331,7 @@ pub(crate) fn conditional_gate_expr<DB: DatabaseLike>(
 }
 
 /// The request clock as a CEL expression, shifted by a fixed offset when the guard
-/// carried one (`now() - interval '30 days'` becomes `request_time - duration("720h")`).
+/// carried one (`now() - interval '36 hours'` becomes `request_time - duration("36h")`).
 pub(crate) fn clock_expr(request_time_parameter: &str, offset: Option<&TemporalOffset>) -> String {
     match offset {
         None => request_time_parameter.to_string(),

@@ -2653,7 +2653,7 @@ CREATE POLICY docs_unexpired ON docs FOR SELECT USING ("Foo" > now());
 
 /// Ported from `interval_grace_condition_parity_postgres18_and_openfga`.
 ///
-/// A grace period spelled `now() - interval '30 days'` must survive with its offset
+/// A grace period spelled `now() - interval '720 hours'` must survive with its offset
 /// intact, so a row that expired inside the window still reads and one past it does not.
 async fn a_grace_period_keeps_its_offset(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
@@ -2661,7 +2661,7 @@ async fn a_grace_period_keeps_its_offset(cluster: Arc<Cluster>) {
         "
 CREATE TABLE docs (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_grace ON docs FOR SELECT USING (expires_at > now() - interval '30 days');
+CREATE POLICY docs_grace ON docs FOR SELECT USING (expires_at > now() - interval '720 hours');
 ",
         &[
             // Relative to the run clock: valid, expired inside the grace, past it, none.
@@ -2680,7 +2680,7 @@ CREATE POLICY docs_grace ON docs FOR SELECT USING (expires_at > now() - interval
     .also_at(
         "25 days",
         "SELECT 'app_user'::text AS subject, 'docs:' || id AS object
-         FROM docs WHERE expires_at > $1::timestamptz - interval '30 days'",
+         FROM docs WHERE expires_at > $1::timestamptz - interval '720 hours'",
     );
     let run = support::parity::run(&cluster, &case).await;
     for (object, visible) in [
@@ -2775,7 +2775,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
         FROM paper_shares s
         WHERE s.paper_id = papers.id
           AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
-          AND s.expires_at > now() - interval '30 days'
+          AND s.expires_at > now() - interval '720 hours'
     )
 );
 ",
@@ -2800,7 +2800,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
                 SELECT 1 FROM paper_shares s
                 WHERE s.paper_id = p.id
                   AND s.viewer = ANY(string_to_array(c.keys, ','))
-                  AND s.expires_at > $1::timestamptz - interval '30 days')",
+                  AND s.expires_at > $1::timestamptz - interval '720 hours')",
     );
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [

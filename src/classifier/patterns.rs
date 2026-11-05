@@ -68,7 +68,7 @@ pub struct AttributeRequestPredicate {
     pub operator: AttributeOperator,
     /// What the request supplies.
     pub request_value: RequestValue,
-    /// A fixed offset applied to the request clock, from `now() - interval '30 days'`
+    /// A fixed offset applied to the request clock, from `now() - interval '36 hours'`
     /// and its spellings. `None` when the guard compares against the bare clock.
     pub offset: Option<TemporalOffset>,
 }
@@ -81,10 +81,11 @@ pub enum RequestValue {
     StatementTimestamp,
 }
 
-/// A fixed-length shift of the request clock, lifted from a `PostgreSQL` interval.
+/// A fixed-length shift of the request clock, lifted from a `PostgreSQL` interval of
+/// microseconds alone.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TemporalOffset {
-    /// The offset as a CEL duration, such as `720h` for `interval '30 days'`.
+    /// The offset as a CEL duration, such as `36h` for `interval '36 hours'`.
     pub cel_duration: String,
     /// `true` subtracts it from the clock (`now() - interval`), `false` adds it.
     pub subtract: bool,

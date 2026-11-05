@@ -2882,7 +2882,7 @@ fn an_expiring_share_settles_from_its_row_with_the_clock_in_its_condition() {
     );
 }
 
-/// The membership arm carries a grace period, `s.expires_at > now() - interval '30 days'`.
+/// The membership arm carries a grace period, `s.expires_at > now() - interval '36 hours'`.
 /// The offset is the request clock's to apply, so it rides the condition as a duration
 /// beside the viewer set rather than filtering the query. The single-table door's tests
 /// cover the offset. This pins the shared path reaching the membership arm too.
@@ -2901,7 +2901,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
         FROM paper_shares s
         WHERE s.paper_id = papers.id
           AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
-          AND s.expires_at > now() - interval '30 days'
+          AND s.expires_at > now() - interval '36 hours'
     )
 );
 ";
@@ -2919,7 +2919,7 @@ fn a_membership_grace_window_rides_the_clock_as_a_duration() {
     let dsl = outputs.model();
     assert!(
         dsl.lines().any(|line| line
-            .contains("viewer in app_subjects && expires_at > request_time - duration(\"720h\")")),
+            .contains("viewer in app_subjects && expires_at > request_time - duration(\"36h\")")),
         "the membership condition joins the viewer set and grace offset with &&, not ||:\n{dsl}"
     );
 
@@ -2939,6 +2939,35 @@ fn a_membership_grace_window_rides_the_clock_as_a_duration() {
         ),
         "the boundary travels in the tuple context:\n{}",
         query.sql
+    );
+}
+
+/// The same arm counting its grace in days has no fixed length, since `PostgreSQL` adds a
+/// day on the calendar of the session `TimeZone`. It falls closed, and the report names the
+/// interval rather than the clock's own call.
+#[test]
+fn a_membership_grace_window_in_days_falls_closed_naming_why() {
+    let schema = GRACE_SHARE.replace("'36 hours'", "'30 days'");
+    let (db, registry) = parsed_with_session_attributes(&schema, EXPIRING_SHARE_ATTRIBUTES);
+    let outputs = translation(
+        &db,
+        &registry,
+        ConfidenceLevel::B,
+        &GeneratorSettings::default(),
+    )
+    .outputs_accepting_gaps();
+    let dsl = outputs.model();
+    assert!(
+        dsl.contains("define can_select: no_access"),
+        "a calendar window must fall closed:\n{dsl}"
+    );
+    let report = outputs.report();
+    assert!(
+        report.contains(
+            "Unknown: INTERVAL '30 days' counts days, which PostgreSQL adds as calendar days \
+             in the session TimeZone, so it has no fixed CEL duration"
+        ),
+        "the report must name the interval as the reason:\n{report}"
     );
 }
 
