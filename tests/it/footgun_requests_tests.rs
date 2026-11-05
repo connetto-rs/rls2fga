@@ -1165,6 +1165,26 @@ fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
             "request_time - duration(\"1m\")",
         ),
         (
+            "now() - '5'::interval hour",
+            "05:00:00",
+            "request_time - duration(\"5h\")",
+        ),
+        (
+            "now() - '45'::interval second",
+            "00:00:45",
+            "request_time - duration(\"45s\")",
+        ),
+        (
+            "now() - '2:03'::interval hour to minute",
+            "02:03:00",
+            "request_time - duration(\"123m\")",
+        ),
+        (
+            "now() - '2:03:04'::interval hour to second",
+            "02:03:04",
+            "request_time - duration(\"7384s\")",
+        ),
+        (
             "now() - '1:30.5'::interval minute to second(0)",
             "00:01:31",
             "request_time - duration(\"91s\")",
@@ -1343,6 +1363,41 @@ fn an_offset_without_a_fixed_length_falls_closed_naming_why() {
             "CAST('1 mon' AS interval)",
             "1 mon",
             format!("CAST('1 mon' AS INTERVAL) {MONTHS}"),
+        ),
+        (
+            "'2'::interval year",
+            "2 years",
+            format!("'2'::INTERVAL YEAR {MONTHS}"),
+        ),
+        (
+            "'3'::interval month",
+            "3 mons",
+            format!("'3'::INTERVAL MONTH {MONTHS}"),
+        ),
+        (
+            "'4'::interval day",
+            "4 days",
+            format!("'4'::INTERVAL DAY {DAYS}"),
+        ),
+        (
+            "'1-2'::interval year to month",
+            "1 year 2 mons",
+            format!("'1-2'::INTERVAL YEAR TO MONTH {MONTHS}"),
+        ),
+        (
+            "'1 2'::interval day to hour",
+            "1 day 02:00:00",
+            format!("'1 2'::INTERVAL DAY TO HOUR {DAYS}"),
+        ),
+        (
+            "'1 2:03'::interval day to minute",
+            "1 day 02:03:00",
+            format!("'1 2:03'::INTERVAL DAY TO MINUTE {DAYS}"),
+        ),
+        (
+            "'1 2:03:04'::interval day to second",
+            "1 day 02:03:04",
+            format!("'1 2:03:04'::INTERVAL DAY TO SECOND {DAYS}"),
         ),
         (
             "'fortnight'::interval",
