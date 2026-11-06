@@ -11,5 +11,5 @@ SELECT 'docs:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text EL
 FROM "public"."docs"
 WHERE "id" IS NOT NULL;
 
--- Scope scope_member_editor_89c73e0a admits PostgreSQL role 'editor', which the policy decides rather than any row
+-- Scope scope_member_editor_89c73e0a admits PostgreSQL role 'editor', which the schema decides rather than any row
 SELECT 'pg_role_scope:scope_member_editor_89c73e0a' AS object, 'roles' AS relation, 'pg_role:editor' AS subject;

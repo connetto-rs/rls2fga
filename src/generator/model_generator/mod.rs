@@ -15,8 +15,12 @@ use crate::generator::db_lookup::{
 use crate::generator::identity::MAX_OBJECT_NAME_CHARS;
 use crate::generator::ir::{GateContextColumn, MembershipGate, PrincipalInfo, TupleSource};
 use crate::generator::notes::SkippedTuples;
+use crate::generator::privileges::{
+    holders_by_command, read_table_privileges, ReadPrivileges, TableCommand,
+};
 use crate::generator::role_relations::{sorted_role_relation_names, RoleRelationName};
 use crate::generator::tuple_generator::{resolve_bridge_columns, UnboundedColumns};
+use crate::generator::unrestricted::unrestricted_tables;
 use crate::generator::well_known::{
     blocked_relation, can_delete_relation, can_insert_relation, can_insert_returning_relation,
     can_select_for_update_relation, can_select_relation, can_update_check_relation,
@@ -39,7 +43,8 @@ use crate::parser::sql_parser::{
 };
 use crate::types::{
     stable_hex_suffix, ColumnKind, ColumnName, ConditionName, ConditionParameterName,
-    ContextWitness, RelationName, RequestComparison, TableId, TranslationNote, TypeName,
+    ContextWitness, PrivilegeHolders, RelationName, RequestComparison, TableId, TablePrivileges,
+    TranslationNote, TypeName, UnrestrictedTable,
 };
 
 /// Which relation a command reads, and how a policy's clauses reach it.
@@ -598,6 +603,8 @@ pub struct GeneratorSettings {
     /// The roles every caller runs as, against which each `TO` clause is settled.
     /// Without them a `TO` clause asks the consumer to load every role it names.
     pub caller_roles: Option<CallerRoles>,
+    /// Whether each action also requires its command's table privilege, read from the schema's grants.
+    pub table_privileges: bool,
 }
 
 impl Default for GeneratorSettings {
@@ -607,6 +614,7 @@ impl Default for GeneratorSettings {
             well_known: WellKnownTypes::default(),
             caller_set: CallerSetCompletion::Request,
             caller_roles: None,
+            table_privileges: false,
         }
     }
 }
@@ -635,6 +643,8 @@ pub(crate) struct SchemaPlan {
     /// Conditions any relation reference names, keyed by name.
     pub conditions: BTreeMap<ConditionName, ConditionSpec>,
     pub well_known: WellKnownTypes,
+    /// Tables row-level security is off on, read once with their privileges.
+    pub unrestricted_tables: Vec<UnrestrictedTable>,
 }
 
 /// Why a translation cannot be planned.
@@ -1022,6 +1032,13 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 // source can be emitted for it. Resolved once here rather than per policy.
                 let object_identifier = resolve_row_identity(&source_table, db);
 
+                // An RLS-off table has no type, and the unrestricted report reads its privileges.
+                let privileges = if settings.table_privileges {
+                    lookup_table_id(db, &source_table).map(|table| read_table_privileges(table, db))
+                } else {
+                    None
+                };
+
                 // UPDATE and DELETE name the row they change, so a denied read closes them.
                 // INSERT does not name a row, and the read is the gate itself.
                 let write_targets: BTreeSet<ActionTarget> = table_policies
@@ -1111,6 +1128,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     &action_buckets,
                     &recursive_targets,
                     update_check_was_filtered,
+                    privileges.as_ref(),
                 );
 
                 if let Some(declared_permissive) = &declared_permissive {
@@ -1177,6 +1195,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
 
     let types = ordered_types(all_types, &settings.well_known.user);
     let conditions = surviving_conditions(&types)?;
+    let unrestricted_tables = unrestricted_tables(db, settings, &mut notes);
 
     let plan = SchemaPlan {
         types,
@@ -1184,6 +1203,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         confidence_summary,
         conditions,
         well_known: settings.well_known.clone(),
+        unrestricted_tables,
     };
     crate::generator::model_bounds::check(&crate::generator::json_model::json_model_from_plan(
         &plan,
@@ -1518,6 +1538,7 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
         action_buckets: &BTreeMap<ActionTarget, ModeBuckets>,
         recursive_targets: &BTreeMap<ActionTarget, &[String]>,
         update_check_was_filtered: bool,
+        privileges: Option<&ReadPrivileges>,
     ) -> BTreeSet<&'static str> {
         let mut select_expr = compose_action(self.plan, action_buckets.get(&ActionTarget::Select));
         let mut insert_expr = compose_action(self.plan, action_buckets.get(&ActionTarget::Insert));
@@ -1538,6 +1559,38 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
         {
             update_using_expr = None;
             update_check_expr = None;
+        }
+
+        if let Some(read) = privileges {
+            // A rule granting nobody already denies, so its privilege neither gates it nor
+            // narrows it.
+            let admits = |rule: Option<&UsersetExpr>| {
+                rule.is_some_and(|rule| !grants_nothing(rule, self.plan, &mut BTreeSet::new()))
+            };
+            let admitted: Vec<TableCommand> = [
+                (TableCommand::Select, admits(select_expr.as_ref())),
+                (TableCommand::Insert, admits(insert_expr.as_ref())),
+                (TableCommand::Update, admits(update_using_expr.as_ref())),
+                (TableCommand::Delete, admits(delete_expr.as_ref())),
+            ]
+            .into_iter()
+            .filter_map(|(command, admits)| admits.then_some(command))
+            .collect();
+            read.note_gaps(&admitted, self.notes);
+            let settled = read.settled(
+                self.settings.caller_roles.as_ref(),
+                self.db,
+                &admitted,
+                self.notes,
+            );
+            let gates = self.privilege_gates(&settled, &admitted);
+            select_expr = select_expr.map(|rule| self.gated(&gates, TableCommand::Select, rule));
+            insert_expr = insert_expr.map(|rule| self.gated(&gates, TableCommand::Insert, rule));
+            update_using_expr =
+                update_using_expr.map(|rule| self.gated(&gates, TableCommand::Update, rule));
+            update_check_expr = update_check_expr
+                .map(|check| check.map(|rule| self.gated(&gates, TableCommand::Update, rule)));
+            delete_expr = delete_expr.map(|rule| self.gated(&gates, TableCommand::Delete, rule));
         }
 
         // One note per loop, naming the commands it denies. A command denies as soon as
@@ -1622,6 +1675,96 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
         }
         blocked_commands
     }
+
+    /// The gate each admitted command's rule passes through, one scope per distinct role set.
+    ///
+    /// Applied before the derived relations, so `can_update` and `can_delete` inherit the
+    /// `SELECT` gate through the read they already require, as `PostgreSQL` does.
+    fn privilege_gates(
+        &mut self,
+        privileges: &TablePrivileges,
+        admitted: &[TableCommand],
+    ) -> BTreeMap<TableCommand, PrivilegeGate> {
+        let mut by_roles: BTreeMap<&[String], Vec<TableCommand>> = BTreeMap::new();
+        let mut gates = BTreeMap::new();
+        for (command, holders) in holders_by_command(privileges) {
+            if !admitted.contains(&command) {
+                continue;
+            }
+            match holders {
+                PrivilegeHolders::Everyone => {
+                    gates.insert(command, PrivilegeGate::Open);
+                }
+                PrivilegeHolders::Roles(roles) if roles.is_empty() => {
+                    gates.insert(command, PrivilegeGate::Closed);
+                }
+                PrivilegeHolders::Roles(roles) => {
+                    by_roles.entry(roles.as_slice()).or_default().push(command);
+                }
+            }
+        }
+        let walked = RolePrivilege::Usage.relation_name();
+        for (roles, commands) in by_roles {
+            let relation = role_scope_name(walked.as_str(), roles);
+            let filled = register_pg_role_scope(
+                self.plan,
+                &mut *self.other_types,
+                self.notes,
+                self.source_table,
+                self.db,
+                RoleScopeSpec {
+                    scope_relation: &relation,
+                    walked: &walked,
+                    role_names: roles,
+                    scope_note: TranslationNote::TablePrivilegeScope {
+                        table: self.source_table.clone(),
+                        commands: commands
+                            .iter()
+                            .map(|command| command.as_str().to_string())
+                            .collect(),
+                        roles: roles.to_vec(),
+                        relation: relation.clone(),
+                    },
+                    missing_object_what: "table privilege scope tuples",
+                },
+            );
+            // A scope no tuple can fill admits nobody, like a command nobody holds.
+            let gate = if filled {
+                PrivilegeGate::Scope(relation)
+            } else {
+                PrivilegeGate::Closed
+            };
+            for command in commands {
+                gates.insert(command, gate.clone());
+            }
+        }
+        gates
+    }
+
+    /// `rule` behind the gate of `command`.
+    fn gated(
+        &mut self,
+        gates: &BTreeMap<TableCommand, PrivilegeGate>,
+        command: TableCommand,
+        rule: UsersetExpr,
+    ) -> UsersetExpr {
+        match gates.get(&command) {
+            Some(PrivilegeGate::Scope(relation)) => scoped_policy_expr(rule, relation),
+            Some(PrivilegeGate::Closed) => deny_expr(self.plan),
+            Some(PrivilegeGate::Open) | None => rule,
+        }
+    }
+}
+
+/// What a command's table privilege adds to its rule.
+#[derive(Debug, Clone)]
+enum PrivilegeGate {
+    /// Granted to `PUBLIC`, so nothing.
+    Open,
+    /// Held by nobody the model can name, so the rule admits nobody.
+    Closed,
+    /// Held by the roles this scope relation lists.
+    Scope(RelationName),
 }
 
 /// What the policy loop already settled about each SQL command, so coverage reporting reads

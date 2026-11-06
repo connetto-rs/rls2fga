@@ -1729,9 +1729,9 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
-        // No `FROM`: which roles a scope admits is a fact about the policy, so the query
-        // yields its one row whatever any table holds, and the load no longer scans a
-        // table per role to find out.
+        // No `FROM`: which roles a scope admits is a fact about the schema, a policy's `TO`
+        // clause or a table's grants, so the query yields its one row whatever any table
+        // holds, and the load no longer scans a table per role to find out.
         TupleSource::PolicyScopeRoles {
             scope_type,
             scope_object,
@@ -1743,7 +1743,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             Some(TupleQuery {
                 comment: format!(
                     "-- Scope {scope_object} admits PostgreSQL role '{pg_role}', which the \
-                     policy decides rather than any row"
+                     schema decides rather than any row"
                 ),
                 sql: format!(
                     "SELECT {object_sql} AS object, \

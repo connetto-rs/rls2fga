@@ -20,6 +20,8 @@ pub(crate) mod notes;
 // `policy_reads` carries its own module documentation.
 pub(crate) mod policy_reads;
 pub(crate) mod relations;
+// `privileges` carries its own module documentation.
+pub(crate) mod privileges;
 /// Shared helpers for stable and valid role-based relation naming.
 pub(crate) mod role_relations;
 pub(crate) mod row_naming;

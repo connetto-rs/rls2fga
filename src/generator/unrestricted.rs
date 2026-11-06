@@ -10,16 +10,18 @@
 //! canonicalize alike, and a consumer keying answers by type name would then read a
 //! guarded table as open.
 //!
-//! Row filters only. Table privileges are outside everything this crate reads, so a
-//! `REVOKE` that leaves nobody able to read the table is not what this reports on.
+//! Row filters first. Where the translation models table privileges, each entry also says
+//! who holds each command, since a role lacking the privilege is refused every row.
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeSet;
 
+use crate::generator::model_generator::GeneratorSettings;
+use crate::generator::privileges::{read_table_privileges, TableCommand};
 use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, TableLike};
-use crate::types::{TableId, UnrestrictedTable};
+use crate::types::{TableId, TranslationNote, UnrestrictedTable};
 
 /// Whether row-level security is positively known to be off on this table.
 ///
@@ -73,16 +75,37 @@ fn restricted_through_an_ancestor<DB: DatabaseLike>(table: &DB::Table, db: &DB) 
     }
 }
 
-/// One entry per table row-level security is off on, in table order.
+/// One entry per table row-level security is off on, in table order, with its privileges
+/// where `settings` models them, settled against its caller roles where it names them.
 ///
 /// Read from the schema rather than from the plan, so a table the model gives a type to
 /// and one it never reaches are both here.
-pub(crate) fn unrestricted_tables<DB: DatabaseLike>(db: &DB) -> Vec<UnrestrictedTable> {
-    let mut entries: Vec<UnrestrictedTable> = db
+pub(crate) fn unrestricted_tables<DB: DatabaseLike>(
+    db: &DB,
+    settings: &GeneratorSettings,
+    notes: &mut Vec<TranslationNote>,
+) -> Vec<UnrestrictedTable> {
+    let mut tables: Vec<(TableId, &DB::Table)> = db
         .tables()
         .filter(|table| restricts_nothing_by_any_route(*table, db))
-        .map(|table| UnrestrictedTable::new(table_identity(table)))
+        .map(|table| (table_identity(table), table))
         .collect();
-    entries.sort_by(|left, right| left.table.cmp(&right.table));
-    entries
+    tables.sort_by(|left, right| left.0.cmp(&right.0));
+    tables
+        .into_iter()
+        .map(|(identity, table)| {
+            let privileges = settings.table_privileges.then(|| {
+                let read = read_table_privileges(table, db);
+                // Nothing restricts a row, so every command reaches its privilege check.
+                read.note_gaps(&TableCommand::ALL, notes);
+                read.settled(
+                    settings.caller_roles.as_ref(),
+                    db,
+                    &TableCommand::ALL,
+                    notes,
+                )
+            });
+            UnrestrictedTable::new(identity, privileges)
+        })
+        .collect()
 }
