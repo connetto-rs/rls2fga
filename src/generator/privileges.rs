@@ -372,3 +372,37 @@ pub(crate) fn read_table_privileges<DB: DatabaseLike>(
         gaps: [select_gaps, insert_gaps, update_gaps, delete_gaps],
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use sqlparser::ast::{Ident, ObjectName, ObjectNamePart, ObjectNamePartFunction};
+
+    use super::*;
+
+    /// Grantee shapes other dialects parse, which name a holder and never widen to `PUBLIC`.
+    #[test]
+    fn a_grantee_postgresql_cannot_spell_stays_a_named_holder() {
+        let user_host = Grantee {
+            grantee_type: GranteesType::None,
+            name: Some(GranteeName::UserHost {
+                user: Ident::with_quote('\'', "root"),
+                host: Ident::with_quote('\'', "%"),
+            }),
+        };
+        let computed = Grantee {
+            grantee_type: GranteesType::None,
+            name: Some(GranteeName::ObjectName(ObjectName(vec![
+                ObjectNamePart::Function(ObjectNamePartFunction {
+                    name: Ident::new("IDENTIFIER"),
+                    args: Vec::new(),
+                }),
+            ]))),
+        };
+        for grantee in [user_host, computed] {
+            assert!(
+                matches!(resolve_grantee(&grantee), Resolved::Role(spelling) if spelling == grantee.to_string()),
+                "{grantee}"
+            );
+        }
+    }
+}

@@ -255,6 +255,79 @@ GRANT SELECT ON docs TO reader;
     assert!(translation.outputs().is_ok());
 }
 
+#[test]
+fn public_spelled_as_a_group_or_quoted_is_read_as_postgresql_resolves_it() {
+    let translation = translate(
+        r#"
+CREATE TABLE docs (id TEXT PRIMARY KEY);
+GRANT SELECT ON docs TO GROUP public;
+GRANT INSERT ON docs TO "public";
+GRANT UPDATE ON docs TO "Reader";
+GRANT DELETE ON docs TO Reader;
+"#,
+        true,
+    );
+    assert_eq!(
+        translation.unrestricted_tables()[0].privileges,
+        Some(TablePrivileges {
+            select: PrivilegeHolders::Everyone,
+            insert: roles(&["public"]),
+            update: roles(&["Reader"]),
+            delete: roles(&["reader"]),
+        })
+    );
+}
+
+#[test]
+fn a_column_grant_to_public_narrows_and_names_public() {
+    let translation = translate(
+        "
+CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (true);
+CREATE POLICY docs_write ON docs FOR UPDATE USING (true);
+GRANT SELECT ON docs TO PUBLIC;
+GRANT UPDATE (body) ON docs TO PUBLIC;
+",
+        true,
+    );
+    assert!(translation
+        .notes()
+        .contains(&TranslationNote::ColumnPrivilegeOnly {
+            table: docs(),
+            command: "UPDATE".to_string(),
+            roles: vec!["PUBLIC".to_string()],
+        }));
+    assert_eq!(
+        answer(&translation, "docs", ActionStatement::Update),
+        ActionAnswer::Denied
+    );
+}
+
+#[test]
+fn an_owner_bound_by_the_rules_loses_a_privilege_revoked_from_it() {
+    let translation = translate(
+        "
+CREATE TABLE docs (id TEXT PRIMARY KEY);
+ALTER TABLE docs OWNER TO app_owner;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE docs FORCE ROW LEVEL SECURITY;
+CREATE POLICY docs_all ON docs USING (true) WITH CHECK (true);
+GRANT SELECT, UPDATE ON docs TO reader;
+REVOKE UPDATE ON docs FROM app_owner;
+",
+        true,
+    );
+    assert_eq!(
+        scope_roles(&translation, "SELECT"),
+        [vec!["app_owner".to_string(), "reader".to_string()]]
+    );
+    assert_eq!(
+        scope_roles(&translation, "UPDATE"),
+        [vec!["reader".to_string()]]
+    );
+}
+
 fn translate_for_callers(sql: &str, callers: &[&str]) -> Translation {
     let db = parse_schema(sql).expect("schema parses");
     TranslatorBuilder::new()
@@ -319,5 +392,31 @@ CREATE POLICY docs_all ON docs USING (true) WITH CHECK (true);
     assert_eq!(
         scope_roles(&translation, "INSERT"),
         [vec!["authenticated".to_string()]]
+    );
+}
+
+#[test]
+fn a_holder_reaching_every_caller_role_opens_and_one_reaching_none_drops_out() {
+    let translation = translate_for_callers(
+        "
+CREATE ROLE anon NOLOGIN;
+CREATE ROLE authenticated NOLOGIN;
+CREATE ROLE members NOLOGIN;
+CREATE ROLE support_staff NOLOGIN;
+GRANT members TO anon, authenticated;
+CREATE TABLE docs (id TEXT PRIMARY KEY);
+GRANT SELECT ON docs TO members;
+GRANT DELETE ON docs TO support_staff, authenticated;
+",
+        &["anon", "authenticated"],
+    );
+    assert_eq!(
+        translation.unrestricted_tables()[0].privileges,
+        Some(TablePrivileges {
+            select: PrivilegeHolders::Everyone,
+            insert: roles(&[]),
+            update: roles(&[]),
+            delete: roles(&["authenticated"]),
+        })
     );
 }
