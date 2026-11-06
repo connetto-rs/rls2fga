@@ -285,6 +285,30 @@ fn a_membership_table_no_caller_role_reads_grants_nothing() {
 }
 
 #[test]
+fn a_membership_table_guarded_for_everyone_stays_guarded_under_caller_roles() {
+    let outputs = kinds(&membership("public").replace(
+        "TO public USING (true)",
+        "USING (user_id = current_setting('app.user_id', true))",
+    ));
+    let notes = notes_about(&outputs, "shared");
+    assert!(
+        notes
+            .iter()
+            .any(|note| matches!(note, TranslationNote::MembershipTableGuarded { .. }))
+            && !notes
+                .iter()
+                .any(|note| matches!(note, TranslationNote::MembershipTableGrantsNoReads { .. })),
+        "{notes:#?}"
+    );
+    assert_eq!(
+        pg_roles_named(&outputs),
+        BTreeSet::new(),
+        "{}",
+        outputs.model()
+    );
+}
+
+#[test]
 fn an_unsettled_membership_read_role_is_refused() {
     let outputs = kinds(&membership("ghost"));
     assert_eq!(
