@@ -7,7 +7,9 @@
 //! answers a different question there than `PostgreSQL` answers at check time.
 
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::types::{ConfidenceLevel, RecordDerivation};
+use rls2fga::types::{
+    AttributeLiteral, AttributeOperator, AttributeTest, ConfidenceLevel, Guard, RecordDerivation,
+};
 
 use crate::support::footgun::{db_of, translator};
 
@@ -247,41 +249,68 @@ fn a_bare_clock_comparison_still_becomes_a_condition() {
     );
 }
 
-/// A membership conjunct cast so the value can change stays SQL with its cast, which the
-/// loader's `PostgreSQL` evaluates as the policy does. Read from the row instead, the
-/// record would compare `score` with 2.7 where the policy compares it with 3.
-#[test]
-fn a_value_changing_cast_keeps_the_conjunct_in_sql() {
-    let db = db_of(&membership_with("m.score >= 2.7::int"));
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
+/// The `doc_members` query of the membership whose extra conjunct is `conjunct`.
+fn member_query(conjunct: &str) -> rls2fga::generator::tuple_generator::TupleQuery {
+    translator(ConfidenceLevel::B)
+        .translate(&db_of(&membership_with(conjunct)))
         .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let members = outputs
+        .outputs_accepting_gaps()
         .tuple_queries()
         .iter()
-        .filter_map(|query| {
-            query
-                .description
-                .as_ref()
-                .map(|description| (query, description))
+        .find(|query| {
+            query.description.as_ref().is_some_and(|description| {
+                description
+                    .tables
+                    .iter()
+                    .any(|table| table.name() == "doc_members")
+            })
         })
-        .find(|(_, description)| {
-            description
-                .tables
-                .iter()
-                .any(|table| table.name() == "doc_members")
-        })
-        .expect("the membership still loads");
+        .cloned()
+        .expect("the membership still loads")
+}
+
+/// A membership conjunct whose literal cast `sql-values` computes replays from the row
+/// against the value `PostgreSQL` compares, 3 for `2.7::int`. Against the uncast 2.7, a
+/// member scoring 3 would be refused although the policy admits it.
+#[test]
+fn a_folded_literal_cast_replays_against_the_cast_value() {
+    let query = member_query("m.score = 2.7::int");
+    let description = query.description.as_ref().expect("the query is described");
+    let RecordDerivation::FromRow { guards, .. } = &description.derivation else {
+        panic!(
+            "the row alone decides the folded comparison: {:?}",
+            description.derivation
+        );
+    };
+    let folded = AttributeTest::Compare {
+        operator: AttributeOperator::Eq,
+        value: AttributeLiteral::Number("3".to_string()),
+    };
     assert!(
-        members.0.sql.contains("score >= 2.7::INT"),
-        "the cast stays for the loader to evaluate:\n{}",
-        members.0.sql
+        guards.iter().any(|guard| matches!(
+            guard,
+            Guard::Compare { predicate, .. }
+                if predicate.column == "score" && predicate.test == folded
+        )),
+        "the row is compared with 3: {guards:?}"
     );
+}
+
+/// A membership conjunct whose cast this cannot compute stays SQL with its cast, which the
+/// loader's `PostgreSQL` evaluates as the policy does, and no record replays from the row.
+#[test]
+fn an_unfolded_cast_keeps_the_conjunct_in_sql() {
+    let query = member_query("m.local_at < '2030-01-01 12:00'::date");
     assert!(
-        !matches!(members.1.derivation, RecordDerivation::FromRow { .. }),
+        query.sql.contains("local_at < '2030-01-01 12:00'::DATE"),
+        "the cast stays for the loader to evaluate:\n{}",
+        query.sql
+    );
+    let description = query.description.as_ref().expect("the query is described");
+    assert!(
+        !matches!(description.derivation, RecordDerivation::FromRow { .. }),
         "no record may be derived from the row against the uncast literal: {:?}",
-        members.1.derivation
+        description.derivation
     );
 }
 
