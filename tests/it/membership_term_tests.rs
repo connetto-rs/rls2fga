@@ -1131,12 +1131,17 @@ fn a_membership_table_narrowing_the_role_is_refused_naming_it() {
         "team_members FOR ALL USING (true)",
         "team_members FOR ALL TO bot USING (true)",
     );
+    let cap_at_ddl_time = TEAMS.replace(
+        "AS RESTRICTIVE FOR SELECT TO bot",
+        "AS RESTRICTIVE FOR SELECT TO bot, CURRENT_USER",
+    );
     for (schema, role, expected) in [
         (TEAMS, Some("bot"), "'team_members' carries read rules for role bot, so the same filter run as SQL answers differently for a reader they narrow"),
         (TEAMS, Some("bot_installation"), "'team_members' carries read rules for role bot_installation"),
         (TEAMS, None, "'team_members' carries its own read rules"),
         (narrowing_open.as_str(), Some("authenticated"), "'team_members' carries read rules for role authenticated"),
         (scoped_open.as_str(), Some("authenticated"), "'team_members' carries read rules for role authenticated"),
+        (cap_at_ddl_time.as_str(), Some("authenticated"), "'team_members' carries read rules for role authenticated"),
     ] {
         match team_term(schema, role) {
             Ok(shapes) => panic!("{role:?}: compiled to {:?}", shapes.chain),

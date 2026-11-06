@@ -199,11 +199,10 @@ fn reach<P: PolicyLike>(policy: &P, callers: Option<&CallerRoles>, db: &P::DB) -
     let Some(callers) = callers else {
         return Reach::Some;
     };
-    let named = derive_scoped_roles(policy, db);
-    if named.is_empty() || !derive_ddl_time_scoped_roles(policy, db).is_empty() {
+    if !derive_ddl_time_scoped_roles(policy, db).is_empty() {
         return Reach::Some;
     }
-    match callers.settle(&named, db) {
+    match callers.settle(&derive_scoped_roles(policy, db), db) {
         Settlement::Everyone => Reach::Everyone,
         Settlement::Nobody => Reach::Nobody,
         Settlement::Callers(_) | Settlement::Unsettled(_) => Reach::Some,
