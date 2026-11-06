@@ -335,12 +335,12 @@ fn listed_roles_expand_into_one_membership_each() {
     }
 }
 
-/// A far list item cast so its value can change is not the literal written, so the list
-/// keeps its casts as one SQL condition. Deduplicated by the uncast value, the two items
-/// below collapsed into `role = 'read'::char(2)` alone, which denies a membership whose
-/// role is `'read'` although the policy's second item grants it.
+/// Far list items are told apart by the value `PostgreSQL` compares, so `'read'::char(2)`,
+/// which is `'re'`, and `'read'` stay two memberships. Told apart by the uncast value, the
+/// two collapsed into `role = 'read'::char(2)` alone, which denies a membership whose role
+/// is `'read'` although the policy's second item grants it.
 #[test]
-fn a_recast_far_list_item_keeps_the_list_in_sql() {
+fn a_recast_far_list_item_keeps_its_own_membership() {
     let c = classify(
         "EXISTS (
         SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
@@ -349,10 +349,17 @@ fn a_recast_far_list_item_keeps_the_list_in_sql() {
             AND role IN ('read'::char(2), 'read')))",
     );
     let p19 = p19(&c);
-    assert_eq!(p19.memberships.len(), 1, "the list stays one condition");
+    let conditions: Vec<_> = p19
+        .memberships
+        .iter()
+        .map(|membership| membership.extra_predicates.sql())
+        .collect();
     assert_eq!(
-        p19.memberships[0].extra_predicates.sql(),
-        Some("role IN ('read'::CHAR(2), 'read')".to_string())
+        conditions,
+        [
+            Some("role = 'read'::CHAR(2)".to_string()),
+            Some("role = 'read'".to_string())
+        ]
     );
 }
 

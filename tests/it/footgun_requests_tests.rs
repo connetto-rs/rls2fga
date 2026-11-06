@@ -1484,24 +1484,28 @@ fn interval_offsets_carry_across_spellings() {
 
 /// The schema the cast tests guard, one column per family a cast can rename.
 const CAST_GUARDED: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, \
-                            level NUMERIC, amount NUMERIC, code TEXT, \
+                            level NUMERIC, amount NUMERIC, code TEXT, flag BOOLEAN, \
                             starts_on TIMESTAMP, expires_at TIMESTAMPTZ);\n\
                             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n";
 
 /// A cast that can change a compared value makes `PostgreSQL` compare something other
-/// than the literal, the column or the clock as written. The tuple SQL and the request
-/// clock read them as written, so each falls closed and the report names the cast.
-/// Beside each is a row `PostgreSQL` 18.6 and the uncast reading answer differently.
+/// than the column or the clock as written, or a literal whose cast this cannot compute.
+/// The tuple SQL and the request clock read them as written, so each falls closed and the
+/// report names the cast. Beside each is what `PostgreSQL` 18.6 answers differently.
 #[test]
 fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
     const CHANGES: &str = "which can change the value PostgreSQL compares while the model \
                            compares it as written, so compare it uncast or as text";
     for (guard, diverging_row, cast) in [
-        ("level >= 2.7::int", "level 2.8", "2.7::INT is cast to int"),
         (
-            "level >= CAST(2.7 AS integer)",
-            "level 2.8",
-            "CAST(2.7 AS INTEGER) is cast to integer",
+            "level >= '2.5'::int",
+            "every row, PostgreSQL raising invalid input syntax for type integer",
+            "'2.5'::INT is cast to int",
+        ),
+        (
+            "level >= 2.7::text::int",
+            "every row, PostgreSQL raising invalid input syntax for type integer",
+            "2.7::TEXT::INT is cast to int",
         ),
         (
             "amount::int > 5",
@@ -1509,24 +1513,39 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
             "amount::INT is cast to int",
         ),
         (
-            "code = 'abc'::char(2)",
-            "code 'ab'",
-            "'abc'::CHAR(2) is cast to char(2)",
+            "level = 'NaN'::numeric",
+            "no bare SQL number, the cast being NaN",
+            "'NaN'::NUMERIC is cast to numeric",
         ),
         (
-            "code IN ('abc'::char(2), 'x')",
-            "code 'ab'",
-            "'abc'::CHAR(2) is cast to char(2)",
+            "level >= true::int",
+            "every row as level >= 1, the uncast true not comparing with a number",
+            "true::INT is cast to int",
         ),
         (
-            "code = 'ab'::varchar(1)",
-            "code 'a'",
-            "'ab'::VARCHAR(1) is cast to varchar(1)",
+            "code = 'ab'::varchar(MAX)",
+            "every row, PostgreSQL refusing the type at MAX",
+            "'ab'::VARCHAR(MAX) is cast to varchar(max)",
+        ),
+        (
+            "level >= 1::numeric(0,0)",
+            "every row, PostgreSQL refusing NUMERIC precision 0",
+            "1::NUMERIC(0,0) is cast to numeric(0,0)",
+        ),
+        (
+            "starts_on < '2030-01-01 00:00:00+02'::timestamptz",
+            "starts_on 2029-12-31 23:00, false under UTC and true under Europe/Athens",
+            "'2030-01-01 00:00:00+02'::TIMESTAMPTZ is cast to timestamptz",
         ),
         (
             "starts_on < '2026-01-01 23:00'::date",
             "starts_on 2026-01-01 12:00",
             "'2026-01-01 23:00'::DATE is cast to date",
+        ),
+        (
+            "starts_on < '2026-01-01 23:00:00.6'::timestamp(0)",
+            "starts_on 2026-01-01 23:00:00.8, the cast rounding to 23:00:01",
+            "'2026-01-01 23:00:00.6'::TIMESTAMP(0) is cast to timestamp(0)",
         ),
         (
             "expires_at > now()::date",
@@ -1578,6 +1597,73 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
                 "| q (USING) | P8 (And of 2 parts, graded D by Unknown: {reason}) |"
             )),
             "the conjunction must name the cast too:\n{report}"
+        );
+    }
+}
+
+/// A literal cast once to a type whose cast `sql-values` computes compares as the value
+/// `PostgreSQL` 18.6 makes of it, so the tuple SQL carries that value. Each folded guard
+/// answered every row of a sample the same way as the cast one on 18.6.
+#[test]
+fn a_literal_cast_folds_into_the_value_postgresql_compares() {
+    for (guard, stored, fragment) in [
+        ("level >= 2.7::int", "3", "AND \"level\" >= 3;"),
+        ("level >= CAST(2.7 AS integer)", "3", "AND \"level\" >= 3;"),
+        ("level = 2.5::bigint", "3", "AND \"level\" = 3;"),
+        ("level >= '07'::smallint", "7", "AND \"level\" >= 7;"),
+        (
+            "level >= '12.345'::numeric(4,1)",
+            "12.3",
+            "AND \"level\" >= 12.3;",
+        ),
+        ("code = 'abc'::char(2)", "ab", "AND \"code\" = 'ab';"),
+        (
+            "code = 'ab'::char(4)",
+            "ab followed by two blanks",
+            "AND \"code\" = 'ab';",
+        ),
+        (
+            "code IN ('abc'::char(2), 'x')",
+            "ab",
+            "AND \"code\" IN ('ab', 'x');",
+        ),
+        ("code = 'ab'::varchar(1)", "a", "AND \"code\" = 'a';"),
+        ("flag = 'yes'::boolean", "t", "AND \"flag\" = TRUE;"),
+        ("flag = 'on'::bool", "t", "AND \"flag\" = TRUE;"),
+        ("level >= '7'::int2", "7", "AND \"level\" >= 7;"),
+        ("level >= '7'::int4", "7", "AND \"level\" >= 7;"),
+        ("level >= '7'::int8", "7", "AND \"level\" >= 7;"),
+        (
+            "level >= 12.345::dec(4,1)",
+            "12.3",
+            "AND \"level\" >= 12.3;",
+        ),
+        (
+            "level >= 12.345::decimal(4,1)",
+            "12.3",
+            "AND \"level\" >= 12.3;",
+        ),
+        ("level >= 12.5::numeric(3)", "13", "AND \"level\" >= 13;"),
+        ("code = 'ab'::char varying(1)", "a", "AND \"code\" = 'a';"),
+        (
+            "code = 'ab'::character varying(1)",
+            "a",
+            "AND \"code\" = 'a';",
+        ),
+        ("code = 'abc'::character(2)", "ab", "AND \"code\" = 'ab';"),
+        ("code = 'ab'::char", "a", "AND \"code\" = 'a';"),
+        ("code = $$abc$$::char(2)", "ab", "AND \"code\" = 'ab';"),
+    ] {
+        let (dsl, tuples) = translation(&format!(
+            "{CAST_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"
+        ));
+        assert!(
+            tuples.contains(fragment),
+            "`{guard}` casts to {stored}, so its tuples must read `{fragment}`:\n{tuples}"
+        );
+        assert!(
+            !dsl.contains("define can_select: no_access"),
+            "`{guard}` must translate:\n{dsl}"
         );
     }
 }

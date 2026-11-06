@@ -836,15 +836,15 @@ fn mirrored(operator: AttributeOperator) -> AttributeOperator {
     }
 }
 
-/// A literal constant, and nothing a function or the clock supplies, read only through
-/// casts that keep its value.
+/// A literal constant, and nothing a function or the clock supplies, read through casts
+/// that keep its value or as the value a cast `sql-values` computes makes of it.
 pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
     let (casts, peeled) = CastChain::peeled(expr);
     let Expr::Value(value) = peeled else {
         return None;
     };
     if casts.renaming(None).is_some() {
-        return None;
+        return folded_literal(expr);
     }
     match &value.value {
         Value::SingleQuotedString(text) => Some(AttributeLiteral::Text(text.clone())),
@@ -852,6 +852,105 @@ pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
         Value::Boolean(flag) => Some(AttributeLiteral::Boolean(*flag)),
         _ => None,
     }
+}
+
+/// The value `PostgreSQL` makes of a literal cast once, as the literal that compares like
+/// it, or `None` for any other chain of casts or a cast `sql-values` does not compute.
+///
+/// A date or time result is not folded, since how it compares with a zoned column depends
+/// on the session's `TimeZone`, and `char(n)` reads without the blank padding its cast to
+/// `text` drops.
+fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
+    let mut casts = 0_usize;
+    let mut outermost = None;
+    let peeled = peel_noting_casts(expr, |data_type| {
+        casts += 1;
+        outermost.get_or_insert(data_type);
+    });
+    let (1, Some(data_type)) = (casts, outermost) else {
+        return None;
+    };
+    let Expr::Value(ValueWithSpan { value, .. }) = peeled else {
+        return None;
+    };
+    let literal = match value {
+        Value::SingleQuotedString(text) => sql_values::Literal::Quoted(text),
+        Value::DollarQuotedString(quoted) => sql_values::Literal::Quoted(&quoted.value),
+        Value::Number(number, _) => sql_values::Literal::Number(number),
+        _ => return None,
+    };
+    match sql_values::cast_literal(literal, cast_target(data_type)?).ok()? {
+        sql_values::CastValue::Boolean(flag) => Some(AttributeLiteral::Boolean(flag)),
+        number @ (sql_values::CastValue::Smallint(_)
+        | sql_values::CastValue::Integer(_)
+        | sql_values::CastValue::Bigint(_)) => Some(AttributeLiteral::Number(number.to_string())),
+        sql_values::CastValue::Numeric(number) => {
+            // `NaN` and the infinities print as words no bare SQL number spells.
+            let printed = number.to_string();
+            printed
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
+                .then_some(AttributeLiteral::Number(printed))
+        }
+        sql_values::CastValue::Text(text) => Some(AttributeLiteral::Text(text)),
+        sql_values::CastValue::Bpchar(text) => Some(AttributeLiteral::Text(
+            text.trim_end_matches(' ').to_string(),
+        )),
+        sql_values::CastValue::Date(_)
+        | sql_values::CastValue::Timestamp(_)
+        | sql_values::CastValue::TimestampTz(_) => None,
+    }
+}
+
+/// The cast `sql-values` computes for a cast to `data_type`, or `None` for a type it does
+/// not model or a modifier `PostgreSQL` refuses.
+fn cast_target(data_type: &DataType) -> Option<sql_values::CastTarget> {
+    use sql_values::{CastTarget, CharLength, NumericTypmod};
+    let length = |length: &Option<ast::CharacterLength>| match length {
+        None => Some(None),
+        Some(ast::CharacterLength::IntegerLength { length, unit: None }) => {
+            CharLength::new(usize::try_from(*length).ok()?).map(Some)
+        }
+        Some(_) => None,
+    };
+    Some(match data_type {
+        DataType::Bool | DataType::Boolean => CastTarget::Boolean,
+        DataType::SmallInt(None) | DataType::Int2(None) => CastTarget::Smallint,
+        DataType::Int(None) | DataType::Integer(None) | DataType::Int4(None) => CastTarget::Integer,
+        DataType::BigInt(None) | DataType::Int8(None) => CastTarget::Bigint,
+        DataType::Numeric(info) | DataType::Decimal(info) | DataType::Dec(info) => {
+            CastTarget::Numeric(match info {
+                ast::ExactNumberInfo::None => None,
+                ast::ExactNumberInfo::Precision(precision) => {
+                    Some(NumericTypmod::new(u16::try_from(*precision).ok()?, 0)?)
+                }
+                ast::ExactNumberInfo::PrecisionAndScale(precision, scale) => {
+                    Some(NumericTypmod::new(
+                        u16::try_from(*precision).ok()?,
+                        i16::try_from(*scale).ok()?,
+                    )?)
+                }
+            })
+        }
+        DataType::Varchar(chars)
+        | DataType::CharacterVarying(chars)
+        | DataType::CharVarying(chars) => CastTarget::Varchar(length(chars)?),
+        DataType::Char(chars) | DataType::Character(chars) => {
+            // A bare `char` is `char(1)`.
+            CastTarget::Bpchar(Some(length(chars)?.or_else(|| CharLength::new(1))?))
+        }
+        DataType::Date => CastTarget::Date,
+        DataType::Timestamp(precision, _) => {
+            // A precision above six is six, as `PostgreSQL` clamps it.
+            let precision = precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX));
+            if temporal_zone(data_type) == Some(true) {
+                CastTarget::TimestampTz(precision)
+            } else {
+                CastTarget::Timestamp(precision)
+            }
+        }
+        _ => return None,
+    })
 }
 
 /// The non-user column one operand names when the other is a literal or temporal value,
@@ -1128,7 +1227,10 @@ fn shifted_clock(expr: &Expr) -> Option<&Expr> {
 fn operand_renaming_cast(operand: &Expr) -> Option<(&Expr, String)> {
     let (casts, peeled) = CastChain::peeled(operand);
     if !is_clock_shaped(peeled) {
-        return casts.renaming(None).map(|cast| (operand, cast.to_string()));
+        let cast = casts.renaming(None)?;
+        return folded_literal(operand)
+            .is_none()
+            .then(|| (operand, cast.to_string()));
     }
     if let Some(cast) = casts.renaming_beyond(CLOCK_TYPE) {
         return Some((operand, cast.to_string()));
