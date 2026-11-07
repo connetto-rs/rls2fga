@@ -487,18 +487,19 @@ fn key_columns(naming: &RowNaming) -> Option<Vec<&str>> {
         .collect()
 }
 
-/// The `WHERE` clause naming one row by its key, compared as text so any key type fits.
+/// The `WHERE` clause naming one row by its key, compared as `to_jsonb` printed it so any
+/// key type fits, a blank-padded `char(n)` included.
 fn key_predicate(row: &serde_json::Value, columns: &[&str]) -> String {
     let mut predicate = String::new();
     for (at, column) in columns.iter().enumerate() {
         let value = row
             .get(*column)
-            .and_then(super::scalar_text)
-            .unwrap_or_default();
+            .unwrap_or(&serde_json::Value::Null)
+            .to_string();
         let joiner = if at == 0 { "" } else { " AND " };
         let _ = write!(
             predicate,
-            "{joiner}\"{column}\"::text = '{}'",
+            "{joiner}to_jsonb(\"{column}\") = '{}'::jsonb",
             value.replace('\'', "''")
         );
     }

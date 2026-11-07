@@ -163,8 +163,13 @@ pub enum ContextWitness {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum AttributeLiteral {
-    /// A string literal.
+    /// A string literal, compared as the column's own type.
     Text(String),
+    /// A string literal ending in a blank, compared as `text` because the literal is cast
+    /// to `text` or the column to an unbounded text type. A `char(n)` column then drops its
+    /// own trailing blanks and the literal keeps them, where a [`Self::Text`] literal would
+    /// lose them too.
+    AsText(String),
     /// A numeric literal, unparsed.
     Number(String),
     /// `TRUE` or `FALSE`.

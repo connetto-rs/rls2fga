@@ -51,7 +51,7 @@ impl RowValues for FuzzRow<'_> {
             return RowCell::Absent;
         }
         match kind {
-            ColumnKind::Text => RowCell::Text(self.0.into()),
+            ColumnKind::Text | ColumnKind::Bpchar => RowCell::Text(self.0.into()),
             ColumnKind::Integer => RowCell::Integer("1".into()),
             ColumnKind::Decimal => RowCell::Decimal("1.0".into()),
             ColumnKind::Bool => RowCell::Bool(self.mix(column).is_multiple_of(2)),
