@@ -36,12 +36,13 @@ const DUMP_BLOCKED_ON_SQLPARSER: [(&str, &str); 2] = [
          the table target upstream, the unfiled owner-to-uneven finding",
     ),
 ];
-/// Roles fixture policies name in `TO` clauses, which must exist before
-/// `CREATE POLICY` runs.
-const FIXTURE_ROLES: [&str; 4] = ["auditor", "contractor", "editors", "app"];
+/// Roles fixtures name in `TO` clauses or create themselves, which must exist before a
+/// fixture names them and be absent before one creates them.
+const FIXTURE_ROLES: [&str; 5] = ["auditor", "contractor", "editors", "app", "editor"];
 
 /// Roles a fixture creates itself, which must be absent when it applies.
-const CREATES_ROLES: [(&str, &str); 1] = [("schema_objects", "auditor")];
+const CREATES_ROLES: [(&str, &str); 2] =
+    [("schema_objects", "auditor"), ("pg_role_gate", "editor")];
 
 /// The model and tuple queries planned with the fixture's registry.
 fn artifacts(db: &ParserDB, fixture: &str) -> (Value, Vec<TupleQuery>) {
@@ -92,21 +93,35 @@ fn executed_rows(
     keys
 }
 
-/// `pg_dump -s` of one database, run inside the server's own container so the
-/// client version always matches the server's.
-async fn dump_schema(container: &ContainerAsync<GenericImage>, database: &str) -> String {
+/// What `command` prints, run inside the server's own container so the client version
+/// always matches the server's.
+async fn run_in_container(container: &ContainerAsync<GenericImage>, command: &[&str]) -> String {
     let mut result = container
         .exec(
-            ExecCommand::new(["pg_dump", "--schema-only", "-U", PG_USER, database])
-                .with_cmd_ready_condition(CmdWaitFor::exit()),
+            ExecCommand::new(command.iter().copied()).with_cmd_ready_condition(CmdWaitFor::exit()),
         )
         .await
-        .expect("pg_dump should run inside the container");
+        .unwrap_or_else(|error| panic!("{command:?} should run inside the container: {error}"));
     let stdout = result
         .stdout_to_vec()
         .await
-        .expect("pg_dump output should be readable");
+        .expect("the dump output should be readable");
     String::from_utf8(stdout).expect("pg_dump emits UTF-8")
+}
+
+/// `pg_dump -s` of one database.
+async fn dump_schema(container: &ContainerAsync<GenericImage>, database: &str) -> String {
+    run_in_container(
+        container,
+        &["pg_dump", "--schema-only", "-U", PG_USER, database],
+    )
+    .await
+}
+
+/// `pg_dumpall --roles-only`, the roles and memberships a schema dump leaves out because
+/// they belong to the cluster.
+async fn dump_roles(container: &ContainerAsync<GenericImage>) -> String {
+    run_in_container(container, &["pg_dumpall", "--roles-only", "-U", PG_USER]).await
 }
 
 /// Drop the psql meta-commands a dump carries (`\restrict`, `\unrestrict`,
@@ -125,6 +140,9 @@ async fn every_fixture_round_trips_through_pg_dump() {
     let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
     let admin_url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{pg_port}/{PG_DB}");
     let mut admin = connect_postgres_with_retry(&admin_url);
+    admin
+        .batch_execute(support::deployment::ROLES)
+        .expect("Failed to create the deployment's roles");
 
     let mut failures = Vec::new();
     for fixture in support::fixture_names() {
@@ -168,8 +186,8 @@ async fn every_fixture_round_trips_through_pg_dump() {
         }
 
         let dump = format!(
-            "CREATE ROLE {PG_USER};\n{}\n{}",
-            support::deployment::ROLES,
+            "{}\n{}",
+            strip_meta_commands(&dump_roles(&postgres).await),
             strip_meta_commands(&dump_schema(&postgres, &database).await)
         );
         let parsed = parse_schema(&dump);

@@ -259,37 +259,17 @@ async fn openfga_semantic_checks_all_patterns() {
                 ("user:alice", "can_select", "docs:d1", false),
             ],
         },
-        // P2: pg_has_role gate. The role membership is written by hand, since it lives
-        // outside the policy tables and no generated query can produce it. The scope tuple
-        // is what the generated SQL emits, one per row.
-        //
-        // The scope is named after what it is, membership of editor, so a change to that
-        // rule renames the relation and the server refuses these writes rather than
-        // answering with a stale object. `role_scope_name("member", ["editor"])` is the
-        // rule, and `generator_tests` derives it rather than spelling it.
+        // P10: pg_has_role decided by the schema. The acting role is a member of editor,
+        // so every request reads every row, and the model grants the row to everyone.
         Scenario {
-            name: "P2_pg_role_gate",
+            name: "P10_pg_has_role_constant",
             fixture: "pg_role_gate",
             min_confidence: ConfidenceLevel::B,
-            tuples: vec![
-                (
-                    "docs:d1",
-                    "scope_member_editor_89c73e0a",
-                    "pg_role_scope:scope_member_editor_89c73e0a",
-                ),
-                (
-                    "pg_role_scope:scope_member_editor_89c73e0a",
-                    "roles",
-                    "pg_role:editor",
-                ),
-                ("pg_role:editor", "member", "user:alice"),
-            ],
+            tuples: vec![("docs:d1", "public_viewer", "user:*")],
             rows: vec![],
             checks: vec![
-                // RLS admits every member of 'editor', so the model has to as well.
                 ("user:alice", "can_select", "docs:d1", true),
-                // And nobody else, which is what makes the grant a gate.
-                ("user:bob", "can_select", "docs:d1", false),
+                ("user:bob", "can_select", "docs:d1", true),
             ],
         },
     ];

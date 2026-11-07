@@ -207,7 +207,7 @@ fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
             "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, deleted_at TIMESTAMP, \
              tenant_id UUID, title TEXT);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);\n\
+             CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
              CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT USING ({restriction});\n"
         )
     };
@@ -229,20 +229,21 @@ fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
     );
 
     // Anding a relationship onto the same barrier must not discard the barrier.
-    let with_relationship = body("title LIKE 'draft%' AND tenant_id = current_user");
+    let with_relationship =
+        body("title LIKE 'draft%' AND tenant_id = current_setting('app.user_id', true)");
     assert!(
         with_relationship.contains("no_access"),
         "the 'title LIKE' barrier vanished, leaving '{with_relationship}'"
     );
     assert_ne!(
         with_relationship,
-        body("tenant_id = current_user"),
+        body("tenant_id = current_setting('app.user_id', true)"),
         "the restriction with a barrier must be stricter than the one without it"
     );
 
     // The same holds when the barrier hides inside a branch of a union.
     let nested =
-        body("(title LIKE 'draft%' AND tenant_id = current_user) OR owner_id = current_user");
+        body("(title LIKE 'draft%' AND tenant_id = current_setting('app.user_id', true)) OR owner_id = current_setting('app.user_id', true)");
     assert!(
         nested.contains("no_access"),
         "a barrier nested in a union vanished, leaving '{nested}'"
@@ -256,7 +257,9 @@ fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
     );
 
     // A denied barrier must not also ask for runtime enforcement.
-    let db = db_of(&schema("title LIKE 'draft%' AND tenant_id = current_user"));
+    let db = db_of(&schema(
+        "title LIKE 'draft%' AND tenant_id = current_setting('app.user_id', true)",
+    ));
     let model = translator(ConfidenceLevel::C)
         .translate(&db)
         .expect("translation should plan")
@@ -390,9 +393,11 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (uid(id));
     );
 }
 
-/// The same body under the default `SECURITY INVOKER` does identify the caller.
+/// The same body under the default `SECURITY INVOKER` returns the acting role, which is the
+/// same name for every request and never the caller, so the call is no caller accessor and
+/// the clause it guards denies.
 #[test]
-fn security_invoker_current_user_stays_the_caller() {
+fn security_invoker_current_user_is_not_the_caller() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
@@ -407,8 +412,8 @@ CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = app_uid());
         .outputs_accepting_gaps();
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("owner"),
-        "an invoker accessor is per-caller ownership:\n{}",
+        Some("no_access"),
+        "a body returning the acting role names no caller:\n{}",
         model.model()
     );
 }
@@ -440,17 +445,17 @@ CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = app_uid());
 
 /// `PostgreSQL` 18, role alice, rows carrying `ARRAY['alice']`, `ARRAY['alice','bob']`,
 /// `ARRAY[]`, `NULL`, `ARRAY[NULL]`, `ARRAY['alice',NULL]` and `ARRAY['bob']`: a
-/// policy `USING (current_user = ANY (editors))` returns exactly the three rows
+/// policy `USING (current_setting('app.user_id', true) = ANY (editors))` returns exactly the three rows
 /// holding 'alice', and `SELECT id, unnest(editors)` filtered to 'alice' returns
 /// the same three. The translation is exact, not a widening, so it earns a
 /// relation rather than a refusal.
 #[test]
 fn caller_listed_in_an_array_column_is_a_relationship_not_a_refusal() {
     for clause in [
-        "current_user = ANY (editors)",
-        "editors @> ARRAY[current_user]",
-        "ARRAY[current_user] <@ editors",
-        "ARRAY[current_user] && editors",
+        "current_setting('app.user_id', true) = ANY (editors)",
+        "editors @> ARRAY[current_setting('app.user_id', true)]",
+        "ARRAY[current_setting('app.user_id', true)] <@ editors",
+        "ARRAY[current_setting('app.user_id', true)] && editors",
     ] {
         let db = db_of(&format!(
             "CREATE TABLE public.docs(id UUID PRIMARY KEY, editors TEXT[]);
@@ -515,8 +520,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ";
 
     for clause in [
-        "current_user = ANY (SELECT user_id FROM doc_members WHERE doc_id = docs.id)",
-        "current_user = ANY (SELECT user_id FROM doc_members)",
+        "current_setting('app.user_id', true) = ANY (SELECT user_id FROM doc_members WHERE doc_id = docs.id)",
+        "current_setting('app.user_id', true) = ANY (SELECT user_id FROM doc_members)",
     ] {
         let db = db_of(&format!(
             "{MEMBERS}CREATE POLICY docs_members ON docs FOR SELECT USING ({clause});"
@@ -543,7 +548,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     // The object-key spelling is real membership and must keep its P4 translation.
     let db = db_of(&format!(
         "{MEMBERS}CREATE POLICY docs_members ON docs FOR SELECT
-           USING (id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user));"
+           USING (id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true)));"
     ));
     let translator = translator(ConfidenceLevel::B);
     let rendered = format_tuples(
@@ -561,16 +566,16 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 
 /// `PostgreSQL` 18, role alice, rows carrying `{"owner":"alice"}`, `{"owner":"bob"}`,
 /// `{"owner":null}`, `{}`, a NULL column and `{"owner":"carol"}`: a policy
-/// `USING (data ->> 'owner' = current_user)` returns exactly the rows whose extracted
+/// `USING (data ->> 'owner' = current_setting('app.user_id', true))` returns exactly the rows whose extracted
 /// text equals the caller, since `->>` yields NULL for a missing key, a null value and
 /// a null column, and the comparison then filters. `SELECT id, data ->> 'owner'` with
 /// the NULLs dropped enumerates the same pairs, so this is exact too.
 #[test]
 fn caller_named_in_a_jsonb_field_is_ownership_not_a_refusal() {
     for clause in [
-        "data ->> 'owner' = current_user",
-        "current_user = data ->> 'owner'",
-        "(data ->> 'owner')::text = current_user",
+        "data ->> 'owner' = current_setting('app.user_id', true)",
+        "current_setting('app.user_id', true) = data ->> 'owner'",
+        "(data ->> 'owner')::text = current_setting('app.user_id', true)",
     ] {
         let db = db_of(&format!(
             "CREATE TABLE public.docs(id UUID PRIMARY KEY, data JSONB);
@@ -615,7 +620,7 @@ fn a_quote_in_a_jsonb_key_cannot_break_out_of_its_literal() {
 CREATE TABLE docs(id UUID PRIMARY KEY, data JSONB);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_json ON docs FOR SELECT
-  USING (data ->> 'ow''ner' = current_user);
+  USING (data ->> 'ow''ner' = current_setting('app.user_id', true));
 ",
     );
     let translator = translator(ConfidenceLevel::B);
@@ -647,7 +652,7 @@ fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, data JSONB, tags TEXT[], status TEXT);
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
          CREATE POLICY docs_hybrid ON docs FOR SELECT
-           USING (owner_id = current_user AND status = 'published');",
+           USING (owner_id = current_setting('app.user_id', true) AND status = 'published');",
     );
     assert_eq!(
         relation_definition(
@@ -674,7 +679,7 @@ fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
             "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, data JSONB, tags TEXT[], status TEXT);
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
              CREATE POLICY docs_hybrid ON docs FOR SELECT
-               USING (owner_id = current_user AND {guard});"
+               USING (owner_id = current_setting('app.user_id', true) AND {guard});"
         ));
         let outputs = translator(ConfidenceLevel::C)
             .translate(&db)
@@ -709,7 +714,7 @@ fn a_dropped_jsonb_attribute_guard_names_the_field_it_stopped_checking() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, data JSONB);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_hybrid ON docs FOR SELECT
-  USING (owner_id = current_user AND data ->> 'status' = 'published');
+  USING (owner_id = current_setting('app.user_id', true) AND data ->> 'status' = 'published');
 ",
     );
     let model = translator(ConfidenceLevel::C)
@@ -850,7 +855,7 @@ fn only_a_literal_constant_earns_the_attribute_wildcard() {
     // And the recognizer itself refuses anything that is not a literal, which is what
     // the emission depends on.
     for clause in [
-        "status = current_user",
+        "status = current_setting('app.user_id', true)",
         "status > now()",
         "status = owner_id",
         "status = upper('a')",
@@ -1440,7 +1445,7 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
         let schema = format!(
             "{CAST_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n\
              CREATE POLICY q ON docs FOR UPDATE USING \
-             (owner_id = current_user AND {guard});\n"
+             (owner_id = current_setting('app.user_id', true) AND {guard});\n"
         );
         let outputs = translator(ConfidenceLevel::B)
             .translate(&db_of(&schema))
@@ -1834,15 +1839,6 @@ CREATE TABLE docs(id UUID PRIMARY KEY, data JSONB);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
   USING (data ->> 'owner' = current_setting('app.user_id', true));
-",
-        ),
-        (
-            "a role the caller holds",
-            r"
-CREATE TABLE docs(id UUID PRIMARY KEY);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT
-  USING (pg_has_role(current_setting('app.user_id', true), 'editors', 'MEMBER'));
 ",
         ),
     ];

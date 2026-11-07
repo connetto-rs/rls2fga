@@ -7,6 +7,7 @@ use sqlparser::ast::{
 
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
+use crate::classifier::role_keywords::role_name;
 pub use crate::parser::expr::extract_column_name;
 pub(crate) use crate::parser::expr::unwrap_cast_or_nested;
 use crate::parser::expr::{extract_column_name_through_coalesce, is_coalesce_wrapped, CastChain};
@@ -15,10 +16,10 @@ use crate::parser::function_analyzer::current_setting_literal_key;
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
     builtin_function_name, folded_function_name, is_current_user_keyword_name,
-    is_public_flag_column_name, is_user_related_column_name, lookup_table, parse_target,
-    stored_ident_name, stored_relation_name,
+    is_public_flag_column_name, lookup_table, parse_target, stored_ident_name,
+    stored_relation_name, RoleKeyword,
 };
-use crate::parser::sql_parser::{ColumnLike, DatabaseLike, ForeignKeyLike, TableLike};
+use crate::parser::sql_parser::{ColumnLike, DatabaseLike, ForeignKeyLike, RoleLike, TableLike};
 use crate::types::ColumnName;
 
 /// P7/P9 attribute-condition detection (non-user column comparisons, temporal guards).
@@ -106,7 +107,7 @@ pub fn recognize_p1<DB: DatabaseLike>(
 /// Role name IN-list or `pg_has_role` built-in.
 pub fn recognize_p2<DB: DatabaseLike>(
     expr: &Expr,
-    _db: &DB,
+    db: &DB,
     registry: &FunctionRegistry,
 ) -> Option<ClassifiedExpr> {
     if let Some((inner_expr, list)) = constant_in_list(expr) {
@@ -134,7 +135,7 @@ pub fn recognize_p2<DB: DatabaseLike>(
         }
     }
 
-    if let Some(c) = recognize_pg_has_role(expr, registry) {
+    if let Some(c) = recognize_pg_has_role(expr, db, registry) {
         return Some(c);
     }
 
@@ -161,7 +162,19 @@ fn role_threshold_resource_column(
     extract_column_name(positional_function_arg(function, *resource_param_index)?)
 }
 
-fn recognize_pg_has_role(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+/// `pg_has_role`, answered from the schema's memberships.
+///
+/// The member names a role, never a person. The classifier has already read
+/// `current_user` and its kin as the role's name, and the two-argument form asks about
+/// the acting role, as `PostgreSQL` answers under `SET ROLE`. Both roles are then known,
+/// so the call is a constant for every row and every request. A member or target the
+/// schema never creates makes `PostgreSQL` raise, and an argument that is no literal is
+/// not settled here, so either is refused.
+fn recognize_pg_has_role<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Option<ClassifiedExpr> {
     use sqlparser::ast::FunctionArguments;
 
     let Expr::Function(func) = expr else {
@@ -173,32 +186,49 @@ fn recognize_pg_has_role(expr: &Expr, registry: &FunctionRegistry) -> Option<Cla
     let FunctionArguments::List(arg_list) = &func.args else {
         return None;
     };
-
     let args: Vec<&Expr> = arg_list.args.iter().filter_map(function_arg_expr).collect();
-
-    // The implicit user of the two-argument form is `current_user`, not `session_user`:
-    // probed under SET ROLE, where the two answer differently and the two-argument form
-    // followed `current_user`.
-    let (role_expr, privilege_expr) = match args.as_slice() {
-        [user_expr, role_expr, privilege] if is_current_user_expr(user_expr, registry) => {
-            (role_expr, privilege)
-        }
-        [role_expr, privilege] => (role_expr, privilege),
-        _ => return None,
+    let refused = |reason: String| ClassifiedExpr {
+        pattern: PatternClass::Unknown(UnclassifiedExpr {
+            sql_text: expr.to_string(),
+            reason,
+        }),
+        confidence: ConfidenceLevel::D,
     };
 
-    // The privilege decides which members the policy admits, so a privilege the crate cannot
+    let (member, role_expr, privilege_expr) = match args.as_slice() {
+        [member, role_expr, privilege] => (string_literal(member)?, role_expr, privilege),
+        [role_expr, privilege] => {
+            match role_name(
+                registry,
+                RoleKeyword::Acting,
+                "pg_has_role's implicit current_user",
+            ) {
+                Ok(member) => (member, role_expr, privilege),
+                Err(unnamed) => return Some(refused(unnamed.to_string())),
+            }
+        }
+        _ => return None,
+    };
+    // The privilege decides which members the call admits, so a privilege the crate cannot
     // read is refused rather than taken for plain membership. A dump deparses both literals
     // with casts, `'editor'::name` and `'MEMBER'::text`, which the reader peels.
-    let privilege = RolePrivilege::parse(&string_literal(privilege_expr)?)?;
-    let role_name = string_literal(role_expr)?;
-
+    let privilege = match RolePrivilege::parse(&string_literal(privilege_expr)?)? {
+        RolePrivilege::Member => sql_traits::traits::RolePrivilege::Member,
+        RolePrivilege::Usage => sql_traits::traits::RolePrivilege::Usage,
+        RolePrivilege::SetRole => sql_traits::traits::RolePrivilege::Set,
+        RolePrivilege::AdminOption => sql_traits::traits::RolePrivilege::Admin,
+    };
+    let target = string_literal(role_expr)?;
+    // `pg_has_role` looks a name up as written, without folding its case.
+    let (Some(member_role), Some(target_role)) = (db.role(&member), db.role(&target)) else {
+        return Some(refused(format!(
+            "pg_has_role asks about role '{member}' and role '{target}', and the schema \
+             does not create both, so PostgreSQL raises"
+        )));
+    };
     Some(ClassifiedExpr {
-        pattern: PatternClass::P2RoleNameInList(RoleNameInList {
-            resource_column: None,
-            function_name: "pg_has_role".to_string(),
-            role_names: vec![role_name],
-            privilege,
+        pattern: PatternClass::P10ConstantBool(ConstantBool {
+            value: member_role.has_role(target_role, privilege, db),
         }),
         confidence: ConfidenceLevel::A,
     })
@@ -312,93 +342,57 @@ pub(super) fn constant_in_list(expr: &Expr) -> Option<(&Expr, &[Expr])> {
 }
 
 /// Direct ownership check.
+///
+/// The caller is a setting or field the deployment declares as the caller, or a function
+/// registered or inferred as the caller's accessor. A role keyword names a role, never a
+/// person, and reaches this recognizer already read as that role's name.
 pub fn recognize_p3<DB: DatabaseLike>(
     expr: &Expr,
     _db: &DB,
     registry: &FunctionRegistry,
 ) -> Option<ClassifiedExpr> {
-    let (left, right, null_safe) = match expr {
-        Expr::BinaryOp {
-            left,
-            op: BinaryOperator::Eq,
-            right,
-        } => (left.as_ref(), right.as_ref(), false),
-        Expr::IsNotDistinctFrom(left, right) => (left.as_ref(), right.as_ref(), true),
-        _ => return None,
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    else {
+        return None;
     };
+    let (left, right) = (left.as_ref(), right.as_ref());
 
-    // Either operand may carry the accessor, and either may reach its column through a
-    // COALESCE default, which `extract_column_name` alone does not see through. A field
-    // the deployment declares as the caller is an accessor too, though it has no name.
-    let accessor = |expr: &Expr| {
-        current_user_accessor_name(expr)
-            .or_else(|| reads_declared_caller(expr, registry).then(String::new))
+    // Either operand may carry the caller, and either may reach its column through a
+    // COALESCE default, which `extract_column_name` alone does not see through.
+    let caller = |expr: &Expr| reads_the_caller(expr, registry);
+    let (col_name, column_side, accessor_side) = if let (Some(col), true) =
+        (extract_column_name(left), caller(right))
+    {
+        (col, left, right)
+    } else if let (true, Some(col)) = (caller(left), extract_column_name(right)) {
+        (col, right, left)
+    } else if let (Some(col), true) = (extract_column_name_through_coalesce(left), caller(right)) {
+        (col, left, right)
+    } else if let (true, Some(col)) = (caller(left), extract_column_name_through_coalesce(right)) {
+        (col, right, left)
+    } else {
+        return None;
     };
-    let (col_name, accessor_name, column_side, accessor_side) =
-        if let (Some(col), Some(accessor)) = (extract_column_name(left), accessor(right)) {
-            (col, accessor, left, right)
-        } else if let (Some(accessor), Some(col)) = (accessor(left), extract_column_name(right)) {
-            (col, accessor, right, left)
-        } else if let (Some(col), Some(accessor)) =
-            (extract_column_name_through_coalesce(left), accessor(right))
-        {
-            (col, accessor, left, right)
-        } else if let (Some(accessor), Some(col)) =
-            (accessor(left), extract_column_name_through_coalesce(right))
-        {
-            (col, accessor, right, left)
-        } else {
-            return None;
-        };
-
-    // Determine how we matched the accessor and assign confidence accordingly.
-    let is_named = registry.is_current_user_accessor(&accessor_name)
-        || reads_declared_caller(accessor_side, registry);
-    let is_sql_keyword = is_sql_current_user_keyword_expr(accessor_side);
-
-    // Guard against false positives like `owner_id = author_id`:
-    // bare identifiers that are not SQL current-user keywords are columns/aliases,
-    // not accessor expressions.
-    if is_bare_identifier_expr(accessor_side) && !is_sql_keyword && !is_named {
-        return None;
-    }
-
-    // Prevent false positives from user-defined function calls that only *look*
-    // like SQL current-user keywords (e.g. `"current_user"()`, `x.current_user()`).
-    if is_keyword_named_function_call_expr(accessor_side) && !is_sql_keyword && !is_named {
-        return None;
-    }
-
-    // Strict policy: only SQL current-user keywords and accessors somebody named,
-    // by function or by setting key, are eligible for P3.
-    if !is_named && !is_sql_keyword {
-        return None;
-    }
-    if null_safe && !is_sql_keyword {
-        return None;
-    }
     if caller_renaming_cast(accessor_side, &CastChain::default(), registry).is_some()
         || casts::row_renaming_cast(column_side).is_some()
     {
         return None;
     }
 
-    let accessor_indirection =
-        is_subquery_wrapped(accessor_side) || is_coalesce_wrapped(column_side);
-
     // Subquery- and COALESCE-wrapped accessors are accepted but capped at B due to added
-    // indirection. This cap only applies after strict accessor validation above.
-    if accessor_indirection {
-        return Some(ClassifiedExpr {
-            pattern: PatternClass::P3DirectOwnership(DirectOwnership { column: col_name }),
-            confidence: ConfidenceLevel::B,
-        });
-    }
-
-    // Registry-confirmed or SQL keyword without indirection: confidence A.
+    // indirection.
+    let confidence = if is_subquery_wrapped(accessor_side) || is_coalesce_wrapped(column_side) {
+        ConfidenceLevel::B
+    } else {
+        ConfidenceLevel::A
+    };
     Some(ClassifiedExpr {
         pattern: PatternClass::P3DirectOwnership(DirectOwnership { column: col_name }),
-        confidence: ConfidenceLevel::A,
+        confidence,
     })
 }
 
@@ -1057,13 +1051,6 @@ fn is_subquery_wrapped(expr: &Expr) -> bool {
     matches!(unwrap_cast_or_nested(expr), Expr::Subquery(_))
 }
 
-fn is_bare_identifier_expr(expr: &Expr) -> bool {
-    matches!(
-        unwrap_cast_or_nested(expr),
-        Expr::Identifier(_) | Expr::CompoundIdentifier(_)
-    )
-}
-
 /// Peel parentheses, which the parse has already resolved into tree shape and which
 /// therefore say nothing about what an expression means. A cast is left in place: it
 /// changes the value, and a leaf that reaches generated SQL has to keep it.
@@ -1073,14 +1060,13 @@ pub(crate) fn unparenthesize(mut expr: &Expr) -> &Expr {
     }
     expr
 }
-fn is_current_user_keyword(name: &str) -> bool {
-    is_current_user_keyword_name(name)
-}
-
+/// Whether `expr` is a keyword naming the acting role, which the classifier reads as that
+/// role's name before any recognizer runs. A recognizer called directly can still meet
+/// one, and must never take it for a column.
 fn is_sql_current_user_keyword_expr(expr: &Expr) -> bool {
     match accessor_root(expr) {
         Some(Expr::Identifier(ident)) => {
-            ident.quote_style.is_none() && is_current_user_keyword(&ident.value)
+            ident.quote_style.is_none() && is_current_user_keyword_name(&ident.value)
         }
         Some(Expr::Function(func)) => {
             parse_target(&func.name.to_string()).is_some_and(|target| target.schema().is_none())
@@ -1090,14 +1076,6 @@ fn is_sql_current_user_keyword_expr(expr: &Expr) -> bool {
         }
         _ => false,
     }
-}
-
-fn is_keyword_named_function_call_expr(expr: &Expr) -> bool {
-    matches!(
-        accessor_root(expr),
-        Some(Expr::Function(func)) if folded_function_name(func)
-            .is_some_and(|name| is_current_user_keyword_name(&name))
-    )
 }
 
 /// `caller IS NOT NULL`, which says nothing a tuple does not already say.
@@ -1121,14 +1099,9 @@ pub(crate) fn is_current_user_expr(expr: &Expr, registry: &FunctionRegistry) -> 
 
 /// Whether `expr` reads the caller, whatever casts it is written under.
 fn reads_the_caller(expr: &Expr, registry: &FunctionRegistry) -> bool {
-    if reads_declared_caller(expr, registry) {
-        return true;
-    }
-    let Some(name) = current_user_accessor_name(expr) else {
-        return false;
-    };
-    registry.is_current_user_accessor(&name)
-        || (is_current_user_keyword(&name) && is_sql_current_user_keyword_expr(expr))
+    reads_declared_caller(expr, registry)
+        || current_user_accessor_name(expr)
+            .is_some_and(|name| registry.is_current_user_accessor(&name))
 }
 
 #[cfg(test)]

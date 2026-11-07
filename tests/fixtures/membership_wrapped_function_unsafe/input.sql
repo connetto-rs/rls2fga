@@ -19,7 +19,7 @@ USING (
     SELECT 1
     FROM doc_members dm
     WHERE dm.doc_id = docs.id
-      AND dm.user_id = current_user
+      AND dm.user_id = current_setting('app.user_id', true)
       AND lower(docs.owner_id::text) = lower(dm.member_id::text)
   )
 );

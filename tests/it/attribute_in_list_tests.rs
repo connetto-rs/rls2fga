@@ -55,7 +55,9 @@ fn gate_query<'a>(outputs: &'a Outputs, column: &str) -> Option<&'a TupleQuery> 
 
 #[test]
 fn an_in_list_beside_ownership_translates_both_halves() {
-    let outputs = outputs_for("owner_id = current_user AND status IN ('active', 'pending')");
+    let outputs = outputs_for(
+        "owner_id = current_setting('app.user_id', true) AND status IN ('active', 'pending')",
+    );
     let can_select = can_select(&outputs);
     assert!(
         can_select.starts_with("owner and public_where_status_"),
@@ -179,7 +181,7 @@ fn the_gate_record_admits_exactly_the_listed_values() {
 fn a_negated_list_never_opens_a_gate() {
     for clause in [
         "status NOT IN ('active', 'pending')",
-        "owner_id = current_user AND status NOT IN ('active', 'pending')",
+        "owner_id = current_setting('app.user_id', true) AND status NOT IN ('active', 'pending')",
     ] {
         let outputs = outputs_for(clause);
         let can_select = can_select(&outputs);
@@ -194,7 +196,8 @@ fn a_negated_list_never_opens_a_gate() {
 #[test]
 fn a_list_naming_a_caller_value_never_opens_a_gate() {
     let outputs = outputs_for(
-        "owner_id = current_user AND status IN ('active', current_setting('app.status', true))",
+        "owner_id = current_setting('app.user_id', true) \
+         AND status IN ('active', current_setting('app.status', true))",
     );
     let can_select = can_select(&outputs);
     assert!(

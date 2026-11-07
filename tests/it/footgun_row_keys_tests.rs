@@ -44,7 +44,7 @@ fn a_composite_primary_key_names_a_row_by_every_key_column() {
         r"
 CREATE TABLE public.docs(tenant_id UUID, id UUID, owner_id UUID, PRIMARY KEY (tenant_id, id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -83,7 +83,7 @@ fn a_table_whose_key_could_overrun_is_told_its_budget() {
         let db = db_of(&format!(
             "{declaration}
 ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON {table} FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON {table} FOR SELECT USING (owner_id = current_setting('app.user_id'));
 "
         ));
         translator(ConfidenceLevel::B)
@@ -134,7 +134,7 @@ fn the_budget_note_does_not_claim_a_divergence() {
         r"
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let translation = translator(ConfidenceLevel::B)
@@ -165,7 +165,7 @@ fn the_generated_query_guards_the_subject_length_too() {
         r"
 CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let rendered = format_tuples(
@@ -198,7 +198,7 @@ fn column_no_constraint_makes_unique_does_not_identify_objects() {
         r"
 CREATE TABLE docs(id UUID, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -228,7 +228,7 @@ fn not_null_unique_column_identifies_objects_without_a_primary_key() {
         r"
 CREATE TABLE public.docs(id UUID NOT NULL UNIQUE, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -257,7 +257,7 @@ fn a_primary_key_declared_by_alter_table_identifies_rows() {
              CREATE TABLE public.docs (id UUID {key}, owner_id UUID NOT NULL REFERENCES users(id));\n\
              {constraint}\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);\n"
+             CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));\n"
         )
     };
     let (inline_dsl, inline_tuples) = translation(&schema("PRIMARY KEY", ""));
@@ -291,7 +291,7 @@ fn a_unique_constraint_declared_by_alter_table_identifies_rows() {
              owner_id UUID NOT NULL REFERENCES users(id));\n\
              {constraint}\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);\n"
+             CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));\n"
         )
     };
     let (inline_dsl, inline_tuples) = translation(&schema("UNIQUE", ""));
@@ -331,18 +331,18 @@ AS 'SELECT 0';";
         "role_levels": {"viewer": 2, "editor": 3},
         "grant_table": "owner_grants", "grant_grantee_col": "grantee_owner_id",
         "grant_resource_col": "granted_owner_id", "grant_role_col": "role_id"}}"#;
-    let cases: [(&str, &str, &str, Option<&str>); 13] = [
-        ("ownership", "", "USING (viewer = current_user)", None),
+    let cases: [(&str, &str, &str, Option<&str>); 12] = [
+        ("ownership", "", "USING (viewer = current_setting('app.user_id'))", None),
         (
             "array membership",
             "",
-            "USING (current_user = ANY (editors))",
+            "USING (current_setting('app.user_id') = ANY (editors))",
             None,
         ),
         (
             "jsonb field ownership",
             "",
-            "USING (meta ->> 'owner' = current_user)",
+            "USING (meta ->> 'owner' = current_setting('app.user_id'))",
             None,
         ),
         ("public-flag", "", "USING (is_public)", None),
@@ -351,45 +351,39 @@ AS 'SELECT 0';";
         (
             "policy scope",
             "CREATE ROLE auditor;",
-            "TO auditor USING (viewer = current_user)",
+            "TO auditor USING (viewer = current_setting('app.user_id'))",
             None,
         ),
         (
             "bridge tuples to 'link'",
             "CREATE TABLE links(link_id UUID, user_id TEXT);",
             "USING (EXISTS (SELECT 1 FROM links l WHERE l.link_id = shares.paper_id \
-             AND l.user_id = current_user))",
+             AND l.user_id = current_setting('app.user_id')))",
             None,
         ),
         (
             "bridge tuples to 'papers'",
             "",
             "USING (EXISTS (SELECT 1 FROM papers p WHERE p.id = shares.paper_id \
-             AND p.owner = current_user))",
+             AND p.owner = current_setting('app.user_id')))",
             None,
         ),
         (
             "membership holder",
             "CREATE TABLE staff(user_id TEXT);",
-            "USING (EXISTS (SELECT 1 FROM staff s WHERE s.user_id = current_user))",
-            None,
-        ),
-        (
-            "role gate",
-            "",
-            "USING (pg_has_role(current_user, 'editor', 'MEMBER'))",
+            "USING (EXISTS (SELECT 1 FROM staff s WHERE s.user_id = current_setting('app.user_id')))",
             None,
         ),
         (
             "bridge tuples to 'owner_grants_owner'",
             GRANT_SCHEMA,
-            "USING (get_owner_role(current_user, viewer) >= 2)",
+            "USING (get_owner_role(current_setting('app.user_id'), viewer) >= 2)",
             Some(GRANT_REGISTRY),
         ),
         (
             "bridge tuples to 'owner_grants_owner'",
             GRANT_SCHEMA,
-            "USING (get_owner_role(current_user, viewer) IN (2, 3))",
+            "USING (get_owner_role(current_setting('app.user_id'), viewer) IN (2, 3))",
             Some(GRANT_REGISTRY),
         ),
     ];
@@ -402,7 +396,7 @@ CREATE TABLE shares(paper_id UUID REFERENCES papers(id), viewer TEXT, editors TE
   meta JSONB, is_public BOOLEAN, status TEXT);
 ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
 ALTER TABLE shares ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_own ON papers FOR SELECT USING (owner = current_user);
+CREATE POLICY papers_own ON papers FOR SELECT USING (owner = current_setting('app.user_id'));
 CREATE POLICY shares_read ON shares FOR SELECT {policy_tail};
 "
         ));
@@ -520,7 +514,7 @@ fn a_bridge_the_schema_cannot_write_is_reported() {
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM doc_members dm WHERE dm.doc_id = nonexistent AND dm.user_id = current_user));
+  SELECT 1 FROM doc_members dm WHERE dm.doc_id = nonexistent AND dm.user_id = current_setting('app.user_id')));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -590,7 +584,7 @@ CREATE TABLE project_members(project_id TEXT, user_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON projects FOR SELECT USING (EXISTS (
   SELECT 1 FROM project_members m WHERE m.project_id = projects.project_id
-    AND m.user_id = current_user));
+    AND m.user_id = current_setting('app.user_id')));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)

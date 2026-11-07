@@ -48,6 +48,14 @@ pub(crate) fn caller_deployment() -> Deployment {
 pub(crate) fn caller_deployment_with(
     settings: impl IntoIterator<Item = SessionSetting>,
 ) -> Deployment {
+    caller_deployment_acting_as(&[ACTING_ROLE], settings)
+}
+
+/// [`caller_deployment_with`] acting as `acting_roles` in place of [`ACTING_ROLE`].
+pub(crate) fn caller_deployment_acting_as(
+    acting_roles: &[&str],
+    settings: impl IntoIterator<Item = SessionSetting>,
+) -> Deployment {
     let mut declared: BTreeMap<String, SessionSetting> = CALLER_SETTINGS
         .into_iter()
         .map(|name| (name.to_string(), caller(name)))
@@ -55,7 +63,12 @@ pub(crate) fn caller_deployment_with(
     for setting in settings {
         declared.insert(setting.name().to_ascii_lowercase(), setting);
     }
-    deployment(declared.into_values())
+    Deployment::new(
+        LOGIN_ROLE,
+        acting_roles.iter().copied(),
+        declared.into_values(),
+    )
+    .expect("a valid test deployment")
 }
 
 /// A translator builder reading for [`caller_deployment`].

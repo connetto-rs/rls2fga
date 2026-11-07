@@ -2,7 +2,7 @@
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{Expr, FunctionArguments, FunctionSecurity, SelectItem, Statement};
+use sqlparser::ast::{Expr, FunctionArguments, SelectItem, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -10,9 +10,7 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::classifier::function_registry::DeclaredSources;
 use crate::classifier::recognizers::{projected_select, renaming_reason};
 use crate::parser::expr::{function_arg_expr, CastChain};
-use crate::parser::names::{
-    builtin_function_name, folded_function_name, is_current_user_keyword_name, parse_target,
-};
+use crate::parser::names::{builtin_function_name, is_current_user_keyword_name};
 use crate::types::ColumnName;
 
 /// Complete metadata for a role-threshold team membership join.
@@ -331,38 +329,46 @@ pub(crate) fn current_setting_literal_key(expr: &Expr) -> Option<String> {
 /// function returns. A cast is proven only by the type the deployment declares the caller
 /// setting it reads canonical for.
 struct BodyCallerRead {
-    /// The caller key whose declaration would prove the cast, absent for a keyword.
-    key: Option<String>,
+    /// The caller setting whose declaration would prove the cast.
+    key: String,
     /// The first cast that renames the caller.
     renaming: Option<String>,
 }
 
+/// The caller a body expression reads, a setting the deployment declares as the caller.
+/// A role keyword names a role, never the caller.
 fn body_caller_read(expr: &Expr, sources: &DeclaredSources) -> Option<BodyCallerRead> {
     let (casts, peeled) = CastChain::peeled(expr);
-    let read = |key: Option<String>, declared: Option<&str>| BodyCallerRead {
+    let key = current_setting_literal_key(peeled)?;
+    let declared = sources.caller(&key, &[])?.canonical_type();
+    Some(BodyCallerRead {
+        renaming: casts.renaming(Some(&declared)).map(str::to_string),
         key,
-        renaming: casts.renaming(declared).map(str::to_string),
-    };
-    match peeled {
-        Expr::Identifier(ident)
-            if ident.quote_style.is_none() && is_current_user_keyword_name(&ident.value) =>
-        {
-            Some(read(None, None))
-        }
-        Expr::Function(func) => match current_setting_literal_key(peeled) {
-            Some(key) => {
-                let declared = sources.caller(&key, &[])?.canonical_type();
-                Some(read(Some(key), Some(&declared)))
-            }
-            None => (folded_function_name(func)
-                .is_some_and(|name| is_current_user_keyword_name(&name))
-                && parse_target(&func.name.to_string())
-                    .is_some_and(|target| target.schema().is_none())
-                && matches!(func.args, FunctionArguments::None))
-            .then(|| read(None, None)),
-        },
-        _ => None,
+    })
+}
+
+/// Whether a whole body returns a keyword naming the acting role, which inside a
+/// `SECURITY DEFINER` body is the function owner for every caller.
+pub(crate) fn body_returns_acting_role(body: &str, return_type: &str, language: &str) -> bool {
+    if language != "sql"
+        || !returns_one_identity(&return_type.to_lowercase())
+        || accessor_shape(body) != Some(true)
+    {
+        return false;
     }
+    body_single_projection(body).is_some_and(|expr| {
+        let (_, peeled) = CastChain::peeled(&expr);
+        match peeled {
+            Expr::Identifier(ident) => {
+                ident.quote_style.is_none() && is_current_user_keyword_name(&ident.value)
+            }
+            Expr::Function(func) => {
+                matches!(func.args, FunctionArguments::None)
+                    && is_current_user_keyword_name(&func.name.to_string())
+            }
+            _ => false,
+        }
+    })
 }
 
 /// The single expression a one-statement `SELECT` body projects, when nothing in the
@@ -414,20 +420,22 @@ pub(crate) fn body_setting_key(body: &str) -> Option<(String, CastChain)> {
 
 impl FunctionSemantic {
     /// Classify a function body by its shape, reading the deployment's `sources`.
+    ///
+    /// A setting is per session, so whether the function runs as its owner does not
+    /// change what a caller setting read returns.
     pub(crate) fn analyze_body_with_sources(
         body: &str,
         return_type: &str,
         language: &str,
-        security: &FunctionSecurity,
         sources: &DeclaredSources,
     ) -> Option<FunctionSemantic> {
         let return_type_lower = return_type.to_lowercase();
         let read = body_caller_read_of(body, &return_type_lower, language, sources)?;
-        (read.renaming.is_none() && !runs_as_owner_reading_effective_user(body, security)).then(
-            || FunctionSemantic::CurrentUserAccessor {
+        read.renaming
+            .is_none()
+            .then(|| FunctionSemantic::CurrentUserAccessor {
                 returns: return_type_lower.trim().to_string(),
-            },
-        )
+            })
     }
 }
 
@@ -441,23 +449,12 @@ pub(crate) fn renamed_caller_body(
 ) -> Option<String> {
     let read = body_caller_read_of(body, &return_type.to_lowercase(), language, sources)?;
     let cast = read.renaming?;
-    let subject = match &read.key {
-        Some(key) => format!("its body reads current_setting('{key}'), which"),
-        None => "its body reads the caller, which".to_string(),
-    };
-    Some(renaming_reason(&subject, &cast, read.key.as_deref()))
+    let subject = format!("its body reads current_setting('{}'), which", read.key);
+    Some(renaming_reason(&subject, &cast, Some(&read.key)))
 }
 
-/// True when the body identifies its caller through `current_user` or `current_role`
-/// but runs as the owner, which makes that value the owner's for every caller.
-///
-/// A session setting is per session, so a `current_setting` body is unaffected.
-fn runs_as_owner_reading_effective_user(body: &str, security: &FunctionSecurity) -> bool {
-    matches!(security, FunctionSecurity::Definer) && body_reads_effective_user(body)
-}
-
-/// True when the body reads `current_user` or `current_role` as a token,
-/// keyword spellings inside literals and comments excluded.
+/// True when the body reads a keyword naming the acting role as a token, keyword
+/// spellings inside literals and comments excluded.
 /// A body the lexer cannot read answers `true`: the caller refuses on it, and a body
 /// nobody can read is not one to conclude anything else from.
 pub(crate) fn body_reads_effective_user(body: &str) -> bool {
@@ -466,7 +463,7 @@ pub(crate) fn body_reads_effective_user(body: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FunctionSecurity, FunctionSemantic, TeamMembershipConfig};
+    use super::{FunctionSemantic, TeamMembershipConfig};
     use crate::classifier::function_registry::DeclaredSources;
     use crate::test_support::{caller, caller_deployment, sources, typed_caller};
     use crate::types::ColumnName;
@@ -479,7 +476,6 @@ mod tests {
             body,
             return_type,
             language,
-            &FunctionSecurity::Invoker,
             &DeclaredSources::of(&caller_deployment()),
         )
     }
@@ -535,10 +531,10 @@ mod tests {
     #[test]
     fn a_complex_keyword_outside_code_does_not_refuse_the_accessor() {
         for body in [
-            "SELECT current_user -- update",
-            "SELECT current_user /* delete from */",
+            "SELECT current_setting('app.user_id') -- update",
+            "SELECT current_setting('app.user_id') /* delete from */",
             "SELECT current_setting('app.current_user_id') /* update from */",
-            r#"SELECT current_user AS "from""#,
+            r#"SELECT current_setting('app.user_id') AS "from""#,
         ] {
             assert!(
                 analyze_body(body, "UUID", "sql").is_some(),
@@ -546,8 +542,8 @@ mod tests {
             );
         }
         for body in [
-            "SELECT current_user FROM audit",
-            "UPDATE audit SET who = current_user RETURNING who",
+            "SELECT current_setting('app.user_id') FROM audit",
+            "UPDATE audit SET who = current_setting('app.user_id') RETURNING who",
         ] {
             assert!(
                 analyze_body(body, "UUID", "sql").is_none(),
@@ -618,7 +614,6 @@ mod tests {
                 body,
                 "UUID",
                 "sql",
-                &FunctionSecurity::Invoker,
                 &sources([typed_caller("app.user_id", declared)]),
             )
         };
@@ -638,53 +633,53 @@ mod tests {
         assert!(analyze("SELECT current_user::uuid", DataType::Text).is_none());
     }
 
+    /// A role keyword names the role a request acts as, which every request of a
+    /// deployment shares, so a body returning one is no caller accessor.
     #[test]
-    fn analyze_body_detects_direct_current_user_keyword_accessor() {
-        let semantic = analyze_body("SELECT current_user::text", "TEXT", "sql");
-
-        assert!(matches!(
-            semantic,
-            Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "text"
-        ));
-
-        let semantic_role = analyze_body("SELECT current_role::text", "TEXT", "sql");
-        assert!(matches!(
-            semantic_role,
-            Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "text"
-        ));
-    }
-
-    #[test]
-    fn analyze_body_rejects_the_keyword_accessor_when_the_function_runs_as_its_owner() {
-        let settings = DeclaredSources::of(&caller_deployment());
-        for body in ["SELECT current_user::text", "SELECT CURRENT_USER::text"] {
-            let semantic = FunctionSemantic::analyze_body_with_sources(
-                body,
-                "UUID",
-                "sql",
-                &FunctionSecurity::Definer,
-                &settings,
-            );
+    fn a_body_returning_a_role_keyword_names_no_caller() {
+        for body in [
+            "SELECT current_user::text",
+            "SELECT current_role::text",
+            "SELECT session_user::text",
+            "SELECT user",
+        ] {
             assert!(
-                semantic.is_none(),
-                "a definer body returns the owner's name, not the caller's, for {body}"
+                analyze_body(body, "TEXT", "sql").is_none(),
+                "{body:?} names a role, not the caller"
             );
         }
+    }
 
-        let setting_body = FunctionSemantic::analyze_body_with_sources(
-            "SELECT current_setting('app.current_user_id')",
-            "UUID",
-            "sql",
-            &FunctionSecurity::Definer,
-            &settings,
-        );
-        assert!(
-            matches!(
-                setting_body,
-                Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "uuid"
-            ),
-            "a session setting is per session, so the security mode cannot change it"
-        );
+    /// Inside a `SECURITY DEFINER` body the acting role is the owner, so the bodies that
+    /// return it are exactly the ones whose value the owner fixes. `session_user` is the
+    /// login role whatever the function runs as, and a quoted spelling is a column.
+    #[test]
+    fn a_body_returns_the_acting_role_only_through_its_keywords() {
+        for body in [
+            "SELECT current_user",
+            "SELECT CURRENT_USER::text",
+            "SELECT current_role",
+            "SELECT user",
+            "SELECT (current_user)",
+        ] {
+            assert!(
+                super::body_returns_acting_role(body, "TEXT", "sql"),
+                "{body:?} returns the acting role"
+            );
+        }
+        for (body, language) in [
+            ("SELECT session_user", "sql"),
+            (r#"SELECT "current_user""#, "sql"),
+            ("SELECT current_setting('app.user_id')", "sql"),
+            ("SELECT current_user FROM audit", "sql"),
+            ("SELECT current_user", "plpgsql"),
+            ("SELECT 'current_user'", "sql"),
+        ] {
+            assert!(
+                !super::body_returns_acting_role(body, "TEXT", language),
+                "{body:?} in {language} does not return the acting role"
+            );
+        }
     }
 
     #[test]
@@ -743,7 +738,6 @@ mod tests {
                 &format!("SELECT current_setting('{key}')"),
                 "UUID",
                 "sql",
-                &FunctionSecurity::Invoker,
                 &sources([caller(key)]),
             );
             assert!(
@@ -925,7 +919,6 @@ mod tests {
             "SELECT current_setting('tenant.current_user_uuid')",
             "UUID",
             "sql",
-            &FunctionSecurity::Invoker,
             &sources([caller("tenant.current_user_uuid")]),
         );
         assert!(

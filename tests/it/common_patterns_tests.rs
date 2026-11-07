@@ -268,24 +268,27 @@ fn fixture_wrapped_outer_table_membership_predicate_fails_closed_with_unknown_re
     }
 }
 
+/// `current_user` names the role a request acts as, so under the suite's one acting role
+/// the policy compares the column to that role's name like any literal.
 #[test]
 fn current_user_keyword_equality() {
     let (classified, _db, _reg) = classify_fixture("current_user_equality", |_reg| {});
 
     assert_eq!(classified.len(), 1, "Should find one current_user policy");
-    let cp = &classified[0];
-    let classification = cp
+    let classification = classified[0]
         .using_classification()
         .expect("Should have USING classification");
 
     match &classification.pattern {
-        PatternClass::P3DirectOwnership(DirectOwnership { column }) => {
+        PatternClass::P9AttributeCondition(AttributeCondition {
+            column,
+            value_description,
+            ..
+        }) => {
             assert_eq!(column, "manager");
-            assert_eq!(classification.confidence, ConfidenceLevel::A);
+            assert_eq!(value_description, "'app_user'");
         }
-        other => {
-            panic!("Expected P3 with column 'manager', got: {other:?}");
-        }
+        other => panic!("Expected P9 on 'manager', got: {other:?}"),
     }
 }
 

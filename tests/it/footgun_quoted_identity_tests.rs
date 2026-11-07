@@ -86,7 +86,7 @@ CREATE POLICY p ON public."M" FOR SELECT USING (
         SELECT 1
         FROM public.members AS m
         WHERE m.doc_id = "M".id
-          AND "M".owner_id = CURRENT_USER
+          AND "M".owner_id = current_setting('app.user_id', true)
     )
 );
 "#;
@@ -138,7 +138,7 @@ CREATE TABLE public."M" (id TEXT PRIMARY KEY);
 CREATE TABLE public.m (doc_id TEXT NOT NULL REFERENCES public."M"(id), user_id NAME NOT NULL);
 ALTER TABLE public."M" ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON public."M" FOR SELECT USING (
-    EXISTS (SELECT 1 FROM public.m WHERE public.m.doc_id = "M".id AND public.m.user_id = CURRENT_USER)
+    EXISTS (SELECT 1 FROM public.m WHERE public.m.doc_id = "M".id AND public.m.user_id = current_setting('app.user_id', true))
 );
 "#,
     )
@@ -160,7 +160,7 @@ fn an_unquoted_spelling_of_the_guarded_table_still_refuses() {
 CREATE TABLE public.docs (id TEXT PRIMARY KEY, owner_id NAME NOT NULL);
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON public.docs FOR SELECT USING (
-    EXISTS (SELECT 1 FROM public.DOCS d WHERE d.id = docs.id AND d.owner_id = CURRENT_USER)
+    EXISTS (SELECT 1 FROM public.DOCS d WHERE d.id = docs.id AND d.owner_id = current_setting('app.user_id', true))
 );
 ",
     );
@@ -188,7 +188,7 @@ CREATE POLICY p ON public.docs FOR SELECT USING (
         SELECT 1
         FROM public.m, public."M" AS gate
         WHERE public.m.doc_id = docs.id
-          AND public.m.user_id = CURRENT_USER
+          AND public.m.user_id = current_setting('app.user_id', true)
           AND gate.user_id = public.m.user_id
           AND gate.allowed
     )
@@ -217,7 +217,7 @@ CREATE TABLE public."M" (id TEXT PRIMARY KEY);
 CREATE TABLE public.doc_members (id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, user_id NAME NOT NULL);
 CREATE FUNCTION public.is_member(d TEXT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members AS "M" WHERE "M".doc_id = d AND "M".user_id = CURRENT_USER)';
+'SELECT EXISTS (SELECT 1 FROM doc_members AS "M" WHERE "M".doc_id = d AND "M".user_id = current_setting(''app.user_id'', true))';
 ALTER TABLE public."M" ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON public."M" FOR SELECT USING (public.is_member(id));
 "#,
@@ -251,7 +251,7 @@ CREATE TABLE public."M" (id TEXT PRIMARY KEY);
 CREATE TABLE public.doc_members (id TEXT PRIMARY KEY, doc_id TEXT NOT NULL, user_id NAME NOT NULL);
 CREATE FUNCTION public.is_member(d TEXT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members AS dm WHERE dm.doc_id = d AND dm.user_id = CURRENT_USER)';
+'SELECT EXISTS (SELECT 1 FROM doc_members AS dm WHERE dm.doc_id = d AND dm.user_id = current_setting(''app.user_id'', true))';
 ALTER TABLE public."M" ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON public."M" FOR SELECT USING (public.is_member(id));
 "#,
@@ -276,7 +276,7 @@ CREATE TABLE public.docs (id TEXT PRIMARY KEY);
 CREATE TABLE public.dm (doc_id TEXT NOT NULL REFERENCES public.docs(id), user_id NAME NOT NULL);
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON public.docs FOR SELECT USING (
-    EXISTS (SELECT 1 FROM public.dm AS "DM" WHERE "DM".doc_id = docs.id AND dm.user_id = CURRENT_USER)
+    EXISTS (SELECT 1 FROM public.dm AS "DM" WHERE "DM".doc_id = docs.id AND dm.user_id = current_setting('app.user_id', true))
 );
 "#,
     );
@@ -319,7 +319,7 @@ CREATE TABLE public.docs (id TEXT PRIMARY KEY);
 CREATE TABLE public.doc_members (doc_id TEXT NOT NULL, user_id NAME NOT NULL);
 CREATE FUNCTION public."IS_MEMBER"(d TEXT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members dm WHERE dm.doc_id = d AND dm.user_id = CURRENT_USER)';
+'SELECT EXISTS (SELECT 1 FROM doc_members dm WHERE dm.doc_id = d AND dm.user_id = current_setting(''app.user_id'', true))';
 CREATE FUNCTION public.is_member(d TEXT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
 'SELECT public."IS_MEMBER"(d)';

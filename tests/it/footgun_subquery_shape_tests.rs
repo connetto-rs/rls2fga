@@ -18,9 +18,9 @@ use crate::support::footgun::{
 #[test]
 fn a_row_limited_membership_subquery_is_refused() {
     for clause in [
-        "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user LIMIT 1)",
-        "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id LIMIT 1)",
-        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user FETCH FIRST 1 ROWS ONLY)",
+        "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) LIMIT 1)",
+        "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id LIMIT 1)",
+        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) FETCH FIRST 1 ROWS ONLY)",
     ] {
         let (dsl, _) = membership_translation(clause);
         assert_eq!(
@@ -51,20 +51,20 @@ fn a_grouped_membership_subquery_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user GROUP BY doc_id)",
+             AND user_id = current_setting('app.user_id', true) GROUP BY doc_id)",
             "GROUP BY",
         ),
         (
-            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user GROUP BY doc_id)",
+            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) GROUP BY doc_id)",
             "GROUP BY",
         ),
         (
-            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user \
+            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) \
              GROUP BY doc_id)",
             "GROUP BY",
         ),
         (
-            "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
+            "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
              GROUP BY user_id)",
             "GROUP BY",
         ),
@@ -78,26 +78,26 @@ fn a_membership_subquery_filtered_by_having_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user HAVING count(*) > 1)",
+             AND user_id = current_setting('app.user_id', true) HAVING count(*) > 1)",
             "HAVING",
         ),
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user GROUP BY doc_id HAVING count(*) > 1)",
+             AND user_id = current_setting('app.user_id', true) GROUP BY doc_id HAVING count(*) > 1)",
             "HAVING",
         ),
         (
-            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user \
+            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) \
              GROUP BY doc_id HAVING count(*) > 1)",
             "HAVING",
         ),
         (
-            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user \
+            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) \
              GROUP BY doc_id HAVING count(*) > 1)",
             "HAVING",
         ),
         (
-            "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
+            "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
              GROUP BY user_id HAVING count(*) > 1)",
             "HAVING",
         ),
@@ -109,22 +109,22 @@ fn a_membership_subquery_filtered_by_having_is_refused() {
 fn a_qualify_filtered_membership_subquery_is_refused() {
     assert_every_spelling_refused(&[
         (
-            "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user \
+            "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true) \
              QUALIFY row_number() OVER (PARTITION BY doc_id ORDER BY role) = 1)",
             "QUALIFY",
         ),
         (
-            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user \
+            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) \
              QUALIFY row_number() OVER (PARTITION BY doc_id ORDER BY role) = 1)",
             "QUALIFY",
         ),
         (
-            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user \
+            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) \
              QUALIFY row_number() OVER (PARTITION BY doc_id ORDER BY role) = 1)",
             "QUALIFY",
         ),
         (
-            "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
+            "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
              QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY role) = 1)",
             "QUALIFY",
         ),
@@ -137,21 +137,21 @@ fn a_distinct_on_membership_subquery_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT DISTINCT ON (role) doc_id FROM doc_members \
-             WHERE doc_id = docs.id AND user_id = current_user)",
+             WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
             "DISTINCT ON",
         ),
         (
             "id IN (SELECT DISTINCT ON (role) doc_id FROM doc_members \
-             WHERE user_id = current_user)",
+             WHERE user_id = current_setting('app.user_id', true))",
             "DISTINCT ON",
         ),
         (
             "id = ANY (SELECT DISTINCT ON (role) doc_id FROM doc_members \
-             WHERE user_id = current_user)",
+             WHERE user_id = current_setting('app.user_id', true))",
             "DISTINCT ON",
         ),
         (
-            "current_user IN (SELECT DISTINCT ON (role) user_id FROM doc_members \
+            "current_setting('app.user_id', true) IN (SELECT DISTINCT ON (role) user_id FROM doc_members \
              WHERE doc_id = docs.id)",
             "DISTINCT ON",
         ),
@@ -165,21 +165,21 @@ fn a_sampled_membership_subquery_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT 1 FROM doc_members TABLESAMPLE BERNOULLI (10) \
-             WHERE doc_id = docs.id AND user_id = current_user)",
+             WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
             "TABLESAMPLE",
         ),
         (
             "id IN (SELECT doc_id FROM doc_members TABLESAMPLE BERNOULLI (10) \
-             WHERE user_id = current_user)",
+             WHERE user_id = current_setting('app.user_id', true))",
             "TABLESAMPLE",
         ),
         (
             "id = ANY (SELECT doc_id FROM doc_members TABLESAMPLE SYSTEM (10) \
-             WHERE user_id = current_user)",
+             WHERE user_id = current_setting('app.user_id', true))",
             "TABLESAMPLE",
         ),
         (
-            "current_user IN (SELECT user_id FROM doc_members TABLESAMPLE SYSTEM (10) \
+            "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members TABLESAMPLE SYSTEM (10) \
              REPEATABLE (42) WHERE doc_id = docs.id)",
             "TABLESAMPLE",
         ),
@@ -193,19 +193,19 @@ fn a_membership_subquery_reading_only_the_named_table_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT 1 FROM ONLY doc_members \
-             WHERE doc_id = docs.id AND user_id = current_user)",
+             WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
             "ONLY",
         ),
         (
-            "id IN (SELECT doc_id FROM ONLY doc_members WHERE user_id = current_user)",
+            "id IN (SELECT doc_id FROM ONLY doc_members WHERE user_id = current_setting('app.user_id', true))",
             "ONLY",
         ),
         (
-            "id = ANY (SELECT doc_id FROM ONLY (doc_members) WHERE user_id = current_user)",
+            "id = ANY (SELECT doc_id FROM ONLY (doc_members) WHERE user_id = current_setting('app.user_id', true))",
             "ONLY",
         ),
         (
-            "current_user IN (SELECT user_id FROM ONLY doc_members WHERE doc_id = docs.id)",
+            "current_setting('app.user_id', true) IN (SELECT user_id FROM ONLY doc_members WHERE doc_id = docs.id)",
             "ONLY",
         ),
     ]);
@@ -216,7 +216,7 @@ fn a_membership_subquery_reading_only_the_named_table_is_refused() {
 #[test]
 fn a_membership_subquery_naming_the_inheriting_tables_translates_as_the_plain_table() {
     let plain =
-        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user)";
+        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))";
     let (plain_dsl, plain_tuples) = membership_translation(plain);
     assert_ne!(
         relation_definition(&plain_dsl, "docs", "can_select").as_deref(),
@@ -243,7 +243,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
     EXISTS (
         SELECT 1
         FROM (ONLY doc_members AS m JOIN users AS u ON u.id = m.user_id)
-        WHERE m.doc_id = docs.id AND u.id = current_user
+        WHERE m.doc_id = docs.id AND u.id = current_setting('app.user_id', true)
     )
 );
 ",
@@ -284,7 +284,7 @@ CREATE POLICY p ON docs FOR SELECT USING (
         SELECT 1
         FROM parents AS p
         JOIN orgs AS o TABLESAMPLE BERNOULLI (10) ON o.id = p.org_id
-        WHERE p.id = docs.parent_id AND p.owner_id = current_user
+        WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)
     )
 );
 ",
@@ -332,23 +332,23 @@ fn a_membership_subquery_that_binds_its_own_names_is_refused() {
         (
             "EXISTS (WITH doc_members AS (SELECT doc_id, user_id FROM doc_members \
              WHERE role = 'nobody') SELECT 1 FROM doc_members \
-             WHERE doc_id = docs.id AND user_id = current_user)",
+             WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
             "WITH",
         ),
         (
             "id IN (WITH doc_members AS (SELECT doc_id, user_id FROM doc_members \
              WHERE role = 'nobody') SELECT doc_id FROM doc_members \
-             WHERE user_id = current_user)",
+             WHERE user_id = current_setting('app.user_id', true))",
             "WITH",
         ),
         (
             "id = ANY (WITH doc_members AS (SELECT doc_id, user_id FROM doc_members \
              WHERE role = 'nobody') SELECT doc_id FROM doc_members \
-             WHERE user_id = current_user)",
+             WHERE user_id = current_setting('app.user_id', true))",
             "WITH",
         ),
         (
-            "current_user IN (WITH doc_members AS (SELECT doc_id, user_id FROM doc_members \
+            "current_setting('app.user_id', true) IN (WITH doc_members AS (SELECT doc_id, user_id FROM doc_members \
              WHERE role = 'nobody') SELECT user_id FROM doc_members \
              WHERE doc_id = docs.id)",
             "WITH",
@@ -368,19 +368,19 @@ fn a_membership_subquery_that_locks_its_rows_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user FOR UPDATE)",
+             AND user_id = current_setting('app.user_id', true) FOR UPDATE)",
             "row lock",
         ),
         (
-            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user FOR UPDATE)",
+            "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) FOR UPDATE)",
             "row lock",
         ),
         (
-            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user FOR SHARE)",
+            "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true) FOR SHARE)",
             "row lock",
         ),
         (
-            "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id FOR SHARE)",
+            "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id FOR SHARE)",
             "row lock",
         ),
     ]);
@@ -393,22 +393,22 @@ fn an_exists_membership_subquery_whose_row_limit_can_empty_it_is_refused() {
     assert_every_spelling_refused(&[
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user OFFSET 1)",
+             AND user_id = current_setting('app.user_id', true) OFFSET 1)",
             "OFFSET",
         ),
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user LIMIT 0)",
+             AND user_id = current_setting('app.user_id', true) LIMIT 0)",
             "LIMIT",
         ),
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user LIMIT (SELECT count(*) FROM doc_members))",
+             AND user_id = current_setting('app.user_id', true) LIMIT (SELECT count(*) FROM doc_members))",
             "LIMIT",
         ),
         (
             "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-             AND user_id = current_user FETCH FIRST 0 ROWS ONLY)",
+             AND user_id = current_setting('app.user_id', true) FETCH FIRST 0 ROWS ONLY)",
             "FETCH",
         ),
     ]);
@@ -419,12 +419,12 @@ fn an_exists_membership_subquery_whose_row_limit_can_empty_it_is_refused() {
 #[test]
 fn a_distinct_membership_subquery_still_translates() {
     let (expected_dsl, expected_tuples) = membership_translation(
-        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user)",
+        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
     );
 
     for clause in [
-        "id IN (SELECT DISTINCT doc_id FROM doc_members WHERE user_id = current_user)",
-        "id = ANY (SELECT DISTINCT doc_id FROM doc_members WHERE user_id = current_user)",
+        "id IN (SELECT DISTINCT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
+        "id = ANY (SELECT DISTINCT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
     ] {
         let (dsl, tuples) = membership_translation(clause);
         assert_eq!(
@@ -500,12 +500,12 @@ fn refused_teams_policy_complaints(clause: &str, reason_names: &str) -> Vec<Stri
 #[test]
 fn an_in_subquery_selecting_something_other_than_a_column_is_refused() {
     let complaints: Vec<String> = [
-        "id IN (SELECT min(team_id) FROM members WHERE user_id = current_user)",
-        "id = ANY (SELECT min(team_id) FROM members WHERE user_id = current_user)",
-        "id IN (SELECT team_id || '' FROM members WHERE user_id = current_user)",
-        "id IN (SELECT * FROM members WHERE user_id = current_user)",
+        "id IN (SELECT min(team_id) FROM members WHERE user_id = current_setting('app.user_id', true))",
+        "id = ANY (SELECT min(team_id) FROM members WHERE user_id = current_setting('app.user_id', true))",
+        "id IN (SELECT team_id || '' FROM members WHERE user_id = current_setting('app.user_id', true))",
+        "id IN (SELECT * FROM members WHERE user_id = current_setting('app.user_id', true))",
         "id IN (SELECT row_number() OVER (ORDER BY team_id) FROM members \
-         WHERE user_id = current_user)",
+         WHERE user_id = current_setting('app.user_id', true))",
     ]
     .iter()
     .flat_map(|clause| {
@@ -528,7 +528,7 @@ fn an_in_subquery_selecting_a_cast_is_refused() {
     // Refused by the analyzer rather than by the projection guard: a cast is a column
     // reference, and what it cannot be is the key a tuple carries.
     let complaints = refused_teams_policy_complaints(
-        "id IN (SELECT team_id::uuid FROM members WHERE user_id = current_user)",
+        "id IN (SELECT team_id::uuid FROM members WHERE user_id = current_setting('app.user_id', true))",
         "could not infer a unique membership join",
     );
     assert!(
@@ -553,12 +553,12 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 fn an_in_subquery_carrying_two_correlations_is_refused() {
     let clauses = [
         "id IN (SELECT m.doc_id FROM m WHERE m.tenant_id = docs.tenant_id \
-         AND m.user_id = current_user)",
+         AND m.user_id = current_setting('app.user_id', true))",
         "id = ANY (SELECT m.doc_id FROM m WHERE m.tenant_id = docs.tenant_id \
-         AND m.user_id = current_user)",
+         AND m.user_id = current_setting('app.user_id', true))",
         // The same policy as an EXISTS, refused today, pinned so the two cannot drift.
         "EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.tenant_id = docs.tenant_id \
-         AND m.user_id = current_user)",
+         AND m.user_id = current_setting('app.user_id', true))",
     ];
     let mut complaints = Vec::new();
     for clause in clauses {

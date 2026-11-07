@@ -14,7 +14,7 @@ CREATE TABLE members(id INT PRIMARY KEY, doc_id TEXT NOT NULL REFERENCES docs(id
   user_id TEXT NOT NULL, trial_ends TIMESTAMPTZ NOT NULL, support_ends TIMESTAMPTZ NOT NULL);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)
     AND m.trial_ends > now() AND m.support_ends > now()));
 ";
 
@@ -92,7 +92,7 @@ CREATE TABLE members(id INT PRIMARY KEY, doc_id TEXT NOT NULL REFERENCES docs(id
   user_id TEXT NOT NULL, expires_at TIMESTAMPTZ NOT NULL, UNIQUE (doc_id, user_id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)
     AND m.expires_at > now()));
 ";
     let (dsl, tuples) = model_and_tuples(sql);
@@ -117,7 +117,7 @@ CREATE TABLE project_members(project_id TEXT NOT NULL REFERENCES projects(id),
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON tasks FOR SELECT USING (EXISTS (
   SELECT 1 FROM project_members m WHERE m.project_id = tasks.project_id
-    AND m.user_id = current_user AND m.expires_at > now()));
+    AND m.user_id = current_setting('app.user_id', true) AND m.expires_at > now()));
 ";
     let (dsl, _) = model_and_tuples(sql);
     assert!(
@@ -146,7 +146,7 @@ CREATE TABLE project_members(id INT PRIMARY KEY, project_id TEXT NOT NULL REFERE
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON tasks FOR SELECT USING (EXISTS (
   SELECT 1 FROM project_members m WHERE m.project_id = tasks.project_id
-    AND m.user_id = current_user AND m.trial_ends > now() AND m.support_ends > now()));
+    AND m.user_id = current_setting('app.user_id', true) AND m.trial_ends > now() AND m.support_ends > now()));
 ";
     let (dsl, tuples) = model_and_tuples(sql);
     assert!(
@@ -198,10 +198,10 @@ CREATE TABLE note_links(id INT PRIMARY KEY, note_id TEXT NOT NULL REFERENCES not
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)
     AND m.trial_ends > now() AND m.support_ends > now()));
 CREATE POLICY q ON docs FOR DELETE USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)
     AND m.trial_ends > now()));
 ";
     let (dsl, _) = model_and_tuples(sql);
@@ -231,7 +231,7 @@ CREATE TABLE reviewers(id INT PRIMARY KEY, user_id TEXT NOT NULL,
   vetted_until TIMESTAMPTZ NOT NULL, cleared_until TIMESTAMPTZ NOT NULL);
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON memos FOR SELECT USING (EXISTS (
-  SELECT 1 FROM reviewers r WHERE r.user_id = current_user
+  SELECT 1 FROM reviewers r WHERE r.user_id = current_setting('app.user_id', true)
     AND r.vetted_until > now() AND r.cleared_until > now()));
 ";
     let (dsl, tuples) = model_and_tuples(sql);
@@ -264,7 +264,7 @@ CREATE TABLE memos(id TEXT PRIMARY KEY);
 CREATE TABLE reviewers(user_id TEXT NOT NULL, vetted_since TIMESTAMPTZ NOT NULL);
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON memos FOR SELECT USING (EXISTS (
-  SELECT 1 FROM reviewers r WHERE r.user_id = current_user AND r.vetted_since <= now()));
+  SELECT 1 FROM reviewers r WHERE r.user_id = current_setting('app.user_id', true) AND r.vetted_since <= now()));
 ";
     let (_, tuples) = model_and_tuples(sql);
     assert!(
@@ -287,7 +287,7 @@ CREATE TABLE reviewers(user_id TEXT NOT NULL,
   vetted_until TIMESTAMPTZ NOT NULL, cleared_until TIMESTAMPTZ NOT NULL);
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON memos FOR SELECT USING (EXISTS (
-  SELECT 1 FROM reviewers r WHERE r.user_id = current_user
+  SELECT 1 FROM reviewers r WHERE r.user_id = current_setting('app.user_id', true)
     AND r.vetted_until > now() AND r.cleared_until > now()));
 ";
     let db = db_of(sql);
@@ -340,7 +340,7 @@ CREATE TABLE reviewers(id TEXT PRIMARY KEY, user_id TEXT NOT NULL,
   vetted_until TIMESTAMPTZ NOT NULL, cleared_until TIMESTAMPTZ NOT NULL);
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON memos FOR SELECT USING (EXISTS (
-  SELECT 1 FROM reviewers r WHERE r.user_id = current_user
+  SELECT 1 FROM reviewers r WHERE r.user_id = current_setting('app.user_id', true)
     AND r.vetted_until > now() AND r.cleared_until > now()));
 ";
     let (_, tuples) = model_and_tuples(sql);

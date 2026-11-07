@@ -33,8 +33,8 @@ ALTER TABLE archive.docs ENABLE ROW LEVEL SECURITY;
 
 -- The target is written bare. Only the path says which `docs` this guards, and it is
 -- `app.docs` because `app` comes first.
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_setting('app.user_id'));
 
 -- The other one is named in full, so both spellings appear in one schema.
 CREATE POLICY archive_docs_owner ON archive.docs FOR SELECT
-    USING (owner_login = current_user);
+    USING (owner_login = current_setting('app.user_id'));

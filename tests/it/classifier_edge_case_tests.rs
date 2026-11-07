@@ -16,7 +16,8 @@ CREATE TABLE docs(id UUID PRIMARY KEY, val INT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (val + my_user_func() > 0);
 
-CREATE FUNCTION my_user_func() RETURNS UUID LANGUAGE sql AS 'SELECT current_user';
+CREATE FUNCTION my_user_func() RETURNS UUID LANGUAGE sql AS
+'SELECT current_setting(''app.current_user_id'')::uuid';
 ";
     let db = parse_schema(sql).unwrap();
     let mut registry = FunctionRegistry::new();
@@ -128,8 +129,8 @@ fn classifications_iterator_yields_both_using_and_with_check() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR UPDATE
-    USING (owner_id = current_user)
-    WITH CHECK (owner_id = current_user);
+    USING (owner_id = current_setting('app.user_id'))
+    WITH CHECK (owner_id = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -146,7 +147,7 @@ fn classifications_iterator_yields_one_for_select() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -162,7 +163,7 @@ fn scoped_roles_returns_empty_for_public() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO PUBLIC USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT TO PUBLIC USING (owner_id = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -177,7 +178,7 @@ fn scoped_roles_returns_role_names() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO app_user, admin_role USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT TO app_user, admin_role USING (owner_id = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -199,7 +200,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT);
 CREATE TABLE members(doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id')
     AND {conjunct}));
 "
         );
@@ -221,7 +222,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT);
 CREATE TABLE members(doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id')));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -236,12 +237,12 @@ CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
 
 #[test]
 fn a_nullif_wrapped_ownership_refuses() {
-    // NULLIF(owner_id, 'system') = current_user denies the sentinel principal
+    // NULLIF(owner_id, 'system') = current_setting('app.user_id') denies the sentinel principal
     // its rows. Tuples built from the raw column would reverse that exclusion.
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (NULLIF(owner_id, 'system') = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (NULLIF(owner_id, 'system') = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -258,7 +259,7 @@ fn a_coalesce_wrapped_ownership_still_classifies_at_b() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (COALESCE(owner_id, 'nobody') = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (COALESCE(owner_id, 'nobody') = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -279,7 +280,7 @@ fn ownership_beside_a_literal_guard_keeps_the_composite_structure() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
-    USING (owner_id = current_user AND status = 'published');
+    USING (owner_id = current_setting('app.user_id') AND status = 'published');
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -306,7 +307,7 @@ fn p8_composite_or_with_all_relationship_parts() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
-    USING (owner_id = current_user OR editor_id = current_user);
+    USING (owner_id = current_setting('app.user_id') OR editor_id = current_setting('app.user_id'));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -329,7 +330,7 @@ fn array_any_membership_classified_as_array_membership() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, allowed_users TEXT[]);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (current_user = ANY(allowed_users));
+CREATE POLICY p ON docs FOR SELECT USING (current_setting('app.user_id') = ANY(allowed_users));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -446,7 +447,7 @@ fn confidence_filter_drops_below_threshold_classifications() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_own ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY p_flag ON docs FOR SELECT USING (is_public = TRUE);
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
@@ -534,9 +535,14 @@ CREATE POLICY p ON docs FOR SELECT USING (auth.role() IN ('authenticated', 'admi
     );
 }
 
+/// The two-argument `pg_has_role` asks about the acting role, and the schema's role
+/// memberships settle the answer, so the call classifies as the constant they decide.
 #[test]
-fn pg_has_role_two_arg_classified_as_p2() {
+fn pg_has_role_two_arg_is_a_constant_the_schema_decides() {
     let sql = r"
+CREATE ROLE app_user;
+CREATE ROLE admin;
+GRANT admin TO app_user;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (pg_has_role('admin', 'MEMBER'));
@@ -547,16 +553,21 @@ CREATE POLICY p ON docs FOR SELECT USING (pg_has_role('admin', 'MEMBER'));
     assert!(
         matches!(
             &c.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { role_names, .. }) if role_names == &["admin"]
+            PatternClass::P10ConstantBool(ConstantBool { value: true })
         ),
-        "Expected P2 for pg_has_role 2-arg, got: {:?}",
+        "the grant settles the acting role's membership, got: {:?}",
         c.pattern
     );
 }
 
+/// The three-argument form reads its member from the acting role the same way, so a
+/// policy written with the keyword classifies as the constant the memberships decide.
 #[test]
-fn pg_has_role_three_arg_classified_as_p2() {
+fn pg_has_role_three_arg_is_a_constant_the_schema_decides() {
     let sql = r"
+CREATE ROLE app_user;
+CREATE ROLE editor;
+GRANT editor TO app_user;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (pg_has_role(current_user, 'editor', 'MEMBER'));
@@ -567,9 +578,9 @@ CREATE POLICY p ON docs FOR SELECT USING (pg_has_role(current_user, 'editor', 'M
     assert!(
         matches!(
             &c.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { role_names, .. }) if role_names == &["editor"]
+            PatternClass::P10ConstantBool(ConstantBool { value: true })
         ),
-        "Expected P2 for pg_has_role 3-arg, got: {:?}",
+        "the keyword reads the acting role and the grant settles it, got: {:?}",
         c.pattern
     );
 }
@@ -729,7 +740,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
-    USING (id IN (SELECT doc_id FROM shares WHERE shares.user_id = current_user));
+    USING (id IN (SELECT doc_id FROM shares WHERE shares.user_id = current_setting('app.user_id')));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
     assert_eq!(classified.len(), 1);
@@ -757,7 +768,7 @@ CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
         SELECT 1 FROM doc_members m
         JOIN docs d ON m.doc_id = d.id
-        WHERE m.member_id = current_user
+        WHERE m.member_id = current_setting('app.user_id')
     ));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
@@ -781,7 +792,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
         SELECT 1 FROM shares s
-        JOIN docs d ON s.user_id = current_user
+        JOIN docs d ON s.user_id = current_setting('app.user_id')
         WHERE s.doc_id = docs.id
     ));
 ",
@@ -792,7 +803,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
         SELECT 1 FROM shares s
-        JOIN docs d ON current_user = s.user_id
+        JOIN docs d ON current_setting('app.user_id') = s.user_id
         WHERE s.doc_id = docs.id
     ));
 ",
@@ -819,7 +830,7 @@ CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
         SELECT 1 FROM doc_access a
         WHERE docs.id = a.doc_id
-          AND a.user_id = current_user
+          AND a.user_id = current_setting('app.user_id')
     ));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
@@ -843,7 +854,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
         SELECT 1 FROM access a
-        WHERE a.doc_id = docs.id AND a.project_id = docs.project_id AND a.user_id = current_user
+        WHERE a.doc_id = docs.id AND a.project_id = docs.project_id AND a.user_id = current_setting('app.user_id')
     ));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
@@ -865,7 +876,7 @@ CREATE TABLE log(id UUID PRIMARY KEY, doc_id UUID, editor UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
-        SELECT 1 FROM log WHERE log.editor = current_user
+        SELECT 1 FROM log WHERE log.editor = current_setting('app.user_id')
     ));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
@@ -898,7 +909,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
         SELECT 1 FROM orgs o
-        WHERE o.id = docs.org_id AND o.id = docs.alt_org_id AND o.owner_id = current_user
+        WHERE o.id = docs.org_id AND o.id = docs.alt_org_id AND o.owner_id = current_setting('app.user_id')
     ));
 ";
     let (classified, _db, _registry) = support::classify_sql_no_registry(sql);

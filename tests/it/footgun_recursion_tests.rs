@@ -19,9 +19,9 @@ fn a_select_policy_reading_its_own_table_denies_the_table() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tree ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -52,7 +52,7 @@ CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), u
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM docs d2 JOIN doc_members dm ON dm.doc_id = d2.id
-          WHERE d2.id = docs.id AND dm.user_id = current_user));
+          WHERE d2.id = docs.id AND dm.user_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -75,9 +75,9 @@ fn a_non_select_policy_may_read_its_own_table() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (
-  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -105,9 +105,9 @@ fn a_recursive_select_policy_denies_reads_even_when_unrecognized() {
         r"
 CREATE TABLE t1(id INTEGER PRIMARY KEY, parent_id INTEGER, owner TEXT);
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
-CREATE POLICY t1_own ON t1 FOR SELECT USING (owner = current_user);
+CREATE POLICY t1_own ON t1 FOR SELECT USING (owner = current_setting('app.user_id', true));
 CREATE POLICY t1_tree ON t1 FOR SELECT USING (
-  EXISTS (SELECT 1 FROM t1 p WHERE p.id = t1.parent_id AND p.owner = current_user));
+  EXISTS (SELECT 1 FROM t1 p WHERE p.id = t1.parent_id AND p.owner = current_setting('app.user_id', true)));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -141,10 +141,10 @@ CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, a_id INTEGER REFERENCES a(
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (b_id) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pa ON a FOR {command} USING (owner_id = current_user
-  OR EXISTS (SELECT 1 FROM b WHERE b.id = a.b_id AND b.owner_id = current_user));
-CREATE POLICY pb ON b FOR {command} USING (owner_id = current_user
-  OR EXISTS (SELECT 1 FROM a WHERE a.id = b.a_id AND a.owner_id = current_user));
+CREATE POLICY pa ON a FOR {command} USING (owner_id = current_setting('app.user_id', true)
+  OR EXISTS (SELECT 1 FROM b WHERE b.id = a.b_id AND b.owner_id = current_setting('app.user_id', true)));
+CREATE POLICY pb ON b FOR {command} USING (owner_id = current_setting('app.user_id', true)
+  OR EXISTS (SELECT 1 FROM a WHERE a.id = b.a_id AND a.owner_id = current_setting('app.user_id', true)));
 "
     ))
 }
@@ -249,12 +249,12 @@ ALTER TABLE b ADD CONSTRAINT b_c FOREIGN KEY (nx) REFERENCES c(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
 ALTER TABLE c ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pa ON a FOR SELECT USING (owner_id = current_user
-  OR EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user));
-CREATE POLICY pb ON b FOR SELECT USING (owner_id = current_user
-  OR EXISTS (SELECT 1 FROM c WHERE c.id = b.nx AND c.owner_id = current_user));
-CREATE POLICY pc ON c FOR SELECT USING (owner_id = current_user
-  OR EXISTS (SELECT 1 FROM a WHERE a.id = c.nx AND a.owner_id = current_user));
+CREATE POLICY pa ON a FOR SELECT USING (owner_id = current_setting('app.user_id', true)
+  OR EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_setting('app.user_id', true)));
+CREATE POLICY pb ON b FOR SELECT USING (owner_id = current_setting('app.user_id', true)
+  OR EXISTS (SELECT 1 FROM c WHERE c.id = b.nx AND c.owner_id = current_setting('app.user_id', true)));
+CREATE POLICY pc ON c FOR SELECT USING (owner_id = current_setting('app.user_id', true)
+  OR EXISTS (SELECT 1 FROM a WHERE a.id = c.nx AND a.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -285,11 +285,11 @@ ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
 ALTER TABLE x ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pa ON a FOR SELECT USING (
-  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user));
+  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY pb ON b FOR SELECT USING (
-  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_user));
-CREATE POLICY px ON x FOR SELECT USING (owner_id = current_user
-  OR EXISTS (SELECT 1 FROM a WHERE a.id = x.nx AND a.owner_id = current_user));
+  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_setting('app.user_id', true)));
+CREATE POLICY px ON x FOR SELECT USING (owner_id = current_setting('app.user_id', true)
+  OR EXISTS (SELECT 1 FROM a WHERE a.id = x.nx AND a.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -323,11 +323,11 @@ CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pa ON a FOR SELECT USING (owner_id = current_user);
+CREATE POLICY pa ON a FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY par ON a AS RESTRICTIVE FOR SELECT USING (
-  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user));
+  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY pb ON b FOR SELECT USING (
-  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_user));
+  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -393,11 +393,11 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id UUID);
 CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_user));
-CREATE POLICY pds ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY pdi_plain ON docs FOR INSERT WITH CHECK (owner_id = current_user);
+CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
+CREATE POLICY pds ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY pdi_plain ON docs FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pdi_loop ON docs FOR INSERT WITH CHECK (
-  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -449,10 +449,10 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id UUID);
 CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_user));
-CREATE POLICY pds ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY pdu ON docs FOR UPDATE USING (owner_id = current_user) WITH CHECK (
-  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
+CREATE POLICY pds ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY pdu ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true)) WITH CHECK (
+  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -514,7 +514,7 @@ CREATE SCHEMA app;
 CREATE TABLE app.docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES app.docs(id), owner_id UUID);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_tree ON app.docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM app.docs p WHERE p.id = app.docs.parent_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM app.docs p WHERE p.id = app.docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -540,7 +540,7 @@ fn a_fully_blocked_policy_leaves_no_role_scope_behind() {
 CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_tree ON docs FOR SELECT TO auditor USING (
-  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -581,13 +581,13 @@ ALTER TABLE g ENABLE ROW LEVEL SECURITY;
 ALTER TABLE e ENABLE ROW LEVEL SECURITY;
 ALTER TABLE f ENABLE ROW LEVEL SECURITY;
 ALTER TABLE d ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pg ON g FOR SELECT USING (owner_id = current_user);
+CREATE POLICY pg ON g FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pe ON e FOR SELECT USING (
-  EXISTS (SELECT 1 FROM g WHERE g.id = e.nx AND g.owner_id = current_user));
+  EXISTS (SELECT 1 FROM g WHERE g.id = e.nx AND g.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY pf ON f FOR SELECT USING (
-  EXISTS (SELECT 1 FROM g WHERE g.id = f.nx AND g.owner_id = current_user));
+  EXISTS (SELECT 1 FROM g WHERE g.id = f.nx AND g.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY pd ON d FOR SELECT USING (
-  EXISTS (SELECT 1 FROM e WHERE e.id = d.nx AND e.owner_id = current_user));
+  EXISTS (SELECT 1 FROM e WHERE e.id = d.nx AND e.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -624,12 +624,12 @@ CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pas ON a FOR SELECT USING (owner_id = current_user);
+CREATE POLICY pas ON a FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY pau ON a FOR UPDATE USING (
-  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user))
+  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_setting('app.user_id', true)))
   WITH CHECK (id IS NOT NULL);
 CREATE POLICY pb ON b FOR SELECT USING (
-  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_user));
+  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -669,9 +669,9 @@ CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pa ON a FOR SELECT USING (
-  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user));
+  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY pb ON b FOR SELECT USING (
-  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_user));
+  EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -707,10 +707,10 @@ ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pa ON a FOR SELECT USING (
-  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user));
+  EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY pb_loop ON b FOR SELECT USING (
-  NOT EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_user));
-CREATE POLICY pb_own ON b FOR SELECT USING (owner_id = current_user);
+  NOT EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_setting('app.user_id', true)));
+CREATE POLICY pb_own ON b FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -738,9 +738,9 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
 CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_user));
+CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
 CREATE POLICY pd ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     assert_looping_membership_is_silent(&db, "the correlated membership spelling");
@@ -757,8 +757,8 @@ CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
 CREATE TABLE m(id INTEGER PRIMARY KEY, user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
-CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_user));
-CREATE POLICY pd ON docs FOR SELECT USING (EXISTS (SELECT 1 FROM m WHERE m.user_id = current_user));
+CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
+CREATE POLICY pd ON docs FOR SELECT USING (EXISTS (SELECT 1 FROM m WHERE m.user_id = current_setting('app.user_id', true)));
 ",
     );
     assert_looping_membership_is_silent(&db, "the uncorrelated membership spelling");
