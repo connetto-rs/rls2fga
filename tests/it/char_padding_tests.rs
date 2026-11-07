@@ -108,6 +108,14 @@ fn an_array_compares_as_its_own_element_type() {
         ["ab  "]
     );
     assert_eq!(
+        admitted("code = ANY (ARRAY['ab '::char(3), 'x'])", CELLS),
+        ["ab  "]
+    );
+    assert_eq!(
+        admitted("code = ANY (ARRAY['x'::char(2), 'ab '::varchar])", CELLS),
+        ["ab  "]
+    );
+    assert_eq!(
         admitted("code = ANY (ARRAY['ab ', 'x']::text[])", CELLS),
         Vec::<&str>::new()
     );

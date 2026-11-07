@@ -435,7 +435,7 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
         return None;
     }
     if let Some((column, list)) = constant_in_list(expr) {
-        let as_text = column_cast_to_text(column) || list_compares_as_text(expr, list)?;
+        let as_text = column_cast_to_text(column) || list_compares_as_text(expr, list);
         return literal_list_predicate(column, list, as_text);
     }
     let null_test = match expr {
@@ -510,41 +510,29 @@ fn literal_cast_to_text(literal: &Expr) -> bool {
     CastChain::peeled(literal).0.outermost() == Some("text")
 }
 
-/// Whether the values of a list compare with an uncast column as `text`, `None` where
-/// their common type depends on the order they are written in.
+/// Whether the values of a list compare with an uncast column as `text`.
 ///
 /// An `IN` list of several values takes the column's type whatever the values are cast
 /// to, and a list of one is the equality it spells. `= ANY (ARRAY[...])` takes the array's
-/// type, which is `text[]` unless the array or an item is cast to another string type.
-fn list_compares_as_text(expr: &Expr, list: &[Expr]) -> Option<bool> {
+/// type, which is `text[]` when the array or an item is cast to `text` or nothing is cast,
+/// and otherwise the `varchar` or `char(n)` a string literal here is cast to, which a
+/// `char(n)` column compares as `char(n)`.
+fn list_compares_as_text(expr: &Expr, list: &[Expr]) -> bool {
     let Expr::AnyOp { right, .. } = expr else {
-        return Some(matches!(list, [only] if literal_cast_to_text(only)));
+        return matches!(list, [only] if literal_cast_to_text(only));
     };
     if let Some(array_type) = CastChain::peeled(right).0.outermost() {
-        return Some(element_type(array_type) == "text");
+        return element_type(array_type) == "text";
     }
-    let (mut varying, mut padded) = (false, false);
+    let mut typed = false;
     for item in list {
         match CastChain::peeled(item).0.outermost() {
-            Some("text") => return Some(true),
-            Some(name)
-                if ["varchar", "character varying", "char varying"]
-                    .iter()
-                    .any(|family| name.starts_with(family)) =>
-            {
-                varying = true;
-            }
-            Some(name)
-                if ["char", "character", "bpchar"]
-                    .iter()
-                    .any(|family| name.starts_with(family)) =>
-            {
-                padded = true;
-            }
-            _ => {}
+            Some("text") => return true,
+            Some(_) => typed = true,
+            None => {}
         }
     }
-    (!(varying && padded)).then_some(!varying && !padded)
+    !typed
 }
 
 /// The list item a list of several values compares, without the `text` and unbounded

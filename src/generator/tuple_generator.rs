@@ -1822,30 +1822,27 @@ pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
             operator.sql(),
             render_attribute_literal(value)?
         )),
-        // Every value of an `IN` list compares as the column's type, so a list compared as
-        // `text` spells the array it compares against.
-        AttributeTest::In(values)
-            if values
-                .iter()
-                .any(|value| matches!(value, AttributeLiteral::AsText(_))) =>
-        {
-            let rendered = values
-                .iter()
-                .map(|value| match value {
-                    AttributeLiteral::Text(spelled) | AttributeLiteral::AsText(spelled) => {
-                        Some(quote_sql_string_literal(spelled))
-                    }
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            Some(format!("= ANY (ARRAY[{}]::text[])", rendered.join(", ")))
-        }
         AttributeTest::In(values) if !values.is_empty() => {
             let rendered = values
                 .iter()
-                .map(render_attribute_literal)
-                .collect::<Option<Vec<_>>>()?;
-            Some(format!("IN ({})", rendered.join(", ")))
+                .map(|value| match value {
+                    AttributeLiteral::AsText(spelled) => Some(quote_sql_string_literal(spelled)),
+                    other => render_attribute_literal(other),
+                })
+                .collect::<Option<Vec<_>>>()?
+                .join(", ");
+            // Every value of an `IN` list compares as the column's type, so a list compared
+            // as `text` spells the array it compares against.
+            Some(
+                if values
+                    .iter()
+                    .any(|value| matches!(value, AttributeLiteral::AsText(_)))
+                {
+                    format!("= ANY (ARRAY[{rendered}]::text[])")
+                } else {
+                    format!("IN ({rendered})")
+                },
+            )
         }
         AttributeTest::In(_) => None,
         AttributeTest::IsNull => Some("IS NULL".to_string()),
