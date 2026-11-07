@@ -16,9 +16,7 @@ use alloc::vec::Vec;
 
 use sqlparser::ast::{BinaryOperator, Expr, FunctionArguments, InTarget, Query, SelectItem};
 
-use crate::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
+use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     CallerScalarEqualsConstant, ClassifiedExpr, ConfidenceLevel, ConstantInCallerSet, PatternClass,
     RowValueEqualsCallerScalar, RowValueInCallerSet,
@@ -26,6 +24,7 @@ use crate::classifier::patterns::{
 use crate::parser::expr::{function_arg_expr, CastChain};
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::builtin_function_name;
+use crate::parser::sql_parser::SetPacking;
 use crate::types::ColumnName;
 
 use super::casts::other_side_renaming;
@@ -89,7 +88,7 @@ fn set_membership_in_subquery(expr: &Expr, registry: &FunctionRegistry) -> Optio
 /// spellings answer that the same way.
 fn tested_against_set(
     tested: &Expr,
-    source: &SessionAttribute,
+    source: &DeclaredSource,
     separator: Option<String>,
     casts: &CastChain,
 ) -> Option<ClassifiedExpr> {
@@ -176,7 +175,7 @@ fn tested_value(expr: &Expr) -> TestedValue {
 
 /// A field taken out of the caller's value is indirection, which caps at B exactly as a
 /// scalar subquery wrapper and a `COALESCE` wrapper already do.
-fn grade(source: &SessionAttribute) -> ConfidenceLevel {
+fn grade(source: &DeclaredSource) -> ConfidenceLevel {
     if source.path().is_empty() {
         ConfidenceLevel::A
     } else {
@@ -189,9 +188,9 @@ fn grade(source: &SessionAttribute) -> ConfidenceLevel {
 fn declared_scalar<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r SessionAttribute, CastChain)> {
+) -> Option<(&'r DeclaredSource, CastChain)> {
     declared_read(expr, registry)
-        .filter(|(source, casts)| casts.renaming(source.identity_cast()).is_none())
+        .filter(|(source, casts)| casts.renaming(Some(&source.canonical_type())).is_none())
 }
 
 /// A source the caller's set comes from, named rather than resolved, so one reader
@@ -206,6 +205,26 @@ pub(crate) struct SetSource {
     pub(crate) separator: Option<String>,
     /// Every cast between the setting and the set's elements, outermost first.
     pub(crate) casts: CastChain,
+}
+
+impl SetSource {
+    /// Whether this read yields the elements `declared` holds, which takes a set unpacked
+    /// the way the deployment packs it under no cast that renames an element.
+    ///
+    /// A split on another delimiter than the declared one names elements the request never
+    /// sent, and a JSON array split as text or text expanded as JSON names none at all.
+    pub(crate) fn reads_as(&self, declared: &DeclaredSource) -> bool {
+        let unpacked = match (declared.packing(), self.separator.as_deref()) {
+            (Some(SetPacking::Delimited(declared)), Some(split)) => declared == split,
+            (Some(SetPacking::JsonArray), None) => true,
+            _ => false,
+        };
+        unpacked
+            && self
+                .casts
+                .renaming(Some(&declared.canonical_type()))
+                .is_none()
+    }
 }
 
 /// An **array valued** expression yielding the caller's set, which is what `= ANY (...)`
@@ -326,31 +345,32 @@ fn source_read_by(
 pub(crate) fn caller_set<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r SessionAttribute, Option<String>)> {
-    let (attribute, separator, _) = declared_set(array_valued_set(expr, registry)?, registry)?;
-    Some((attribute, separator))
+) -> Option<(&'r DeclaredSource, Option<String>)> {
+    let (source, separator, _) = declared_set(array_valued_set(expr, registry)?, registry)?;
+    Some((source, separator))
 }
 
 /// The declared set a subquery projects, which is what `IN (SELECT ...)` takes.
 pub(crate) fn caller_set_in_subquery<'r>(
     query: &Query,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r SessionAttribute, Option<String>)> {
-    let (attribute, separator, _) =
+) -> Option<(&'r DeclaredSource, Option<String>)> {
+    let (source, separator, _) =
         declared_set(row_valued_set(sole_projection(query)?, registry)?, registry)?;
-    Some((attribute, separator))
+    Some((source, separator))
 }
 
-/// The set declaration `source` reads, when no cast on the read renames its elements.
+/// The set declaration `source` reads, when the read unpacks it as declared and no cast
+/// on the read renames its elements.
 fn declared_set(
     source: SetSource,
     registry: &FunctionRegistry,
-) -> Option<(&SessionAttribute, Option<String>, CastChain)> {
-    let attribute = resolve_declared_set(&source, registry)?;
-    if source.casts.renaming(attribute.identity_cast()).is_some() {
+) -> Option<(&DeclaredSource, Option<String>, CastChain)> {
+    let declared = resolve_declared_set(&source, registry)?;
+    if !source.reads_as(declared) {
         return None;
     }
-    Some((attribute, source.separator, source.casts))
+    Some((declared, source.separator, source.casts))
 }
 
 /// The declaration a named source resolves to, when the deployment declared it a set.
@@ -360,17 +380,17 @@ fn declared_set(
 fn resolve_declared_set<'r>(
     source: &SetSource,
     registry: &'r FunctionRegistry,
-) -> Option<&'r SessionAttribute> {
+) -> Option<&'r DeclaredSource> {
     registry
-        .session_attribute(&source.key, &source.path)
-        .filter(|attribute| attribute.kind() == SessionAttributeKind::SetAttribute)
+        .declared_source(&source.key, &source.path)
+        .filter(|declared| declared.packing().is_some())
 }
 
 /// The declared set `expr` reads and the casts on its elements, renaming or not.
 pub(super) fn set_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r SessionAttribute, CastChain)> {
+) -> Option<(&'r DeclaredSource, CastChain)> {
     let source = array_valued_set(expr, registry).or_else(|| row_valued_set(expr, registry))?;
     Some((resolve_declared_set(&source, registry)?, source.casts))
 }
@@ -408,7 +428,8 @@ pub(crate) fn undeclared_set_reads(expr: &Expr, registry: &FunctionRegistry) -> 
     reasons
 }
 
-/// Why `source`, read as a set, resolves to no set declaration, or `None` when it does.
+/// Why `source`, read as a set, resolves to no set declaration it unpacks as declared, or
+/// `None` when it does.
 fn undeclared_set_reason(source: &SetSource, registry: &FunctionRegistry) -> Option<String> {
     let read = if source.path.is_empty() {
         format!("current_setting('{}')", source.key)
@@ -419,20 +440,23 @@ fn undeclared_set_reason(source: &SetSource, registry: &FunctionRegistry) -> Opt
             source.key
         )
     };
-    let declared = match registry
-        .session_attribute(&source.key, &source.path)
-        .map(SessionAttribute::kind)
-    {
-        None => "no SetAttribute declares it",
-        Some(SessionAttributeKind::ScalarAttribute) => {
-            "it is declared as one value (ScalarAttribute), not as a SetAttribute"
-        }
-        Some(SessionAttributeKind::CallerId) => {
-            "it is declared as the caller (CallerId), not as a SetAttribute"
-        }
-        Some(SessionAttributeKind::SetAttribute) => return None,
+    let unpacking = match &source.separator {
+        Some(separator) => format!("split on '{separator}'"),
+        None => "expanded as a JSON array".to_string(),
     };
-    Some(format!("{read} is read as a set and {declared}"))
+    let declared = match registry.declared_source(&source.key, &source.path) {
+        None => "the deployment declares no such setting".to_string(),
+        Some(declared) if declared.packing().is_none() => {
+            format!("the deployment declares it as {}", declared.declared_as())
+        }
+        Some(declared) if source.reads_as(declared) => return None,
+        Some(declared) => format!(
+            "the deployment declares it as {} of {}",
+            declared.declared_as(),
+            declared.canonical_type()
+        ),
+    };
+    Some(format!("{read} is {unpacking} and {declared}"))
 }
 
 /// The single-value declaration behind whatever `expr` reads and the casts around the
@@ -442,18 +466,18 @@ fn undeclared_set_reason(source: &SetSource, registry: &FunctionRegistry) -> Opt
 pub(super) fn declared_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r SessionAttribute, CastChain)> {
+) -> Option<(&'r DeclaredSource, CastChain)> {
     let AccessorRead { root, path, casts } = accessor_read(expr)?;
     let key = setting_key_read_by(root, registry)?;
-    let attribute = registry
-        .session_attribute(&key, &path)
-        .filter(|attribute| attribute.kind() == SessionAttributeKind::ScalarAttribute)?;
-    Some((attribute, casts))
+    let source = registry
+        .declared_source(&key, &path)
+        .filter(|source| source.is_scalar())?;
+    Some((source, casts))
 }
 
 /// The `current_setting` key a node names, written inline or wrapped in a function whose
 /// whole body reads it. Both spellings reach one declaration, so they cannot disagree.
-fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<String> {
+pub(super) fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<String> {
     if let Some(key) = current_setting_literal_key(root) {
         return Some(key);
     }
@@ -469,22 +493,29 @@ fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classifier::recognizers::is_current_user_expr;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
+    use crate::parser::sql_parser::SettingValue;
+    use crate::test_support::{caller, delimited_set, json_field, registry, scalar};
+    use sqlparser::ast::DataType;
 
-    fn registry_with(attributes: Vec<SessionAttribute>) -> FunctionRegistry {
-        let mut registry = FunctionRegistry::new();
-        registry.declare_session_attributes(attributes);
-        registry
+    /// A JSON setting whose `teams` field holds a JSON array of text.
+    fn teams_claim() -> crate::parser::sql_parser::SessionSetting {
+        json_field(
+            "request.jwt.claims",
+            &["teams"],
+            SettingValue::Set {
+                element: DataType::Text,
+                packing: SetPacking::JsonArray,
+            },
+        )
     }
 
     /// A set read where one value belongs is the recorded tenant trap in the other
     /// direction, so the kind has to refuse it rather than fall through to ownership.
     #[test]
     fn a_declared_set_read_as_one_value_is_refused() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )]);
+        let registry = registry([delimited_set("app.subjects", ",")]);
         let expr = parse_expr("owner = current_setting('app.subjects', true)");
         assert!(
             recognize_session_attribute(&expr, &registry).is_none(),
@@ -496,63 +527,57 @@ mod tests {
     /// element, which is not what the deployment declared.
     #[test]
     fn a_declared_single_value_read_as_a_set_is_refused() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.tenant_id",
-            SessionAttributeKind::ScalarAttribute,
-        )]);
         let expr =
             parse_expr("owner = ANY(string_to_array(current_setting('app.tenant_id'), ','))");
+        let registry_of_scalar = registry([scalar("app.tenant_id")]);
         assert!(
-            recognize_session_attribute(&expr, &registry).is_none(),
+            recognize_session_attribute(&expr, &registry_of_scalar).is_none(),
             "one value is not a set"
         );
         assert_eq!(
-            undeclared_set_reads(&expr, &registry),
+            undeclared_set_reads(&expr, &registry_of_scalar),
             vec![
-                "current_setting('app.tenant_id') is read as a set and it is declared as one \
-                 value (ScalarAttribute), not as a SetAttribute"
+                "current_setting('app.tenant_id') is split on ',' and the deployment declares \
+                 it as one value"
                     .to_string()
             ],
-            "the refusal names the kind the deployment declared"
+            "the refusal names what the deployment declared"
         );
-
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.tenant_id",
-            SessionAttributeKind::CallerId,
-        )]);
         assert_eq!(
-            undeclared_set_reads(&expr, &registry),
+            undeclared_set_reads(&expr, &registry([caller("app.tenant_id")])),
             vec![
-                "current_setting('app.tenant_id') is read as a set and it is declared as the \
-                 caller (CallerId), not as a SetAttribute"
+                "current_setting('app.tenant_id') is split on ',' and the deployment declares \
+                 it as the caller"
                     .to_string()
             ]
         );
     }
 
-    /// A cast to an array splits on `PostgreSQL`'s array literal syntax rather than on a
-    /// separator, so the caller contract differs and the shape falls closed.
+    /// A split on another delimiter than the deployment joins the set with names elements
+    /// the request never sent, as `string_to_array('a,b', ';')` is `{"a,b"}`. The read is
+    /// refused, naming both delimiters.
     #[test]
-    fn an_array_cast_is_not_the_declared_split() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )]);
-        let expr = parse_expr("owner = ANY(current_setting('app.subjects', true)::text[])");
+    fn a_split_on_another_separator_than_declared_is_refused() {
+        let registry = registry([delimited_set("app.subjects", ",")]);
+        let expr = parse_expr("owner = ANY(string_to_array(current_setting('app.subjects'), ';'))");
         assert!(
             recognize_session_attribute(&expr, &registry).is_none(),
-            "an array cast is a different split"
+            "a split on ';' of a set joined by ',' names other elements"
+        );
+        assert_eq!(
+            undeclared_set_reads(&expr, &registry),
+            vec![
+                "current_setting('app.subjects') is split on ';' and the deployment declares \
+                 it as a set joined by ',' of text"
+                    .to_string()
+            ]
         );
     }
 
-    /// A separator other than a comma is still a split, and the disclosure has to name
-    /// which one so the caller sends the matching elements.
+    /// The declared delimiter is the one a policy splits on, whatever it is.
     #[test]
-    fn the_separator_is_carried_rather_than_assumed() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )]);
+    fn the_declared_separator_is_read() {
+        let registry = registry([delimited_set("app.subjects", ";")]);
         let expr = parse_expr("owner = ANY(string_to_array(current_setting('app.subjects'), ';'))");
         assert!(
             matches!(
@@ -564,14 +589,69 @@ mod tests {
         );
     }
 
+    /// A set packed as a JSON array is expanded as JSON, and splitting its text names no
+    /// element the request sent. A delimited set is no JSON document either.
+    #[test]
+    fn a_set_is_unpacked_only_the_way_it_is_packed() {
+        let json = registry([teams_claim()]);
+        let expanded = parse_expr(
+            "team IN (SELECT jsonb_array_elements_text(current_setting('request.jwt.claims')::jsonb -> 'teams'))",
+        );
+        assert!(
+            recognize_session_attribute(&expanded, &json).is_some(),
+            "the JSON array is expanded as declared"
+        );
+        let split = parse_expr(
+            "team = ANY(string_to_array(current_setting('request.jwt.claims')::jsonb ->> 'teams', ','))",
+        );
+        assert!(
+            recognize_session_attribute(&split, &json).is_none(),
+            "a JSON array split as text names other elements"
+        );
+        assert_eq!(
+            undeclared_set_reads(&split, &json),
+            vec![
+                "field 'teams' of current_setting('request.jwt.claims') is split on ',' and \
+                 the deployment declares it as a set packed as a JSON array of text"
+                    .to_string()
+            ]
+        );
+
+        let delimited = registry([delimited_set("app.subjects", ",")]);
+        let expanded = parse_expr(
+            "owner IN (SELECT jsonb_array_elements_text(current_setting('app.subjects')::jsonb))",
+        );
+        assert!(
+            recognize_session_attribute(&expanded, &delimited).is_none(),
+            "a delimited set expanded as JSON names no element"
+        );
+        assert_eq!(
+            undeclared_set_reads(&expanded, &delimited),
+            vec![
+                "current_setting('app.subjects') is expanded as a JSON array and the \
+                 deployment declares it as a set joined by ',' of text"
+                    .to_string()
+            ]
+        );
+    }
+
+    /// A cast to an array splits on `PostgreSQL`'s array literal syntax rather than on a
+    /// separator, so the caller contract differs and the shape falls closed.
+    #[test]
+    fn an_array_cast_is_not_the_declared_split() {
+        let registry = registry([delimited_set("app.subjects", ",")]);
+        let expr = parse_expr("owner = ANY(current_setting('app.subjects', true)::text[])");
+        assert!(
+            recognize_session_attribute(&expr, &registry).is_none(),
+            "an array cast is a different split"
+        );
+    }
+
     /// A third argument to the split names a string that reads back as NULL, so the
     /// elements are not the ones the contract describes.
     #[test]
     fn a_null_string_argument_refuses_the_split() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )]);
+        let registry = registry([delimited_set("app.subjects", ",")]);
         let expr =
             parse_expr("owner = ANY(string_to_array(current_setting('app.subjects'), ',', 'x'))");
         assert!(
@@ -580,36 +660,38 @@ mod tests {
         );
     }
 
-    /// A field declared as the caller is inert, so configuration cannot open the identity
-    /// door that was closed deliberately. Two halves hold it, and both are asserted: the
-    /// kind never matches an attribute read, and the caller lookup asks for the whole
-    /// value so a field path is unreachable from it.
+    /// A field the deployment declares as the caller is the caller, and only that field:
+    /// the token holding it is not, and neither is a sibling field.
     #[test]
-    fn a_claim_declared_as_the_caller_is_inert() {
-        let registry = registry_with(vec![SessionAttribute::claim(
+    fn a_field_declared_as_the_caller_is_the_caller() {
+        let registry = registry([json_field(
             "request.jwt.claims",
-            ["sub"],
-            SessionAttributeKind::CallerId,
+            &["sub"],
+            SettingValue::Caller(DataType::Text),
         )]);
-        let expr = parse_expr("owner = current_setting('request.jwt.claims')::json ->> 'sub'");
+        let sub = parse_expr("current_setting('request.jwt.claims')::json ->> 'sub'");
+        assert!(is_current_user_expr(&sub, &registry));
         assert!(
-            recognize_session_attribute(&expr, &registry).is_none(),
-            "a field of the caller's value is never the caller"
+            recognize_session_attribute(&parse_expr(&format!("owner = {sub}")), &registry)
+                .is_none(),
+            "the caller is not a value the request compares with a condition"
         );
-        assert!(
-            !registry.names_caller_setting_key("request.jwt.claims"),
-            "declaring a field of the token does not name the token as the caller"
-        );
+        for other in [
+            "current_setting('request.jwt.claims')",
+            "current_setting('request.jwt.claims')::json ->> 'tenant'",
+        ] {
+            assert!(
+                !is_current_user_expr(&parse_expr(other), &registry),
+                "{other} is not the field declared as the caller"
+            );
+        }
     }
 
     /// A different splitter is a different split, so the caller contract would name
     /// elements the database never produces. Only `string_to_array` reaches a set.
     #[test]
     fn another_splitting_function_is_not_the_declared_split() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )]);
+        let registry = registry([delimited_set("app.subjects", ",")]);
         let expr = parse_expr(
             "owner = ANY(regexp_split_to_array(current_setting('app.subjects', true), ','))",
         );
@@ -624,10 +706,7 @@ mod tests {
     /// wildcarded away.
     #[test]
     fn a_global_in_subquery_is_not_the_declared_set() {
-        let registry = registry_with(vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )]);
+        let registry = registry([delimited_set("app.subjects", ",")]);
         let expr = parse_expr(
             "owner IN (SELECT unnest(string_to_array(current_setting('app.subjects', true), ',')))",
         );
@@ -656,9 +735,9 @@ mod tests {
         );
     }
 
-    /// Nothing named the key, so nothing may read it.
+    /// Nothing declared the setting, so nothing may read it.
     #[test]
-    fn an_undeclared_key_reads_as_nothing() {
+    fn an_undeclared_setting_reads_as_nothing() {
         let registry = FunctionRegistry::new();
         let expr =
             parse_expr("owner = ANY(string_to_array(current_setting('app.subjects', true), ','))");
@@ -672,10 +751,10 @@ mod tests {
     /// another.
     #[test]
     fn a_declared_field_does_not_answer_for_its_sibling() {
-        let registry = registry_with(vec![SessionAttribute::claim(
+        let registry = registry([json_field(
             "request.jwt.claims",
-            ["aal"],
-            SessionAttributeKind::ScalarAttribute,
+            &["aal"],
+            SettingValue::Scalar(DataType::Text),
         )]);
         let expr = parse_expr("current_setting('request.jwt.claims')::jsonb ->> 'role' = 'admin'");
         assert!(
@@ -693,12 +772,12 @@ mod tests {
     /// A field is indirection, which caps at B, while a plain key read does not.
     #[test]
     fn a_field_read_grades_below_a_plain_key_read() {
-        let registry = registry_with(vec![
-            SessionAttribute::setting("app.tenant_id", SessionAttributeKind::ScalarAttribute),
-            SessionAttribute::claim(
+        let registry = registry([
+            scalar("app.tenant_id"),
+            json_field(
                 "request.jwt.claims",
-                ["aal"],
-                SessionAttributeKind::ScalarAttribute,
+                &["aal"],
+                SettingValue::Scalar(DataType::Text),
             ),
         ]);
         let plain = parse_expr("tenant_id = current_setting('app.tenant_id')");

@@ -5,9 +5,9 @@
 
 use std::collections::BTreeSet;
 
+use crate::support::deployment::{caller, db, delimited_set, deployment};
 use crate::support::footgun::{relation_definition, relation_denies};
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
+use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{ActionAnswer, ActionRelations, ActionStatement, RowVersion};
@@ -193,24 +193,23 @@ fn the_report_answers_for_every_statement_the_enum_declares() {
 }
 
 fn translate(db: &ParserDB) -> Translation {
-    TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(db)
-        .expect("translation should plan")
+    TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        delimited_set("app.subjects", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(db)
+    .expect("translation should plan")
 }
 
 fn report(sql: &str) -> Vec<ActionRelations> {
-    let db: ParserDB = parse_schema(sql).expect("schema should parse");
+    let db = db(sql);
     translate(&db).action_relations().to_vec()
 }
 
 fn dsl(sql: &str) -> String {
-    let db: ParserDB = parse_schema(sql).expect("schema should parse");
+    let db = db(sql);
     translate(&db).outputs_accepting_gaps().model()
 }
 
@@ -511,7 +510,7 @@ fn a_table_the_database_does_not_restrict_reports_every_action_unrestricted() {
 #[test]
 fn every_type_the_model_names_rows_of_answers_every_statement() {
     for (label, sql) in EVERY_SCHEMA {
-        let db: ParserDB = parse_schema(sql).expect("schema should parse");
+        let db = db(sql);
         let planned = translate(&db);
         let entries = planned.action_relations();
         for naming in planned.row_naming() {
@@ -606,7 +605,7 @@ fn a_refusal_is_answered_for_a_table_whose_rows_cannot_be_named() {
     let sql = "CREATE TABLE audit(message TEXT);
 ALTER TABLE audit ENABLE ROW LEVEL SECURITY;
 ";
-    let db: ParserDB = parse_schema(sql).expect("schema should parse");
+    let db = db(sql);
     let planned = translate(&db);
     assert!(
         planned.row_naming().is_empty(),

@@ -1,6 +1,5 @@
 #![cfg(not(target_os = "windows"))]
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::generator::well_known::{
     WellKnownTypes, NOBODY_TYPE, PG_ROLE_SCOPE_TYPE, PG_ROLE_TYPE, REQUEST_GATE_TYPE, TEAM_TYPE,
 };
@@ -8,6 +7,7 @@ use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
+use crate::support::deployment::{deployment, scalar};
 
 #[tokio::test]
 #[ignore = "requires Docker and OpenFGA container"]
@@ -75,9 +75,6 @@ CREATE POLICY p ON tenant_docs FOR SELECT
     USING ("tenant-id" = current_setting('app.tenant'));
 CREATE POLICY p ON timed_docs FOR SELECT USING ("in" > now());
 "#;
-    let attribute = SessionAttribute::setting("app.tenant", SessionAttributeKind::ScalarAttribute)
-        .with_parameter("TenantValue_2")
-        .expect("TenantValue_2 is a valid parameter");
     let well_known = WellKnownTypes::new(
         "Principal-Team/V2.member",
         TEAM_TYPE,
@@ -88,11 +85,10 @@ CREATE POLICY p ON timed_docs FOR SELECT USING ("in" > now());
     )
     .expect("the extended type name should be valid");
     let db = support::footgun::db_of(schema);
-    let model = TranslatorBuilder::new()
+    let model = TranslatorBuilder::new(deployment([scalar("app.tenant")]))
         .with_request_time_parameter("as_of_2")
         .expect("as_of_2 is a valid parameter")
         .with_well_known_types(well_known)
-        .with_session_attributes([attribute])
         .build()
         .translate(&db)
         .expect("translation should plan")
@@ -102,7 +98,7 @@ CREATE POLICY p ON timed_docs FOR SELECT USING ("in" > now());
     let conditions = model.conditions.as_ref().expect("conditions should exist");
     assert!(conditions
         .values()
-        .any(|condition| condition.parameters.contains_key("TenantValue_2")));
+        .any(|condition| condition.parameters.contains_key("app_tenant")));
     assert!(conditions
         .values()
         .any(|condition| condition.parameters.contains_key("_in")));

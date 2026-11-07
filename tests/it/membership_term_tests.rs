@@ -4,10 +4,8 @@
 //! refusals from the decisions recorded there.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use rls2fga::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
+use rls2fga::classifier::function_registry::FunctionRegistry;
+use rls2fga::parser::sql_parser::{parse_schema, Deployment, ParserDB};
 use rls2fga::term::{describe_membership_term, TermCaller, TermChain, TermShapes};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
@@ -17,6 +15,8 @@ use rls2fga::types::{RecordDerivation, TranslationNote, ValueSource};
 use sqlparser::ast::Expr;
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
+
+use crate::support;
 
 /// The request's own three-table shop, with no row-level security anywhere, which is
 /// what a subscription engine's catalog holds.
@@ -47,34 +47,40 @@ fn parse_term(sql: &str) -> Expr {
         .expect("the term should parse")
 }
 
-fn registry() -> FunctionRegistry {
+/// The deployment the terms read for, declaring the caller's identity and the subjects
+/// the caller holds.
+fn terms_deployment() -> Deployment {
+    support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+        support::deployment::delimited_set("app.subjects", ","),
+    ])
+}
+
+fn registry(db: &ParserDB) -> FunctionRegistry {
     let mut registry = FunctionRegistry::new();
-    registry.declare_session_attributes([
-        SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-        SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-    ]);
+    registry.enrich_from_schema(db, &terms_deployment());
     registry
 }
 
 fn compile_on(schema: &str, table: &str, term: &str, min: ConfidenceLevel) -> TermShapes {
     let db: ParserDB = parse_schema(schema).expect("the schema should parse");
-    describe_membership_term(&parse_term(term), &db, &registry(), table, min)
+    describe_membership_term(&parse_term(term), &db, &registry(&db), table, min)
         .unwrap_or_else(|refusal| panic!("the term should compile, refused: {}", refusal.reason))
 }
 
 fn refuse_on(schema: &str, table: &str, term: &str, min: ConfidenceLevel) -> String {
-    refuse_with(schema, table, term, min, &registry())
+    let db: ParserDB = parse_schema(schema).expect("the schema should parse");
+    refuse_in(&db, table, term, min, &registry(&db))
 }
 
-fn refuse_with(
-    schema: &str,
+fn refuse_in(
+    db: &ParserDB,
     table: &str,
     term: &str,
     min: ConfidenceLevel,
     registry: &FunctionRegistry,
 ) -> String {
-    let db: ParserDB = parse_schema(schema).expect("the schema should parse");
-    match describe_membership_term(&parse_term(term), &db, registry, table, min) {
+    match describe_membership_term(&parse_term(term), db, registry, table, min) {
         Ok(shapes) => panic!("the term should be refused, compiled to {:?}", shapes.chain),
         Err(refusal) => refusal.reason,
     }
@@ -537,8 +543,8 @@ CREATE TABLE a.notes (id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE b.notes (id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE a.notes ENABLE ROW LEVEL SECURITY;
 ";
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
-    let registry = registry();
+    let db = support::deployment::db(sql);
+    let registry = registry(&db);
     let compiled = describe_membership_term(
         &parse_term(&format!("owner_id = {CALLER}")),
         &db,
@@ -548,9 +554,9 @@ ALTER TABLE a.notes ENABLE ROW LEVEL SECURITY;
     )
     .expect("the filter compiles");
 
-    let planned = TranslatorBuilder::new()
+    let deployment = support::deployment::deployment([support::deployment::caller("app.user_id")]);
+    let planned = TranslatorBuilder::new(deployment)
         .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
         .build()
         .translate(&db)
         .expect("translation should plan");
@@ -581,11 +587,13 @@ CREATE TABLE line_items (id INTEGER PRIMARY KEY, order_id INTEGER REFERENCES ord
 ",
     )
     .expect("the schema should parse");
-    let mut registry = registry();
-    registry.declare_session_attributes([SessionAttribute::setting(
-        "app.tenant_id",
-        SessionAttributeKind::ScalarAttribute,
-    )]);
+    let deployment = support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+        support::deployment::delimited_set("app.subjects", ","),
+        support::deployment::scalar("app.tenant_id"),
+    ]);
+    let mut registry = FunctionRegistry::new();
+    registry.enrich_from_schema(&db, &deployment);
 
     let term = parse_term(&format!(
         "tenant = current_setting('app.tenant_id', true) \
@@ -771,9 +779,9 @@ CREATE POLICY members_b ON b.members FOR ALL USING (TRUE);"
     assert_eq!(unrelated, expected);
 
     let related = compile_on(&schema, "b.members", &term, ConfidenceLevel::B);
-    let db: ParserDB = parse_schema(&schema).expect("the schema should parse");
-    let planned = TranslatorBuilder::new()
-        .with_registry(registry())
+    let db = support::deployment::db(&schema);
+    let planned = TranslatorBuilder::new(terms_deployment())
+        .with_registry(registry(&db))
         .build()
         .translate(&db)
         .expect("the policies should plan");
@@ -798,8 +806,8 @@ CREATE FUNCTION current_user_id() RETURNS TEXT LANGUAGE sql SECURITY DEFINER
     AS 'SELECT current_user';"
     );
     let db: ParserDB = parse_schema(&schema).expect("the schema should parse");
-    let mut enriched = registry();
-    enriched.enrich_from_schema(&db);
+    let mut enriched = FunctionRegistry::new();
+    enriched.enrich_from_schema(&db, &terms_deployment());
     let term = format!("owner = {CALLER}");
     let expected = compile_on(PROJECTS, "docs", &term, ConfidenceLevel::B);
     let actual = describe_membership_term(
@@ -851,7 +859,7 @@ CREATE POLICY docs_p ON docs {policy} (
     let membership = parse_term(&format!(
         "project_id IN (SELECT project_id FROM project_members WHERE user_id = {CALLER})"
     ));
-    describe_membership_term(&membership, &db, &registry(), "docs", ConfidenceLevel::B)
+    describe_membership_term(&membership, &db, &registry(&db), "docs", ConfidenceLevel::B)
         .expect_err("a read term cannot ignore row security on its membership table");
 }
 
@@ -879,7 +887,7 @@ CREATE POLICY members_p ON project_members FOR ALL USING (TRUE);"
         describe_membership_term(
             &parse_term(&term),
             &db,
-            &registry(),
+            &registry(&db),
             "docs",
             ConfidenceLevel::B,
         )
@@ -901,8 +909,9 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_p ON docs {policy};"
         );
         let db: ParserDB = parse_schema(&schema).expect("the schema should parse");
-        let refusal = describe_membership_term(&term, &db, &registry(), "docs", ConfidenceLevel::A)
-            .expect_err("the read term must satisfy its own confidence threshold");
+        let refusal =
+            describe_membership_term(&term, &db, &registry(&db), "docs", ConfidenceLevel::A)
+                .expect_err("the read term must satisfy its own confidence threshold");
         assert_eq!(refusal.classified.confidence, ConfidenceLevel::B);
     }
 }
@@ -1006,13 +1015,17 @@ fn a_filter_comparing_the_caller_two_ways_is_refused() {
 /// half of a gate, so a tenant filter compiles to no chain of records here either.
 #[test]
 fn a_declared_single_value_still_compiles_to_no_chain() {
-    let mut registry = registry();
-    registry.declare_session_attributes([SessionAttribute::setting(
-        "app.tenant_id",
-        SessionAttributeKind::ScalarAttribute,
-    )]);
-    let reason = refuse_with(
-        "CREATE TABLE docs(id INTEGER PRIMARY KEY, tenant_id TEXT);",
+    let schema = "CREATE TABLE docs(id INTEGER PRIMARY KEY, tenant_id TEXT);";
+    let db: ParserDB = parse_schema(schema).expect("the schema should parse");
+    let deployment = support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+        support::deployment::delimited_set("app.subjects", ","),
+        support::deployment::scalar("app.tenant_id"),
+    ]);
+    let mut registry = FunctionRegistry::new();
+    registry.enrich_from_schema(&db, &deployment);
+    let reason = refuse_in(
+        &db,
         "docs",
         "tenant_id = current_setting('app.tenant_id', true)",
         ConfidenceLevel::B,
@@ -1028,19 +1041,20 @@ fn a_declared_single_value_still_compiles_to_no_chain() {
 /// the missing piece is the declaration and not a function body.
 #[test]
 fn an_undeclared_set_is_refused_naming_the_declaration() {
+    let db: ParserDB = parse_schema(PROJECTS).expect("the schema should parse");
+    let deployment = support::deployment::deployment([support::deployment::caller("app.user_id")]);
     let mut undeclared = FunctionRegistry::new();
-    undeclared.trust_current_user_setting_keys(["app.user_id"]);
+    undeclared.enrich_from_schema(&db, &deployment);
     for spelling in [
         format!("owner = {SUBJECTS}"),
         format!(
             "project_id IN (SELECT project_id FROM project_members WHERE user_id = {SUBJECTS})"
         ),
     ] {
-        let reason = refuse_with(PROJECTS, "docs", &spelling, ConfidenceLevel::B, &undeclared);
+        let reason = refuse_in(&db, "docs", &spelling, ConfidenceLevel::B, &undeclared);
         assert!(
             reason.contains("current_setting('app.subjects')")
-                && reason.contains("read as a set")
-                && reason.contains("SetAttribute"),
+                && reason.contains("the deployment declares no such setting"),
             "{spelling}: the refusal names the missing declaration, got: {reason}"
         );
         assert!(

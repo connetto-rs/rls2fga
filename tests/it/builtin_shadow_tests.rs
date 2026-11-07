@@ -153,7 +153,6 @@ CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
 /// another schema may split differently or not at all.
 #[test]
 fn a_qualified_string_to_array_is_not_the_splitter() {
-    let attributes = r#"[{ "key": "app.subjects", "kind": "set_attribute" }]"#;
     let sql = |splitter: &str| {
         format!(
             "
@@ -164,8 +163,10 @@ CREATE POLICY p ON docs FOR SELECT USING (
 "
         )
     };
-    let (classified, _db, _registry) =
-        support::classify_sql_with_session_attributes(&sql("app.string_to_array"), attributes);
+    let (classified, _db, _registry) = support::classify_sql_with_settings(
+        &sql("app.string_to_array"),
+        [support::deployment::delimited_set("app.subjects", ",")],
+    );
     let pattern = classified[0]
         .using_classification()
         .expect("USING classifies")
@@ -175,8 +176,10 @@ CREATE POLICY p ON docs FOR SELECT USING (
         !matches!(&pattern, PatternClass::P14RowValueInCallerSet(_)),
         "`app.string_to_array` is somebody's function, got {pattern:?}"
     );
-    let (classified, _db, _registry) =
-        support::classify_sql_with_session_attributes(&sql("string_to_array"), attributes);
+    let (classified, _db, _registry) = support::classify_sql_with_settings(
+        &sql("string_to_array"),
+        [support::deployment::delimited_set("app.subjects", ",")],
+    );
     let pattern = classified[0]
         .using_classification()
         .expect("USING classifies")
@@ -193,16 +196,21 @@ CREATE POLICY p ON docs FOR SELECT USING (
 /// `row_valued_set` fell closed on them, losing dump-shaped coverage.
 #[test]
 fn the_catalog_qualified_set_spellings_stay_classified() {
-    let attributes = r#"[{ "key": "app.subjects", "kind": "set_attribute" }]"#;
-    for (label, clause) in [
+    for (label, clause, setting) in [
         (
             "pg_catalog.string_to_array",
             "owner = ANY(pg_catalog.string_to_array(current_setting('app.subjects', true), ','))",
+            support::deployment::delimited_set("app.subjects", ","),
         ),
         (
             "pg_catalog.jsonb_array_elements_text",
             "owner IN (SELECT pg_catalog.jsonb_array_elements_text(\
              current_setting('app.subjects', true)::jsonb))",
+            rls2fga::parser::sql_parser::SessionSetting::value(
+                "app.subjects",
+                support::deployment::json_array(),
+            )
+            .expect("a custom setting name"),
         ),
     ] {
         let sql = format!(
@@ -212,8 +220,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING ({clause});
 "
         );
-        let (classified, _db, _registry) =
-            support::classify_sql_with_session_attributes(&sql, attributes);
+        let (classified, _db, _registry) = support::classify_sql_with_settings(&sql, [setting]);
         let pattern = classified[0]
             .using_classification()
             .expect("USING classifies")

@@ -1,7 +1,6 @@
 //! Reaching the outputs, and what stops it.
 use core::fmt::Write;
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::generator::model_bounds::ModelBound;
 use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::PlanningError;
@@ -11,6 +10,7 @@ use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
 
+use crate::support::deployment;
 use crate::support::footgun::{db_of, translator};
 
 /// A schema every clause of which translates.
@@ -204,12 +204,8 @@ fn membership_translation(
                        AND m.member_id = current_setting('app.user_id', true)));
          {extra_policy}"
     ));
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment::deployment([deployment::caller("app.user_id")]))
         .with_min_confidence(min_confidence)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
         .build()
         .translate(&db)
         .expect("membership schema should plan")
@@ -445,7 +441,7 @@ fn schema_with_temporal_guards(count: usize) -> String {
 #[test]
 fn twenty_six_conditions_refuse_the_translation() {
     let db = db_of(&schema_with_temporal_guards(26));
-    let error = TranslatorBuilder::new()
+    let error = TranslatorBuilder::new(deployment::caller_deployment())
         .build()
         .translate(&db)
         .expect_err("26 distinct conditions cross the bound");
@@ -476,7 +472,7 @@ fn twenty_six_conditions_refuse_the_translation() {
 #[test]
 fn twenty_five_conditions_still_translate() {
     let db = db_of(&schema_with_temporal_guards(25));
-    let outputs = TranslatorBuilder::new()
+    let outputs = TranslatorBuilder::new(deployment::caller_deployment())
         .build()
         .translate(&db)
         .expect("25 conditions sit exactly on the bound")
@@ -498,7 +494,7 @@ fn twenty_five_conditions_still_translate() {
 #[test]
 fn a_request_time_parameter_over_fifty_characters_refuses_the_translation() {
     let db = db_of(TEMPORAL);
-    let error = TranslatorBuilder::new()
+    let error = TranslatorBuilder::new(deployment::caller_deployment())
         .with_request_time_parameter("t".repeat(55))
         .expect("fifty five letters are a valid identifier")
         .build()
@@ -535,7 +531,7 @@ fn a_configured_type_name_past_two_hundred_fifty_four_refuses_the_translation() 
     )
     .expect("the name is otherwise valid");
     let db = db_of(CLEAN);
-    let error = TranslatorBuilder::new()
+    let error = TranslatorBuilder::new(deployment::caller_deployment())
         .with_well_known_types(well_known)
         .build()
         .translate(&db)

@@ -5,7 +5,7 @@ use core::fmt;
 use serde::{Deserialize, Serialize};
 use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr, Owner};
 
-use crate::classifier::function_registry::SessionAttribute;
+use crate::classifier::function_registry::DeclaredSource;
 use crate::clock::ClockThreshold;
 use crate::parser::names::{stored_ident_name, table_identity};
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
@@ -424,7 +424,7 @@ pub struct RowValueInCallerSet {
     /// a list, which has no delimiter and so no such hazard.
     pub separator: Option<String>,
     /// The declared source, carrying the parameter the caller supplies.
-    pub source: SessionAttribute,
+    pub source: DeclaredSource,
 }
 
 /// The caller's declared single value equals the row's:
@@ -434,7 +434,7 @@ pub struct RowValueEqualsCallerScalar {
     /// Column the value has to equal.
     pub column: ColumnName,
     /// The declared source, carrying the parameter the caller supplies.
-    pub source: SessionAttribute,
+    pub source: DeclaredSource,
 }
 
 /// The caller's declared set holds a constant the policy names, so no row takes part:
@@ -446,7 +446,7 @@ pub struct ConstantInCallerSet {
     /// Separator the policy splits the setting on, absent for a list source.
     pub separator: Option<String>,
     /// The declared source, carrying the parameter the caller supplies.
-    pub source: SessionAttribute,
+    pub source: DeclaredSource,
 }
 
 /// The caller's declared single value equals a constant the policy names, so no row
@@ -456,7 +456,7 @@ pub struct CallerScalarEqualsConstant {
     /// The constant the value has to equal.
     pub value: String,
     /// The declared source, carrying the parameter the caller supplies.
-    pub source: SessionAttribute,
+    pub source: DeclaredSource,
 }
 
 /// A membership row whose member column holds a value the caller's declared set has
@@ -474,7 +474,7 @@ pub struct MembershipInCallerSet {
     /// Separator the policy splits the setting on, absent for a list source.
     pub separator: Option<String>,
     /// The declared source, carrying the parameter the caller supplies.
-    pub source: SessionAttribute,
+    pub source: DeclaredSource,
 }
 
 /// Membership reached through a closure table sharing the far table's declared owner key.

@@ -15,22 +15,19 @@ use sql_traits::errors::LookupError;
 use sql_traits::structs::metadata::{ExpressionCalls, PolicyMetadata};
 use sql_traits::structs::{TableAttribute, TableMetadata};
 use sqlparser::ast::{
-    ColumnDef, ColumnOption, CreatePolicy, CreateTable, Expr, ForeignKeyConstraint, Statement,
-    TableConstraint,
+    ColumnDef, ColumnOption, CreatePolicy, CreateRole, CreateTable, Expr, ForeignKeyConstraint,
+    Statement, TableConstraint,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
-use rls2fga::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
+use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, DirectOwnership, MembershipJoinPair, PatternClass,
 };
 use rls2fga::classifier::policy_classifier::{classify_expr, classify_policies};
 use rls2fga::generator::model_generator::GeneratorSettings;
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::function_analyzer::AccessorInferenceSettings;
 use rls2fga::parser::sql_parser::{
     parse_schema, ColumnLike, DatabaseLike, ForeignKeyLike, ParserDB, PolicyLike, TableLike,
 };
@@ -71,18 +68,15 @@ fn drive<DB: DatabaseLike>(db: &DB) -> Driven {
         .load_from_json(support::ACCESSOR_REGISTRY)
         .expect("the registry parses");
 
-    let settings = AccessorInferenceSettings::default();
+    let deployment = support::deployment::caller_deployment();
     let generator = GeneratorSettings::default();
 
-    // The free classifier, plus the two registry enrichers.
-    let classified = classify_policies(db, &registry);
+    // The free classifier, plus the registry enricher.
+    let classified = classify_policies(db, &registry, &deployment);
 
     let mut enriched = FunctionRegistry::new();
-    enriched.enrich_from_schema(db);
-    let mut enriched_with_settings = FunctionRegistry::new();
-    enriched_with_settings.enrich_from_schema_with_settings(db, &settings);
-    let enriched_accessor = enriched.is_current_user_accessor("auth_current_user_id")
-        && enriched_with_settings.is_current_user_accessor("auth_current_user_id");
+    enriched.enrich_from_schema(db, &deployment);
+    let enriched_accessor = enriched.is_current_user_accessor("auth_current_user_id");
 
     // One expression, classified on its own, which is how an oracle reaches the
     // pattern tree without going through the whole schema.
@@ -94,7 +88,7 @@ fn drive<DB: DatabaseLike>(db: &DB) -> Driven {
     let expr_pattern = classify_expr(&expr, db, &registry, "docs", PolicyCommand::Select).pattern;
 
     // The facade, then the plan built from answers somebody else classified.
-    let translator = TranslatorBuilder::new()
+    let translator = TranslatorBuilder::new(deployment)
         .with_registry(registry.clone())
         .with_min_confidence(ConfidenceLevel::B)
         .build();
@@ -155,7 +149,7 @@ fn drive<DB: DatabaseLike>(db: &DB) -> Driven {
 /// exercises.
 #[test]
 fn a_catalog_known_only_as_database_like_drives_the_whole_surface() {
-    let db = parse_schema(SCHEMA).expect("the schema parses");
+    let db = support::deployment::db(SCHEMA);
     let driven = drive(&db);
 
     assert_eq!(driven.classified, 1);
@@ -279,18 +273,24 @@ ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
     )
 }
 
-/// Rebuilds a catalog without schema-ingestion validation.
+/// Rebuilds a catalog without schema-ingestion validation, holding the roles the suite's
+/// deployment resolves against.
 fn rebuilt_catalog(ddl: &str) -> ParserDB {
     let dialect = *parse_schema("CREATE TABLE dialect_source (id TEXT PRIMARY KEY);")
         .expect("a catalog ingests")
         .dialect();
-    let statements =
-        Parser::parse_sql(&PostgreSqlDialect {}, ddl).expect("the edge is grammatical");
+    let statements = Parser::parse_sql(
+        &PostgreSqlDialect {},
+        &format!("{}{ddl}", support::deployment::ROLES),
+    )
+    .expect("the edge is grammatical");
     let mut tables: Vec<CreateTable> = Vec::new();
+    let mut roles: Vec<CreateRole> = Vec::new();
     let mut policy: Option<CreatePolicy> = None;
     for statement in statements {
         match statement {
             Statement::CreateTable(table) => tables.push(table),
+            Statement::CreateRole(role) => roles.push(role),
             Statement::CreatePolicy(created) => policy = Some(created),
             _ => {}
         }
@@ -322,6 +322,9 @@ fn rebuilt_catalog(ddl: &str) -> ParserDB {
         builder = builder
             .add_table(table, metadata)
             .expect("the table takes its name");
+    }
+    for role in roles {
+        builder = builder.add_role(Arc::new(role), ());
     }
     builder = builder.add_policy(
         Arc::new(policy),
@@ -385,14 +388,10 @@ fn the_named_key(db: &ParserDB) -> &<ParserDB as DatabaseLike>::ForeignKey {
         .expect("the fixture named the edge")
 }
 
-/// The policy's USING classification under the session attribute the pattern names.
+/// The policy's USING classification under the caller the pattern names.
 fn classify_orders_read(db: &ParserDB) -> ClassifiedExpr {
-    let translator = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
-        .build();
+    let deployment = support::deployment::deployment([support::deployment::caller("app.user_id")]);
+    let translator = TranslatorBuilder::new(deployment).build();
     let classified = translator.classify(db);
     assert_eq!(classified.len(), 1);
     classified[0]
@@ -440,12 +439,8 @@ fn assert_indirect_payload(classified: &ClassifiedExpr) {
 
 /// The fail-closed answer each broken edge must earn, through both doors.
 fn assert_indirect_membership_refused(db: &ParserDB) {
-    let translator = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
-        .build();
+    let deployment = support::deployment::deployment([support::deployment::caller("app.user_id")]);
+    let translator = TranslatorBuilder::new(deployment).build();
     let classified = translator.classify(db);
     assert_eq!(classified.len(), 1);
     let pattern = classified[0]

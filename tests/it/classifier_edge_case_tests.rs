@@ -27,7 +27,11 @@ CREATE FUNCTION my_user_func() RETURNS UUID LANGUAGE sql AS 'SELECT current_user
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
 
     let c = classified[0]
@@ -56,7 +60,11 @@ CREATE POLICY p ON docs FOR SELECT USING (mystery_func(val));
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
     let c = classified[0].using_classification().unwrap();
     if let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &c.pattern {
@@ -95,7 +103,11 @@ CREATE POLICY p ON docs FOR SELECT USING (role_level(val, id));
         )
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
     let c = classified[0].using_classification().unwrap();
     if let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &c.pattern {
@@ -475,7 +487,11 @@ CREATE POLICY p ON docs FOR SELECT USING (auth.role() = 'authenticated');
         .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
     let c = classified[0].using_classification().unwrap();
     assert!(
@@ -501,7 +517,11 @@ CREATE POLICY p ON docs FOR SELECT USING (auth.role() IN ('authenticated', 'admi
         .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
     let c = classified[0].using_classification().unwrap();
     assert!(
@@ -572,7 +592,11 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
     let c = classified[0].using_classification().unwrap();
     assert!(
@@ -598,7 +622,11 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = (SELECT auth.uid()));
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
     let c = classified[0].using_classification().unwrap();
     assert!(

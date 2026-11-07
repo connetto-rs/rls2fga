@@ -1,5 +1,3 @@
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-use rls2fga::parser::sql_parser::parse_schema;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{
     records_from_row, ConfidenceLevel, Record, RecordDerivation, ReplayScope, TranslationNote,
@@ -10,9 +8,6 @@ use crate::support;
 use crate::support::{
     INDIRECT_MEMBERSHIP_NESTED_ROLE as NESTED, INDIRECT_MEMBERSHIP_SCHEMA as SCHEMA,
 };
-
-#[cfg(all(not(target_os = "windows"), feature = "client"))]
-const ATTRIBUTES: &str = r#"[{"key":"app.user_id","kind":"caller_id"}]"#;
 
 const JOINED: &str = "EXISTS (
     SELECT 1 FROM ownable_ancestors a JOIN memberships m ON m.owner_id = a.owner
@@ -26,13 +21,9 @@ const NESTED_IN: &str = "orders.id IN (
         WHERE m.member_id = current_setting('app.user_id', true) AND m.role = 'read'))";
 
 fn outputs(schema: &str, policies: &str) -> Outputs {
-    let db = parse_schema(&format!("{schema} {policies}")).unwrap();
-    TranslatorBuilder::new()
+    let db = support::deployment::db(&format!("{schema} {policies}"));
+    TranslatorBuilder::new(support::deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
         .build()
         .translate(&db)
         .unwrap()
@@ -231,7 +222,7 @@ async fn indirect_membership_live_parity() {
                     ["reader", "writer", "outsider"].iter().map(|subject| {
                         Principal::with_setting(subject, "app_reader", "app.user_id", subject)
                     }).collect(),
-                ).with_attributes(ATTRIBUTES);
+                );
                 case.loading_from_rows = from_rows;
                 let run = support::parity::run_before(
                     &cluster,
@@ -314,8 +305,7 @@ async fn indirect_and_direct_membership_sources_stay_separate_in_both_policy_ord
                             Principal::with_setting(subject, "app_reader", "app.user_id", subject)
                         })
                         .collect(),
-                )
-                .with_attributes(ATTRIBUTES);
+                );
                 case.loading_from_rows = from_rows;
                 let run = support::parity::run_before(
                     &cluster,
@@ -389,7 +379,7 @@ async fn indirect_memberships_keep_independent_clock_conditions() {
             ["reader", "blocked", "both"].iter().map(|subject| {
                 Principal::with_setting(subject, "app_reader", "app.user_id", subject).with_clock()
             }).collect(),
-        ).with_attributes(ATTRIBUTES);
+        );
         case.loading_from_rows = from_rows;
         let run =
             support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
@@ -457,7 +447,7 @@ async fn indirect_membership_witnesses_never_mix_rows() {
             ["mixed", "reader"].iter().map(|subject| {
                 Principal::with_setting(subject, "app_reader", "app.user_id", subject).with_clock()
             }).collect(),
-        ).with_attributes(ATTRIBUTES).also_at(
+        ).also_at(
             "3 years",
             "SELECT m.member_id AS subject, 'orders:' || o.id AS object
              FROM orders o JOIN ownable_ancestors a ON a.ownable = o.id
@@ -534,7 +524,7 @@ async fn indirect_membership_composite_owner_keys_preserve_tenant_identity() {
             ["reader", "other", "swapped"].iter().map(|subject| {
                 Principal::with_setting(subject, "app_reader", "app.user_id", subject)
             }).collect(),
-        ).with_attributes(ATTRIBUTES);
+        );
         case.loading_from_rows = from_rows;
         let run =
             support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
@@ -907,8 +897,6 @@ async fn indirect_membership_request_gated_hop_live_parity() {
     use crate::support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
     use rls2fga::types::ActionStatement;
 
-    const GATE_ATTRIBUTES: &str =
-        r#"[{"key":"app.user_id","kind":"caller_id"},{"key":"app.roles","kind":"set_attribute"}]"#;
     let cluster = Cluster::start().await;
     for table in ["ownable_ancestors", "memberships"] {
         let schema = format!(
@@ -949,7 +937,7 @@ async fn indirect_membership_request_gated_hop_live_parity() {
             ],
             vec![reader, gateless, outsider],
         )
-        .with_attributes(GATE_ATTRIBUTES);
+        .with_settings([support::deployment::delimited_set("app.roles", ",")]);
             case.loading_from_rows = from_rows;
             let run =
                 support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
@@ -1017,8 +1005,7 @@ async fn indirect_membership_sql_residual_live_parity() {
                 "app.user_id",
                 "reader",
             )],
-        )
-        .with_attributes(ATTRIBUTES);
+        );
         case.loading_from_rows = from_rows;
         let run =
             support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))
@@ -1077,8 +1064,7 @@ async fn indirect_membership_quoted_owner_column_live_parity() {
                 "app.user_id",
                 "reader",
             )],
-        )
-        .with_attributes(ATTRIBUTES);
+        );
         case.loading_from_rows = from_rows;
         let run =
             support::parity::run_before(&cluster, &case, core::time::Duration::from_secs(300))

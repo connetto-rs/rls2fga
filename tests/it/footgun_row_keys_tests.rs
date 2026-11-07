@@ -8,6 +8,8 @@ use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
 
+use crate::support::deployment::caller_deployment;
+
 use crate::support::footgun::{
     db_of, is_structural_type, relation_denies, translation, translator,
 };
@@ -404,7 +406,8 @@ CREATE POLICY papers_own ON papers FOR SELECT USING (owner = current_user);
 CREATE POLICY shares_read ON shares FOR SELECT {policy_tail};
 "
         ));
-        let mut builder = TranslatorBuilder::new().with_min_confidence(ConfidenceLevel::C);
+        let mut builder =
+            TranslatorBuilder::new(caller_deployment()).with_min_confidence(ConfidenceLevel::C);
         if let Some(json) = registry_json {
             builder = builder.with_registry_json(json).expect("registry json");
         }

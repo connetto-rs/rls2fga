@@ -11,9 +11,11 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use crate::support;
+use crate::support::deployment::{caller, delimited_set};
 
 use crate::support::footgun::{
     QUOTED_NESTED_MEMBERSHIP_SCHEMA, TWO_MEMBERSHIP_COLUMNS_SCHEMA, TWO_ROLE_THRESHOLD_REGISTRY,
@@ -55,6 +57,8 @@ async fn every_parity_case_agrees() {
             the_runner_agrees_on_direct_ownership,
             the_runner_agrees_on_membership,
             the_runner_agrees_on_a_role_scoped_restriction,
+            a_set_split_on_an_undeclared_delimiter_shows_nothing,
+            a_set_split_on_the_declared_delimiter_agrees,
             both_one_sided_cases_pass,
             the_runner_finds_a_planted_divergence,
             an_update_candidate_exercises_with_check,
@@ -231,6 +235,65 @@ async fn the_runner_agrees_on_membership(cluster: Arc<Cluster>) {
     let mismatches = support::parity::run(&cluster, &case).await;
     assert_agrees(&case, &mismatches);
 }
+
+/// The review's separator probe. A caller sends the keys it holds joined by the
+/// deployment's delimiter, and a policy splitting them on another one names a single
+/// element nobody owns, so `PostgreSQL` shows nothing. The translation refuses the split
+/// and says so.
+async fn a_set_split_on_an_undeclared_delimiter_shows_nothing(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-undeclared-delimiter",
+        SPLIT_NOTES,
+        &[
+            "INSERT INTO split_notes(id, owner) VALUES ('n1', 'alice'), ('n2', 'bob')",
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT ON split_notes TO app_reader",
+        ],
+        vec![subject_holder("alice", &["alice", "bob"])],
+    )
+    .with_settings([delimited_set("app.subjects", ",")]);
+    let run = support::parity::run_disclosing(&cluster, &case).await;
+    for object in ["split_notes:n1", "split_notes:n2"] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            "alice",
+            object,
+            ActionStatement::Select,
+            false,
+        );
+    }
+    support::parity::assert_discloses(&case, &run, &["split_notes"]);
+    support::parity::assert_disclosed_where_noted(&case, &run);
+}
+
+/// The same policy, its delimiter declared, translates to what `PostgreSQL` shows.
+async fn a_set_split_on_the_declared_delimiter_agrees(cluster: Arc<Cluster>) {
+    let mut holder = Principal::as_role("alice", "app_reader")
+        .with_context(serde_json::json!({ "app_subjects": ["alice", "bob"] }));
+    holder
+        .session
+        .push(("app.subjects".to_string(), "alice;bob".to_string()));
+    let case = ParityCase::reading(
+        "runner-declared-delimiter",
+        SPLIT_NOTES,
+        &[
+            "INSERT INTO split_notes(id, owner) VALUES ('n1', 'alice'), ('n2', 'bob'), ('n3', 'carol')",
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT ON split_notes TO app_reader",
+        ],
+        vec![holder],
+    )
+    .with_settings([delimited_set("app.subjects", ";")]);
+    let run = support::parity::run(&cluster, &case).await;
+    assert_agrees(&case, &run);
+}
+
+/// A table each caller reads by the keys it holds, split on `;`.
+const SPLIT_NOTES: &str = "
+CREATE TABLE split_notes(id TEXT PRIMARY KEY, owner TEXT);
+ALTER TABLE split_notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY split_notes_select ON split_notes FOR SELECT
+    USING (owner = ANY(string_to_array(current_setting('app.subjects', true), ';')));
+";
 
 /// A RESTRICTIVE policy scoped to a role, which the model expresses by subtracting the
 /// role from the grant. The caller's role memberships are declared, since no tuple query
@@ -2082,13 +2145,13 @@ async fn a_batch_share_grants_every_paper_of_the_batch(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-batch-share",
         "
-CREATE TABLE papers (id INT PRIMARY KEY, batch TEXT NOT NULL);
-CREATE TABLE shares (id INT PRIMARY KEY, paper_batch TEXT NOT NULL, viewer TEXT NOT NULL);
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (
+    CREATE TABLE papers (id INT PRIMARY KEY, batch TEXT NOT NULL);
+    CREATE TABLE shares (id INT PRIMARY KEY, paper_batch TEXT NOT NULL, viewer TEXT NOT NULL);
+    ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (
     SELECT 1 FROM shares s WHERE s.paper_batch = papers.batch
       AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))));
-",
+    ",
         &[
             "INSERT INTO papers (id, batch) VALUES (1, 'b1'), (2, 'b1'), (3, 'b2');
              INSERT INTO shares (id, paper_batch, viewer) VALUES (10, 'b1', 'team-a'), (11, 'b2', 'team-z')",
@@ -2100,8 +2163,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (
             subject_holder("dave", &["team-z"]),
             subject_holder("carol", &[]),
         ],
-    )
-    .with_attributes(SUBJECTS_ONLY);
+    ).with_settings(subjects_only());
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
         ("alice", "papers:1", true),
@@ -2130,19 +2192,19 @@ async fn a_composite_key_share_in_the_callers_set_stays_within_its_tenant(cluste
     let case = ParityCase::reading(
         "runner-composite-key-set-share",
         "
-CREATE TABLE tenant_papers (tenant_id TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (tenant_id, id));
-CREATE TABLE tenant_shares (
+    CREATE TABLE tenant_papers (tenant_id TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (tenant_id, id));
+    CREATE TABLE tenant_shares (
     tenant_id TEXT NOT NULL,
     paper_id TEXT NOT NULL,
     viewer TEXT NOT NULL,
     PRIMARY KEY (tenant_id, paper_id, viewer)
-);
-ALTER TABLE tenant_papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_visible ON tenant_papers FOR SELECT USING (EXISTS (
+    );
+    ALTER TABLE tenant_papers ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY papers_visible ON tenant_papers FOR SELECT USING (EXISTS (
     SELECT 1 FROM tenant_shares s
     WHERE s.tenant_id = tenant_papers.tenant_id AND s.paper_id = tenant_papers.id
       AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))));
-",
+    ",
         &[
             "INSERT INTO tenant_papers (tenant_id, id) VALUES
                  ('t1', 'p-shared'), ('t2', 'p-shared'), ('t1', 'p-solo');
@@ -2155,8 +2217,7 @@ CREATE POLICY papers_visible ON tenant_papers FOR SELECT USING (EXISTS (
             subject_holder("alice", &["team-a"]),
             subject_holder("dave", &["team-z"]),
         ],
-    )
-    .with_attributes(SUBJECTS_ONLY);
+    ).with_settings(subjects_only());
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
         ("alice", "tenant_papers:t1|p-shared", true),
@@ -2183,16 +2244,16 @@ async fn a_row_valued_set_share_reaches_items_through_the_team(cluster: Arc<Clus
     let case = ParityCase::reading(
         "runner-row-valued-team-share",
         "
-CREATE TABLE teams (id INT PRIMARY KEY);
-CREATE TABLE team_members (member TEXT NOT NULL, team_id INT REFERENCES teams(id),
+    CREATE TABLE teams (id INT PRIMARY KEY);
+    CREATE TABLE team_members (member TEXT NOT NULL, team_id INT REFERENCES teams(id),
                            PRIMARY KEY (team_id, member));
-CREATE TABLE items (id INT PRIMARY KEY, team_id INT NOT NULL REFERENCES teams(id));
-ALTER TABLE items ENABLE ROW LEVEL SECURITY;
-CREATE POLICY items_p ON items FOR SELECT USING (EXISTS (
+    CREATE TABLE items (id INT PRIMARY KEY, team_id INT NOT NULL REFERENCES teams(id));
+    ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY items_p ON items FOR SELECT USING (EXISTS (
     SELECT 1 FROM team_members
     WHERE team_members.team_id = items.team_id
       AND team_members.member IN (SELECT unnest(string_to_array(current_setting('app.subjects', true), ',')))));
-",
+    ",
         &[
             "INSERT INTO teams (id) VALUES (1), (2);
              INSERT INTO team_members (team_id, member) VALUES (1, 'team-a'), (2, 'team-z');
@@ -2205,8 +2266,7 @@ CREATE POLICY items_p ON items FOR SELECT USING (EXISTS (
             subject_holder("dave", &["team-z"]),
             subject_holder("carol", &[]),
         ],
-    )
-    .with_attributes(SUBJECTS_ONLY);
+    ).with_settings(subjects_only());
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
         ("alice", "items:1", true),
@@ -2235,17 +2295,17 @@ async fn a_membership_row_compared_to_the_caller_twice_denies_either_half(cluste
     let case = ParityCase::reading(
         "runner-two-member-columns",
         "
-CREATE TABLE teams (id INT PRIMARY KEY);
-CREATE TABLE team_members (member TEXT NOT NULL, role TEXT NOT NULL,
+    CREATE TABLE teams (id INT PRIMARY KEY);
+    CREATE TABLE team_members (member TEXT NOT NULL, role TEXT NOT NULL,
                            team_id INT REFERENCES teams(id), PRIMARY KEY (team_id, member));
-CREATE TABLE items (id INT PRIMARY KEY, team_id INT NOT NULL REFERENCES teams(id));
-ALTER TABLE items ENABLE ROW LEVEL SECURITY;
-CREATE POLICY items_p ON items FOR SELECT USING (EXISTS (
+    CREATE TABLE items (id INT PRIMARY KEY, team_id INT NOT NULL REFERENCES teams(id));
+    ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY items_p ON items FOR SELECT USING (EXISTS (
     SELECT 1 FROM team_members
     WHERE team_members.team_id = items.team_id
       AND team_members.member = current_setting('app.user_id', true)
       AND team_members.role = ANY(string_to_array(current_setting('app.subjects', true), ','))));
-",
+    ",
         &[
             // alice is the member but holds no key, dave holds the key but is not the member.
             "INSERT INTO teams (id) VALUES (1);
@@ -2259,7 +2319,7 @@ CREATE POLICY items_p ON items FOR SELECT USING (EXISTS (
             user_holder("dave", "app_reader", &["team-a"]),
         ],
     )
-    .with_attributes(CALLER_AND_SUBJECTS);
+    .with_settings(caller_and_subjects());
     let run = support::parity::run_disclosing(&cluster, &case).await;
     for subject in ["alice", "dave"] {
         support::parity::assert_postgres(
@@ -2580,11 +2640,10 @@ async fn a_missing_session_setting_is_not_a_denial(cluster: Arc<Cluster>) {
     assert_agrees(&declared, &run);
 }
 
-/// The request-scoped values the share cases declare.
-const CALLER_AND_SUBJECTS: &str = r#"[
-      { "key": "app.user_id", "kind": "caller_id" },
-      { "key": "app.subjects", "kind": "set_attribute" }
-    ]"#;
+/// The settings the share cases declare, the caller and the subjects it holds.
+fn caller_and_subjects() -> Vec<SessionSetting> {
+    vec![caller("app.user_id"), delimited_set("app.subjects", ",")]
+}
 
 /// A caller identified by `app.user_id` and holding `keys` as `app.subjects`, logged in as `login`.
 fn user_holder(subject: &str, login: &str, keys: &[&str]) -> Principal {
@@ -2774,7 +2833,7 @@ async fn an_expiring_share_leaves_the_owner_arm_alone(cluster: Arc<Cluster>) {
         ],
         vec![key_holder("alice", &["team-a"]), key_holder("carol", &[])],
     )
-    .with_attributes(CALLER_AND_SUBJECTS)
+    .with_settings(caller_and_subjects())
     .also_at(
         "1 year",
         "SELECT c.subject, 'papers:' || p.id AS object
@@ -2814,15 +2873,15 @@ async fn an_expiring_share_keeps_its_grace_period(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-interval-grace-membership",
         r"
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (
+    CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
+    CREATE TABLE paper_shares (
     paper_id INT,
     viewer TEXT,
     expires_at TIMESTAMPTZ,
     PRIMARY KEY (paper_id, viewer)
-);
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_p ON papers FOR SELECT USING (
+    );
+    ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY papers_p ON papers FOR SELECT USING (
     owner = current_setting('app.user_id', true)
     OR EXISTS (
         SELECT 1
@@ -2831,8 +2890,8 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
           AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
           AND s.expires_at > now() - interval '720 hours'
     )
-);
-",
+    );
+    ",
         &[
             "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, 'bob');
              INSERT INTO paper_shares (paper_id, viewer, expires_at) VALUES
@@ -2843,7 +2902,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
         ],
         vec![key_holder("alice", &["team-a"]), key_holder("carol", &[])],
     )
-    .with_attributes(CALLER_AND_SUBJECTS)
+    .with_settings(caller_and_subjects())
     .also_at(
         "1 year",
         "SELECT c.subject, 'papers:' || p.id AS object
@@ -2998,8 +3057,10 @@ CREATE POLICY memos_p ON memos FOR SELECT USING (
     assert_agrees(&case, &run);
 }
 
-/// The set attribute the viewer cases declare.
-const SUBJECTS_ONLY: &str = r#"[{ "key": "app.subjects", "kind": "set_attribute" }]"#;
+/// The set the viewer cases declare.
+fn subjects_only() -> Vec<SessionSetting> {
+    vec![delimited_set("app.subjects", ",")]
+}
 
 /// A caller identified only by the keys it holds as `app.subjects`.
 fn subject_holder(subject: &str, keys: &[&str]) -> Principal {
@@ -3177,19 +3238,19 @@ async fn two_viewers_of_one_paper_load_and_union(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-two-viewers-of-one-paper",
         "
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (paper_id INT, viewer TEXT, PRIMARY KEY (paper_id, viewer));
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
-CREATE POLICY papers_p ON papers FOR SELECT USING (
+    CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
+    CREATE TABLE paper_shares (paper_id INT, viewer TEXT, PRIMARY KEY (paper_id, viewer));
+    ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY papers_p ON papers FOR SELECT USING (
     EXISTS (
         SELECT 1 FROM paper_shares s
         WHERE s.paper_id = papers.id
           AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
     )
-);
-CREATE POLICY shares_read ON paper_shares FOR SELECT USING (true);
-",
+    );
+    CREATE POLICY shares_read ON paper_shares FOR SELECT USING (true);
+    ",
         &[
             "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob');
              INSERT INTO paper_shares (paper_id, viewer) VALUES
@@ -3203,7 +3264,7 @@ CREATE POLICY shares_read ON paper_shares FOR SELECT USING (true);
             subject_holder("viewer_z", &["viewer_z"]),
         ],
     )
-    .with_attributes(SUBJECTS_ONLY);
+    .with_settings(subjects_only());
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
         ("viewer_x", "papers:1", true),
@@ -3234,17 +3295,17 @@ async fn two_expiring_viewers_of_one_paper_gate_independently(cluster: Arc<Clust
     let case = ParityCase::reading(
         "runner-two-expiring-viewers",
         r"
-CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
-CREATE TABLE paper_shares (
+    CREATE TABLE papers (id INT PRIMARY KEY, owner TEXT);
+    CREATE TABLE paper_shares (
     paper_id INT,
     viewer TEXT,
     expires_at TIMESTAMPTZ,
     PRIMARY KEY (paper_id, viewer)
-);
-ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
-ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
-CREATE POLICY shares_read ON paper_shares FOR SELECT USING (true);
-CREATE POLICY papers_p ON papers FOR SELECT USING (
+    );
+    ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
+    CREATE POLICY shares_read ON paper_shares FOR SELECT USING (true);
+    CREATE POLICY papers_p ON papers FOR SELECT USING (
     EXISTS (
         SELECT 1
         FROM paper_shares s
@@ -3252,8 +3313,8 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
           AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
           AND s.expires_at > now()
     )
-);
-",
+    );
+    ",
         &[
             "INSERT INTO papers (id, owner) VALUES (1, 'alice');
              INSERT INTO paper_shares (paper_id, viewer, expires_at) VALUES
@@ -3264,7 +3325,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
         ],
         vec![holder("viewer_live"), holder("viewer_gone")],
     )
-    .with_attributes(SUBJECTS_ONLY)
+    .with_settings(subjects_only())
     .also_at(
         "1 year",
         "SELECT c.subject, 'papers:' || p.id AS object
@@ -3707,7 +3768,7 @@ async fn every_exact_support_case_agrees(cluster: Arc<Cluster>) {
             .collect();
         let prelude: Vec<&str> = generated.prelude.iter().map(String::as_str).collect();
         let case = ParityCase::reading(&generated.name, &generated.schema, &seed, principals)
-            .with_attributes(support::exact_support::DECLARED_KEY)
+            .with_settings([support::exact_support::declared_key()])
             // The roles exist before the schema, which may name one as the table's owner.
             .after(&prelude)
             // A partition is filtered by nothing when a read names it, so the case compares
@@ -4120,9 +4181,7 @@ async fn a_witness_link_and_a_caller_set_gate_do_not_share_a_tupleset(cluster: A
             user_holder("carol", "app_reader", &["carol"]).with_clock(),
         ],
     )
-    .with_attributes(
-        r#"[{"key":"app.user_id","kind":"caller_id"},{"key":"app.subjects","kind":"set_attribute"}]"#,
-    );
+    .with_settings(caller_and_subjects());
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
         // alice's row ties her to A via owner_id and to B via lead_id, so each

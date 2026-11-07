@@ -1,0 +1,3 @@
+[
+  {"setting": "request.jwt.claims", "field": ["teams"], "set": "text", "json_array": true}
+]

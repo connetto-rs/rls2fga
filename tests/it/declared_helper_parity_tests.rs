@@ -13,8 +13,6 @@ use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
 };
 
-const ATTRIBUTES: &str = r#"[{ "key": "app.user_id", "kind": "caller_id" }]"#;
-
 const HELPERS: &str = r#"{
     "authz.projects_with": { "kind": "declared_helper" },
     "authz.teams_with": { "kind": "declared_helper" },
@@ -68,7 +66,7 @@ fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
             Principal::as_role("anonymous", "app_reader"),
         ],
     )
-    .with_attributes(ATTRIBUTES)
+    .with_settings([support::deployment::caller("app.user_id")])
     .with_registry(HELPERS)
     .writing(
         "orders",

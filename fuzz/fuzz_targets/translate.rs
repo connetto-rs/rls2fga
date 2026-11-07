@@ -7,7 +7,7 @@ use rls2fga::classifier::oracle::{consult_oracle, OracleAnswer, PolicyOracle, Re
 use rls2fga::classifier::patterns::{ClassifiedExpr, ConstantBool, PatternClass};
 use rls2fga::generator::model_generator::GeneratorSettings;
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::parser::sql_parser::{parse_schema, Deployment, SessionSetting, SettingValue};
 use rls2fga::translator::{PlanningError, Translation, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{records_from_row, ColumnKind, RowCell, RowList, RowValues};
@@ -157,8 +157,29 @@ const REGISTRY: &str = r#"{
   "auth_role": {"kind": "role_accessor", "returns": "text"}
 }"#;
 
+/// The roles the harness deployment runs as, read before every input so the deployment
+/// resolves against it.
+const ROLES: &str = "CREATE ROLE fuzz_login LOGIN NOINHERIT;
+CREATE ROLE fuzz_user NOLOGIN;
+";
+
+/// The deployment every input is read for, the caller in the three settings schemas most
+/// often read it from.
+fn deployment() -> Deployment {
+    let callers = [
+        "app.user_id",
+        "app.current_user_id",
+        "request.jwt.claim.sub",
+    ]
+    .map(|name| {
+        SessionSetting::value(name, SettingValue::Caller(sqlparser::ast::DataType::Text))
+            .expect("a custom setting name")
+    });
+    Deployment::new("fuzz_login", ["fuzz_user"], callers).expect("one acting role")
+}
+
 fn translator_at(level: ConfidenceLevel) -> rls2fga::translator::Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment())
         .with_min_confidence(level)
         .with_registry_json(REGISTRY)
         .expect("the harness registry is a fixed literal")
@@ -170,7 +191,7 @@ fn translator_at(level: ConfidenceLevel) -> rls2fga::translator::Translator {
 /// The property under test is that no input, however malformed, may panic or abort.
 /// Parse errors are an expected outcome for random bytes and are not failures.
 fn translate(sql: &str) {
-    let Ok(db) = parse_schema(sql) else {
+    let Ok(db) = parse_schema(&format!("{ROLES}{sql}")) else {
         return;
     };
 
@@ -188,13 +209,13 @@ fn translate(sql: &str) {
     // An oracle's answers reach the generators only through `Translation::plan`, and at
     // one level rather than four because it doubles the work per input.
     let translator = translator_at(ConfidenceLevel::B);
-    let mut policies = translator.classify(&db);
+    let (mut policies, registry) = translator.classify_with_effective_registry(&db);
     black_box(consult_oracle(&mut policies, &TextOracle).len());
     exercise_planned(
         Translation::plan(
             policies,
             &db,
-            translator.registry(),
+            &registry,
             translator.min_confidence(),
             &GeneratorSettings::default(),
         ),

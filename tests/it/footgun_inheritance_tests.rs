@@ -3,8 +3,6 @@
 //!
 //! Parent rules through a foreign key, `INHERITS` children, and partitions.
 
-use rls2fga::parser::sql_parser::parse_schema;
-use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
 
@@ -959,9 +957,9 @@ CREATE POLICY papers_own ON papers FOR SELECT USING (owner = auth_uid());
 CREATE POLICY shares_insert ON paper_shares FOR INSERT WITH CHECK (
     EXISTS (SELECT 1 FROM papers p WHERE p.id = paper_id));
 ";
-    let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new().build();
-    let (classified, registry) = translator.classify_with_effective_registry(&db);
+    let db = db_of(sql);
+    let (classified, registry) =
+        translator(ConfidenceLevel::B).classify_with_effective_registry(&db);
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let model = outputs.model();
 

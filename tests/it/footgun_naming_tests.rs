@@ -12,6 +12,7 @@ use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
+use crate::support::deployment::caller_deployment;
 
 use crate::support::footgun::{
     assert_model_is_internally_consistent, db_of, docs_read_definition, is_structural_type,
@@ -700,7 +701,7 @@ fn custom_well_known_types(setting: &str, replacement: &str) -> WellKnownTypes {
 }
 
 fn translator_with_types(names: WellKnownTypes) -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(caller_deployment())
         .with_min_confidence(ConfidenceLevel::A)
         .with_well_known_types(names)
         .build()
@@ -817,7 +818,7 @@ fn well_known_names_have_a_single_source_of_truth() {
         let registry =
             std::fs::read_to_string(format!("tests/fixtures/{fixture}/function_registry.json"))
                 .ok();
-        let mut builder = TranslatorBuilder::new()
+        let mut builder = TranslatorBuilder::new(caller_deployment())
             .with_min_confidence(ConfidenceLevel::B)
             .with_well_known_types(names.clone());
         if let Some(registry) = registry {

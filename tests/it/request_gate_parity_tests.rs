@@ -7,23 +7,18 @@
 use core::fmt::Write;
 use core::time::Duration;
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::{records_from_row, ActionStatement, ConfidenceLevel, RowDecision};
 
 use crate::support;
 
+use crate::support::deployment;
 use crate::support::footgun::{db_of, gated_tables, OPEN_PLUS_CAP_BOT_LIST_GATES};
 use crate::support::parity::{
     assert_agrees, assert_postgres, request_predicate_holds, Cluster, Mutations, ParityCase,
     Principal,
 };
 use crate::support::JsonRowValues;
-
-const ATTRIBUTES: &str = r#"[
-    { "key": "app.user_id", "kind": "caller_id" },
-    { "key": "app.bot_list", "kind": "set_attribute" }
-]"#;
 
 /// Gated tables in the model. Over the 25 conditions `OpenFGA` accepts, had each gate
 /// declared its own.
@@ -77,7 +72,7 @@ fn case(name: &str) -> ParityCase {
         ],
         callers(),
     )
-    .with_attributes(ATTRIBUTES);
+    .with_settings([deployment::delimited_set("app.bot_list", ",")]);
     for table in ["t0", "t1"] {
         case = case.writing(
             table,
@@ -130,17 +125,15 @@ fn recipe_allows(
 
 /// The recipe `t0#can_select` reports, read without a round trip.
 fn select_recipe() -> RowDecision {
-    let outputs = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(&db_of(&gated_tables(TABLES)))
-        .expect("translation should plan")
-        .outputs()
-        .expect("every clause translates");
+    let outputs = TranslatorBuilder::new(deployment::caller_deployment_with([
+        deployment::delimited_set("app.bot_list", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db_of(&gated_tables(TABLES)))
+    .expect("translation should plan")
+    .outputs()
+    .expect("every clause translates");
     outputs
         .translation()
         .relations()
@@ -257,7 +250,7 @@ async fn gated_aggregate_parity() {
                 .map(|(viewer, entries)| caller(viewer, *entries))
                 .collect(),
         )
-        .with_attributes(ATTRIBUTES);
+        .with_settings([deployment::delimited_set("app.bot_list", ",")]);
         case.loading_from_rows = from_rows;
         let run = support::parity::run_before(&cluster, &case, Duration::from_secs(300)).await;
         for (subject, object, allowed) in [

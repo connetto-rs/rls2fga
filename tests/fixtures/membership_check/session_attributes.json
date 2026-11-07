@@ -1,3 +1,0 @@
-[
-  { "key": "app.current_user_id", "kind": "caller_id", "identity_cast": "uuid" }
-]

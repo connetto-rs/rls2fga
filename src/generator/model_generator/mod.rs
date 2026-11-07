@@ -4,7 +4,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt::Write;
 
 use crate::classifier::expansion::ExpansionState;
-use crate::classifier::function_registry::{FunctionRegistry, SessionAttribute};
+use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
 use crate::classifier::readability::{table_readability, ReadGate, TableReadability};
 use crate::clock::{cel_duration, ClockParameter, ClockReading, ClockThreshold};
@@ -643,6 +643,9 @@ pub(crate) struct SchemaPlan {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum PlanningError {
+    /// The schema does not declare a role the deployment names.
+    #[error("the deployment does not match the schema: {0}")]
+    Deployment(#[from] sql_traits::errors::DeploymentError),
     /// A table claimed a configured type name that belongs to the generator.
     #[error(
         "table '{table}' takes configured well-known type '{type_name}' from setting '{setting}'"
@@ -709,13 +712,13 @@ impl ConditionParameterAllocator {
             settings.request_time_parameter.clone(),
             "request time".to_string(),
         )?;
-        for attribute in registry.session_attributes() {
-            let source = if attribute.path().is_empty() {
-                attribute.setting_key().to_string()
+        for source in registry.sources().iter() {
+            let name = if source.path().is_empty() {
+                source.setting_key().to_string()
             } else {
-                format!("{}.{}", attribute.setting_key(), attribute.path().join("."))
+                format!("{}.{}", source.setting_key(), source.path().join("."))
             };
-            allocator.reserve_request(attribute.condition_parameter().clone(), source)?;
+            allocator.reserve_request(source.condition_parameter().clone(), name)?;
         }
         Ok(allocator)
     }
@@ -862,14 +865,33 @@ pub(crate) fn build_filtered_schema_plan<DB: DatabaseLike>(
     bounds: &UnboundedColumns,
 ) -> Result<SchemaPlan, PlanningError> {
     let filtered = filter_policies_for_output(policies, min_confidence);
-    build_plan_typing(
+    let mut plan = build_plan_typing(
         &filtered,
         db,
         registry,
         settings,
         bounds,
         PlanScope::Policies,
-    )
+    )?;
+    // Every policy, translated or not, since a clause the translation refused denies too
+    // and the reader still learns that the database admits more there.
+    for policy in policies {
+        for clause in policy.using.iter().chain(&policy.with_check) {
+            for (source, expression) in
+                crate::classifier::recognizers::empty_readings(clause, registry)
+            {
+                let note = TranslationNote::UnsetSettingReadAsEmpty {
+                    policy: policy.name().to_string(),
+                    setting: source.setting_key().to_string(),
+                    expression,
+                };
+                if !plan.notes.contains(&note) {
+                    plan.notes.push(note);
+                }
+            }
+        }
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]

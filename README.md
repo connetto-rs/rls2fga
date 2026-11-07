@@ -13,16 +13,19 @@ Each `USING` and `WITH CHECK` expression is classified against the patterns belo
 
 ## Usage
 
-Parse a schema, plan a translation, then ask it for each output. The plan is built once and every output is rendered from it.
+Describe the deployment your requests run as, parse a schema that declares its roles, plan a translation, then ask it for each output. The plan is built once and every output is rendered from it.
 
 ```rust
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-use rls2fga::types::ConfidenceLevel;
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::parser::sql_parser::{parse_schema, Deployment, SessionSetting, SettingValue};
 use rls2fga::translator::TranslatorBuilder;
+use rls2fga::types::ConfidenceLevel;
+use sqlparser::ast::DataType;
 
 let sql = "
+    CREATE ROLE authenticator LOGIN NOINHERIT;
+    CREATE ROLE web_user NOLOGIN;
+    GRANT web_user TO authenticator WITH INHERIT FALSE, SET TRUE;
     CREATE TABLE documents (
         id       UUID PRIMARY KEY,
         owner_id UUID NOT NULL
@@ -37,11 +40,12 @@ let sql = "
 ";
 
 let db = parse_schema(sql).expect("parse error");
-let caller = SessionAttribute::setting("app.current_user_id", SessionAttributeKind::CallerId)
-    .with_identity_cast("uuid");
-let translation = TranslatorBuilder::new()
+let caller = SessionSetting::value("app.current_user_id", SettingValue::Caller(DataType::Uuid))
+    .expect("a custom setting name");
+let deployment = Deployment::new("authenticator", ["web_user"], [caller])
+    .expect("one acting role");
+let translation = TranslatorBuilder::new(deployment)
     .with_min_confidence(ConfidenceLevel::B)
-    .with_session_attributes([caller])
     .build()
     .translate(&db)
     .expect("schema should plan");
@@ -57,7 +61,9 @@ for note in outputs.notes() {
 
 `outputs()` refuses every note whose severity `diverges_from_database()`, including `Unhandled`, `Partial` and `BelowThreshold`, and `DivergentTranslation::notes()` names each gap. `outputs_accepting_gaps()` deliberately accepts models that may grant what the database denies or deny what it grants. `min_confidence` sets the bar (`A` fully translated, `B` composed or row-decided, `C` a relationship with an unenforced attribute guard, `D` unrecognised), and `Outputs::report()` lists dropped clauses, with dropped `PERMISSIVE` clauses granting nothing and dropped `RESTRICTIVE` clauses becoming `no_access`.
 
-The model compares the caller as sent, while `PostgreSQL` compares whatever a cast made of it, and `'01'::integer` is `1`. Any cast but `text` or an unbounded `varchar` on a request value or on the row it meets is therefore refused, unless `with_identity_cast` declares that the value always arrives in that type's canonical form, as the `::uuid` above does.
+The `sql_traits` `Deployment` names the role a request logs in as, the roles it acts as, and every session setting a policy may read, whether the caller's identity, one value, or a set joined by a delimiter or packed as a JSON array, each with its type and whether a request may leave it unset. A setting it does not declare is refused wherever a policy reads it, and so is a set split on another delimiter than the declared one. The schema has to declare the deployment's roles.
+
+The model compares the caller as sent, while `PostgreSQL` compares whatever a cast made of it, and `'01'::integer` is `1`. Any cast but `text` or an unbounded `varchar` on a request value or on the row it meets is therefore refused, unless the deployment declares the setting in that type, which promises that every request sends it in the type's canonical form, as the `::uuid` above does.
 
 ## Output
 
@@ -158,7 +164,7 @@ A column with no foreign key, such as an `owner` that may name a team or a proje
 
 Naming a row to change means reading it, so `can_update` and `can_delete` intersect `can_select`, while an `UPDATE` naming no row is `can_update_without_reading`. Plain `INSERT` reads nothing, but `RETURNING` a column and naming an `ON CONFLICT` target both read the new row back, which is `can_insert_returning`, and `INSERT ... ON CONFLICT DO UPDATE` is `can_upsert`. A locking read (`FOR UPDATE` and friends) also applies the `UPDATE` policies, so check `can_select_for_update` rather than `can_select`. A policy expression reads every table it names, so an inherited parent rule intersects the parent's `can_select` and a membership table granting no reads denies outright.
 
-Membership tables whose permissive read policies all use `USING (true)` and apply to `PUBLIC` need no caveat when their restrictive read policies are absent or constant `true`. Supported restrictive gates using only literals and declared session attributes are `AND`ed onto the membership arm and require those attributes in each check context. Row-dependent or role-scoped membership rules retain `MembershipTableGuarded`.
+Membership tables whose permissive read policies all use `USING (true)` and apply to `PUBLIC` need no caveat when their restrictive read policies are absent or constant `true`. Supported restrictive gates using only literals and settings the deployment declares are `AND`ed onto the membership arm and require those settings in each check context. Row-dependent or role-scoped membership rules retain `MembershipTableGuarded`.
 
 A residual such as `s.weight > (SELECT avg(weight) FROM paper_shares)` may read a table gated that way too. When the gate holds the caller sees what the loader saw, and when it fails the table reads empty, so the residual is accepted only where an empty table makes it false (`avg` of nothing is `NULL`, `count` of nothing fails `> 0`), and the grant is `AND`ed with the gate. `count(*) = 0` and `NOT EXISTS` stay refused.
 
@@ -167,6 +173,8 @@ Membership tuple relations are isolated by table, correlation, user column, pred
 ## Runtime data you have to supply
 
 A policy scoped `TO analyst` keeps that scope through a `pg_role` type, so load `usage` tuples mapping users to `pg_role` objects or those policies match nobody.
+
+Every value a policy reads from a setting other than the caller reaches the model as a condition parameter named after the setting and field, `app.tenant_id` as `app_tenant_id`, which every check carries. A request that leaves a setting the deployment says may be unset sends no subject for it and omits its parameters, never `''` or an empty list. `PostgreSQL` reads such a setting as `NULL` on a fresh connection and as `''` once a transaction-local value has ended, and the model answers as `NULL` does, which admits least. Where `''` would admit rows, an `UnsetSettingReadAsEmpty` note names the comparison.
 
 A guard against statement time such as `expires_at > now()` cannot be a tuple, since whatever it decided when written stays decided. It becomes an `OpenFGA` condition instead: the row's value travels with the tuple and every check must carry the time in its context under `request_time`, renamed by `TranslatorBuilder::with_request_time_parameter`. A day or month window, `current_date` and `localtimestamp` read the clock in the session `TimeZone`, which CEL cannot, so each becomes a parameter of its own such as `request_time_minus_1_day`. `Translation::clock_context` computes every clock parameter of one check from the instant and the zone the request runs in.
 

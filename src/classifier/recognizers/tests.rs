@@ -7,6 +7,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
 use crate::parser::expr::parse_expr_for_tests as parse_expr;
+use crate::test_support::{caller, delimited_set, registry};
 
 fn parse_select(sql: &str) -> Select {
     let stmts = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("query should parse");
@@ -537,13 +538,12 @@ fn recognize_p3_current_setting_requires_registration() {
     );
 }
 
-/// The key carries the meaning, so naming it is enough: the function itself stays
-/// unregistered, which is what keeps a call reading some other key unrecognised.
+/// The setting carries the meaning, so declaring it is enough and the function itself
+/// stays unregistered, which is what keeps a call reading some other setting unrecognised.
 #[test]
-fn recognize_p3_reads_a_named_setting_key_without_registering_the_function() {
+fn recognize_p3_reads_a_declared_setting_without_registering_the_function() {
     let db = db_with_docs_and_members();
-    let mut registry = FunctionRegistry::new();
-    registry.trust_current_user_setting_keys(["app.current_user_id"]);
+    let registry = registry([caller("app.current_user_id")]);
 
     let named = parse_expr("owner_id = current_setting('app.current_user_id')");
     let classified = recognize_p3(&named, &db, &registry)
@@ -1561,12 +1561,7 @@ CREATE POLICY shares_cap ON paper_shares AS RESTRICTIVE FOR SELECT USING (
 );";
 
 fn gated_registry() -> FunctionRegistry {
-    let mut registry = FunctionRegistry::new();
-    registry.declare_session_attributes([
-        SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-        SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-    ]);
-    registry
+    registry([caller("app.user_id"), delimited_set("app.bot_list", ",")])
 }
 
 fn gated_residual(residual: &str) -> Expr {
@@ -3402,8 +3397,7 @@ fn current_user_accessor_name_subquery_with_multiple_projections_returns_none() 
 /// A set operation is two queries, so which row it yields is not the projection of one.
 #[test]
 fn current_user_accessor_name_set_operation_subquery_returns_none() {
-    let mut registry = FunctionRegistry::new();
-    registry.trust_current_user_setting_keys(["app.user_id"]);
+    let registry = registry([caller("app.user_id")]);
     let expr = parse_expr(
         "(SELECT current_setting('app.user_id') UNION SELECT current_setting('app.tenant_id'))",
     );
@@ -4579,14 +4573,13 @@ fn a_field_read_out_of_an_accessor_is_not_the_caller() {
 
 /// The refusal holds however the accessor was named, so one shape has one answer.
 #[test]
-fn a_field_read_is_refused_for_a_registered_accessor_and_a_named_key_alike() {
+fn a_field_read_is_refused_for_a_registered_accessor_and_a_whole_caller_setting_alike() {
     let db = db_with_docs_and_members();
     let mut registered = FunctionRegistry::new();
     registered
         .load_from_json(r#"{"current_setting": {"kind":"current_user_accessor","returns":"text"}}"#)
         .unwrap();
-    let mut keyed = FunctionRegistry::new();
-    keyed.trust_current_user_setting_keys(["request.jwt.claims"]);
+    let keyed = registry([caller("request.jwt.claims")]);
 
     let expr = parse_expr("owner_id = current_setting('request.jwt.claims')::json->>'sub'");
     for (how, registry) in [("registered function", &registered), ("named key", &keyed)] {

@@ -1,11 +1,10 @@
-use rls2fga::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
+use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::*;
 use rls2fga::classifier::policy_classifier;
 use rls2fga::parser::function_analyzer::FunctionSemantic;
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
+use sqlparser::ast::DataType;
 
 use crate::support;
 
@@ -15,7 +14,11 @@ fn load_emi_fixture() -> (rls2fga::parser::sql_parser::ParserDB, FunctionRegistr
 
 fn p1_threshold_for(policy_name: &str) -> i32 {
     let (db, registry) = load_emi_fixture();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("earth_metabolome"),
+    );
     let policy = classified.iter().find(|c| c.name() == policy_name).unwrap();
     match policy.using_classification() {
         Some(ClassifiedExpr {
@@ -29,7 +32,11 @@ fn p1_threshold_for(policy_name: &str) -> i32 {
 #[test]
 fn classify_emi_policies_as_p1() {
     let (db, registry) = load_emi_fixture();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("earth_metabolome"),
+    );
 
     assert_eq!(classified.len(), 4);
 
@@ -81,7 +88,11 @@ fn classify_simple_ownership_as_p3() {
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("simple_ownership"),
+    );
 
     for cp in &classified {
         let classification = cp
@@ -107,7 +118,11 @@ fn classify_public_flag_as_p6_heuristic_gives_confidence_b() {
     let db = support::parse_fixture_db("public_flag");
     let registry = FunctionRegistry::new();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("public_flag"),
+    );
     assert_eq!(classified.len(), 1);
 
     let cp = &classified[0];
@@ -133,7 +148,11 @@ fn classify_public_flag_registered_column_gives_confidence_a() {
     let mut registry = FunctionRegistry::new();
     registry.register_public_flag_column("is_public");
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("public_flag"),
+    );
     assert_eq!(classified.len(), 1);
 
     let cp = &classified[0];
@@ -157,7 +176,11 @@ fn classify_public_flag_registered_column_gives_confidence_a() {
 fn classify_abac_status_as_a_threshold_beside_a_literal_guard() {
     let (db, registry) = support::load_fixture_db_and_registry("abac_status");
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("abac_status"),
+    );
     assert_eq!(classified.len(), 1);
 
     let cp = &classified[0];
@@ -185,14 +208,11 @@ fn classify_abac_status_as_a_threshold_beside_a_literal_guard() {
 #[test]
 fn classify_tenant_isolation_without_registry_via_function_body_inference() {
     let db = support::parse_fixture_db("tenant_isolation");
-    let classified = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "app.tenant_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("uuid")])
-        .build()
-        .classify(&db);
+    let deployment = support::deployment::deployment([support::deployment::typed_caller(
+        "app.tenant_id",
+        DataType::Uuid,
+    )]);
+    let classified = TranslatorBuilder::new(deployment).build().classify(&db);
     assert_eq!(classified.len(), 1);
 
     let cp = &classified[0];

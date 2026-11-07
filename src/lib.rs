@@ -87,3 +87,6 @@ pub mod parser;
 pub mod term;
 /// High-level builder/facade for classification and `OpenFGA` translation.
 pub mod translator;
+
+#[cfg(test)]
+pub(crate) mod test_support;

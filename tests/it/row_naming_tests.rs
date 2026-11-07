@@ -3,27 +3,27 @@
 //! The assertions come from the request recorded in `plans/row-naming.md`.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translation, TranslatorBuilder};
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::Translation;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RowNaming;
 use rls2fga::types::{records_from_row, ColumnKind, RecordDerivation, RecordError, ValueSource};
 
+use crate::support;
 use crate::support::row;
 
 const CALLER: &str = "current_setting('app.user_id', true)";
 
 fn translate(db: &ParserDB) -> Translation {
-    TranslatorBuilder::new()
+    support::deployment::translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
         .build()
         .translate(db)
         .expect("translation should plan")
 }
 
 fn naming(sql: &str) -> Vec<RowNaming> {
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     let mut entries = translate(&db).row_naming().to_vec();
     entries.sort_by_key(|entry| entry.table.clone());
     entries
@@ -52,7 +52,7 @@ fn a_named_table_reports_the_type_its_relations_live_on() {
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id', true));
 ";
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     let planned = translate(&db);
     let entries = planned.row_naming();
     assert_eq!(
@@ -82,7 +82,7 @@ fn the_rendered_name_is_the_one_the_records_carry() {
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id', true));
 ";
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     let planned = translate(&db);
     let entries = planned.row_naming();
     let docs = entry(entries, "docs");
@@ -118,7 +118,7 @@ fn an_array_key_is_not_treated_as_element_text() {
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id', true));
 ";
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     let planned = translate(&db);
     let entries = planned.row_naming();
     let docs = entry(entries, "docs");
@@ -199,7 +199,7 @@ fn a_table_whose_rows_cannot_be_named_has_no_entry() {
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id', true));
 ";
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     let planned = translate(&db);
     assert!(
         planned.row_naming().is_empty(),

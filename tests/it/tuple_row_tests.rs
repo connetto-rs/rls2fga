@@ -6,11 +6,10 @@
 
 use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::ClassifiedPolicy;
-use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator::{TupleCondition, TupleRow, TupleRowError};
 use rls2fga::generator::well_known::deny_relation;
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Outputs, TranslatorBuilder};
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::Outputs;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{records_from_row, Record, RecordDerivation};
 
@@ -30,11 +29,11 @@ const ACCESSOR_REGISTRY: &str =
     r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "text"}}"#;
 
 fn ownership_db() -> ParserDB {
-    parse_schema(OWNERSHIP).expect("the schema should parse")
+    support::deployment::db(OWNERSHIP)
 }
 
 fn ownership_outputs(db: &ParserDB) -> Outputs {
-    TranslatorBuilder::new()
+    support::deployment::translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
         .with_registry_json(ACCESSOR_REGISTRY)
         .expect("the registry should parse")
@@ -45,11 +44,7 @@ fn ownership_outputs(db: &ParserDB) -> Outputs {
 }
 
 fn qualified_tenant_setting() -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
-    let sql = support::read_fixture_sql("tenant_setting");
-    let db = parse_schema(&sql).expect("the schema should parse");
-    let registry = support::try_load_fixture_registry("tenant_setting");
-    let classified = policy_classifier::classify_policies(&db, &registry);
-    (classified, db, registry)
+    support::try_load_fixture_classified("tenant_setting")
 }
 
 #[test]

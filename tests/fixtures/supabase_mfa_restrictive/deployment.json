@@ -1,0 +1,3 @@
+[
+  {"setting": "request.jwt.claims", "field": ["aal"], "scalar": "text"}
+]

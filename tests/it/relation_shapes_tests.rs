@@ -7,8 +7,10 @@
 
 use std::collections::BTreeSet;
 
-use rls2fga::classifier::function_registry::{FunctionRegistry, SessionAttribute};
-use rls2fga::classifier::policy_classifier::classify_policies;
+use rls2fga::classifier::function_registry::FunctionRegistry;
+use rls2fga::classifier::policy_classifier::{
+    classify_policies, classify_policies_with_effective_registry,
+};
 use rls2fga::generator::model_generator::GeneratorSettings;
 use rls2fga::generator::tuple_generator::TupleQuery;
 use rls2fga::generator::well_known::{
@@ -16,7 +18,7 @@ use rls2fga::generator::well_known::{
 };
 use rls2fga::parser::names::lookup_table;
 use rls2fga::parser::sql_parser::{
-    parse_schema, ColumnLike, DatabaseLike, ParserDB, PolicyLike, TableLike,
+    parse_schema, ColumnLike, DatabaseLike, Deployment, ParserDB, PolicyLike, TableLike,
 };
 use rls2fga::translator::Translation;
 use rls2fga::types::ConditionParameterName;
@@ -96,15 +98,19 @@ fn parsed(sql: &str, registry_json: &str) -> (ParserDB, FunctionRegistry) {
     (db, registry)
 }
 
-fn parsed_with_session_attributes(
+/// The schema parsed, beside the deployment declaring `settings_json` next to the
+/// suite's callers.
+fn parsed_with_settings(
     sql: &str,
-    attributes_json: &str,
-) -> (ParserDB, FunctionRegistry) {
-    let (db, mut registry) = parsed(sql, "{}");
-    let attributes: Vec<SessionAttribute> =
-        serde_json::from_str(attributes_json).expect("the session attributes parse");
-    registry.declare_session_attributes(attributes);
-    (db, registry)
+    settings_json: &str,
+) -> (ParserDB, FunctionRegistry, Deployment) {
+    let (db, registry) = parsed(sql, "{}");
+    let settings = support::deployment::settings_from_json(settings_json);
+    (
+        db,
+        registry,
+        support::deployment::caller_deployment_with(settings),
+    )
 }
 
 fn translation(
@@ -112,15 +118,11 @@ fn translation(
     registry: &FunctionRegistry,
     level: ConfidenceLevel,
     settings: &GeneratorSettings,
+    deployment: &Deployment,
 ) -> Translation {
-    Translation::plan(
-        classify_policies(db, registry),
-        db,
-        registry,
-        level,
-        settings,
-    )
-    .expect("translation should plan")
+    let (classified, registry) =
+        classify_policies_with_effective_registry(db, registry, deployment);
+    Translation::plan(classified, db, &registry, level, settings).expect("translation should plan")
 }
 
 fn shapes_of(sql: &str, registry_json: &str) -> Vec<RelationShapes> {
@@ -130,6 +132,7 @@ fn shapes_of(sql: &str, registry_json: &str) -> Vec<RelationShapes> {
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
     )
     .relations()
     .to_vec()
@@ -137,16 +140,28 @@ fn shapes_of(sql: &str, registry_json: &str) -> Vec<RelationShapes> {
 
 fn shapes_at(sql: &str, registry_json: &str, level: ConfidenceLevel) -> Vec<RelationShapes> {
     let (db, registry) = parsed(sql, registry_json);
-    translation(&db, &registry, level, &GeneratorSettings::default())
-        .relations()
-        .to_vec()
+    translation(
+        &db,
+        &registry,
+        level,
+        &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
+    )
+    .relations()
+    .to_vec()
 }
 
 fn model_at(sql: &str, registry_json: &str, level: ConfidenceLevel) -> String {
     let (db, registry) = parsed(sql, registry_json);
-    translation(&db, &registry, level, &GeneratorSettings::default())
-        .outputs_accepting_gaps()
-        .model()
+    translation(
+        &db,
+        &registry,
+        level,
+        &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
+    )
+    .outputs_accepting_gaps()
+    .model()
 }
 
 fn entry<'a>(shapes: &'a [RelationShapes], type_name: &str, relation: &str) -> &'a RelationShapes {
@@ -487,8 +502,9 @@ fn no_tuple_query_names_an_undeclared_relation() {
 fn every_conditional_tuple_filters_its_context_columns() {
     let mut checked = 0usize;
 
-    for (fixture, db, registry) in tuple_contract_cases() {
-        let classified = classify_policies(&db, &registry);
+    for (fixture, db, registry, deployment) in tuple_contract_cases() {
+        let (classified, registry) =
+            classify_policies_with_effective_registry(&db, &registry, &deployment);
         let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
 
         for query in outputs.tuple_queries() {
@@ -569,23 +585,26 @@ fn a_shape_naming_the_guarded_table_names_its_whole_key() {
     let mut compound = 0usize;
     let mut checked = 0usize;
 
-    let mut cases: Vec<(String, ParserDB, FunctionRegistry)> = support::fixture_names()
+    let mut cases: Vec<(String, ParserDB, FunctionRegistry, Deployment)> = support::fixture_names()
         .into_iter()
         .map(|fixture| {
             let (_, db, registry) = support::try_load_fixture_classified(&fixture);
-            (fixture, db, registry)
+            let deployment = support::deployment::fixture_deployment(&fixture);
+            (fixture, db, registry, deployment)
         })
         .collect();
     let (db, registry) = parsed(COMPOSITE_KEY_GRANTS, GRANT_REGISTRY);
-    cases.push(("composite_key_grants".to_string(), db, registry));
+    cases.push((
+        "composite_key_grants".to_string(),
+        db,
+        registry,
+        support::deployment::caller_deployment(),
+    ));
 
-    for (name, db, registry) in &cases {
-        let planned = support::plan_at(
-            classify_policies(db, registry),
-            db,
-            registry,
-            ConfidenceLevel::B,
-        );
+    for (name, db, registry, deployment) in &cases {
+        let (classified, registry) =
+            classify_policies_with_effective_registry(db, registry, deployment);
+        let planned = support::plan_at(classified, db, &registry, ConfidenceLevel::B);
         // Keyed by type, not by table: the same table is the object's own in one shape
         // and the join table of another type's shape in the next.
         let keys: Vec<(TableId, TypeName, Vec<ColumnName>)> = planned
@@ -819,8 +838,9 @@ fn is_that_query_plus_one_line(whole: &str, bound: &str) -> bool {
 fn a_bound_query_is_its_whole_table_query_plus_one_condition() {
     let mut checked = 0usize;
 
-    for (fixture, db, registry) in tuple_contract_cases() {
-        let classified = classify_policies(&db, &registry);
+    for (fixture, db, registry, deployment) in tuple_contract_cases() {
+        let (classified, registry) =
+            classify_policies_with_effective_registry(&db, &registry, &deployment);
         let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
         let shapes = planned.translation().relations();
         let whole_table: Vec<String> = planned
@@ -937,7 +957,7 @@ fn appended_predicate_identifier(sql: &str) -> String {
 fn a_bound_condition_quotes_its_column_the_way_the_query_does() {
     let (db, registry) = parsed(QUOTED_MEMBERSHIP, ACCESSOR_REGISTRY);
     let planned = support::plan_at(
-        classify_policies(&db, &registry),
+        classify_policies(&db, &registry, &support::deployment::caller_deployment()),
         &db,
         &registry,
         ConfidenceLevel::B,
@@ -997,18 +1017,24 @@ CREATE POLICY jobs_sel ON jobs FOR SELECT USING (as_of > now());
         ..GeneratorSettings::default()
     };
 
-    let context_keys: Vec<String> = translation(&db, &registry, ConfidenceLevel::B, &settings)
-        .relations()
-        .iter()
-        .flat_map(|entry| entry.shapes.iter())
-        .filter_map(|shape| match &shape.derivation {
-            RecordDerivation::FromRow { template, .. } => template
-                .context
-                .as_ref()
-                .and_then(|context| context.entries.first().map(|entry| entry.key.clone())),
-            _ => None,
-        })
-        .collect();
+    let context_keys: Vec<String> = translation(
+        &db,
+        &registry,
+        ConfidenceLevel::B,
+        &settings,
+        &support::deployment::caller_deployment(),
+    )
+    .relations()
+    .iter()
+    .flat_map(|entry| entry.shapes.iter())
+    .filter_map(|shape| match &shape.derivation {
+        RecordDerivation::FromRow { template, .. } => template
+            .context
+            .as_ref()
+            .and_then(|context| context.entries.first().map(|entry| entry.key.clone())),
+        _ => None,
+    })
+    .collect();
 
     assert!(!context_keys.is_empty(), "the request-time gate settles");
     // The caller's name collides with the column, so the plan suffixes the row's
@@ -1334,25 +1360,32 @@ fn a_holder_relation_is_never_decidable_from_one_row() {
 #[test]
 fn every_query_the_loader_runs_has_a_shape() {
     let mut checked = 0usize;
-    let mut cases: Vec<(String, ParserDB, FunctionRegistry)> = Vec::new();
+    let mut cases: Vec<(String, ParserDB, FunctionRegistry, Deployment)> = Vec::new();
     for fixture in support::fixture_names() {
         let (_, db, registry) = support::try_load_fixture_classified(&fixture);
-        cases.push((fixture, db, registry));
+        let deployment = support::deployment::fixture_deployment(&fixture);
+        cases.push((fixture, db, registry, deployment));
     }
     for (label, sql, registry_json) in [
         ("holder", HOLDER, ACCESSOR_REGISTRY),
         ("ownership", OWNERSHIP, ACCESSOR_REGISTRY),
     ] {
         let (db, registry) = parsed(sql, registry_json);
-        cases.push((label.to_string(), db, registry));
+        cases.push((
+            label.to_string(),
+            db,
+            registry,
+            support::deployment::caller_deployment(),
+        ));
     }
 
-    for (label, db, registry) in &cases {
+    for (label, db, registry, deployment) in &cases {
         for query in translation(
             db,
             registry,
             ConfidenceLevel::B,
             &GeneratorSettings::default(),
+            deployment,
         )
         .outputs_accepting_gaps()
         .tuple_queries()
@@ -1470,9 +1503,15 @@ fn conditional_wildcards(json: &str) -> Vec<(String, String, String)> {
 #[test]
 fn every_condition_parameter_is_supplied_by_its_own_tuples() {
     let mut checked = 0usize;
-    let residual = parsed_with_session_attributes(SQL_RESIDUAL_SHARE, EXPIRING_SHARE_ATTRIBUTES);
-    for (fixture, db, registry) in [("sql-residual share".to_string(), residual.0, residual.1)] {
-        let classified = classify_policies(&db, &registry);
+    let residual = parsed_with_settings(SQL_RESIDUAL_SHARE, EXPIRING_SHARE_SETTINGS);
+    for (fixture, db, registry, deployment) in [(
+        "sql-residual share".to_string(),
+        residual.0,
+        residual.1,
+        residual.2,
+    )] {
+        let (classified, registry) =
+            classify_policies_with_effective_registry(&db, &registry, &deployment);
         let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
         let json = serde_json::to_string(&outputs.json_model()).expect("the model serializes");
         let model: serde_json::Value = serde_json::from_str(&json).expect("parses");
@@ -1745,6 +1784,7 @@ fn either_spelling_of_two_ownership_columns_composes_into_any() {
             &registry,
             ConfidenceLevel::B,
             &GeneratorSettings::default(),
+            &support::deployment::caller_deployment(),
         );
         let reported = planned.relations();
         let named: Vec<&str> = recipe_leaves(
@@ -2163,17 +2203,18 @@ CREATE POLICY b_owner ON b.docs FOR SELECT USING (owner_id = auth_current_user_i
 CREATE POLICY a_team ON a.docs FOR SELECT USING (team_id = auth_current_user_id());
 ";
     let (db, registry) = parsed(sql, ACCESSOR_REGISTRY);
-    let classified: Vec<_> = classify_policies(&db, &registry)
-        .into_iter()
-        .map(|cp| {
-            if cp.name() == "a_team" {
-                // Both schemas bear `docs`, so the catalog cannot place this spelling.
-                cp.guarding_unresolvable_table("docs")
-            } else {
-                cp
-            }
-        })
-        .collect();
+    let classified: Vec<_> =
+        classify_policies(&db, &registry, &support::deployment::caller_deployment())
+            .into_iter()
+            .map(|cp| {
+                if cp.name() == "a_team" {
+                    // Both schemas bear `docs`, so the catalog cannot place this spelling.
+                    cp.guarding_unresolvable_table("docs")
+                } else {
+                    cp
+                }
+            })
+            .collect();
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let shapes = planned.translation().relations();
 
@@ -2612,6 +2653,7 @@ fn a_clock_gated_record_names_the_condition_its_context_carries() {
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
     );
     let reported = planned.relations();
     let gate = reported
@@ -2701,9 +2743,9 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
 );
 ";
 
-const EXPIRING_SHARE_ATTRIBUTES: &str = r#"[
-  { "key": "app.user_id", "kind": "caller_id" },
-  { "key": "app.subjects", "kind": "set_attribute" }
+const EXPIRING_SHARE_SETTINGS: &str = r#"[
+  { "setting": "app.user_id", "caller": "text" },
+  { "setting": "app.subjects", "set": "text", "delimiter": "," }
 ]"#;
 
 /// A share gated by the caller's set, with a residual only SQL can evaluate (a
@@ -2731,28 +2773,40 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
 );
 ";
 
-fn tuple_contract_cases() -> Vec<(String, ParserDB, FunctionRegistry)> {
-    let residual = parsed_with_session_attributes(SQL_RESIDUAL_SHARE, EXPIRING_SHARE_ATTRIBUTES);
+fn tuple_contract_cases() -> Vec<(String, ParserDB, FunctionRegistry, Deployment)> {
+    let residual = parsed_with_settings(SQL_RESIDUAL_SHARE, EXPIRING_SHARE_SETTINGS);
     let plain = parsed(QUOTED_MEMBERSHIP, ACCESSOR_REGISTRY);
     let mut cases = vec![
-        ("sql-residual share".to_string(), residual.0, residual.1),
-        ("quoted membership".to_string(), plain.0, plain.1),
+        (
+            "sql-residual share".to_string(),
+            residual.0,
+            residual.1,
+            residual.2,
+        ),
+        (
+            "quoted membership".to_string(),
+            plain.0,
+            plain.1,
+            support::deployment::caller_deployment(),
+        ),
     ];
     for fixture in support::fixture_names() {
         let (_, db, registry) = support::try_load_fixture_classified(&fixture);
-        cases.push((fixture, db, registry));
+        let deployment = support::deployment::fixture_deployment(&fixture);
+        cases.push((fixture, db, registry, deployment));
     }
     cases
 }
 
 fn joined_shape_queries() -> Vec<(String, RelationShapes, BoundQuery)> {
     let mut result = Vec::new();
-    for (fixture, db, registry) in tuple_contract_cases() {
+    for (fixture, db, registry, deployment) in tuple_contract_cases() {
         let planned = translation(
             &db,
             &registry,
             ConfidenceLevel::B,
             &GeneratorSettings::default(),
+            &deployment,
         );
         for entry in planned.relations() {
             for shape in &entry.shapes {
@@ -2774,12 +2828,13 @@ fn joined_shape_queries() -> Vec<(String, RelationShapes, BoundQuery)> {
 /// re-evaluates the clock the request supplies.
 #[test]
 fn an_expiring_share_settles_from_its_row_with_the_clock_in_its_condition() {
-    let (db, registry) = parsed_with_session_attributes(EXPIRING_SHARE, EXPIRING_SHARE_ATTRIBUTES);
+    let (db, registry, deployment) = parsed_with_settings(EXPIRING_SHARE, EXPIRING_SHARE_SETTINGS);
     let planned = translation(
         &db,
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &deployment,
     );
     let reported = planned.relations();
     let gate = reported
@@ -2908,12 +2963,13 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
 
 #[test]
 fn a_membership_grace_window_rides_the_clock_as_a_duration() {
-    let (db, registry) = parsed_with_session_attributes(GRACE_SHARE, EXPIRING_SHARE_ATTRIBUTES);
+    let (db, registry, deployment) = parsed_with_settings(GRACE_SHARE, EXPIRING_SHARE_SETTINGS);
     let outputs = translation(
         &db,
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &deployment,
     )
     .outputs_accepting_gaps();
     let dsl = outputs.model();
@@ -2948,12 +3004,13 @@ fn a_membership_grace_window_rides_the_clock_as_a_duration() {
 #[test]
 fn a_membership_grace_window_in_days_reads_its_threshold_parameter() {
     let schema = GRACE_SHARE.replace("'36 hours'", "'30 days'");
-    let (db, registry) = parsed_with_session_attributes(&schema, EXPIRING_SHARE_ATTRIBUTES);
+    let (db, registry, deployment) = parsed_with_settings(&schema, EXPIRING_SHARE_SETTINGS);
     let outputs = translation(
         &db,
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &deployment,
     )
     .outputs_accepting_gaps();
     let dsl = outputs.model();
@@ -3004,6 +3061,7 @@ fn an_expiring_exists_membership_conditions_its_member_tuple() {
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
     );
     let reported = planned.relations();
     let member = reported
@@ -3201,7 +3259,7 @@ CREATE POLICY docs_member ON public.docs FOR SELECT USING (
 fn resolved_membership_query() -> TupleQuery {
     let (db, registry) = parsed(RESOLVED_MEMBERSHIP, ACCESSOR_REGISTRY);
     support::plan_at(
-        classify_policies(&db, &registry),
+        classify_policies(&db, &registry, &support::deployment::caller_deployment()),
         &db,
         &registry,
         ConfidenceLevel::B,
@@ -3290,11 +3348,17 @@ fn every_bound_query_agrees_with_its_own_projection() {
 fn every_tuple_query_states_the_shape_of_its_own_rows() {
     let (mut conditional, mut plain) = (0usize, 0usize);
     let (mut carried, mut bare) = (0usize, 0usize);
-    let expiring = parsed_with_session_attributes(EXPIRING_SHARE, EXPIRING_SHARE_ATTRIBUTES);
+    let expiring = parsed_with_settings(EXPIRING_SHARE, EXPIRING_SHARE_SETTINGS);
     let mut cases = tuple_contract_cases();
-    cases.push(("expiring share".to_string(), expiring.0, expiring.1));
-    for (fixture, db, registry) in cases {
-        let classified = classify_policies(&db, &registry);
+    cases.push((
+        "expiring share".to_string(),
+        expiring.0,
+        expiring.1,
+        expiring.2,
+    ));
+    for (fixture, db, registry, deployment) in cases {
+        let (classified, registry) =
+            classify_policies_with_effective_registry(&db, &registry, &deployment);
         let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
         for query in outputs.tuple_queries() {
             let named = format!("{fixture}: {}", query.comment.trim());
@@ -3539,7 +3603,7 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
 fn unqualified_table_declaration_does_not_produce_search_path_dependent_sql() {
     let (db, registry) = parsed(UNQUALIFIED_MEMBERSHIPS, ACCESSOR_REGISTRY);
     let outputs = support::plan_at(
-        classify_policies(&db, &registry),
+        classify_policies(&db, &registry, &support::deployment::caller_deployment()),
         &db,
         &registry,
         ConfidenceLevel::B,
@@ -3629,6 +3693,7 @@ fn a_cross_row_residual_discloses_the_relations_its_proof_rests_on() {
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
     )
     .outputs_accepting_gaps()
     .notes()
@@ -3675,15 +3740,16 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (
 
 #[test]
 fn a_caller_set_membership_discloses_the_relations_its_proof_rests_on() {
-    let (db, registry) = parsed_with_session_attributes(
+    let (db, registry, deployment) = parsed_with_settings(
         CALLER_SET_CROSS_ROW,
-        r#"[{ "key": "app.subjects", "kind": "set_attribute" }]"#,
+        r#"[{ "setting": "app.subjects", "set": "text", "delimiter": "," }]"#,
     );
     let notes = translation(
         &db,
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &deployment,
     )
     .outputs_accepting_gaps()
     .notes()
@@ -3757,15 +3823,17 @@ CREATE POLICY orders_cap_read ON orders AS RESTRICTIVE FOR SELECT USING (
   OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
 ";
 
-const BOT_LIST_ATTRIBUTES: &str = r#"[{ "key": "app.bot_list", "kind": "set_attribute" }]"#;
+const BOT_LIST_SETTINGS: &str =
+    r#"[{ "setting": "app.bot_list", "set": "text", "delimiter": "," }]"#;
 
-fn shapes_with_attributes(sql: &str, attributes_json: &str) -> Vec<RelationShapes> {
-    let (db, registry) = parsed_with_session_attributes(sql, attributes_json);
+fn shapes_with_settings(sql: &str, settings_json: &str) -> Vec<RelationShapes> {
+    let (db, registry, deployment) = parsed_with_settings(sql, settings_json);
     translation(
         &db,
         &registry,
         ConfidenceLevel::B,
         &GeneratorSettings::default(),
+        &deployment,
     )
     .relations()
     .to_vec()
@@ -3775,7 +3843,7 @@ fn shapes_with_attributes(sql: &str, attributes_json: &str) -> Vec<RelationShape
 /// request, so the pair needs no stored fact and the recipe says so.
 #[test]
 fn an_open_table_under_a_request_gate_is_decided_without_a_round_trip() {
-    let shapes = shapes_with_attributes(OPEN_UNDER_GATE, BOT_LIST_ATTRIBUTES);
+    let shapes = shapes_with_settings(OPEN_UNDER_GATE, BOT_LIST_SETTINGS);
     let open = entry(&shapes, "orders", "public_viewer");
     let everyone = RowDecision::Everyone {
         relation: open.relation.clone(),

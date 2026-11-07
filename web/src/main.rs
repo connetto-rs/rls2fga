@@ -96,7 +96,8 @@ struct Rendered {
 /// the whole pipeline is cheap enough to run inline on the main thread, so no worker
 /// is needed.
 fn translate(sql: &str, level: ConfidenceLevel) -> Result<Rendered> {
-    let db = parse_schema(sql).context("parsing the SQL schema")?;
+    let db =
+        parse_schema(&format!("{}{sql}", settings::ROLES)).context("parsing the SQL schema")?;
     let translator = settings::translator(level).context("loading the app's function registry")?;
     let translation = translator
         .translate(&db)

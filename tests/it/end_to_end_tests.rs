@@ -14,7 +14,11 @@ fn end_to_end_earth_metabolome() {
     let registry = support::load_fixture_registry("earth_metabolome");
 
     // Stage 4: Classify
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("earth_metabolome"),
+    );
     assert_eq!(classified.len(), 4, "Should classify all 4 policies");
 
     // Stage 5: Generate model
@@ -46,7 +50,11 @@ fn end_to_end_earth_metabolome() {
 #[test]
 fn end_to_end_emi_role_hierarchy_needs_no_read_gate() {
     let (db, registry) = support::load_fixture_db_and_registry("earth_metabolome");
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("earth_metabolome"),
+    );
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
 
     for line in model.model().lines().map(str::trim) {
@@ -69,7 +77,11 @@ fn end_to_end_emi_role_hierarchy_needs_no_read_gate() {
 fn end_to_end_emi_all_level_a() {
     let (db, registry) = support::load_fixture_db_and_registry("earth_metabolome");
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("earth_metabolome"),
+    );
 
     for cp in &classified {
         for c in cp.classifications() {

@@ -3,9 +3,9 @@
 //!
 //! Values the request supplies rather than the row, and the guards that read them.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::classifier::patterns::{DirectOwnership, PatternClass, UnclassifiedExpr};
 use rls2fga::generator::tuple_generator::format_tuples;
+use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationShapes;
@@ -13,6 +13,10 @@ use rls2fga::types::TranslationNote;
 use rls2fga::types::{ColumnName, RelationName};
 use rls2fga::types::{RecordDerivation, ValueSource};
 
+use crate::support::deployment::{
+    caller, caller_deployment, delimited_set, deployment, json_array, json_setting, scalar,
+    translator_builder,
+};
 use crate::support::footgun::{
     db_of, relation_definition, relation_definitions, relation_denies, translation, translator,
 };
@@ -311,7 +315,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = app_uid());
 ",
     );
-    let model = TranslatorBuilder::new()
+    let model = translator_builder()
         .with_registry_json(r#"{"app_uid": {"kind": "current_user_accessor", "returns": "text"}}"#)
         .expect("registry should parse")
         .with_min_confidence(ConfidenceLevel::B)
@@ -945,7 +949,7 @@ fn the_request_time_parameter_name_is_configurable() {
         "the default name is request_time:\n{default_dsl}"
     );
 
-    let configured = TranslatorBuilder::new()
+    let configured = TranslatorBuilder::new(caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
         .with_request_time_parameter("as_of")
         .expect("as_of is a valid parameter")
@@ -1667,9 +1671,8 @@ CREATE TABLE rows_(id INTEGER PRIMARY KEY, tenant_id TEXT);
 ALTER TABLE rows_ ENABLE ROW LEVEL SECURITY;
 CREATE POLICY rows_p ON rows_ USING (tenant_id = current_setting('app.tenant_id', true));
 ";
-    let translator = TranslatorBuilder::new()
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
         .build();
 
     let owner_db = db_of(owner_sql);
@@ -1841,16 +1844,15 @@ CREATE POLICY p ON docs FOR SELECT
 /// predicate, which the probe behind D6 established, so nothing here compares against it.
 #[test]
 fn one_caller_carried_set_written_two_ways_emits_one_model() {
-    fn model(clause: &str, preamble: &str, attribute: SessionAttribute) -> String {
+    fn model(clause: &str, preamble: &str, setting: SessionSetting) -> String {
         let db = db_of(&format!(
             "CREATE TABLE documents(id UUID PRIMARY KEY, team_id TEXT);\n\
              {preamble}\
              ALTER TABLE documents ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY p ON documents FOR SELECT USING ({clause});\n"
         ));
-        TranslatorBuilder::new()
+        TranslatorBuilder::new(deployment([setting]))
             .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes(vec![attribute])
             .build()
             .translate(&db)
             .expect("translation should plan")
@@ -1863,13 +1865,7 @@ fn one_caller_carried_set_written_two_ways_emits_one_model() {
                          current_setting('request.jwt.claims')::jsonb -> 'teams')";
     const WRAPPER: &str = "CREATE FUNCTION user_teams() RETURNS SETOF TEXT LANGUAGE sql STABLE\n\
           AS 'SELECT unnest(string_to_array(current_setting(''app.teams'', true), '','')) ';\n";
-    let token = || {
-        SessionAttribute::claim(
-            "request.jwt.claims",
-            ["teams"],
-            SessionAttributeKind::SetAttribute,
-        )
-    };
+    let token = || json_setting("request.jwt.claims", [(&["teams"], json_array())]);
     let in_form = model(&format!("team_id IN (SELECT {CLAIM})"), "", token());
     let array_form = model(
         &format!("team_id = ANY (ARRAY(SELECT {CLAIM}))"),
@@ -1885,7 +1881,7 @@ fn one_caller_carried_set_written_two_ways_emits_one_model() {
         "the shape must actually translate rather than agreeing on a denial: {in_form}"
     );
 
-    let setting = || SessionAttribute::setting("app.teams", SessionAttributeKind::SetAttribute);
+    let setting = || delimited_set("app.teams", ",");
     let in_form = model("team_id IN (SELECT user_teams())", WRAPPER, setting());
     let array_form = model(
         "team_id = ANY (ARRAY(SELECT user_teams()))",
@@ -1910,7 +1906,7 @@ fn one_caller_carried_set_written_two_ways_emits_one_model() {
 /// would let it assert its own membership.
 #[test]
 fn a_set_the_authority_does_not_supply_is_refused() {
-    fn classify(preamble: &str, clause: &str, attribute: SessionAttribute) -> PatternClass {
+    fn classify(preamble: &str, clause: &str, setting: SessionSetting) -> PatternClass {
         let db = db_of(&format!(
             "CREATE TABLE documents(id UUID PRIMARY KEY, team_id TEXT);\n\
              CREATE TABLE members(user_id TEXT, team_id TEXT);\n\
@@ -1918,8 +1914,7 @@ fn a_set_the_authority_does_not_supply_is_refused() {
              ALTER TABLE documents ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY p ON documents FOR SELECT USING ({clause});\n"
         ));
-        TranslatorBuilder::new()
-            .with_session_attributes(vec![attribute])
+        TranslatorBuilder::new(deployment([setting]))
             .build()
             .classify(&db)[0]
             .using_classification()
@@ -1931,11 +1926,7 @@ fn a_set_the_authority_does_not_supply_is_refused() {
     let containment = classify(
         "",
         "current_setting('request.jwt.claims')::jsonb -> 'teams' ? team_id",
-        SessionAttribute::claim(
-            "request.jwt.claims",
-            ["teams"],
-            SessionAttributeKind::SetAttribute,
-        ),
+        json_setting("request.jwt.claims", [(&["teams"], json_array())]),
     );
     assert!(
         matches!(containment, PatternClass::Unknown(UnclassifiedExpr { .. })),
@@ -1946,7 +1937,7 @@ fn a_set_the_authority_does_not_supply_is_refused() {
         "CREATE FUNCTION user_teams() RETURNS SETOF TEXT LANGUAGE sql STABLE\n\
            AS 'SELECT team_id FROM members WHERE user_id = current_setting(''app.teams'', true)';\n",
         "team_id IN (SELECT user_teams())",
-        SessionAttribute::setting("app.teams", SessionAttributeKind::SetAttribute),
+        delimited_set("app.teams", ","),
     );
     assert!(
         matches!(from_a_table, PatternClass::Unknown(UnclassifiedExpr { .. })),
@@ -1968,17 +1959,15 @@ fn a_list_source_states_no_separator_in_its_caller_contract() {
          CREATE POLICY p ON documents FOR SELECT USING (team_id IN (SELECT \
          jsonb_array_elements_text(current_setting('request.jwt.claims')::jsonb -> 'teams')));\n",
     );
-    let outputs = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes(vec![SessionAttribute::claim(
-            "request.jwt.claims",
-            ["teams"],
-            SessionAttributeKind::SetAttribute,
-        )])
-        .build()
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let outputs = TranslatorBuilder::new(deployment([json_setting(
+        "request.jwt.claims",
+        [(&["teams"], json_array())],
+    )]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps();
 
     let contract = outputs
         .notes()
@@ -2010,16 +1999,12 @@ CREATE TABLE right_docs(id UUID PRIMARY KEY, tenant_id TEXT);
 ALTER TABLE left_docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE right_docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON left_docs FOR SELECT
-    USING (tenant_id = current_setting('a.b'));
+    USING (tenant_id = current_setting('a.b_c'));
 CREATE POLICY p ON right_docs FOR SELECT
-    USING (tenant_id = current_setting('a_b'));
+    USING (tenant_id = current_setting('a_b.c'));
 ";
     let db = db_of(sql);
-    let result = TranslatorBuilder::new()
-        .with_session_attributes([
-            SessionAttribute::setting("a.b", SessionAttributeKind::ScalarAttribute),
-            SessionAttribute::setting("a_b", SessionAttributeKind::ScalarAttribute),
-        ])
+    let result = TranslatorBuilder::new(deployment([scalar("a.b_c"), scalar("a_b.c")]))
         .build()
         .translate(&db);
     assert!(
@@ -2029,7 +2014,7 @@ CREATE POLICY p ON right_docs FOR SELECT
 }
 
 #[test]
-fn session_attribute_cannot_alias_request_time_parameter() {
+fn session_setting_cannot_alias_request_time_parameter() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, tenant_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -2037,49 +2022,11 @@ CREATE POLICY p ON docs FOR SELECT
     USING (tenant_id = current_setting('request.time'));
 ";
     let db = db_of(sql);
-    let result = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "request.time",
-            SessionAttributeKind::ScalarAttribute,
-        )])
+    let result = TranslatorBuilder::new(deployment([scalar("request.time")]))
         .build()
         .translate(&db);
     assert!(
         result.is_err(),
         "a session source must not alias request time"
     );
-}
-
-#[test]
-fn valid_custom_condition_parameter_name_is_preserved() {
-    let attribute = serde_json::from_value::<SessionAttribute>(serde_json::json!({
-        "key": "app.tenant_id",
-        "kind": "scalar_attribute",
-        "parameter": "TenantValue_2",
-    }))
-    .expect("the custom parameter should parse");
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, tenant_id TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT
-    USING (tenant_id = current_setting('app.tenant_id'));
-";
-    let db = db_of(sql);
-    let model = TranslatorBuilder::new()
-        .with_session_attributes([attribute])
-        .build()
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .json_model();
-    let condition = model
-        .conditions
-        .as_ref()
-        .and_then(|conditions| {
-            conditions
-                .values()
-                .find(|condition| condition.parameters.contains_key("TenantValue_2"))
-        })
-        .expect("the model should keep the custom parameter");
-    assert!(condition.expression.contains("TenantValue_2"));
 }

@@ -7,10 +7,10 @@
 //! upper-case uuid is lower-cased), so it translates only where the deployment declared
 //! the request value already canonical for that type, and never on the row side.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::parser::sql_parser::{SessionSetting, SetPacking, SettingValue};
 use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
+use sqlparser::ast::DataType;
 
 use crate::support;
 
@@ -43,28 +43,57 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (
   owner = current_setting('app.user_id', true));
 ";
 
-/// Translate `clause` as the read policy on `docs`, declaring each `(key, cast)` pair as
-/// the identity cast of that key.
+/// The type a `(key, cast)` pair's cast names.
+fn data_type(cast: &str) -> DataType {
+    match cast {
+        "text" => DataType::Text,
+        "integer" => DataType::Integer(None),
+        "uuid" => DataType::Uuid,
+        _ => panic!("the cases name only text, integer and uuid casts"),
+    }
+}
+
+/// Translate `clause` as the read policy on `docs`, declaring each `(key, cast)` pair's
+/// key to hold the cast's type.
 fn translate(clause: &str, declared: &[(&str, &str)]) -> Translation {
     let sql = format!("{TABLES} CREATE POLICY docs_read ON docs FOR SELECT USING ({clause});");
-    let db = parse_schema(&sql).expect("schema parses");
-    let attribute = |key: &str, kind| {
-        let attribute = SessionAttribute::setting(key, kind);
-        match declared
+    let db = support::deployment::db(&sql);
+    let cast_of = |key: &str| {
+        declared
             .iter()
-            .find(|(declared_key, _)| *declared_key == key)
-        {
-            Some((_, cast)) => attribute.with_identity_cast(*cast),
-            None => attribute,
-        }
+            .find_map(|(declared_key, cast)| (*declared_key == key).then_some(*cast))
     };
-    TranslatorBuilder::new()
+    let settings = [
+        SessionSetting::value(
+            "app.user_id",
+            SettingValue::Caller(match cast_of("app.user_id") {
+                Some(cast) => data_type(cast),
+                None => DataType::Text,
+            }),
+        )
+        .expect("a caller name"),
+        SessionSetting::value(
+            "app.tenant",
+            SettingValue::Scalar(match cast_of("app.tenant") {
+                Some(cast) => data_type(cast),
+                None => DataType::Text,
+            }),
+        )
+        .expect("a setting name"),
+        SessionSetting::value(
+            "app.subjects",
+            SettingValue::Set {
+                element: match cast_of("app.subjects") {
+                    Some(cast) => data_type(cast),
+                    None => DataType::Text,
+                },
+                packing: SetPacking::Delimited(",".to_string()),
+            },
+        )
+        .expect("a setting name"),
+    ];
+    TranslatorBuilder::new(support::deployment::deployment(settings))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            attribute("app.user_id", SessionAttributeKind::CallerId),
-            attribute("app.tenant", SessionAttributeKind::ScalarAttribute),
-            attribute("app.subjects", SessionAttributeKind::SetAttribute),
-        ])
         .build()
         .translate(&db)
         .expect("translation plans")
@@ -81,7 +110,7 @@ fn translated_faithfully(translation: Translation) -> bool {
     !diverges && !support::footgun::relation_denies(&model, "docs", "can_select")
 }
 
-/// The `(key, cast)` pairs a case declares canonical.
+/// The `(key, cast)` pairs a case declares, each naming the type its key holds.
 type Declarations = &'static [(&'static str, &'static str)];
 
 const NONE: Declarations = &[];
@@ -262,16 +291,19 @@ fn a_role_function_takes_the_caller_only_through_a_declared_cast() {
         );
     let registry = std::fs::read_to_string("tests/fixtures/role_in_list/function_registry.json")
         .expect("fixture registry");
-    let db = parse_schema(&schema).expect("schema parses");
-    let translate = |caller: SessionAttribute| {
-        TranslatorBuilder::new()
-            .with_min_confidence(ConfidenceLevel::B)
-            .with_registry_json(&registry)
-            .expect("registry loads")
-            .with_session_attributes([caller])
-            .build()
-            .translate(&db)
-            .expect("translation plans")
+    let db = support::deployment::db(&schema);
+    let translate = |value: SettingValue| {
+        TranslatorBuilder::new(support::deployment::deployment([SessionSetting::value(
+            "app.user_id",
+            value,
+        )
+        .expect("a caller name")]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_registry_json(&registry)
+        .expect("registry loads")
+        .build()
+        .translate(&db)
+        .expect("translation plans")
     };
     let refused = |translation: &Translation| {
         translation
@@ -279,16 +311,15 @@ fn a_role_function_takes_the_caller_only_through_a_declared_cast() {
             .iter()
             .any(|note| note.severity().diverges_from_database())
     };
-    let caller = || SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId);
 
-    assert!(refused(&translate(caller())));
-    assert!(!refused(&translate(caller().with_identity_cast("uuid"))));
+    assert!(refused(&translate(SettingValue::Caller(DataType::Text))));
+    assert!(!refused(&translate(SettingValue::Caller(DataType::Uuid))));
 }
 
 /// A refusal names the declaration that would let the cast through, whether the cast is
 /// written in the policy or in the body of the accessor it calls.
 #[test]
-fn a_refusal_names_the_identity_cast_to_declare() {
+fn a_refusal_names_the_type_to_declare() {
     use rls2fga::classifier::patterns::{PatternClass, UnclassifiedExpr};
 
     for clause in [
@@ -296,14 +327,12 @@ fn a_refusal_names_the_identity_cast_to_declare() {
         "owner_int = int_uid()",
     ] {
         let sql = format!("{TABLES} CREATE POLICY docs_read ON docs FOR SELECT USING ({clause});");
-        let db = parse_schema(&sql).expect("schema parses");
-        let classified = TranslatorBuilder::new()
-            .with_session_attributes([SessionAttribute::setting(
-                "app.user_id",
-                SessionAttributeKind::CallerId,
-            )])
-            .build()
-            .classify(&db);
+        let db = support::deployment::db(&sql);
+        let classified = TranslatorBuilder::new(support::deployment::deployment([
+            support::deployment::caller("app.user_id"),
+        ]))
+        .build()
+        .classify(&db);
         let pattern = classified
             .iter()
             .find(|policy| policy.name() == "docs_read")
@@ -313,7 +342,7 @@ fn a_refusal_names_the_identity_cast_to_declare() {
             panic!("`{clause}` must be refused, got {pattern:?}");
         };
         assert!(
-            reason.contains("identity_cast 'integer' on app.user_id"),
+            reason.contains("declare app.user_id in the deployment as holding integer"),
             "`{clause}`: {reason}"
         );
     }
@@ -321,8 +350,11 @@ fn a_refusal_names_the_identity_cast_to_declare() {
 
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 mod parity {
+    use rls2fga::parser::sql_parser::{SessionSetting, SetPacking, SettingValue};
     use rls2fga::types::ActionStatement;
+    use sqlparser::ast::DataType;
 
+    use super::data_type;
     use super::support::parity::{
         assert_agrees, assert_disclosed_where_noted, assert_postgres, run, run_disclosing, Cluster,
         ParityCase, Principal,
@@ -377,20 +409,43 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (true);
         principal
     }
 
-    /// The three request values, the `(key, cast)` pair among them declared canonical.
-    fn attributes(declared: Option<(&str, &str)>) -> String {
-        let attribute = |key: &str, kind: &str| match declared {
-            Some((declared_key, cast)) if declared_key == key => {
-                format!(r#"{{"key":"{key}","kind":"{kind}","identity_cast":"{cast}"}}"#)
-            }
-            _ => format!(r#"{{"key":"{key}","kind":"{kind}"}}"#),
+    /// The three request values the case declares, the `(key, cast)` pair among them
+    /// declaring its key to hold the cast's type.
+    fn settings(declared: Option<(&str, &str)>) -> Vec<SessionSetting> {
+        let cast_of = |key: &str| {
+            declared
+                .filter(|(declared_key, _)| *declared_key == key)
+                .map(|(_, cast)| cast)
         };
-        format!(
-            "[{},{},{}]",
-            attribute("app.user_id", "caller_id"),
-            attribute("app.tenant", "scalar_attribute"),
-            attribute("app.subjects", "set_attribute"),
-        )
+        vec![
+            SessionSetting::value(
+                "app.user_id",
+                SettingValue::Caller(match cast_of("app.user_id") {
+                    Some(cast) => data_type(cast),
+                    None => DataType::Text,
+                }),
+            )
+            .expect("a caller name"),
+            SessionSetting::value(
+                "app.tenant",
+                SettingValue::Scalar(match cast_of("app.tenant") {
+                    Some(cast) => data_type(cast),
+                    None => DataType::Text,
+                }),
+            )
+            .expect("a setting name"),
+            SessionSetting::value(
+                "app.subjects",
+                SettingValue::Set {
+                    element: match cast_of("app.subjects") {
+                        Some(cast) => data_type(cast),
+                        None => DataType::Text,
+                    },
+                    packing: SetPacking::Delimited(",".to_string()),
+                },
+            )
+            .expect("a setting name"),
+        ]
     }
 
     fn case(
@@ -407,7 +462,7 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (true);
             SEED,
             callers.iter().map(|value| caller(value)).collect(),
         )
-        .with_attributes(&attributes(declared))
+        .with_settings(settings(declared))
     }
 
     /// Spellings whose cast goes through `integer`, which drops the leading zero of `'01'`.

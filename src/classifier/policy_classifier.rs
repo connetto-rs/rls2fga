@@ -5,53 +5,33 @@ use crate::types::ColumnName;
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator, Value};
 
 use crate::classifier::expansion::{self, ExpansionState};
-use crate::classifier::function_registry::{FunctionRegistry, SessionAttribute};
+use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::*;
 use crate::classifier::recognizers;
-use crate::parser::function_analyzer::{AccessorInferenceSettings, FunctionSemantic};
-use crate::parser::sql_parser::DatabaseLike;
+use crate::parser::function_analyzer::FunctionSemantic;
+use crate::parser::sql_parser::{DatabaseLike, Deployment};
 
-/// Classify all policies in the database.
+/// Classify every policy in `db`, read for `deployment`.
 ///
-/// Uses default accessor-inference settings and enriches the registry from the
-/// schema before classifying. For explicit settings or the enriched registry,
-/// go through [`crate::translator::Translator::classify_with_effective_registry`].
+/// Enriches a copy of `registry` from the schema before classifying. For the enriched
+/// registry, go through [`classify_policies_with_effective_registry`].
 pub fn classify_policies<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
+    deployment: &Deployment,
 ) -> Vec<ClassifiedPolicy> {
-    let settings = AccessorInferenceSettings::default();
-    classify_policies_with_effective_registry_and_settings(db, registry, &settings).0
+    classify_policies_with_effective_registry(db, registry, deployment).0
 }
 
-/// Classify all policies using explicit accessor-inference settings, returning the
-/// enriched function registry the classifier used.
-pub(crate) fn classify_policies_with_effective_registry_and_settings<DB: DatabaseLike>(
+/// Classify every policy in `db`, read for `deployment`, returning the enriched function
+/// registry the classifier used.
+pub fn classify_policies_with_effective_registry<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
-    settings: &AccessorInferenceSettings,
+    deployment: &Deployment,
 ) -> (Vec<ClassifiedPolicy>, FunctionRegistry) {
     let mut effective_registry = registry.clone();
-    // An explicit declaration on `registry` outranks a convenience default from
-    // `settings`, so naming a key once with the richer form is never silently
-    // downgraded by the bare default for the same key.
-    let defaults: Vec<SessionAttribute> = settings
-        .session_attributes()
-        .iter()
-        .filter(|attribute| {
-            effective_registry
-                .session_attribute(attribute.setting_key(), attribute.path())
-                .is_none()
-        })
-        .cloned()
-        .collect();
-    effective_registry.declare_session_attributes(defaults);
-    // The two lists become one before anything reads either, so a declaration made on the
-    // registry and one made through the settings cannot describe the same source apart.
-    let declared: Vec<_> = effective_registry.session_attributes().cloned().collect();
-    let effective_settings = AccessorInferenceSettings::from_attributes(declared);
-    effective_registry.enrich_from_schema_with_settings(db, &effective_settings);
-
+    effective_registry.enrich_from_schema(db, deployment);
     let classified = classify_policies_with_registry(db, &effective_registry);
     (classified, effective_registry)
 }
@@ -1227,7 +1207,7 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
         let reason = reason_for(claim_set);
         assert!(
             reason.contains("field 'teams' of current_setting('request.jwt.claims')")
-                && reason.contains("no SetAttribute declares it"),
+                && reason.contains("the deployment declares no such setting"),
             "the declaration is what is missing, got: {reason}"
         );
 
@@ -1495,7 +1475,8 @@ CREATE POLICY docs_update ON docs FOR UPDATE
         .expect("schema should parse");
 
         let registry = FunctionRegistry::new();
-        let classified = classify_policies(&db, &registry);
+        let classified =
+            classify_policies(&db, &registry, &crate::test_support::caller_deployment());
         assert_eq!(classified.len(), 1);
 
         let policy = &classified[0];
@@ -1665,7 +1646,8 @@ CREATE POLICY docs_open ON docs;
         .expect("schema should parse");
 
         let registry = FunctionRegistry::new();
-        let classified = classify_policies(&db, &registry);
+        let classified =
+            classify_policies(&db, &registry, &crate::test_support::caller_deployment());
         assert_eq!(classified.len(), 1);
 
         let policy = &classified[0];

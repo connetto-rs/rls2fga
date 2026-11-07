@@ -1,0 +1,4 @@
+[
+  {"setting": "app.user_id", "caller": "text"},
+  {"setting": "app.subjects", "set": "text", "delimiter": ","}
+]

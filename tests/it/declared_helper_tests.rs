@@ -1,7 +1,6 @@
 //! A column compared with the set a declared `SECURITY DEFINER` helper returns becomes
 //! the grants the helper's body reads, `role from parent` through each parent arm.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, GrantRows, HelperSetArm, PatternClass, UnclassifiedExpr,
 };
@@ -9,6 +8,7 @@ use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::{AttributeLiteral, AttributePredicate, AttributeTest, ConfidenceLevel};
 use rls2fga::types::{ColumnName, TranslationNote};
 
+use crate::support::deployment::{caller, deployment, scalar};
 use crate::support::footgun::{db_of, relation_definition};
 
 /// The request's reduced ownership schema, two levels of grants under the orders.
@@ -61,12 +61,8 @@ const BOTH: &[&str] = &["authz.projects_with", "authz.teams_with"];
 
 /// The caller, and a scalar the request carries, which no helper may take its caller from.
 fn translator(min_confidence: ConfidenceLevel, helpers: &[&str]) -> Translator {
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment([caller("app.user_id"), scalar("app.tenant")]))
         .with_min_confidence(min_confidence)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.tenant", SessionAttributeKind::ScalarAttribute),
-        ])
         .with_declared_helpers(helpers)
         .build()
 }

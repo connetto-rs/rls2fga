@@ -52,7 +52,8 @@ fn every_example_classifies_at_its_documented_level() {
             .iter()
             .find(|example| example.label == *label)
             .unwrap_or_else(|| panic!("the app offers {label}"));
-        let db = parse_schema(example.sql).expect("the example parses");
+        let db = parse_schema(&format!("{}{}", settings::ROLES, example.sql))
+            .expect("the example parses");
         let outputs = settings::translator(ConfidenceLevel::D)
             .expect("the app's registry loads")
             .translate(&db)

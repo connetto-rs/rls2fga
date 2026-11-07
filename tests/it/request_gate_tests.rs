@@ -5,29 +5,27 @@
 
 use core::fmt::Write as _;
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{
     ConfidenceLevel, RecordDerivation, RequestComparison, RequestPredicate, RowDecision,
 };
 
+use crate::support::deployment;
 use crate::support::footgun::{
     db_of, defines_in_type, gated_tables, relation_definition, OPEN_PLUS_CAP_BOT_LIST_GATES,
 };
 
 fn outputs_of(sql: &str) -> Outputs {
-    TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(&db_of(sql))
-        .expect("translation should plan")
-        .outputs()
-        .expect("every clause translates")
+    TranslatorBuilder::new(deployment::caller_deployment_with([
+        deployment::delimited_set("app.bot_list", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db_of(sql))
+    .expect("translation should plan")
+    .outputs()
+    .expect("every clause translates")
 }
 
 fn condition_count(dsl: &str) -> usize {
@@ -215,18 +213,16 @@ fn a_request_gate_names_its_link_and_the_type_it_admits() {
         "nobody",
     )
     .expect("the names are valid");
-    let outputs = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_well_known_types(names)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(&db_of(&gated_tables(1)))
-        .expect("translation should plan")
-        .outputs()
-        .expect("every clause translates");
+    let outputs = TranslatorBuilder::new(deployment::caller_deployment_with([
+        deployment::delimited_set("app.bot_list", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .with_well_known_types(names)
+    .build()
+    .translate(&db_of(&gated_tables(1)))
+    .expect("translation should plan")
+    .outputs()
+    .expect("every clause translates");
     let relations = outputs.translation().relations();
     let entry = |type_name: &str, relation: &str| {
         relations
@@ -350,11 +346,7 @@ CREATE POLICY paper_cap ON papers AS RESTRICTIVE FOR SELECT USING (
     )
 );
 ";
-    let dsl = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
+    let dsl = TranslatorBuilder::new(deployment::caller_deployment())
         .build()
         .translate(&db_of(sql))
         .expect("translation should plan")

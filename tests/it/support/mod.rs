@@ -7,6 +7,7 @@ pub(crate) mod parity;
 #[cfg(not(target_os = "windows"))]
 pub(crate) mod containers;
 
+pub(crate) mod deployment;
 pub(crate) mod exact_support;
 pub(crate) mod footgun;
 pub(crate) mod model_equivalence;
@@ -14,10 +15,10 @@ pub(crate) mod model_equivalence;
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use rls2fga::classifier::function_registry::{FunctionRegistry, SessionAttribute};
+use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::ClassifiedPolicy;
 use rls2fga::classifier::policy_classifier;
-use rls2fga::parser::sql_parser::{self, ParserDB};
+use rls2fga::parser::sql_parser::{self, Deployment, ParserDB, SessionSetting};
 use rls2fga::types::{ColumnKind, RowCell, RowList, RowValues};
 
 /// `serde_json` view of one row, adapting it to the crate's row interface.
@@ -300,7 +301,6 @@ pub(crate) fn load_fixture_registry(fixture: &str) -> FunctionRegistry {
     registry
         .load_from_json(&read_fixture_registry_json(fixture))
         .expect("fixture registry should parse");
-    registry.declare_session_attributes(fixture_session_attributes(fixture));
     registry
 }
 
@@ -312,7 +312,11 @@ pub(crate) fn load_fixture_classified(
     fixture: &str,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let (db, registry) = load_fixture_db_and_registry(fixture);
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &deployment::fixture_deployment(fixture),
+    );
     (classified, db, registry)
 }
 
@@ -324,32 +328,21 @@ pub(crate) fn try_load_fixture_registry(fixture: &str) -> FunctionRegistry {
             .load_from_json(&json)
             .expect("fixture registry should parse");
     }
-    registry.declare_session_attributes(fixture_session_attributes(fixture));
     registry
-}
-
-/// The request-scoped values a fixture's deployment declares, none when it declares none.
-pub(crate) fn fixture_session_attributes(fixture: &str) -> Vec<SessionAttribute> {
-    let path = fixture_dir(fixture).join("session_attributes.json");
-    let Ok(json) = std::fs::read_to_string(path) else {
-        return Vec::new();
-    };
-    serde_json::from_str(&json).expect("fixture session attributes should parse")
 }
 
 pub(crate) fn classify_sql(
     sql: &str,
     registry_json: Option<&str>,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
-    classify_with(sql, registry_json, None)
+    classify_with(sql, registry_json, &deployment::caller_deployment())
 }
 
-/// Classify SQL with both the accessor metadata and the session attributes a deployment
-/// declares.
+/// Classify SQL with the accessor metadata and the deployment it is read for.
 pub(crate) fn classify_with(
     sql: &str,
     registry_json: Option<&str>,
-    attributes_json: Option<&str>,
+    deployment: &Deployment,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let db = sql_parser::parse_schema(sql).expect("schema should parse");
     let mut registry = FunctionRegistry::new();
@@ -358,21 +351,17 @@ pub(crate) fn classify_with(
             .load_from_json(json)
             .expect("registry json should parse");
     }
-    if let Some(json) = attributes_json {
-        let attributes: Vec<SessionAttribute> =
-            serde_json::from_str(json).expect("session attributes should parse");
-        registry.declare_session_attributes(attributes);
-    }
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) =
+        policy_classifier::classify_policies_with_effective_registry(&db, &registry, deployment);
     (classified, db, registry)
 }
 
-/// Classify SQL with declared session attributes and no function registry.
-pub(crate) fn classify_sql_with_session_attributes(
+/// Classify SQL for the suite's callers and `settings`, with no function registry.
+pub(crate) fn classify_sql_with_settings(
     sql: &str,
-    attributes_json: &str,
+    settings: impl IntoIterator<Item = SessionSetting>,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
-    classify_with(sql, None, Some(attributes_json))
+    classify_with(sql, None, &deployment::caller_deployment_with(settings))
 }
 
 /// Classify SQL with an empty function registry, for the common case where no registry
@@ -388,7 +377,11 @@ pub(crate) fn try_load_fixture_classified(
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let db = parse_fixture_db(fixture);
     let registry = try_load_fixture_registry(fixture);
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &deployment::fixture_deployment(fixture),
+    );
     (classified, db, registry)
 }
 

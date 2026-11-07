@@ -24,7 +24,7 @@ use crate::parser::sql_parser::{
     HelperArm, HelperSet, LiteralSet, ParentArm, TableLike,
 };
 use crate::types::ColumnName;
-use sql_traits::errors::{DeploymentError, HelperSetError, LookupError};
+use sql_traits::errors::{HelperSetError, LookupError};
 
 /// Why a call to a declared helper does not translate.
 #[derive(Debug, thiserror::Error)]
@@ -67,9 +67,13 @@ pub(crate) enum HelperRefusal {
         /// The argument as written.
         argument: String,
     },
-    /// The deployment's settings cannot be described to `sql-traits`.
-    #[error("the declared request settings cannot describe the caller, because {0}")]
-    Deployment(#[from] DeploymentError),
+    /// The registry was not read for a deployment, so nothing says which setting is the
+    /// caller.
+    #[error("declared helper '{function}' is read without a deployment naming the caller")]
+    NoDeployment {
+        /// The helper.
+        function: String,
+    },
     /// A table or column of the answer cannot be looked up.
     #[error(transparent)]
     Lookup(#[from] LookupError),
@@ -261,9 +265,13 @@ fn declared_helper<DB: DatabaseLike>(
         })?;
         values.push(value.clone());
     }
-    let deployment = registry.helper_deployment()?;
+    let deployment = registry
+        .deployment()
+        .ok_or_else(|| HelperRefusal::NoDeployment {
+            function: name.clone(),
+        })?;
     let set = function
-        .helper_set(&values, &deployment, db)
+        .helper_set(&values, deployment, db)
         .map_err(|source| HelperRefusal::Unanswered {
             function: name.clone(),
             source,
@@ -544,5 +552,42 @@ fn same_literal(left: &AttributeLiteral, right: &AttributeLiteral) -> bool {
                 )
         }
         _ => left == right,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::expr::parse_expr_for_tests as parse_expr;
+    use crate::parser::sql_parser::parse_schema;
+
+    /// A registry nobody read for a deployment cannot say which setting is the caller, so
+    /// a declared helper it meets is refused naming that, rather than answered against
+    /// settings nobody declared.
+    #[test]
+    fn a_helper_read_without_a_deployment_is_refused() {
+        let db = parse_schema(
+            "CREATE TABLE projects (id UUID PRIMARY KEY);
+             CREATE TABLE tasks (id UUID PRIMARY KEY, project_id UUID);
+             CREATE FUNCTION projects_with(level TEXT) RETURNS SETOF UUID
+                 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public
+                 AS 'SELECT id FROM projects';",
+        )
+        .expect("the schema parses");
+        let mut registry = FunctionRegistry::new();
+        registry.declare_helpers(["projects_with"]);
+        let expr = parse_expr("project_id IN (SELECT projects_with('read'))");
+
+        let classified = recognize_declared_helper(&expr, &db, &registry, "tasks")
+            .expect("the call is a declared helper's");
+        assert_eq!(
+            classified.pattern,
+            PatternClass::Unknown(UnclassifiedExpr {
+                sql_text: expr.to_string(),
+                reason: "declared helper 'projects_with' is read without a deployment naming \
+                         the caller"
+                    .to_string(),
+            })
+        );
     }
 }

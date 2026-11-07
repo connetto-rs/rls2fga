@@ -1,18 +1,17 @@
 //! Scope and key boundaries for indirect membership.
 
-use rls2fga::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
+use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, IndirectMembership, MembershipJoinPair, PatternClass,
 };
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
+use rls2fga::parser::sql_parser::{parse_schema, ParserDB, SessionSetting};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::PolicyCommand;
 use sqlparser::ast::{BinaryOperator, Expr, Ident, Select, Value};
 
 use crate::support::{
-    INDIRECT_MEMBERSHIP_NESTED_ROLE as NESTED_ROLE, INDIRECT_MEMBERSHIP_SCHEMA as SCHEMA,
+    deployment, INDIRECT_MEMBERSHIP_NESTED_ROLE as NESTED_ROLE,
+    INDIRECT_MEMBERSHIP_SCHEMA as SCHEMA,
 };
 
 fn classify(predicate: &str) -> ClassifiedExpr {
@@ -28,10 +27,7 @@ fn classify_in_on(table: &str, schema: &str, predicate: &str) -> ClassifiedExpr 
         table,
         schema,
         predicate,
-        [SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )],
+        [deployment::caller("app.user_id")],
     )
 }
 
@@ -39,14 +35,12 @@ fn classify_in_attrs(
     table: &str,
     schema: &str,
     predicate: &str,
-    attributes: impl IntoIterator<Item = SessionAttribute>,
+    settings: impl IntoIterator<Item = SessionSetting>,
 ) -> ClassifiedExpr {
     let sql =
         format!("{schema}CREATE POLICY {table}_read ON {table} FOR SELECT USING ({predicate});");
     let db = parse_schema(&sql).unwrap();
-    let translator = TranslatorBuilder::new()
-        .with_session_attributes(attributes)
-        .build();
+    let translator = TranslatorBuilder::new(deployment::deployment(settings)).build();
     let classified = translator.classify(&db);
     assert_eq!(classified.len(), 1);
     classified[0]
@@ -514,8 +508,8 @@ fn caller_set_membership_is_not_a_caller_grant() {
                 AND m.member_id = ANY(string_to_array(current_setting('app.members', true), ','))
                 AND m.role = 'read'))",
         [
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.members", SessionAttributeKind::SetAttribute),
+            deployment::caller("app.user_id"),
+            deployment::delimited_set("app.members", ","),
         ],
     );
     assert!(
@@ -763,11 +757,10 @@ fn parsed_predicate(schema: &str, predicate: &str) -> (ParserDB, Expr) {
 /// Classifies an expression with the declared caller setting.
 fn classify_ast(db: &ParserDB, expr: &Expr) -> ClassifiedExpr {
     let mut registry = FunctionRegistry::new();
-    registry.declare_session_attributes([SessionAttribute::setting(
-        "app.user_id",
-        SessionAttributeKind::CallerId,
-    )]);
-    registry.enrich_from_schema(db);
+    registry.enrich_from_schema(
+        db,
+        &deployment::deployment([deployment::caller("app.user_id")]),
+    );
     rls2fga::classifier::policy_classifier::classify_expr(
         expr,
         db,

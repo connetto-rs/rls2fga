@@ -1,3 +1,0 @@
-[
-  { "key": "app.tenant_id", "kind": "scalar_attribute", "identity_cast": "uuid" }
-]

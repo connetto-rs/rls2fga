@@ -13,7 +13,6 @@ use testcontainers::{ContainerAsync, GenericImage};
 
 use rls2fga::generator::tuple_generator::TupleQuery;
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
@@ -46,7 +45,7 @@ const CREATES_ROLES: [(&str, &str); 1] = [("schema_objects", "auditor")];
 
 /// The model and tuple queries planned with the fixture's registry.
 fn artifacts(db: &ParserDB, fixture: &str) -> (Value, Vec<TupleQuery>) {
-    let outputs = TranslatorBuilder::new()
+    let outputs = support::deployment::translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
         .with_registry(support::try_load_fixture_registry(fixture))
         .build()
@@ -169,7 +168,8 @@ async fn every_fixture_round_trips_through_pg_dump() {
         }
 
         let dump = format!(
-            "CREATE ROLE {PG_USER};\n{}",
+            "CREATE ROLE {PG_USER};\n{}\n{}",
+            support::deployment::ROLES,
             strip_meta_commands(&dump_schema(&postgres, &database).await)
         );
         let parsed = parse_schema(&dump);
@@ -188,7 +188,7 @@ async fn every_fixture_round_trips_through_pg_dump() {
             match parsed {
                 Err(error) => Some(format!("{fixture}: its dump does not parse: {error}")),
                 Ok(dumped_db) => {
-                    let fixture_db = support::parse_fixture_db(fixture);
+                    let fixture_db = support::deployment::db(&support::read_fixture_sql(fixture));
                     let (fixture_model, fixture_tuples) = artifacts(&fixture_db, fixture);
                     let (dump_model, dump_tuples) = artifacts(&dumped_db, fixture);
                     let fixture_rows = executed_rows(&mut conn, &fixture_tuples);

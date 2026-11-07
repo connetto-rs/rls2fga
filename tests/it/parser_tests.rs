@@ -380,7 +380,7 @@ fn a_foreign_key_the_schema_does_not_satisfy_is_refused() {
 /// schema's keys resolve instead of refusing the whole input.
 #[test]
 fn the_dumped_constraint_spelling_parses_and_translates() {
-    let db = parse_schema(
+    let db = support::deployment::db(
         r"
 CREATE TABLE docs (id UUID NOT NULL, owner TEXT);
 CREATE TABLE doc_members (id UUID NOT NULL, doc_id UUID, user_id TEXT);
@@ -392,9 +392,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT
   USING (EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
 ",
-    )
-    .expect("the dumped constraint spelling should parse and apply");
-    let translation = rls2fga::translator::TranslatorBuilder::new()
+    );
+    let translation = support::deployment::translator_builder()
         .with_min_confidence(rls2fga::types::ConfidenceLevel::B)
         .build()
         .translate(&db)

@@ -72,4 +72,5 @@ mod translation_object_tests;
 mod translator_builder_tests;
 mod tuple_row_tests;
 mod unrestricted_tables_tests;
+mod unset_setting_tests;
 mod web_examples_tests;

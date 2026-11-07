@@ -23,7 +23,11 @@ fn classify_fixture(
     let db = support::parse_fixture_db(fixture);
     let mut registry = FunctionRegistry::new();
     registry_setup(&mut registry);
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment(fixture),
+    );
     (classified, db, registry)
 }
 
@@ -135,7 +139,11 @@ fn supabase_auth_uid_pattern() {
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("supabase_auth"),
+    );
 
     assert_eq!(classified.len(), 2, "expected both Supabase policies");
     for cp in &classified {
@@ -187,7 +195,11 @@ fn fixture_wrapped_membership_predicate_translates_without_alias_leak() {
     let sql = support::read_fixture_sql("membership_wrapped_function_safe");
     let db = sql_parser::parse_schema(&sql).expect("fixture SQL should parse");
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("membership_wrapped_function_safe"),
+    );
 
     assert_eq!(
         classified.len(),
@@ -395,7 +407,11 @@ fn pipeline_summary_all_common_patterns() {
             },
         );
 
-        let classified = policy_classifier::classify_policies(&db, &registry);
+        let classified = policy_classifier::classify_policies(
+            &db,
+            &registry,
+            &support::deployment::fixture_deployment(fixture),
+        );
         let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::D);
         let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::D);
         let tuples = outputs.tuple_queries();
