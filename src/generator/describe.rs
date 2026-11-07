@@ -13,7 +13,7 @@ use crate::classifier::patterns::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ResidualGuard,
     ResidualPredicates,
 };
-use crate::generator::db_lookup::{column_kind, list_element_kind};
+use crate::generator::db_lookup::{column_compares_bytewise, column_kind, list_element_kind};
 use crate::generator::identity::encode_part;
 use crate::generator::ir::TupleSource;
 use crate::generator::tuple_generator::{quote_sql_identifier, resolve_bridge_columns, TupleQuery};
@@ -1144,16 +1144,26 @@ fn compare_guard<DB: DatabaseLike>(
 ) -> Option<Guard> {
     let column = column_read(table, &predicate.column, db);
     let kind = column.kind();
+    let compares_text = |value: &AttributeLiteral| {
+        matches!(
+            value,
+            AttributeLiteral::Text(_) | AttributeLiteral::AsText(_)
+        )
+    };
+    // A nondeterministic collation can equate text whose bytes differ, which only the
+    // database decides.
+    let text_decides = || column_compares_bytewise(table, predicate.column.as_str(), db);
     let row_decides = match &predicate.test {
         AttributeTest::Compare { operator, value } => {
             literal_row_decides(kind, value)
-                && (!matches!(
-                    value,
-                    AttributeLiteral::Text(_) | AttributeLiteral::AsText(_)
-                ) || matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq))
+                && (!compares_text(value)
+                    || (matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq)
+                        && text_decides()))
         }
         AttributeTest::In(values) => {
-            !values.is_empty() && values.iter().all(|value| literal_row_decides(kind, value))
+            !values.is_empty()
+                && values.iter().all(|value| literal_row_decides(kind, value))
+                && (!values.iter().any(compares_text) || text_decides())
         }
         // The evaluator refuses these kinds before it reads the cell.
         AttributeTest::IsNull | AttributeTest::IsNotNull => {

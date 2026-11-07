@@ -1,7 +1,9 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::parser::names::lookup_table_id;
-use crate::parser::sql_parser::{ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike};
+use crate::parser::sql_parser::{
+    ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike,
+};
 use crate::types::ColumnKind;
 use crate::types::{ColumnName, TableId};
 use core::num::NonZeroU32;
@@ -148,6 +150,23 @@ pub(crate) fn column_is_nullable<DB: DatabaseLike>(
     db: &DB,
 ) -> Option<bool> {
     declared_column(table, column, db).and_then(|column| column.is_nullable(db).ok())
+}
+
+/// Whether `PostgreSQL` compares the column's text byte for byte.
+///
+/// Every collation is deterministic but one created `deterministic = false`, which can make
+/// `'AB'` equal to `'ab'`. A named collation whose kind the schema does not state might be
+/// such a one.
+pub(crate) fn column_compares_bytewise<DB: DatabaseLike>(
+    table: &TableId,
+    column: &str,
+    db: &DB,
+) -> bool {
+    declared_column(table, column, db).is_some_and(|column| match column.collation(db) {
+        Ok(ColumnCollation::DatabaseDefault) => true,
+        Ok(ColumnCollation::Named(named)) => named.postgres_deterministic() == Some(true),
+        Ok(ColumnCollation::Unknown) | Err(_) => false,
+    })
 }
 
 const fn column_kind_from_scalar_family(family: Option<ScalarFamily>) -> ColumnKind {
