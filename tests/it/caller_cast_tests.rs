@@ -131,7 +131,9 @@ const CASES: &[(&str, Declarations, bool)] = &[
     ("owner = current_setting('app.user_id', true)::integer::text", USER_INTEGER, true),
     ("owner = current_setting('app.user_id', true)::integer::text", &[("app.user_id", "text")], false),
     ("current_setting('app.user_id', true)::integer::text = owner", NONE, false),
-    ("owner IS NOT DISTINCT FROM current_user::text", NONE, true),
+    // A null-safe comparison with the acting role's name settles no tuple, so it
+    // grades below the threshold and the clause is refused.
+    ("owner IS NOT DISTINCT FROM current_user::text", NONE, false),
     ("owner_uuid IS NOT DISTINCT FROM current_user::text::uuid", NONE, false),
     ("owner = (SELECT current_setting('app.user_id', true)::integer::text)", NONE, false),
     ("owner = (SELECT current_setting('app.user_id', true))::integer::text", NONE, false),
@@ -144,10 +146,12 @@ const CASES: &[(&str, Declarations, bool)] = &[
     ("owner::integer = current_setting('app.user_id', true)::integer", USER_INTEGER, false),
     ("owner_uuid::text = current_setting('app.user_id', true)", NONE, true),
     ("COALESCE(owner::integer, 0) = current_setting('app.user_id', true)::integer", USER_INTEGER, false),
-    // The caller's keyword and the caller's accessor functions declare no cast.
+    // The role keyword lowers to the acting role's name, so it compares as the literal it
+    // names, and the same casts decide it as they decide one literal.
     ("owner = current_user", NONE, true),
     ("owner = current_user::text", NONE, true),
     ("owner_uuid = current_user::text::uuid", NONE, false),
+    // The caller's accessor functions declare no cast.
     ("owner = text_uid()", NONE, true),
     ("owner_int = text_uid()::integer", USER_INTEGER, false),
     // An accessor whose body casts is the caller only where the key it reads declares it.

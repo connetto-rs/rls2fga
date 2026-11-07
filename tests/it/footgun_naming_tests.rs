@@ -24,10 +24,10 @@ const COLLIDING_SCHEMAS: &str = r"
 CREATE SCHEMA app;
 CREATE TABLE app.docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY app_docs_sel ON app.docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY app_docs_sel ON app.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY public_docs_sel ON public.docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY public_docs_sel ON public.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
 
 /// `app.docs` and `public.docs` both canonicalize to `docs`, so the second type
@@ -118,12 +118,12 @@ fn a_table_named_after_a_structural_relation_does_not_take_it() {
             "
 CREATE TABLE {reserved}(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE {reserved} ENABLE ROW LEVEL SECURITY;
-CREATE POLICY parent_sel ON {reserved} FOR SELECT USING (owner_id = current_user);
+CREATE POLICY parent_sel ON {reserved} FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE tasks(id UUID PRIMARY KEY, parent_id UUID REFERENCES {reserved}(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM {reserved} p
-          WHERE p.id = tasks.parent_id AND p.owner_id = current_user));
+          WHERE p.id = tasks.parent_id AND p.owner_id = current_setting('app.user_id')));
 "
         ));
         let dsl = translator(ConfidenceLevel::A)
@@ -160,10 +160,10 @@ fn a_column_named_after_an_action_relation_does_not_take_it() {
             "
 CREATE TABLE docs(id UUID PRIMARY KEY, {reserved}_id UUID, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING ({reserved}_id = current_user);
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING ({reserved}_id = current_user)
-  WITH CHECK (editor_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING ({reserved}_id = current_setting('app.user_id'));
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_setting('app.user_id'));
+CREATE POLICY docs_upd ON docs FOR UPDATE USING ({reserved}_id = current_setting('app.user_id'))
+  WITH CHECK (editor_id = current_setting('app.user_id'));
 "
         ));
         let dsl = translator(ConfidenceLevel::B)
@@ -200,9 +200,9 @@ fn policies_compose_however_each_one_spells_the_table() {
         format!(
             "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);\n\
+             CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));\n\
              CREATE POLICY docs_reviewed ON {restrictive_on} AS RESTRICTIVE FOR SELECT\n\
-               USING (reviewer_id = current_user);\n"
+               USING (reviewer_id = current_setting('app.user_id'));\n"
         )
     };
     let read_of = |restrictive_on: &str| docs_read_definition(&schema(restrictive_on));
@@ -230,7 +230,7 @@ CREATE SCHEMA app;
 SET search_path TO app;
 CREATE TABLE app.docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -272,7 +272,7 @@ CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE aaa.docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
 SET search_path TO aaa, public;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let model = translator(ConfidenceLevel::A)
@@ -366,7 +366,7 @@ CREATE TABLE aaa.docs(id UUID PRIMARY KEY);
 ALTER TABLE aaa.docs ENABLE ROW LEVEL SECURITY;
 CREATE TABLE zzz.docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE zzz.docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -400,7 +400,7 @@ fn pg_role_identifier_rewrite_is_reported() {
         r#"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT TO "billing admin" USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT TO "billing admin" USING (owner_id = current_setting('app.user_id'));
 "#,
     );
     let model = translator(ConfidenceLevel::A)
@@ -428,8 +428,8 @@ fn distinct_ownership_columns_get_distinct_relations() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (editor_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -491,7 +491,7 @@ ALTER TABLE aaa.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY aaa_sel ON aaa.docs FOR SELECT USING (tenant = current_setting('app.tenant'));
 CREATE TABLE zzz.docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE zzz.docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
     let db = db_of(sql);
     let at_b = type_names(
@@ -813,7 +813,11 @@ fn well_known_names_have_a_single_source_of_truth() {
     )
     .expect("custom type names should be valid");
     let mut rendered = String::new();
-    for fixture in ["abac_status", "pg_role_gate", "role_threshold_compound_key"] {
+    for fixture in [
+        "abac_status",
+        "role_scoped_membership",
+        "role_threshold_compound_key",
+    ] {
         let sql = support::read_fixture_sql(fixture);
         let registry =
             std::fs::read_to_string(format!("tests/fixtures/{fixture}/function_registry.json"))
@@ -925,10 +929,10 @@ CREATE TABLE public.widgets(
     foo_id UUID
 );
 ALTER TABLE widgets ENABLE ROW LEVEL SECURITY;
-CREATE POLICY sel_foo    ON widgets FOR SELECT USING (foo                    = current_user);
-CREATE POLICY sel_owner  ON widgets FOR SELECT USING ("owner_foo_iD"         = current_user);
-CREATE POLICY sel_hash   ON widgets FOR SELECT USING (owner_foo_id_52ed0fe5  = current_user);
-CREATE POLICY upd_foo_id ON widgets FOR UPDATE USING (foo_id                 = current_user);
+CREATE POLICY sel_foo    ON widgets FOR SELECT USING (foo                    = current_setting('app.user_id'));
+CREATE POLICY sel_owner  ON widgets FOR SELECT USING ("owner_foo_iD"         = current_setting('app.user_id'));
+CREATE POLICY sel_hash   ON widgets FOR SELECT USING (owner_foo_id_52ed0fe5  = current_setting('app.user_id'));
+CREATE POLICY upd_foo_id ON widgets FOR UPDATE USING (foo_id                 = current_setting('app.user_id'));
 "#,
     );
 
@@ -1002,8 +1006,8 @@ CREATE TABLE "self"(id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE t_self(id TEXT PRIMARY KEY, editor_id TEXT);
 ALTER TABLE "self" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE t_self ENABLE ROW LEVEL SECURITY;
-CREATE POLICY a ON "self" FOR SELECT USING (owner_id = current_user);
-CREATE POLICY b ON t_self FOR SELECT USING (editor_id = current_user);
+CREATE POLICY a ON "self" FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY b ON t_self FOR SELECT USING (editor_id = current_setting('app.user_id'));
 "#,
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -1039,9 +1043,9 @@ CREATE TABLE "self"(id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE docs(id TEXT PRIMARY KEY, parent_id TEXT REFERENCES "self"(id));
 ALTER TABLE "self" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY parent_owner ON "self" FOR SELECT USING (owner_id = current_user);
+CREATE POLICY parent_owner ON "self" FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY inherit ON docs FOR SELECT USING (EXISTS (
-    SELECT 1 FROM "self" p WHERE p.id = docs.parent_id AND p.owner_id = current_user));
+    SELECT 1 FROM "self" p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id')));
 "#,
     );
     let outputs = translator(ConfidenceLevel::B)

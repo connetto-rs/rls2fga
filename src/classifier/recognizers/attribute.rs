@@ -18,20 +18,15 @@ pub fn attribute_request_predicate(expr: &Expr) -> Option<AttributeRequestPredic
     let operator = attribute_operator(op)?;
     if let Some(column) = extract_column_name(left) {
         if let Some(threshold) = temporal_request_side(right) {
-            if !is_user_related_column_name(column.as_str()) {
-                return Some(AttributeRequestPredicate {
-                    column,
-                    operator,
-                    threshold,
-                });
-            }
+            return Some(AttributeRequestPredicate {
+                column,
+                operator,
+                threshold,
+            });
         }
     }
     let column = extract_column_name(right)?;
     let threshold = temporal_request_side(left)?;
-    if is_user_related_column_name(column.as_str()) {
-        return None;
-    }
     Some(AttributeRequestPredicate {
         column,
         operator: mirrored(operator),
@@ -61,12 +56,14 @@ pub(crate) fn clock_refusals(expr: &Expr) -> Vec<String> {
 
 /// Why one `column op clock` or `BETWEEN` bounded so falls closed.
 fn clock_refusal(expr: &Expr) -> Option<ClockRefusal> {
-    let (column, bounds): (_, [&Expr; 2]) = match unparenthesize(expr) {
+    let bounds: [&Expr; 2] = match unparenthesize(expr) {
         Expr::BinaryOp { left, op, right } => {
             attribute_operator(op)?;
-            match extract_column_name(left) {
-                Some(column) => (column, [right, right]),
-                None => (extract_column_name(right)?, [left, left]),
+            if extract_column_name(left).is_some() {
+                [right, right]
+            } else {
+                extract_column_name(right)?;
+                [left, left]
             }
         }
         Expr::Between {
@@ -74,12 +71,12 @@ fn clock_refusal(expr: &Expr) -> Option<ClockRefusal> {
             low,
             high,
             negated: false,
-        } => (extract_column_name(expr)?, [low, high]),
+        } => {
+            extract_column_name(expr)?;
+            [low, high]
+        }
         _ => return None,
     };
-    if is_user_related_column_name(column.as_str()) {
-        return None;
-    }
     bounds
         .into_iter()
         .find_map(|bound| clock_threshold(&clock_shift(bound)?).err())
@@ -444,8 +441,7 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     };
     if let Some((operand, test)) = null_test {
         let column = extract_column_name(operand)?;
-        return (!is_user_related_column_name(column.as_str()))
-            .then_some(AttributePredicate { column, test });
+        return Some(AttributePredicate { column, test });
     }
     let Expr::BinaryOp { left, op, right } = expr else {
         return None;
@@ -455,19 +451,14 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     // predicate always reads column-first.
     if let Some(column) = extract_column_name(left) {
         if let Some(value) = attribute_literal(right) {
-            if !is_user_related_column_name(column.as_str()) {
-                return Some(AttributePredicate {
-                    column,
-                    test: AttributeTest::Compare { operator, value },
-                });
-            }
+            return Some(AttributePredicate {
+                column,
+                test: AttributeTest::Compare { operator, value },
+            });
         }
     }
     let column = extract_column_name(right)?;
     let value = attribute_literal(left)?;
-    if is_user_related_column_name(column.as_str()) {
-        return None;
-    }
     Some(AttributePredicate {
         column,
         test: AttributeTest::Compare {
@@ -481,9 +472,6 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
 /// single value as the equality it means, so every spelling of one guard mints one gate.
 fn literal_list_predicate(column: &Expr, list: &[Expr]) -> Option<AttributePredicate> {
     let column = extract_column_name(column)?;
-    if is_user_related_column_name(column.as_str()) {
-        return None;
-    }
     let mut values = list
         .iter()
         .map(attribute_literal)
@@ -929,19 +917,17 @@ fn cast_target(data_type: &DataType) -> Option<sql_values::CastTarget> {
     })
 }
 
-/// The non-user column one operand names when the other is a literal or temporal value,
-/// trying `left` as the column first.
+/// The column one operand names when the other is a literal or temporal value, trying
+/// `left` as the column first.
 fn attribute_beside_value(left: &Expr, right: &Expr) -> Option<ColumnName> {
     [(left, right), (right, left)]
         .into_iter()
         .find_map(|(column, value)| {
-            extract_column_name(column).filter(|col| {
-                is_literal_or_temporal(value) && !is_user_related_column_name(col.as_str())
-            })
+            extract_column_name(column).filter(|_| is_literal_or_temporal(value))
         })
 }
 
-/// Column name compared in a non-user attribute guard, if `expr` is one.
+/// Column name compared in an attribute guard, if `expr` is one.
 pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     // A dump parenthesizes every conjunct, and the parentheses are not part
     // of the shape.
@@ -966,10 +952,7 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     }
     if let Some((col_expr, list)) = constant_in_list(unparenthesize(expr)) {
         if let Some(col) = extract_column_name(col_expr) {
-            if !is_user_related_column_name(col.as_str())
-                && !list.is_empty()
-                && list.iter().all(is_literal_value)
-            {
+            if !list.is_empty() && list.iter().all(is_literal_value) {
                 return Some(col);
             }
         }
@@ -989,10 +972,7 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     } = expr
     {
         if let Some(col) = extract_column_name(col_expr) {
-            if !is_user_related_column_name(col.as_str())
-                && is_literal_or_temporal(low)
-                && is_literal_or_temporal(high)
-            {
+            if is_literal_or_temporal(low) && is_literal_or_temporal(high) {
                 return Some(col);
             }
         }
@@ -1000,9 +980,7 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     // `col IS NULL` / `col IS NOT NULL`
     if let Expr::IsNull(col_expr) | Expr::IsNotNull(col_expr) = expr {
         if let Some(col) = extract_column_name(col_expr) {
-            if !is_user_related_column_name(col.as_str()) {
-                return Some(col);
-            }
+            return Some(col);
         }
     }
     // `col LIKE pattern` / `col ILIKE pattern` (non-negated)
@@ -1018,9 +996,7 @@ pub fn is_attribute_check(expr: &Expr) -> Option<ColumnName> {
     } = expr
     {
         if let Some(col) = extract_column_name(col_expr) {
-            if !is_user_related_column_name(col.as_str()) {
-                return Some(col);
-            }
+            return Some(col);
         }
     }
     if let Some(guard) = is_document_attribute_check(expr) {
@@ -1068,22 +1044,16 @@ fn is_document_attribute_check(expr: &Expr) -> Option<ColumnName> {
                 continue;
             }
             if let Some(col) = extract_column_name(unwrap_cast_or_nested(column_side)) {
-                if !is_user_related_column_name(col.as_str()) {
-                    return Some(col);
-                }
+                return Some(col);
             }
         }
     }
     None
 }
 
-/// `data -> meta ->> status` for a jsonb text extraction whose field is not user
-/// related, matching the refusal `is_attribute_check` already makes for such a column.
+/// `data -> meta ->> status` for a jsonb text extraction.
 fn describe_jsonb_path_guard(expr: &Expr) -> Option<ColumnName> {
     let (column, path) = jsonb_text_path(expr)?;
-    if is_user_related_column_name(path.last()?) {
-        return None;
-    }
     Some(ColumnName::from_stored(format!(
         "{column} ->> {}",
         path.join(" -> ")

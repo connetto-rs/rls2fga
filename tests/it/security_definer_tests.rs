@@ -497,7 +497,7 @@ CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT, level IN
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION can_see(d UUID, req INT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_user AND m.min_level <= req)';
+'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true) AND m.min_level <= req)';
 CREATE POLICY p ON docs FOR SELECT USING (can_see(id, {argument}));
 "
         );
@@ -525,7 +525,7 @@ CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT, level IN
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION can_see(d UUID, req INT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_user AND m.min_level <= req)';
+'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true) AND m.min_level <= req)';
 CREATE POLICY p ON docs FOR SELECT USING (can_see(id, 1 + 2));
 ";
     let pattern = docs_using_pattern(sql);
@@ -539,10 +539,12 @@ CREATE POLICY p ON docs FOR SELECT USING (can_see(id, 1 + 2));
     );
 }
 
-/// A cast-wrapped `current_user` argument is the keyword, not a column: qualifying it
-/// would turn it into a column read and lose the caller comparison.
+/// The `current_user` in a cast-wrapped argument names the role a request acts as, so it
+/// is replaced by that role's literal before the body ever sees it, and the user
+/// comparison the body makes of it is a literal guard rather than a caller comparison,
+/// so the shape falls closed.
 #[test]
-fn a_cast_wrapped_current_user_argument_still_reaches_the_user_column() {
+fn a_cast_wrapped_current_user_argument_lowers_to_the_acting_role() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT);
@@ -553,13 +555,15 @@ SET search_path TO public, pg_catalog, pg_temp AS
 CREATE POLICY p ON docs FOR SELECT USING (can_see(id, current_user::text));
 ";
     let pattern = docs_using_pattern(sql);
+    let PatternClass::Unknown(UnclassifiedExpr { sql_text, .. }) = pattern else {
+        panic!(
+            "the lowered literal is no caller comparison, so the shape falls closed, \
+             got {pattern:?}"
+        );
+    };
     assert!(
-        matches!(
-            &pattern,
-            PatternClass::ExpandedFunction(ExpandedFunction { inner, .. })
-                if matches!(&inner.pattern, PatternClass::P4ExistsMembership(_))
-        ),
-        "the keyword must survive substitution unqualified, got {pattern:?}"
+        sql_text.contains("'app_user'::TEXT"),
+        "the keyword lowers inside the argument before the body sees it, got {sql_text}"
     );
 }
 
@@ -574,7 +578,7 @@ CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT, min_leve
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION can_see(d UUID, req INT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members AS docs WHERE docs.doc_id = d AND docs.user_id = current_user AND docs.min_level <= req)';
+'SELECT EXISTS (SELECT 1 FROM doc_members AS docs WHERE docs.doc_id = d AND docs.user_id = current_setting(''app.current_user_id'', true) AND docs.min_level <= req)';
 CREATE POLICY p ON docs FOR SELECT USING (can_see(id, coalesce(level, 0)));
 ";
     let reason = docs_refusal_reason(sql);
@@ -594,7 +598,7 @@ CREATE TABLE doc_members(doc_id UUID, user_id TEXT, min_level INT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION cleared(req INT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members AS docs WHERE docs.min_level <= req AND docs.user_id = current_user)';
+'SELECT EXISTS (SELECT 1 FROM doc_members AS docs WHERE docs.min_level <= req AND docs.user_id = current_setting(''app.current_user_id'', true))';
 CREATE POLICY p ON docs FOR SELECT USING (cleared(coalesce(level, 0)));
 ";
     let reason = docs_refusal_reason(sql);
@@ -1011,11 +1015,11 @@ fn a_qualified_call_reaches_an_unqualified_declaration() {
     let pattern = docs_using_pattern(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(doc_id UUID, user_id NAME);
+CREATE TABLE doc_members(doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION is_member(d UUID) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = CURRENT_USER)';
+'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true))';
 CREATE POLICY docs_sel ON docs FOR SELECT USING (public.is_member(id));
 ",
     );
@@ -1041,15 +1045,15 @@ fn a_qualified_call_reaches_its_own_schemas_declaration() {
         r"
 CREATE SCHEMA other;
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(doc_id UUID, user_id NAME);
-CREATE TABLE other.other_members(doc_id UUID, user_id NAME);
+CREATE TABLE doc_members(doc_id UUID, user_id TEXT);
+CREATE TABLE other.other_members(doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION is_member(d UUID) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = CURRENT_USER)';
+'SELECT EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true))';
 CREATE FUNCTION other.is_member(d UUID) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO other, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM other_members m WHERE m.doc_id = d AND m.user_id = CURRENT_USER)';
+'SELECT EXISTS (SELECT 1 FROM other_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.current_user_id'', true))';
 CREATE POLICY docs_sel ON docs FOR SELECT USING (other.is_member(id));
 ",
     );

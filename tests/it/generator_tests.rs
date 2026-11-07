@@ -1,4 +1,5 @@
 use rls2fga::classifier::function_registry::FunctionRegistry;
+use rls2fga::classifier::patterns::{ConstantBool, PatternClass};
 use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator;
 use rls2fga::parser::function_analyzer::FunctionSemantic;
@@ -172,11 +173,13 @@ CREATE SCHEMA app;
 CREATE SCHEMA auth;
 CREATE TABLE app.users (id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE app.users ENABLE ROW LEVEL SECURITY;
-CREATE POLICY app_users_select ON app.users FOR SELECT USING (owner_id = current_user);
+CREATE POLICY app_users_select ON app.users FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
 
 CREATE TABLE auth.users (id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY;
-CREATE POLICY auth_users_select ON auth.users FOR SELECT USING (owner_id = current_user);
+CREATE POLICY auth_users_select ON auth.users FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
 ";
     let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
@@ -218,48 +221,78 @@ fn generate_constant_bool_model_and_tuples() {
     );
 }
 
-// ── Gap 1: pg_has_role / RoleAccessor → a walked pg_role scope ───────────────
+// ── Gap 1: the role gate, a constant for `pg_has_role` and a walked scope for
+// the role accessor ────────────────────────────────────────────────────────────
 
-/// The relation holds `[pg_role]` subjects, so pointing an action straight at it admits a
-/// `pg_role:` object and never a `user:`. The action has to walk it to the role's members,
-/// which is also what makes `pg_role#member` exist for the operator to load into.
+/// `pg_has_role` names roles, so the schema's role memberships decide it before any row
+/// is read, and the policy grants exactly what they say.
 #[test]
-fn pg_has_role_walks_the_scope_to_the_roles_members() {
+fn pg_has_role_is_the_constant_the_memberships_decide() {
     let sql = r"
-CREATE TABLE public.docs (id UUID PRIMARY KEY, title TEXT);
+CREATE ROLE app_user NOLOGIN;
+CREATE ROLE editor NOLOGIN;
+GRANT editor TO app_user;
+CREATE TABLE docs (id UUID PRIMARY KEY, title TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT
     USING (pg_has_role(current_user, 'editor', 'MEMBER'));
 ";
     let (classified, db, registry) = support::classify_sql(sql, None);
-
+    let pattern = &classified[0]
+        .using_classification()
+        .expect("USING classifies")
+        .pattern;
+    assert!(
+        matches!(
+            pattern,
+            PatternClass::P10ConstantBool(ConstantBool { value: true })
+        ),
+        "the acting role's membership decides the call, got {pattern:?}"
+    );
     let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     assert_eq!(
         support::footgun::relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some(
-            format!(
-                "member from {}",
-                role_scope_name("member", &["editor".to_string()])
-            )
-            .as_str()
-        ),
-        "pg_has_role admits every member of the role, so the grant walks the scope:\n{}",
+        Some("public_viewer"),
+        "the membership admits every row:\n{}",
         model.model()
-    );
-    assert!(
-        model.model().contains("define member: [user]"),
-        "the walked relation has to exist for the operator to load memberships into:\n{}",
-        model.model()
-    );
-    insta::assert_snapshot!("pg_has_role_model", model.model().trim());
-
-    insta::assert_snapshot!(
-        "pg_has_role_tuples",
-        tuple_generator::format_tuples(model.tuple_queries())
     );
 }
 
-/// The accessor spelling reaches the same gate, so it needs the same walk.
+/// The same call about a role the schema never creates cannot be answered, so it is
+/// refused and the table stays closed.
+#[test]
+fn a_pg_has_role_about_a_role_the_schema_never_creates_refuses() {
+    let sql = r"
+CREATE ROLE app_user NOLOGIN;
+CREATE TABLE docs (id UUID PRIMARY KEY, title TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_select ON docs FOR SELECT
+    USING (pg_has_role(current_user, 'editor', 'MEMBER'));
+";
+    let (classified, db, registry) = support::classify_sql(sql, None);
+    let pattern = &classified[0]
+        .using_classification()
+        .expect("USING classifies")
+        .pattern;
+    let PatternClass::Unknown(refused) = pattern else {
+        panic!("the call names a role the schema never creates, got {pattern:?}");
+    };
+    assert!(
+        refused.reason.contains("does not create both"),
+        "the refusal names the missing role, got {}",
+        refused.reason
+    );
+    let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    assert_eq!(
+        support::footgun::relation_definition(&model.model(), "docs", "can_select").as_deref(),
+        Some("no_access"),
+        "the refusal keeps the table closed:\n{}",
+        model.model()
+    );
+}
+
+/// The role accessor admits every member of the role it names, so it walks the scope the
+/// operator loads the memberships into.
 #[test]
 fn role_accessor_walks_the_scope_to_the_roles_members() {
     let sql = r"
@@ -294,70 +327,77 @@ CREATE POLICY docs_select ON docs FOR SELECT
     );
 }
 
-/// The privilege decides which members the policy admits, so it decides which relation the
-/// gate walks. Probed on `postgres:18`: a member granted without inheritance has `MEMBER`
-/// and not `USAGE`, one granted with `SET FALSE` has `MEMBER` and not `SET`, and only an
-/// administrator has any `WITH ADMIN OPTION` form, whichever kind precedes it.
+/// The privilege decides which members the call admits, so it decides the constant the
+/// memberships answer, one privilege at a time.
 #[test]
-fn each_pg_has_role_privilege_walks_its_own_relation() {
+fn each_pg_has_role_privilege_answers_from_its_own_membership() {
     let mut complaints = Vec::new();
-    for (privilege, relation) in [
-        ("MEMBER", "member"),
-        ("USAGE", "usage"),
-        ("SET", "set_role"),
+    for (privilege, grant_options, expected) in [
+        ("MEMBER", "", true),
+        ("USAGE", "", true),
+        ("SET", "", true),
+        ("MEMBER WITH ADMIN OPTION", "", false),
         // All three admin spellings are one answer: PostgreSQL ignores the kind once the
         // admin option is asked about.
-        ("MEMBER WITH ADMIN OPTION", "admin_option"),
-        ("USAGE WITH ADMIN OPTION", "admin_option"),
-        ("SET WITH ADMIN OPTION", "admin_option"),
+        ("MEMBER WITH ADMIN OPTION", " WITH ADMIN OPTION", true),
+        ("USAGE WITH ADMIN OPTION", " WITH ADMIN OPTION", true),
+        ("SET WITH ADMIN OPTION", " WITH ADMIN OPTION", true),
+        // A member granted without inheritance holds `MEMBER` and not `USAGE`, one
+        // granted with `SET FALSE` holds `MEMBER` and not `SET`.
+        ("MEMBER", " WITH INHERIT FALSE", true),
+        ("USAGE", " WITH INHERIT FALSE", false),
+        ("SET", " WITH SET FALSE", false),
         // Case and surrounding space do not change the answer in PostgreSQL either.
-        ("usage", "usage"),
-        (" MEMBER ", "member"),
-        ("member with admin option", "admin_option"),
+        ("usage", "", true),
+        (" MEMBER ", "", true),
+        ("member with admin option", " WITH ADMIN OPTION", true),
     ] {
         let sql = format!(
             r"
+CREATE ROLE app_user NOLOGIN;
+CREATE ROLE editor NOLOGIN;
+GRANT editor TO app_user{grant_options};
 CREATE TABLE docs (id TEXT PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT
     USING (pg_has_role(current_user, 'editor', '{privilege}'));
 "
         );
-        let (classified, db, registry) = support::classify_sql(&sql, None);
-        let dsl = support::plan_at(classified, &db, &registry, ConfidenceLevel::B).model();
-
-        let expected = format!(
-            "{relation} from {}",
-            role_scope_name(relation, &["editor".to_string()])
-        );
-        if support::footgun::relation_definition(&dsl, "docs", "can_select").as_deref()
-            != Some(expected.as_str())
-        {
+        let (classified, _db, _registry) = support::classify_sql(&sql, None);
+        let pattern = &classified[0]
+            .using_classification()
+            .expect("USING classifies")
+            .pattern;
+        let answered = match pattern {
+            PatternClass::P10ConstantBool(ConstantBool { value }) => *value,
+            other => {
+                complaints.push(format!(
+                    "'{privilege}'{grant_options:?} is answered by a constant, got {other:?}"
+                ));
+                continue;
+            }
+        };
+        if answered != expected {
             complaints.push(format!(
-                "'{privilege}' should walk `{expected}`, got `{:?}`",
-                support::footgun::relation_definition(&dsl, "docs", "can_select")
-            ));
-        }
-        if support::footgun::relation_definition(&dsl, "pg_role", relation).as_deref()
-            != Some("[user]")
-        {
-            complaints.push(format!(
-                "'{privilege}' needs pg_role#{relation} for the operator to load into:\n{dsl}"
+                "'{privilege}'{grant_options:?} answers {answered}, expected {expected}"
             ));
         }
     }
     assert!(complaints.is_empty(), "{}", complaints.join("\n"));
 }
 
-/// Two policies naming different privileges of one role is the shape that forces a relation
-/// per privilege: sharing one would make the operator's single set of facts mean both.
+/// Two policies asking about different privileges of one role each decide their own
+/// constant, so a grant beside a denial composes into the action each one guards.
 #[test]
-fn two_privileges_of_one_role_get_their_own_relations() {
+fn two_privileges_of_one_role_each_decide_their_own_constant() {
     let sql = r"
+CREATE ROLE app_user NOLOGIN;
+CREATE ROLE editor NOLOGIN;
+GRANT editor TO app_user;
 CREATE TABLE docs (id TEXT PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_read ON docs FOR SELECT
-    USING (pg_has_role(current_user, 'editor', 'USAGE'));
+    USING (pg_has_role(current_user, 'editor', 'MEMBER'));
 CREATE POLICY docs_admin ON docs FOR DELETE
     USING (pg_has_role(current_user, 'editor', 'MEMBER WITH ADMIN OPTION'));
 ";
@@ -366,37 +406,13 @@ CREATE POLICY docs_admin ON docs FOR DELETE
 
     assert_eq!(
         support::footgun::relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some(
-            format!(
-                "usage from {}",
-                role_scope_name("usage", &["editor".to_string()])
-            )
-            .as_str()
-        ),
-        "the read policy asked about inheriting members:\n{dsl}"
+        Some("public_viewer"),
+        "the acting role's membership admits the read:\n{dsl}"
     );
     assert_eq!(
         support::footgun::relation_definition(&dsl, "docs", "can_delete").as_deref(),
-        Some(
-            format!(
-                "admin_option from {} and can_select",
-                role_scope_name("admin_option", &["editor".to_string()])
-            )
-            .as_str()
-        ),
-        "the delete policy asked about the role's administrators:\n{dsl}"
-    );
-    for relation in ["usage", "admin_option"] {
-        assert_eq!(
-            support::footgun::relation_definition(&dsl, "pg_role", relation).as_deref(),
-            Some("[user]"),
-            "each privilege needs its own set of facts:\n{dsl}"
-        );
-    }
-    assert_eq!(
-        support::footgun::relation_definition(&dsl, "pg_role", "member"),
-        None,
-        "no policy asked about plain membership, so nothing may offer to hold it:\n{dsl}"
+        Some("no_access and can_select"),
+        "the acting role holds no admin option on the role:\n{dsl}"
     );
 }
 

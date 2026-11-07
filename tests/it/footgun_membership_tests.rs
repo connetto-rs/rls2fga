@@ -29,7 +29,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_members(doc_id UUID, user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT
-  USING (id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user));
+  USING (id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true)));
 ",
     );
     let classified = translator(ConfidenceLevel::A).classify(&db);
@@ -61,16 +61,16 @@ fn nested_correlated_exists_resolves_to_the_scanned_table() {
         r"
 CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY orgs_sel ON orgs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY orgs_sel ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE projects(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id));
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (
-  EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_user));
+  EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_setting('app.user_id', true)));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id
-          AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = p.org_id AND o.owner_id = current_user)));
+          AND EXISTS (SELECT 1 FROM orgs o WHERE o.id = p.org_id AND o.owner_id = current_setting('app.user_id', true))));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -124,11 +124,11 @@ fn membership_join_on_the_scanned_tables_own_key_is_refused() {
         r"
 CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY orgs_sel ON orgs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY orgs_sel ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE projects(id UUID PRIMARY KEY, org_id UUID);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (
-  EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_user));
+  EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_setting('app.user_id', true)));
 ",
     );
     // Keep D-level classifications so the diagnostic itself is observable.
@@ -167,7 +167,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_owner(doc_id UUID PRIMARY KEY REFERENCES docs(id), user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_owner o WHERE o.doc_id = docs.id AND o.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_owner o WHERE o.doc_id = docs.id AND o.user_id = current_setting('app.user_id', true)));
 ";
     let db = db_of(sql);
     let translator = translator(ConfidenceLevel::A);
@@ -209,7 +209,7 @@ CREATE TABLE orders(id UUID PRIMARY KEY, region TEXT);
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 CREATE POLICY orders_sel ON orders FOR SELECT USING (
   EXISTS (SELECT 1 FROM user_permissions up JOIN departments d ON up.dept_id = d.id
-          WHERE up.user_id = current_user AND d.region = orders.region));
+          WHERE up.user_id = current_setting('app.user_id', true) AND d.region = orders.region));
 ",
     );
     let model = translator(ConfidenceLevel::D)
@@ -260,10 +260,10 @@ fn self_referential_membership_defines_the_relation_it_reads() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (
   EXISTS (SELECT 1 FROM doc_members dm
-          WHERE dm.doc_id = docs.id AND dm.user_id = current_user));
+          WHERE dm.doc_id = docs.id AND dm.user_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -294,7 +294,7 @@ CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), u
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -325,10 +325,10 @@ fn membership_through_a_guarded_join_table_is_disclosed() {
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
-CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_user);
+CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_setting('app.user_id', true));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -360,7 +360,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -387,7 +387,7 @@ ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dm_read ON doc_members FOR SELECT TO auditor USING (true);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ";
     let db = db_of(sql);
     let translator = translator(ConfidenceLevel::B);
@@ -431,10 +431,10 @@ CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dm_audit ON doc_members FOR SELECT TO auditor USING (true);
-CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_user);
+CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_setting('app.user_id', true));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -458,7 +458,7 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
 #[test]
 fn the_caller_inside_a_membership_subquery_translates_like_the_exists_spelling() {
     let (expected_dsl, expected_tuples) = membership_translation(
-        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user)",
+        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
     );
     assert!(
         !expected_dsl.contains("can_select: no_access"),
@@ -466,9 +466,9 @@ fn the_caller_inside_a_membership_subquery_translates_like_the_exists_spelling()
     );
 
     for clause in [
-        "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id)",
-        "current_user = ANY (SELECT user_id FROM doc_members WHERE doc_id = docs.id)",
-        "current_user IN (SELECT dm.user_id FROM doc_members dm WHERE dm.doc_id = docs.id)",
+        "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id)",
+        "current_setting('app.user_id', true) = ANY (SELECT user_id FROM doc_members WHERE doc_id = docs.id)",
+        "current_setting('app.user_id', true) IN (SELECT dm.user_id FROM doc_members dm WHERE dm.doc_id = docs.id)",
     ] {
         let (dsl, tuples) = membership_translation(clause);
         assert_eq!(
@@ -488,10 +488,10 @@ fn the_caller_inside_a_membership_subquery_translates_like_the_exists_spelling()
 fn a_residual_predicate_survives_the_caller_in_subquery_rewrite() {
     let (expected_dsl, _) = membership_translation(
         "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND role = 'admin' \
-         AND user_id = current_user)",
+         AND user_id = current_setting('app.user_id', true))",
     );
     let (dsl, _) = membership_translation(
-        "current_user IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
+        "current_setting('app.user_id', true) IN (SELECT user_id FROM doc_members WHERE doc_id = docs.id \
          AND role = 'admin')",
     );
     assert_eq!(
@@ -505,18 +505,18 @@ fn a_residual_predicate_survives_the_caller_in_subquery_rewrite() {
 #[test]
 fn an_exists_membership_subquery_keeping_at_least_one_row_still_translates() {
     let (expected_dsl, expected_tuples) = membership_translation(
-        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user)",
+        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
     );
 
     for clause in [
         "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-         AND user_id = current_user LIMIT 1)",
+         AND user_id = current_setting('app.user_id', true) LIMIT 1)",
         "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-         AND user_id = current_user LIMIT ALL)",
+         AND user_id = current_setting('app.user_id', true) LIMIT ALL)",
         "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-         AND user_id = current_user OFFSET 0)",
+         AND user_id = current_setting('app.user_id', true) OFFSET 0)",
         "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
-         AND user_id = current_user FETCH FIRST 1 ROWS ONLY)",
+         AND user_id = current_setting('app.user_id', true) FETCH FIRST 1 ROWS ONLY)",
     ] {
         let (dsl, tuples) = membership_translation(clause);
         assert_eq!(
@@ -541,7 +541,7 @@ fn an_uncorrelated_membership_check_translates_through_a_holder() {
                   CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT USING (\n\
-                    EXISTS (SELECT 1 FROM staff WHERE staff.user_id = current_user));\n";
+                    EXISTS (SELECT 1 FROM staff WHERE staff.user_id = current_setting('app.user_id', true)));\n";
     let (dsl, tuples) = translation(schema);
 
     assert!(
@@ -570,7 +570,7 @@ fn a_clocked_holder_does_not_admit_an_unconditioned_member_tuple() {
                   CREATE TABLE memos(id UUID PRIMARY KEY);\n\
                   ALTER TABLE memos ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY memos_reviewers ON memos FOR SELECT USING (\n\
-                    EXISTS (SELECT 1 FROM reviewers WHERE reviewers.user_id = current_user \
+                    EXISTS (SELECT 1 FROM reviewers WHERE reviewers.user_id = current_setting('app.user_id', true) \
                     AND reviewers.vetted_at > now()));\n";
     let (dsl, tuples) = translation(schema);
 
@@ -604,11 +604,11 @@ fn a_holder_is_shared_per_member_source_and_never_across_them() {
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_staff ON docs FOR SELECT USING (\n\
-                    EXISTS (SELECT 1 FROM staff WHERE staff.user_id = current_user));\n\
+                    EXISTS (SELECT 1 FROM staff WHERE staff.user_id = current_setting('app.user_id', true)));\n\
                   CREATE POLICY docs_audit ON docs FOR DELETE USING (\n\
-                    EXISTS (SELECT 1 FROM auditors WHERE auditors.user_id = current_user));\n\
+                    EXISTS (SELECT 1 FROM auditors WHERE auditors.user_id = current_setting('app.user_id', true)));\n\
                   CREATE POLICY notes_staff ON notes FOR SELECT USING (\n\
-                    EXISTS (SELECT 1 FROM staff WHERE staff.user_id = current_user));\n";
+                    EXISTS (SELECT 1 FROM staff WHERE staff.user_id = current_setting('app.user_id', true)));\n";
     let (dsl, tuples) = translation(schema);
 
     assert_eq!(
@@ -639,7 +639,7 @@ fn a_correlated_membership_check_does_not_become_a_holder() {
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT USING (\n\
                     EXISTS (SELECT 1 FROM doc_members WHERE doc_members.doc_id = docs.id \
-                    AND doc_members.user_id = current_user));\n";
+                    AND doc_members.user_id = current_setting('app.user_id', true)));\n";
     let (dsl, _) = translation(schema);
 
     assert!(
@@ -656,7 +656,7 @@ fn a_correlated_membership_check_does_not_become_a_holder() {
 #[test]
 fn the_object_key_in_subquery_translates_like_the_exists_spelling() {
     let (expected_dsl, expected_tuples) = membership_translation(
-        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user)",
+        "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
     );
     assert!(
         !expected_dsl.contains("can_select: no_access"),
@@ -664,10 +664,10 @@ fn the_object_key_in_subquery_translates_like_the_exists_spelling() {
     );
 
     for clause in [
-        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user)",
-        "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_user)",
-        "id IN (SELECT dm.doc_id FROM doc_members dm WHERE dm.user_id = current_user)",
-        "docs.id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user)",
+        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
+        "id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
+        "id IN (SELECT dm.doc_id FROM doc_members dm WHERE dm.user_id = current_setting('app.user_id', true))",
+        "docs.id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
     ] {
         let (dsl, tuples) = membership_translation(clause);
         assert_eq!(
@@ -687,10 +687,10 @@ fn the_object_key_in_subquery_translates_like_the_exists_spelling() {
 fn a_residual_predicate_survives_the_object_key_in_subquery_rewrite() {
     let (expected_dsl, _) = membership_translation(
         "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND role = 'admin' \
-         AND user_id = current_user)",
+         AND user_id = current_setting('app.user_id', true))",
     );
     let (dsl, _) = membership_translation(
-        "id IN (SELECT doc_id FROM doc_members WHERE role = 'admin' AND user_id = current_user)",
+        "id IN (SELECT doc_id FROM doc_members WHERE role = 'admin' AND user_id = current_setting('app.user_id', true))",
     );
     assert_eq!(
         dsl, expected_dsl,
@@ -709,7 +709,7 @@ CREATE TABLE docs(doc_id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(doc_id UUID REFERENCES docs(doc_id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_members ON docs FOR SELECT
-  USING (doc_id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user));
+  USING (doc_id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true)));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -734,7 +734,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
 {policies}
 CREATE POLICY pd ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 "
     );
     let db = db_of(&sql);
@@ -769,13 +769,13 @@ fn a_membership_read_policy_that_cannot_admit_a_row_denies_the_guarded_table() {
         "CREATE POLICY pm ON m FOR SELECT USING ((false));",
         "CREATE POLICY pm ON m FOR SELECT USING (NOT true);",
         // An AND is empty as soon as either side is, whatever the other side says.
-        "CREATE POLICY pm ON m FOR SELECT USING (false AND m.user_id = current_user);",
-        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_user AND false);",
+        "CREATE POLICY pm ON m FOR SELECT USING (false AND m.user_id = current_setting('app.user_id', true));",
+        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_setting('app.user_id', true) AND false);",
         // Both sides of an OR empty is still empty.
         "CREATE POLICY pm ON m FOR SELECT USING (false OR false);",
         // Every permissive read policy empty, so none of them grants.
         "CREATE POLICY pm ON m FOR SELECT USING (false);\n\
-         CREATE POLICY pm2 ON m FOR SELECT USING (false AND m.user_id = current_user);",
+         CREATE POLICY pm2 ON m FOR SELECT USING (false AND m.user_id = current_setting('app.user_id', true));",
         // FOR ALL applies its USING to reads too.
         "CREATE POLICY pm ON m FOR ALL USING (false);",
     ]);
@@ -812,9 +812,9 @@ fn a_restrictive_kill_switch_on_a_membership_table_denies_the_guarded_table() {
         "CREATE POLICY pm ON m FOR SELECT USING (true);\n\
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT USING (false);",
         // The permissive side being a real rule changes nothing: the barrier still closes.
-        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_user);\n\
+        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_setting('app.user_id', true));\n\
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT USING (false);",
-        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_user);\n\
+        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_setting('app.user_id', true));\n\
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR ALL USING (false);",
     ]);
 }
@@ -829,19 +829,19 @@ fn a_membership_read_policy_that_may_admit_a_row_keeps_its_grant() {
         // 1 row.
         "CREATE POLICY pm ON m FOR SELECT USING (true);",
         // 1 row: the OR still has a live side.
-        "CREATE POLICY pm ON m FOR SELECT USING (false OR m.user_id = current_user);",
+        "CREATE POLICY pm ON m FOR SELECT USING (false OR m.user_id = current_setting('app.user_id', true));",
         // 1 row.
-        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_user);",
+        "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = current_setting('app.user_id', true));",
         // 0 rows for this data only, and the crate cannot tell, so it must not claim to.
         "CREATE POLICY pm ON m FOR SELECT USING (m.user_id = 'nobody');",
         // 0 rows, but the crate folds no arithmetic, so this is not proven either.
         "CREATE POLICY pm ON m FOR SELECT USING (1 = 2);",
         // One empty policy beside a live one still leaves the live one granting.
         "CREATE POLICY pm ON m FOR SELECT USING (false);\n\
-         CREATE POLICY pm2 ON m FOR SELECT USING (m.user_id = current_user);",
+         CREATE POLICY pm2 ON m FOR SELECT USING (m.user_id = current_setting('app.user_id', true));",
         // A restrictive barrier that hides only some rows is the documented widening.
         "CREATE POLICY pm ON m FOR SELECT USING (true);\n\
-         CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT USING (m.user_id = current_user);",
+         CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT USING (m.user_id = current_setting('app.user_id', true));",
         // A non-read policy says nothing about reads.
         "CREATE POLICY pm ON m FOR SELECT USING (true);\n\
          CREATE POLICY pmd ON m FOR DELETE USING (false);",
@@ -954,7 +954,7 @@ fn a_request_gate_that_names_no_row_keeps_the_membership_translated() {
 #[test]
 fn unsupported_membership_read_rules_stay_guarded() {
     for policies in [
-        "CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_user);".to_string(),
+        "CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_setting('app.user_id', true));".to_string(),
         "CREATE POLICY p ON team_members FOR SELECT TO contractor USING (true);".to_string(),
         "CREATE POLICY p ON team_members FOR SELECT TO CURRENT_USER USING (true);".to_string(),
         format!(
@@ -963,12 +963,12 @@ fn unsupported_membership_read_rules_stay_guarded() {
         ),
         format!(
             "{TEAM_MEMBERS_OPEN}
-                 CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_user);"
+                 CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_setting('app.user_id', true));"
         ),
         format!(
             "{TEAM_MEMBERS_OPEN}
                  CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT
-                     USING (user_id = current_user);"
+                     USING (user_id = current_setting('app.user_id', true));"
         ),
         format!(
             "{TEAM_MEMBERS_OPEN}
@@ -1033,7 +1033,7 @@ CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT);
 CREATE TABLE super_members(note TEXT) INHERITS (doc_members);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user)
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true))
 );
 ";
     let db = db_of(sql);
@@ -1625,9 +1625,9 @@ CREATE TABLE read_acl(resource_id UUID REFERENCES resources(id), user_id UUID RE
 CREATE TABLE delete_acl(resource_id UUID REFERENCES resources(id), user_id UUID REFERENCES principals(id));
 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
 CREATE POLICY resources_read ON resources FOR SELECT USING (
-  EXISTS (SELECT 1 FROM read_acl m WHERE m.resource_id = resources.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM read_acl m WHERE m.resource_id = resources.id AND m.user_id = current_setting('app.user_id', true)));
 CREATE POLICY resources_delete ON resources FOR DELETE USING (
-  EXISTS (SELECT 1 FROM delete_acl m WHERE m.resource_id = resources.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM delete_acl m WHERE m.resource_id = resources.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let translator = translator(ConfidenceLevel::A);

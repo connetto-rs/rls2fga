@@ -140,6 +140,10 @@ async fn every_fixture_schema_is_one_postgres_accepts() {
     fixtures.sort();
     assert!(fixtures.len() > 20, "the corpus is read, not guessed");
 
+    // Fixtures are written for the suite's deployment, whose roles a real cluster already holds.
+    admin
+        .batch_execute(support::deployment::ROLES)
+        .expect("failed to create the deployment's roles");
     // A role is cluster-wide, not per database, so one fixture's role outlives its schema and
     // collides with the next fixture that declares the same name. Everything minted beyond
     // the baseline goes, once the database owning it is gone.

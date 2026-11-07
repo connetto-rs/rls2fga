@@ -38,7 +38,7 @@ CREATE POLICY p ON public.docs FOR SELECT USING (
         SELECT 1
         FROM public.doc_members AS m
         WHERE m.doc_id = docs.id
-          AND m.user_id = CURRENT_USER
+          AND m.user_id = current_setting('app.user_id')
           AND {conjunct}
     )
 );
@@ -73,14 +73,24 @@ fn member_query_sql(conjunct: &str) -> String {
     sql
 }
 
-/// `pg_has_role(role, privilege)` tests `current_user`, so the loader's own role decides
-/// it and a loader running as owner admits every membership row.
+/// `pg_has_role` asks about the role a request acts as and the memberships the schema
+/// grants it, and the loader running as itself may substitute neither, so a membership
+/// carrying the gate never carries it into the query that loads the tuples.
 #[test]
-fn a_caller_role_test_never_reaches_the_loader() {
-    let sql = member_query_sql("pg_has_role(m.tenant, 'USAGE')");
+fn a_role_gate_never_reaches_the_loader() {
+    let schema = format!(
+        "CREATE ROLE editor;\nGRANT editor TO app_user;\n{}",
+        membership_with("pg_has_role(current_user, 'editor', 'MEMBER')")
+    );
+    let db = db_of(&schema);
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let tuples = format_tuples(outputs.tuple_queries());
     assert!(
-        !sql.contains("pg_has_role"),
-        "the loader's role would decide this, not the caller's:\n{sql}"
+        !tuples.contains("pg_has_role"),
+        "the schema's memberships settle the gate, so the loader never evaluates it:\n{tuples}"
     );
 }
 
@@ -105,11 +115,12 @@ fn a_wrapped_clock_reading_never_reaches_the_loader() {
     );
 }
 
-/// A function reading the caller is caller-dependent whatever it is called.
+/// Whatever an undeclared function reads, the loader may not answer on the caller's
+/// behalf, so a membership carrying it keeps no query that would evaluate it.
 #[test]
-fn a_user_function_reading_the_caller_never_reaches_the_loader() {
+fn an_undeclared_function_never_reaches_the_loader() {
     let schema = format!(
-        "{}\nCREATE FUNCTION public.mine(flag BOOLEAN) RETURNS BOOLEAN LANGUAGE sql STABLE AS\n'SELECT flag AND CURRENT_USER = ''postgres''';",
+        "{}\nCREATE FUNCTION public.mine(flag BOOLEAN) RETURNS BOOLEAN LANGUAGE sql STABLE AS\n'SELECT flag AND random() > 0.5';",
         membership_with("public.mine(m.active)")
     );
     let db = db_of(&schema);

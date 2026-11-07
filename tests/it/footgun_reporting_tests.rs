@@ -20,7 +20,7 @@ fn generated_comments_cannot_escape_into_executable_sql() {
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\n\
            SELECT 1 FROM \"doc_mem\nSELECT 1; --\" m\n\
-           WHERE m.doc_id = docs.id AND m.user_id = current_user));\n",
+           WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));\n",
     );
     let outputs = translator(ConfidenceLevel::A)
         .translate(&db)
@@ -91,7 +91,7 @@ fn command_without_permissive_policy_is_denied() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_user);
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id', true));
 ",
     );
     let model = translator(ConfidenceLevel::A)
@@ -180,7 +180,7 @@ fn report_names_dropped_permissive_policies_and_their_reason() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs FOR SELECT USING (tenant = current_setting('app.tenant'));
 ",
     );
@@ -239,7 +239,7 @@ fn report_enumerates_policies_dropped_by_confidence_filtering() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
   USING (tenant = current_setting('app.tenant'));
 ",
@@ -272,8 +272,8 @@ fn one_clause_is_reported_once_even_when_it_covers_two_phases() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user AND status LIKE 'live%');
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user AND status LIKE 'live%');
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true) AND status LIKE 'live%');
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true) AND status LIKE 'live%');
 ",
     );
     let model = translator(ConfidenceLevel::D)
@@ -309,7 +309,7 @@ fn a_redundant_select_gate_is_left_out() {
              ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY tasks_sel ON tasks FOR SELECT USING (\n\
                EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id\n\
-                       AND p.owner_id = current_user));\n"
+                       AND p.owner_id = current_setting('app.user_id', true)));\n"
         ));
         let dsl = translator(ConfidenceLevel::B)
             .translate(&db)
@@ -330,7 +330,7 @@ fn a_redundant_select_gate_is_left_out() {
 
     // The parent admits exactly the rule the child names, so no gate is needed.
     let (walked, body, dsl) = inherited_body(
-        "CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_user);\n",
+        "CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n",
     );
     assert_eq!(
         walked, "owner",
@@ -344,7 +344,7 @@ fn a_redundant_select_gate_is_left_out() {
 
     // The rule is one branch of the parent's union, so it still implies visibility.
     let (walked, _, dsl) = inherited_body(
-        "CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_user);\n\
+        "CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
          CREATE POLICY proj_pub ON projects FOR SELECT USING (is_public = TRUE);\n",
     );
     assert_eq!(
@@ -354,7 +354,7 @@ fn a_redundant_select_gate_is_left_out() {
 
     // The parent admits strictly less than the rule, so the gate has to stay.
     let (walked, body, dsl) = inherited_body(
-        "CREATE POLICY proj_editor ON projects FOR SELECT USING (editor_id = current_user);\n",
+        "CREATE POLICY proj_editor ON projects FOR SELECT USING (editor_id = current_setting('app.user_id', true));\n",
     );
     assert!(
         body.is_some_and(|body| body.contains("can_select")),
@@ -369,8 +369,8 @@ fn a_relation_reached_only_by_insert_keeps_its_tuples() {
 CREATE TABLE docs(id INTEGER PRIMARY KEY, parent_id INTEGER, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.editor_id = current_user));
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_user);
+  EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.editor_id = current_setting('app.user_id', true)));
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_setting('app.user_id', true));
 ";
     let db = db_of(sql);
     let translator = translator(ConfidenceLevel::B);
@@ -406,11 +406,11 @@ fn a_granting_model_keeps_its_tuple_queries() {
     let sql = r"
 CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
-  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ";
     let db = db_of(sql);
     let translator = translator(ConfidenceLevel::B);
@@ -440,7 +440,7 @@ fn a_write_policy_without_readable_rows_is_reported() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_user);
+CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id', true));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -464,8 +464,8 @@ CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_user);
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id', true));
 ",
     );
     assert!(
@@ -484,7 +484,7 @@ CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_user);
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_user);
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_setting('app.user_id', true));
 ",
     );
     assert!(
@@ -576,7 +576,7 @@ fn each_outcome_carries_its_own_severity() {
     let hybrid = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, status TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT \
-                  USING (owner_id = current_user AND status LIKE 'live%');\n";
+                  USING (owner_id = current_setting('app.user_id', true) AND status LIKE 'live%');\n";
     let hybrid_db = db_of(hybrid);
     let hybrid_outputs = translator(ConfidenceLevel::C)
         .translate(&hybrid_db)
@@ -613,7 +613,7 @@ fn each_outcome_carries_its_own_severity() {
 fn the_model_follows_a_policy_altered_after_creation() {
     let created = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                    ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                   CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n";
+                   CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
     let narrowed = format!("{created}ALTER POLICY docs_sel ON docs USING (FALSE);\n");
 
     let (before, _) = translation(created);
@@ -646,8 +646,8 @@ fn a_filtered_with_check_does_not_resurrect_through_the_bucket_mirror() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user)
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true))
   WITH CHECK (opaque_gate(id));
 ",
     );
@@ -682,7 +682,7 @@ fn a_clause_the_threshold_dropped_is_named_by_a_typed_note() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_opaque ON docs FOR SELECT USING (opaque_gate(id));
 ",
     );
@@ -746,8 +746,8 @@ fn a_dropped_for_all_policy_reports_one_note_per_clause_not_per_phase() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR ALL USING (owner_id = current_user)
-  WITH CHECK (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR ALL USING (owner_id = current_setting('app.user_id', true))
+  WITH CHECK (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_opaque ON docs FOR ALL USING (opaque_gate(id))
   WITH CHECK (opaque_gate(id));
 ",
@@ -821,7 +821,7 @@ fn a_grant_no_tuple_can_fill_denies_and_is_reported() {
         let db = db_of(&format!(
             "{declaration}
 ALTER TABLE shares ENABLE ROW LEVEL SECURITY;
-CREATE POLICY shares_read ON shares FOR SELECT USING (viewer = current_user);
+CREATE POLICY shares_read ON shares FOR SELECT USING (viewer = current_setting('app.user_id', true));
 "
         ));
         let outputs = translator(ConfidenceLevel::B)
@@ -880,7 +880,7 @@ fn a_barrier_with_nothing_to_narrow_reports_the_commands_it_refuses() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_barrier ON docs AS RESTRICTIVE USING (owner_id = current_user);
+CREATE POLICY docs_barrier ON docs AS RESTRICTIVE USING (owner_id = current_setting('app.user_id', true));
 ",
     );
     let translation = translator(ConfidenceLevel::B)
@@ -932,7 +932,7 @@ fn a_write_the_read_gate_blocks_names_the_commands_it_blocks() {
             "update alone",
             "CREATE TABLE docs(id UUID PRIMARY KEY, editor TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_u ON docs FOR UPDATE USING (editor = current_user);
+CREATE POLICY docs_u ON docs FOR UPDATE USING (editor = current_setting('app.user_id', true));
 ",
             vec!["UPDATE".to_string()],
         ),
@@ -940,8 +940,8 @@ CREATE POLICY docs_u ON docs FOR UPDATE USING (editor = current_user);
             "update and delete",
             "CREATE TABLE docs(id UUID PRIMARY KEY, editor TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_u ON docs FOR UPDATE USING (editor = current_user);
-CREATE POLICY docs_d ON docs FOR DELETE USING (editor = current_user);
+CREATE POLICY docs_u ON docs FOR UPDATE USING (editor = current_setting('app.user_id', true));
+CREATE POLICY docs_d ON docs FOR DELETE USING (editor = current_setting('app.user_id', true));
 ",
             vec!["UPDATE".to_string(), "DELETE".to_string()],
         ),

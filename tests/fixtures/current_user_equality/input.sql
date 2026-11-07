@@ -1,5 +1,6 @@
--- PostgreSQL built-in current_user pattern.
--- Uses the SQL standard current_user keyword instead of a function.
+-- PostgreSQL's current_user keyword, which names the role a request acts as. Every request
+-- of a deployment acting as one role reads the same name, so the rows the policy shows are
+-- those whose manager is that role.
 
 CREATE TABLE accounts (
     id SERIAL PRIMARY KEY,

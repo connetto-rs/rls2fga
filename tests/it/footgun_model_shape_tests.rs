@@ -28,15 +28,15 @@ CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
 CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE aaa.projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE zzz.projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY zzz_sel ON zzz.projects FOR SELECT TO analyst USING (owner_id = current_user);
+CREATE POLICY zzz_sel ON zzz.projects FOR SELECT TO analyst USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES zzz.projects(id), is_public BOOLEAN);
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_all ON tasks FOR ALL USING (
   EXISTS (SELECT 1 FROM zzz.projects p
-          WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+          WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id')));
 CREATE POLICY tasks_public ON tasks FOR SELECT USING (is_public = TRUE);
 CREATE TABLE audit(id UUID PRIMARY KEY);
 ALTER TABLE audit ENABLE ROW LEVEL SECURITY;
@@ -110,18 +110,18 @@ fn a_layered_model_stays_internally_consistent() {
         r"
 CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY orgs_own ON orgs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY orgs_own ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY orgs_pub ON orgs FOR SELECT USING (is_public = TRUE);
 CREATE TABLE projects(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id));
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT TO analyst USING (
-  EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_user));
+  EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_setting('app.user_id')));
 CREATE TABLE members(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id), user_id UUID);
 CREATE TABLE notes(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_sel ON notes FOR SELECT USING (
   EXISTS (SELECT 1 FROM members m WHERE m.project_id = notes.project_id
-          AND m.user_id = current_user));
+          AND m.user_id = current_setting('app.user_id')));
 ",
     );
     assert_model_is_internally_consistent(
@@ -140,7 +140,7 @@ fn no_type_defines_a_relation_twice() {
         r"
 CREATE TABLE teams(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
-CREATE POLICY teams_sel ON teams FOR SELECT USING (owner_id = current_user);
+CREATE POLICY teams_sel ON teams FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE docs(
   id UUID PRIMARY KEY,
   can_select_id UUID,
@@ -150,12 +150,12 @@ CREATE TABLE docs(
   team_ref UUID REFERENCES teams(id)
 );
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_a_reserved ON docs FOR SELECT USING (can_select_id = current_user);
-CREATE POLICY docs_b_deny ON docs FOR UPDATE USING (no_access_id = current_user);
-CREATE POLICY docs_c_owner ON docs FOR DELETE USING (owner_id = current_user);
-CREATE POLICY docs_d_named ON docs FOR INSERT WITH CHECK (teams_id = current_user);
+CREATE POLICY docs_a_reserved ON docs FOR SELECT USING (can_select_id = current_setting('app.user_id'));
+CREATE POLICY docs_b_deny ON docs FOR UPDATE USING (no_access_id = current_setting('app.user_id'));
+CREATE POLICY docs_c_owner ON docs FOR DELETE USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_d_named ON docs FOR INSERT WITH CHECK (teams_id = current_setting('app.user_id'));
 CREATE POLICY docs_e_parent ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM teams t WHERE t.id = docs.team_ref AND t.owner_id = current_user));
+  EXISTS (SELECT 1 FROM teams t WHERE t.id = docs.team_ref AND t.owner_id = current_setting('app.user_id')));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -195,9 +195,9 @@ fn no_tuple_query_feeds_a_relation_no_permission_reaches() {
         r"
 CREATE TABLE t1(id INTEGER PRIMARY KEY, parent_id INTEGER, owner TEXT);
 ALTER TABLE t1 ENABLE ROW LEVEL SECURITY;
-CREATE POLICY t1_own ON t1 FOR SELECT USING (owner = current_user);
+CREATE POLICY t1_own ON t1 FOR SELECT USING (owner = current_setting('app.user_id'));
 CREATE POLICY t1_tree ON t1 FOR SELECT USING (
-  EXISTS (SELECT 1 FROM t1 p WHERE p.id = t1.parent_id AND p.owner = current_user));
+  EXISTS (SELECT 1 FROM t1 p WHERE p.id = t1.parent_id AND p.owner = current_setting('app.user_id')));
 ",
     );
     let translator = translator(ConfidenceLevel::B);
@@ -365,10 +365,10 @@ fn exclusion_emitting_schemas() -> Vec<String> {
         "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN NOT NULL DEFAULT FALSE);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_public ON docs FOR SELECT USING (is_public = TRUE);
 CREATE POLICY docs_barrier ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (owner_id = current_user);
+  USING (owner_id = current_setting('app.user_id'));
 "
         .to_string(),
         // Two barriers, so the outer exclusion subtracts a scope while its base
@@ -376,12 +376,12 @@ CREATE POLICY docs_barrier ON docs AS RESTRICTIVE FOR SELECT TO contractor
         "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN NOT NULL DEFAULT FALSE);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_public ON docs FOR SELECT USING (is_public = TRUE);
 CREATE POLICY docs_contractor ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (owner_id = current_user);
+  USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_auditor ON docs AS RESTRICTIVE FOR SELECT TO auditor
-  USING (owner_id = current_user);
+  USING (owner_id = current_setting('app.user_id'));
 "
         .to_string(),
     ]
@@ -724,7 +724,7 @@ fn the_denial_admits_nobody_and_nobody_reaches_nothing() {
         r"
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_read ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_read ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)

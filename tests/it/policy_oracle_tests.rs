@@ -91,7 +91,7 @@ const BIT_FLAG_SCHEMA: &str = "CREATE TABLE folders(id UUID PRIMARY KEY, owner_i
                                ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                                CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\
                                SELECT 1 FROM folders f WHERE f.id = docs.folder_id \
-                               AND (f.owner_id = current_user OR (f.bits & 2) = 2)));\n";
+                               AND (f.owner_id = current_setting('app.user_id', true) OR (f.bits & 2) = 2)));\n";
 
 /// A refusal sits two levels down here: the parent join is recognized, its parent-side
 /// rule is an `OR`, and only one branch of that `OR` is refused. A walk that knows only
@@ -458,7 +458,7 @@ fn oracle_indirect_memberships_cannot_bypass_key_and_scope_validation() {
             WHERE l.doc_tenant = docs.tenant AND l.doc_id = docs.id
             AND EXISTS (SELECT 1 FROM members m
                 WHERE m.owner_tenant = l.owner_tenant AND m.owner_id = l.owner_id
-                AND m.member = current_user AND m.expires_at > now())));"
+                AND m.member = current_setting('app.user_id', true) AND m.expires_at > now())));"
     ))
     .unwrap();
     let classified = translator().classify(&native);
