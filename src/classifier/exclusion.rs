@@ -455,9 +455,9 @@ fn column_proven_not_null<DB: DatabaseLike>(db: &DB, table: &TableId, column: &s
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
     use crate::parser::sql_parser::parse_schema;
+    use crate::test_support::caller;
 
     const TABLES: &str = "
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner TEXT NOT NULL);
@@ -467,12 +467,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ";
 
     fn registry() -> FunctionRegistry {
-        let mut registry = FunctionRegistry::new();
-        registry.declare_session_attributes(vec![SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )]);
-        registry
+        crate::test_support::registry([caller("app.user_id")])
     }
 
     /// `GLOBAL IN` is `ClickHouse` syntax that `PostgreSqlDialect` never parses, so the only

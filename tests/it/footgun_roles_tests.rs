@@ -406,7 +406,7 @@ CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE USING (reviewer_id = cu
 #[test]
 fn a_role_that_bypasses_row_level_security_is_reported() {
     let schema = "CREATE ROLE reporting BYPASSRLS;\n\
-                  CREATE ROLE app_user LOGIN;\n\
+                  CREATE ROLE plain_user LOGIN;\n\
                   CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   ALTER TABLE docs FORCE ROW LEVEL SECURITY;\n\
@@ -429,7 +429,7 @@ fn a_role_that_bypasses_row_level_security_is_reported() {
         "the report has to name the role: {exempt:?}"
     );
     assert!(
-        !exempt[0].contains("app_user"),
+        !exempt[0].contains("plain_user"),
         "a plain role is not exempt: {exempt:?}"
     );
     // The model still describes only the rules that do apply.

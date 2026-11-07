@@ -6,12 +6,13 @@
 //! binds every key column.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translation, TranslatorBuilder};
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::Translation;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RecordDerivation;
 use rls2fga::types::TranslationNote;
+
+use crate::support::deployment::{db, translator_builder};
 
 /// The control: one join column, classifies today.
 const ONE_COLUMN: &str = "
@@ -35,16 +36,12 @@ CREATE POLICY p2_p ON p2 FOR SELECT USING (
 ";
 
 fn parse(sql: &str) -> ParserDB {
-    parse_schema(sql).expect("schema parses")
+    db(sql)
 }
 
 fn translation(db: &ParserDB) -> Translation {
-    TranslatorBuilder::new()
+    translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
         .build()
         .translate(db)
         .expect("translation plans")

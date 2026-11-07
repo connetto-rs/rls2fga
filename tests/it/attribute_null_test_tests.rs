@@ -1,10 +1,10 @@
 //! A column tested for NULL is row data, so `team_id IS NULL` translates as `team_id = 'solo'` does.
 
-use rls2fga::translator::{Outputs, TranslatorBuilder};
+use rls2fga::translator::Outputs;
 use rls2fga::types::{records_from_row, ConfidenceLevel, RecordDerivation};
 use serde_json::json;
 
-use crate::support::footgun::{db_of, relation_definition};
+use crate::support::footgun::{db_of, relation_definition, translator};
 use crate::support::JsonRowValues;
 
 const PHOTO_ID: &str = "11111111-1111-1111-1111-111111111111";
@@ -17,10 +17,7 @@ fn outputs_for(policy: &str) -> Outputs {
          ALTER TABLE photos ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY photos_p ON photos {policy};\n"
     );
-    TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
-        .build()
+    translator(ConfidenceLevel::B)
         .translate(&db_of(&schema))
         .expect("translation should plan")
         .outputs()

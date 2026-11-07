@@ -8,6 +8,7 @@ use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
 
 use crate::support;
+use crate::support::deployment::{deployment, settings_from_json};
 
 use crate::support::footgun::{
     db_of, docs_read_definition, relation_definition, translator, type_names,
@@ -375,18 +376,16 @@ CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_u
     );
 }
 
-/// The model one schema translates to at `threshold`, with `attributes` declared.
+/// The model one schema translates to at `threshold`, with `settings` declared.
 fn model_at(
     sql: &str,
     registry_json: Option<&str>,
-    attributes: &str,
+    settings: &str,
     threshold: ConfidenceLevel,
 ) -> String {
-    let declared: Vec<rls2fga::classifier::function_registry::SessionAttribute> =
-        serde_json::from_str(attributes).expect("attribute json should parse");
-    let mut builder = rls2fga::translator::TranslatorBuilder::new()
-        .with_min_confidence(threshold)
-        .with_session_attributes(declared);
+    let mut builder =
+        rls2fga::translator::TranslatorBuilder::new(deployment(settings_from_json(settings)))
+            .with_min_confidence(threshold);
     if let Some(json) = registry_json {
         builder = builder
             .with_registry_json(json)
@@ -400,9 +399,9 @@ fn model_at(
         .model()
 }
 
-/// The model one schema translates to at threshold B, with `attributes` declared.
-fn model_with_attributes(sql: &str, registry_json: Option<&str>, attributes: &str) -> String {
-    model_at(sql, registry_json, attributes, ConfidenceLevel::B)
+/// The model one schema translates to at threshold B, with `settings` declared.
+fn model_with_settings(sql: &str, registry_json: Option<&str>, settings: &str) -> String {
+    model_at(sql, registry_json, settings, ConfidenceLevel::B)
 }
 
 /// `pg_dump` deparses every stored policy expression, so a literal argument
@@ -417,12 +416,12 @@ fn a_cast_role_literal_in_pg_has_role_classifies_as_the_plain_one() {
              CREATE POLICY docs_sel ON docs FOR SELECT USING ({using});\n"
         )
     };
-    let plain = model_with_attributes(
+    let plain = model_with_settings(
         &schema("pg_has_role(current_user, 'editor', 'MEMBER')"),
         None,
         "[]",
     );
-    let dumped = model_with_attributes(
+    let dumped = model_with_settings(
         &schema("pg_has_role(CURRENT_USER, 'editor'::name, 'MEMBER'::text)"),
         None,
         "[]",
@@ -451,10 +450,10 @@ fn an_any_array_list_classifies_as_the_in_list() {
         written_spelling,
         "(get_owner_role(auth_current_user_id(), owner_id) = ANY (ARRAY[2, 3, 4]))",
     );
-    let attributes = std::fs::read_to_string("tests/fixtures/role_in_list/session_attributes.json")
-        .expect("fixture attributes should be readable");
-    let plain = model_with_attributes(&written, Some(&registry), &attributes);
-    let dumped = model_with_attributes(&dumped_sql, Some(&registry), &attributes);
+    let settings = std::fs::read_to_string("tests/fixtures/role_in_list/deployment.json")
+        .expect("fixture deployment should be readable");
+    let plain = model_with_settings(&written, Some(&registry), &settings);
+    let dumped = model_with_settings(&dumped_sql, Some(&registry), &settings);
     assert!(
         !support::footgun::relation_denies(&plain, "ownables", "can_select"),
         "the written IN-list must translate, or this proves nothing:\n{plain}"
@@ -465,8 +464,7 @@ fn an_any_array_list_classifies_as_the_in_list() {
 /// `pg_dump` casts the setting key itself: `current_setting('app.tenant_id'::text)`.
 #[test]
 fn a_cast_setting_key_classifies_as_the_plain_one() {
-    let attributes =
-        r#"[{ "key": "app.tenant_id", "kind": "scalar_attribute", "identity_cast": "uuid" }]"#;
+    let settings = r#"[{ "setting": "app.tenant_id", "scalar": "uuid" }]"#;
     let schema = |using: &str| {
         format!(
             "CREATE TABLE documents(id UUID PRIMARY KEY, tenant_id UUID);\n\
@@ -474,15 +472,15 @@ fn a_cast_setting_key_classifies_as_the_plain_one() {
              CREATE POLICY documents_tenant ON documents USING ({using});\n"
         )
     };
-    let plain = model_with_attributes(
+    let plain = model_with_settings(
         &schema("tenant_id = current_setting('app.tenant_id')::uuid"),
         None,
-        attributes,
+        settings,
     );
-    let dumped = model_with_attributes(
+    let dumped = model_with_settings(
         &schema("tenant_id = (current_setting('app.tenant_id'::text))::uuid"),
         None,
-        attributes,
+        settings,
     );
     assert!(
         plain.contains("with when_"),
@@ -495,8 +493,7 @@ fn a_cast_setting_key_classifies_as_the_plain_one() {
 /// subquery: `current_setting('request.jwt.claims'::text)::jsonb -> 'teams'::text`.
 #[test]
 fn a_cast_claim_set_key_classifies_as_the_plain_one() {
-    let attributes =
-        r#"[{ "key": "request.jwt.claims", "path": ["teams"], "kind": "set_attribute" }]"#;
+    let settings = r#"[{ "setting": "request.jwt.claims", "field": ["teams"], "set": "text", "json_array": true }]"#;
     let schema = |using: &str| {
         format!(
             "CREATE TABLE documents(id UUID PRIMARY KEY, team_id TEXT);\n\
@@ -504,19 +501,19 @@ fn a_cast_claim_set_key_classifies_as_the_plain_one() {
              CREATE POLICY documents_team ON documents FOR SELECT USING ({using});\n"
         )
     };
-    let plain = model_with_attributes(
+    let plain = model_with_settings(
         &schema(
             "team_id IN (SELECT jsonb_array_elements_text(current_setting('request.jwt.claims')::jsonb -> 'teams'))",
         ),
         None,
-        attributes,
+        settings,
     );
-    let dumped = model_with_attributes(
+    let dumped = model_with_settings(
         &schema(
             "team_id IN ( SELECT jsonb_array_elements_text(((current_setting('request.jwt.claims'::text))::jsonb -> 'teams'::text)) AS jsonb_array_elements_text)",
         ),
         None,
-        attributes,
+        settings,
     );
     assert!(
         plain.contains("with when_"),
@@ -541,8 +538,8 @@ fn a_qualified_membership_spelling_keeps_the_scope_relation_name() {
                SELECT 1 FROM {members_ref} m WHERE m.doc_id = docs.id AND m.user_id = current_user));\n"
         )
     };
-    let plain = model_with_attributes(&schema("doc_members"), None, "[]");
-    let qualified = model_with_attributes(&schema("public.doc_members"), None, "[]");
+    let plain = model_with_settings(&schema("doc_members"), None, "[]");
+    let qualified = model_with_settings(&schema("public.doc_members"), None, "[]");
     assert!(
         plain.contains("read_scope_doc_members_"),
         "the guarded membership must mint a read scope, or this proves nothing:\n{plain}"
@@ -565,8 +562,8 @@ fn a_qualified_member_table_spelling_keeps_the_holder_type_name() {
                SELECT 1 FROM {staff_ref} WHERE user_id = current_user));\n"
         )
     };
-    let plain = model_with_attributes(&schema("staff"), None, "[]");
-    let qualified = model_with_attributes(&schema("public.staff"), None, "[]");
+    let plain = model_with_settings(&schema("staff"), None, "[]");
+    let qualified = model_with_settings(&schema("public.staff"), None, "[]");
     assert!(
         plain.contains("staff_holder_"),
         "the claimed base must force the disambiguating suffix, or this proves nothing:\n{plain}"
@@ -578,7 +575,7 @@ fn a_qualified_member_table_spelling_keeps_the_holder_type_name() {
 /// when a declared table claims the base.
 #[test]
 fn a_qualified_share_table_spelling_keeps_the_share_type_name() {
-    let attributes = r#"[{ "key": "app.subjects", "kind": "set_attribute" }]"#;
+    let settings = r#"[{ "setting": "app.subjects", "set": "text", "delimiter": "," }]"#;
     let schema = |shares_ref: &str| {
         format!(
             "CREATE TABLE shares_share(id UUID PRIMARY KEY);\n\
@@ -591,8 +588,8 @@ fn a_qualified_share_table_spelling_keeps_the_share_type_name() {
                AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))));\n"
         )
     };
-    let plain = model_with_attributes(&schema("shares"), None, attributes);
-    let qualified = model_with_attributes(&schema("public.shares"), None, attributes);
+    let plain = model_with_settings(&schema("shares"), None, settings);
+    let qualified = model_with_settings(&schema("public.shares"), None, settings);
     assert!(
         plain.contains("shares_share_"),
         "the claimed base must force the disambiguating suffix, or this proves nothing:\n{plain}"
@@ -600,11 +597,11 @@ fn a_qualified_share_table_spelling_keeps_the_share_type_name() {
     assert_eq!(plain, qualified, "one share table, one share type name");
 }
 
-/// `pg_dump` parenthesizes every conjunct. A parenthesized attribute guard must
+/// `pg_dump` parenthesizes every conjunct. A parenthesized setting guard must
 /// not classify differently from the bare one: both spellings carry a literal
 /// the row decides, which translates, so both must reach the same model.
 #[test]
-fn a_parenthesized_attribute_conjunct_classifies_as_the_bare_one() {
+fn a_parenthesized_setting_conjunct_classifies_as_the_bare_one() {
     let registry = std::fs::read_to_string("tests/fixtures/abac_status/function_registry.json")
         .expect("fixture registry should be readable");
     let schema = |using: &str| {
@@ -616,12 +613,12 @@ fn a_parenthesized_attribute_conjunct_classifies_as_the_bare_one() {
              CREATE POLICY ownables_update ON ownables FOR UPDATE USING ({using});\n"
         )
     };
-    let plain = model_with_attributes(
+    let plain = model_with_settings(
         &schema("get_owner_role(auth_current_user_id(), owner_id) >= 3 AND status = 'active'"),
         Some(&registry),
         "[]",
     );
-    let dumped = model_with_attributes(
+    let dumped = model_with_settings(
         &schema(
             "((get_owner_role(auth_current_user_id(), owner_id) >= 3) AND (status = 'active'::text))",
         ),
@@ -641,7 +638,7 @@ fn a_parenthesized_attribute_conjunct_classifies_as_the_bare_one() {
 /// The same pair with a literal IN-list guard: both spellings must reach the same
 /// model, and the dumped list spelling is `= ANY (ARRAY[...])` with cast elements.
 #[test]
-fn a_parenthesized_list_attribute_conjunct_classifies_as_the_bare_one() {
+fn a_parenthesized_list_setting_conjunct_classifies_as_the_bare_one() {
     let registry = std::fs::read_to_string("tests/fixtures/abac_status/function_registry.json")
         .expect("fixture registry should be readable");
     let schema = |using: &str| {

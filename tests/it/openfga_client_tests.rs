@@ -31,8 +31,8 @@ async fn a_written_model_is_the_model_the_server_answers_from() {
     let mut service = support::openfga::connect(grpc_port).await;
     let store_id = support::openfga::create_store(&mut service, "client-surface").await;
 
-    let db = rls2fga::parser::sql_parser::parse_schema(OWNERSHIP).expect("the schema parses");
-    let model = TranslatorBuilder::new()
+    let db = support::deployment::db(OWNERSHIP);
+    let model = TranslatorBuilder::new(support::deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
         .with_registry_json(ACCESSOR_REGISTRY)
         .expect("the registry parses")
@@ -104,8 +104,8 @@ async fn the_denial_cannot_be_lifted_by_writing_a_fact() {
     let container = support::containers::start_openfga().await;
     let grpc_port = container.get_host_port_ipv4(8081).await.unwrap();
 
-    let db = rls2fga::parser::sql_parser::parse_schema(OWNERSHIP).expect("the schema parses");
-    let outputs = TranslatorBuilder::new()
+    let db = support::deployment::db(OWNERSHIP);
+    let outputs = TranslatorBuilder::new(support::deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
         .with_registry_json(ACCESSOR_REGISTRY)
         .expect("the registry parses")
@@ -150,8 +150,8 @@ async fn the_reported_size_and_type_count_are_what_the_server_measures() {
     const SIZE: &str = "OPENFGA_MAX_AUTHORIZATION_MODEL_SIZE_IN_BYTES";
     const TYPES: &str = "OPENFGA_MAX_TYPES_PER_AUTHORIZATION_MODEL";
 
-    let db = rls2fga::parser::sql_parser::parse_schema(OWNERSHIP).expect("the schema parses");
-    let outputs = TranslatorBuilder::new()
+    let db = support::deployment::db(OWNERSHIP);
+    let outputs = TranslatorBuilder::new(support::deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
         .with_registry_json(ACCESSOR_REGISTRY)
         .expect("the registry parses")

@@ -1,15 +1,19 @@
-use rls2fga::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
+use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{
     CallerScalarEqualsConstant, ConstantInCallerSet, DirectOwnership, ExistsMembership,
     MembershipInCallerSet, PatternClass, RowValueEqualsCallerScalar, RowValueInCallerSet,
     UnclassifiedExpr,
 };
 use rls2fga::parser::function_analyzer::FunctionSemantic;
-use rls2fga::parser::sql_parser::parse_schema;
-use rls2fga::translator::TranslatorBuilder;
+use rls2fga::parser::sql_parser::{parse_schema, SessionSetting, SettingPresence, SettingValue};
+use rls2fga::translator::{PlanningError, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
+use sqlparser::ast::DataType;
+
+use crate::support::deployment::{
+    caller, caller_deployment_with, db, delimited, delimited_set, deployment, json_array,
+    json_setting, scalar, translator_builder, typed_caller, typed_scalar,
+};
 
 #[test]
 fn translator_builder_default_settings_reject_timezone_accessor_inference() {
@@ -22,7 +26,7 @@ CREATE FUNCTION wrong_user_id() RETURNS UUID
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = wrong_user_id());
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new().build();
+    let translator = translator_builder().build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -33,25 +37,25 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = wrong_user_id());
             &using.pattern,
             PatternClass::P3DirectOwnership(DirectOwnership { .. })
         ),
-        "timezone-based current_setting must not infer direct ownership by default, got: {:?}",
+        "timezone-based current_setting must not infer direct ownership, got: {:?}",
         using.pattern
     );
 }
 
+/// A wrapper whose whole body reads a setting the deployment declares as the caller is
+/// an accessor, whatever the setting is called.
 #[test]
-fn translator_builder_custom_current_setting_key_enables_schema_inference() {
+fn a_declared_caller_setting_enables_schema_inference() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE FUNCTION wrong_user_id() RETURNS UUID
+CREATE FUNCTION who() RETURNS UUID
   LANGUAGE sql STABLE
-  AS 'SELECT current_setting(''timezone'')';
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = wrong_user_id());
+  AS 'SELECT current_setting(''app.who'')';
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = who());
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["timezone"])
-        .build();
+    let translator = TranslatorBuilder::new(deployment([caller("app.who")])).build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -59,7 +63,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = wrong_user_id());
         .expect("expected USING classification");
     assert!(
         matches!(&using.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"),
-        "custom allowlist should infer direct ownership, got: {:?}",
+        "a declared caller setting should infer direct ownership, got: {:?}",
         using.pattern
     );
     assert_eq!(
@@ -80,7 +84,7 @@ CREATE FUNCTION listed_ids_accessor() RETURNS UUID[]
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = listed_ids_accessor());
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new().build();
+    let translator = translator_builder().build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -107,7 +111,7 @@ CREATE FUNCTION current_user_id() RETURNS UUID
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user_id());
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new().build();
+    let translator = translator_builder().build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -121,15 +125,14 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user_id());
 }
 
 #[test]
-fn translator_builder_registry_json_and_settings_work_together() {
+fn translator_builder_registry_json_and_deployment_work_together() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = oauth_token());
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["tenant.current_user_uuid"])
+    let translator = TranslatorBuilder::new(deployment([caller("tenant.current_user_uuid")]))
         .with_registry_json(
             r#"{
   "oauth_token": {"kind":"current_user_accessor","returns":"uuid"}
@@ -150,20 +153,18 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = oauth_token());
     assert_eq!(using.confidence, ConfidenceLevel::A);
 }
 
-/// A key names the caller wherever the call sits. Nothing forces a policy to route
-/// the read through a declared function, and a wrapper's return type says nothing
-/// about whether its value identifies the caller.
+/// A declared caller setting names the caller wherever the call sits. Nothing forces a
+/// policy to route the read through a declared function, and a wrapper's return type
+/// says nothing about whether its value identifies the caller.
 #[test]
-fn translator_builder_names_the_caller_from_an_inline_setting_key() {
+fn translator_builder_names_the_caller_from_an_inline_setting() {
     let sql = r"
 CREATE TABLE notes(id INTEGER PRIMARY KEY, owner TEXT);
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON notes FOR SELECT USING (owner = current_setting('app.user_id', true));
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["app.user_id"])
-        .build();
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id")])).build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -171,23 +172,23 @@ CREATE POLICY p ON notes FOR SELECT USING (owner = current_setting('app.user_id'
         .expect("expected USING classification");
     assert!(
         matches!(&using.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner"),
-        "a named key read inline should infer direct ownership, got: {:?}",
+        "a declared setting read inline should infer direct ownership, got: {:?}",
         using.pattern
     );
     assert_eq!(
         using.confidence,
         ConfidenceLevel::A,
-        "naming the key is the same statement a registered accessor makes",
+        "declaring the setting is the same statement a registered accessor makes",
     );
 }
 
-/// A wrapper resolves to the key it reads, so its body has to be that read and nothing
-/// else. With a `FROM` and a `WHERE` the function yields no row once the guard is gone,
-/// so it returns NULL and `PostgreSQL` hides every row, while resolving it to the key
-/// would grant every row the request's value matches.
+/// A wrapper resolves to the setting it reads, so its body has to be that read and
+/// nothing else. With a `FROM` and a `WHERE` the function yields no row once the guard is
+/// gone, so it returns NULL and `PostgreSQL` hides every row, while resolving it to the
+/// setting would grant every row the request's value matches.
 ///
 /// The caller identity half of this door is guarded by `is_direct_accessor_body`. This
-/// covers the declared attribute half, which reaches the key through `SettingReader`
+/// covers the declared value half, which reaches the setting through `SettingReader`
 /// instead and so never meets that guard.
 #[test]
 fn a_wrapper_whose_body_can_return_no_row_does_not_resolve_to_its_key() {
@@ -203,10 +204,7 @@ fn a_wrapper_whose_body_can_return_no_row_does_not_resolve_to_its_key() {
     fn classify(body: &str) -> PatternClass {
         declared(
             &schema(body),
-            vec![
-                SessionAttribute::setting("app.tenant_id", SessionAttributeKind::ScalarAttribute)
-                    .with_identity_cast("uuid"),
-            ],
+            vec![typed_scalar("app.tenant_id", DataType::Uuid)],
         )
         .remove(0)
         .1
@@ -243,7 +241,7 @@ fn an_accessor_body_that_can_return_no_row_does_not_name_the_caller() {
     }
     fn classify(body: &str) -> PatternClass {
         let db = parse_schema(&schema(body)).expect("schema should parse");
-        TranslatorBuilder::new().build().classify(&db)[0]
+        translator_builder().build().classify(&db)[0]
             .using_classification()
             .expect("expected USING classification")
             .pattern
@@ -264,7 +262,7 @@ fn an_accessor_body_that_can_return_no_row_does_not_name_the_caller() {
 }
 
 /// A helper naming the columns one translator classifies as owned, so a test asserting
-/// what is refused also asserts what is admitted under the same configuration.
+/// what is refused also asserts what is admitted under the same deployment.
 fn owned_columns(translator: &rls2fga::translator::Translator, sql: &str) -> Vec<String> {
     let db = parse_schema(sql).expect("schema should parse");
     let mut owned: Vec<String> = translator
@@ -281,52 +279,31 @@ fn owned_columns(translator: &rls2fga::translator::Translator, sql: &str) -> Vec
     owned
 }
 
-/// The keys are an allowlist, so a key nobody named stays unknown. Trusting every key
-/// would read a tenant identifier as a user and grant one tuple per tenant. The named
-/// key beside it is the control: refusing everything would satisfy the refusal alone.
+/// Only what the deployment declares is read, so a setting it does not declare names
+/// nobody. Trusting every setting would read a tenant identifier as a user and grant one
+/// tuple per tenant. The declared setting beside it is the control, since refusing
+/// everything would satisfy the refusal alone.
 #[test]
-fn translator_builder_does_not_name_the_caller_from_an_unnamed_setting_key() {
+fn translator_builder_does_not_name_the_caller_from_an_undeclared_setting() {
     let sql = r"
 CREATE TABLE rows_(id INTEGER PRIMARY KEY, tenant_id TEXT, owner_id TEXT);
 ALTER TABLE rows_ ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_tenant ON rows_ FOR SELECT USING (tenant_id = current_setting('app.tenant_id', true));
 CREATE POLICY p_owner ON rows_ FOR UPDATE USING (owner_id = current_setting('app.user_id', true));
 ";
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["app.user_id"])
-        .build();
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id")])).build();
 
     assert_eq!(
         owned_columns(&translator, sql),
         ["owner_id"],
-        "the named key names the caller and the unnamed one names nobody"
+        "the declared setting names the caller and the undeclared one names nobody"
     );
 }
 
-/// `request.jwt.claims` holds the whole token as one object, so its value is not an
-/// identity. It is reached through a `->> 'sub'` hop, which names the caller on its own.
-/// The key beside it is a built-in one, so the refusal is selective rather than total.
+/// Every recognizer asks one predicate who the caller is, so a declared setting reaches
+/// the membership subquery too.
 #[test]
-fn translator_builder_does_not_name_the_caller_from_the_default_claims_object() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, claims_id TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_claims ON docs FOR SELECT USING (claims_id = current_setting('request.jwt.claims', true));
-CREATE POLICY p_owner ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true));
-";
-    let translator = TranslatorBuilder::new().build();
-
-    assert_eq!(
-        owned_columns(&translator, sql),
-        ["owner_id"],
-        "a built-in key that holds an identity is the caller, the token object is not"
-    );
-}
-
-/// Every recognizer asks one predicate who the caller is, so a named key reaches the
-/// membership subquery too.
-#[test]
-fn translator_builder_names_the_caller_from_an_inline_key_inside_a_membership_subquery() {
+fn translator_builder_names_the_caller_from_an_inline_setting_inside_a_membership_subquery() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT);
@@ -337,9 +314,7 @@ CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
 ));
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["app.user_id"])
-        .build();
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id")])).build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -351,7 +326,7 @@ CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
             PatternClass::P4ExistsMembership(ExistsMembership { join_table, user_column, .. })
                 if join_table.name() == "doc_members" && user_column == "user_id"
         ),
-        "a named key read inline should carry the membership too, got: {:?}",
+        "a declared setting read inline should carry the membership too, got: {:?}",
         using.pattern
     );
 }
@@ -369,7 +344,7 @@ CREATE FUNCTION app_user_id() RETURNS TEXT
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = app_user_id());
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new().build();
+    let translator = translator_builder().build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -382,20 +357,19 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = app_user_id());
     );
 }
 
-/// A cast the deployment declares canonical changes the type, not who the value belongs
-/// to, so it must not decide whether the key was named. Undeclared, it can rename the
-/// caller and the clause is refused.
+/// A cast to the type the deployment declares the caller in changes the type, not who
+/// the value belongs to, so it must not decide whether the setting names the caller.
+/// Declared as text, the cast can rename the caller and the clause is refused.
 #[test]
-fn translator_builder_names_the_caller_from_a_declared_cast_inline_setting_key() {
+fn translator_builder_names_the_caller_through_a_cast_to_its_declared_type() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true)::uuid);
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let classify = |caller: SessionAttribute| {
-        TranslatorBuilder::new()
-            .with_session_attributes([caller])
+    let classify = |caller: SessionSetting| {
+        TranslatorBuilder::new(deployment([caller]))
             .build()
             .classify(&db)
             .remove(0)
@@ -403,12 +377,11 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
             .cloned()
             .expect("expected USING classification")
     };
-    let caller = || SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId);
 
-    let declared = classify(caller().with_identity_cast("uuid"));
+    let declared = classify(typed_caller("app.user_id", DataType::Uuid));
     assert!(
         matches!(&declared.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"),
-        "a declared cast key read inline should infer direct ownership, got: {:?}",
+        "a cast to the declared type should infer direct ownership, got: {:?}",
         declared.pattern
     );
     assert_eq!(
@@ -416,62 +389,59 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
         ConfidenceLevel::A,
         "a cast is not indirection",
     );
-    let undeclared = classify(caller());
+    let undeclared = classify(caller("app.user_id"));
     assert!(
         matches!(
             &undeclared.pattern,
             PatternClass::Unknown(UnclassifiedExpr { .. })
         ),
-        "an undeclared cast can rename the caller, got: {:?}",
+        "a cast to another type can rename the caller, got: {:?}",
         undeclared.pattern
     );
 }
 
-/// A login token holds the identity in a field, and no expression says which field that
-/// is, so naming the token's own key names nobody. The key holding just the subject is
-/// the spelling that works, and `PostgREST` sets it alongside the token.
+/// A login token holds the identity in a field, and only the deployment says which field
+/// that is. Declaring the whole token as the caller names none of its fields, and
+/// declaring the `sub` field names that field alone.
 #[test]
-fn translator_builder_reads_a_token_payload_only_through_the_subject_key() {
+fn a_token_names_the_caller_only_through_the_field_declared_as_the_caller() {
     let payload = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, tenant_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT
+CREATE POLICY p_owner ON docs FOR SELECT
   USING (owner_id = current_setting('request.jwt.claims', true)::json->>'sub');
+CREATE POLICY p_tenant ON docs FOR UPDATE
+  USING (tenant_id = current_setting('request.jwt.claims', true)::json->>'tenant');
 ";
-    let subject = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT
-  USING (owner_id = current_setting('request.jwt.claim.sub', true));
-";
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["request.jwt.claims", "request.jwt.claim.sub"])
-        .build();
-
+    let whole = TranslatorBuilder::new(deployment([caller("request.jwt.claims")])).build();
     assert!(
-        owned_columns(&translator, payload).is_empty(),
-        "a field of the token is not the token's value, so the key names nobody here"
+        owned_columns(&whole, payload).is_empty(),
+        "a field of the token is not the token's value"
     );
+
+    let field = TranslatorBuilder::new(deployment([json_setting(
+        "request.jwt.claims",
+        [(&["sub"], SettingValue::Caller(DataType::Text))],
+    )]))
+    .build();
     assert_eq!(
-        owned_columns(&translator, subject),
+        owned_columns(&field, payload),
         ["owner_id"],
-        "the key holding the subject names the caller"
+        "the field declared as the caller names the caller, its sibling does not"
     );
 }
 
-/// Which key names the caller is the caller's to say, so a key the crate ships no
-/// default for works the moment it is named.
+/// Which setting holds the caller is the deployment's to say, so any custom setting works
+/// the moment the deployment declares it.
 #[test]
-fn translator_builder_names_the_caller_from_any_key_it_is_given() {
+fn translator_builder_names_the_caller_from_any_setting_declared_as_the_caller() {
     let sql = r"
 CREATE TABLE rows_(id INTEGER PRIMARY KEY, tenant_id TEXT);
 ALTER TABLE rows_ ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON rows_ FOR SELECT USING (tenant_id = current_setting('app.tenant_id', true));
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["app.tenant_id"])
-        .build();
+    let translator = TranslatorBuilder::new(deployment([caller("app.tenant_id")])).build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -479,47 +449,22 @@ CREATE POLICY p ON rows_ FOR SELECT USING (tenant_id = current_setting('app.tena
         .expect("expected USING classification");
     assert!(
         matches!(&using.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "tenant_id"),
-        "the named key decides, whatever it is called, got: {:?}",
+        "the declared setting decides, whatever it is called, got: {:?}",
         using.pattern
     );
 }
 
-/// The built-in keys are the ones a schema is most likely to spell, so they have to
-/// reach an inline call with nothing configured.
-#[test]
-fn translator_builder_names_the_caller_from_a_built_in_key_with_no_configuration() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT
-  USING (owner_id = current_setting('app.current_user_id', true));
-";
-    let db = parse_schema(sql).expect("schema should parse");
-
-    let classified = TranslatorBuilder::new().build().classify(&db);
-    let using = classified[0]
-        .using_classification()
-        .expect("expected USING classification");
-    assert!(
-        matches!(&using.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"),
-        "a built-in key read inline should infer direct ownership, got: {:?}",
-        using.pattern
-    );
-}
-
-/// `PostgreSQL` folds a setting name when it looks it up, so two spellings of one key
+/// `PostgreSQL` folds a setting name when it looks it up, so two spellings of one setting
 /// name one setting and have to name one caller.
 #[test]
-fn translator_builder_folds_the_case_of_a_setting_key() {
+fn translator_builder_folds_the_case_of_a_setting_name() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('APP.User_Id', true));
 ";
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_current_user_setting_keys([" app.USER_ID "])
-        .build();
+    let translator = TranslatorBuilder::new(deployment([caller("app.USER_ID")])).build();
 
     let classified = translator.classify(&db);
     let using = classified[0]
@@ -529,42 +474,6 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('APP.User_I
         matches!(&using.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"),
         "one setting under two spellings is one caller, got: {:?}",
         using.pattern
-    );
-}
-
-/// A key named on the registry and a key named through the settings are two statements
-/// by the same caller, so both hold.
-#[test]
-fn translator_builder_keeps_a_key_the_base_registry_already_named() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_owner ON docs FOR SELECT USING (owner_id = current_setting('one.key', true));
-CREATE POLICY p_editor ON docs FOR UPDATE USING (editor_id = current_setting('other.key', true));
-";
-    let db = parse_schema(sql).expect("schema should parse");
-    let mut registry = FunctionRegistry::new();
-    registry.trust_current_user_setting_keys(["one.key"]);
-    let translator = TranslatorBuilder::new()
-        .with_registry(registry)
-        .with_current_user_setting_keys(["other.key"])
-        .build();
-
-    let classified = translator.classify(&db);
-    let mut owned: Vec<&str> = classified
-        .iter()
-        .filter_map(|policy| match policy.using_classification()?.pattern {
-            PatternClass::P3DirectOwnership(DirectOwnership { ref column }) => {
-                Some(column.as_str())
-            }
-            _ => None,
-        })
-        .collect();
-    owned.sort_unstable();
-    assert_eq!(
-        owned,
-        ["editor_id", "owner_id"],
-        "both keys name the caller: {classified:#?}"
     );
 }
 
@@ -585,12 +494,8 @@ CREATE POLICY p ON docs FOR SELECT USING (
             returns: "uuid".to_string(),
         },
     );
-    let classified = TranslatorBuilder::new()
+    let classified = TranslatorBuilder::new(deployment([scalar("app.tenant_id")]))
         .with_registry(registry)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.tenant_id",
-            SessionAttributeKind::ScalarAttribute,
-        )])
         .build()
         .classify(&db);
     let using = classified[0]
@@ -604,17 +509,40 @@ CREATE POLICY p ON docs FOR SELECT USING (
     ));
 }
 
-// ── The session attribute vocabulary ──────────────────────────────────
+/// The deployment names roles the schema has to declare, so a schema that does not is
+/// refused before anything is planned, naming the missing role.
+#[test]
+fn a_schema_without_the_deployments_roles_is_refused() {
+    let sql = "CREATE TABLE docs(id UUID PRIMARY KEY);";
+    let refused = translator_builder()
+        .build()
+        .translate(&parse_schema(sql).expect("schema should parse"))
+        .expect_err("the schema declares no role");
+    assert!(
+        matches!(refused, PlanningError::Deployment(_)),
+        "the refusal is the deployment's, got: {refused:?}"
+    );
+    assert!(
+        refused.to_string().contains("app_login"),
+        "the refusal names the login role first, got: {refused}"
+    );
 
-/// Every in-scope spelling, so one declaration list answers the whole inventory.
+    let translator = translator_builder().build();
+    assert_eq!(translator.deployment().login_role(), "app_login");
+    translator
+        .translate(&db(sql))
+        .expect("the same schema with the roles declared translates");
+}
+
+// ── The session setting vocabulary ──────────────────────────────────
+
+/// Every in-scope spelling, read for the suite's callers and `settings`.
 fn declared(
     sql: &str,
-    attributes: Vec<SessionAttribute>,
+    settings: Vec<SessionSetting>,
 ) -> Vec<(String, PatternClass, ConfidenceLevel)> {
     let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_session_attributes(attributes)
-        .build();
+    let translator = TranslatorBuilder::new(caller_deployment_with(settings)).build();
     translator
         .classify(&db)
         .into_iter()
@@ -652,13 +580,7 @@ CREATE POLICY p ON notes FOR SELECT USING (
     owner = ANY(string_to_array(current_setting('app.subjects', true), ','))
 );
 ";
-    let classified = declared(
-        sql,
-        vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )],
-    );
+    let classified = declared(sql, vec![delimited_set("app.subjects", ",")]);
     assert!(
         matches!(
             &classified[0].1,
@@ -667,6 +589,56 @@ CREATE POLICY p ON notes FOR SELECT USING (
         ),
         "a declared set holding the row's value is the whole grant, got {:?}",
         classified[0].1
+    );
+}
+
+/// The source a pattern carries is the deployment's declaration, what it holds and
+/// whether a request may leave it unset included.
+#[test]
+fn a_read_carries_the_declaration_it_resolved_to() {
+    let sql = r"
+CREATE TABLE notes(id INT PRIMARY KEY, owner TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON notes FOR SELECT USING (
+    owner = ANY(string_to_array(current_setting('app.subjects', true), ','))
+);
+";
+    let classified = declared(sql, vec![delimited_set("app.subjects", ",").may_be_unset()]);
+    let PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { source, .. }) = &classified[0].1
+    else {
+        panic!("a declared set, got {:?}", classified[0].1);
+    };
+    assert_eq!(source.value(), &delimited(","));
+    assert_eq!(source.presence(), SettingPresence::MayBeUnset);
+    assert_eq!(source.setting_key(), "app.subjects");
+    assert_eq!(source.path(), &[] as &[String]);
+}
+
+/// A set the policy splits on another delimiter than the deployment joins it with names
+/// elements no request sends, so the read is refused and the refusal names both
+/// delimiters.
+#[test]
+fn a_split_on_another_separator_than_declared_is_refused() {
+    let sql = r"
+CREATE TABLE notes(id INT PRIMARY KEY, owner TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON notes FOR SELECT USING (
+    owner = ANY(string_to_array(current_setting('app.subjects', true), ';'))
+);
+";
+    let classified = declared(sql, vec![delimited_set("app.subjects", ",")]);
+    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &classified[0].1 else {
+        panic!(
+            "a split on ';' of a set joined by ',' is refused, got {:?}",
+            classified[0].1
+        );
+    };
+    assert!(
+        reason.contains(
+            "current_setting('app.subjects') is split on ';' and the deployment declares it \
+             as a set joined by ',' of text"
+        ),
+        "the refusal names both delimiters, got: {reason}"
     );
 }
 
@@ -690,10 +662,9 @@ fn a_declared_set_inside_the_token_holds_the_rows_value() {
     ] {
         let classified = declared(
             &schema(&clause),
-            vec![SessionAttribute::claim(
+            vec![json_setting(
                 "request.jwt.claims",
-                ["teams"],
-                SessionAttributeKind::SetAttribute,
+                [(&["teams"], json_array())],
             )],
         );
         assert!(
@@ -734,13 +705,7 @@ fn a_set_returning_wrapper_over_a_declared_setting_holds_the_rows_value() {
         ("8b", "team_id IN (SELECT user_teams())"),
         ("8a", "team_id = ANY (ARRAY(SELECT user_teams()))"),
     ] {
-        let classified = declared(
-            &schema(clause),
-            vec![SessionAttribute::setting(
-                "app.teams",
-                SessionAttributeKind::SetAttribute,
-            )],
-        );
+        let classified = declared(&schema(clause), vec![delimited_set("app.teams", ",")]);
         assert!(
             matches!(
                 &classified[0].1,
@@ -764,13 +729,7 @@ CREATE TABLE documents(id UUID PRIMARY KEY, tenant_id UUID NOT NULL REFERENCES t
 ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON documents FOR SELECT USING (tenant_id = current_setting('app.tenant_id')::uuid);
 ";
-    let classified = declared(
-        sql,
-        vec![
-            SessionAttribute::setting("app.tenant_id", SessionAttributeKind::ScalarAttribute)
-                .with_identity_cast("uuid"),
-        ],
-    );
+    let classified = declared(sql, vec![typed_scalar("app.tenant_id", DataType::Uuid)]);
     assert!(
         matches!(
             &classified[0].1,
@@ -792,13 +751,7 @@ CREATE POLICY p ON audit_log FOR SELECT USING (
     'admin' = ANY(string_to_array(current_setting('app.roles', true), ','))
 );
 ";
-    let classified = declared(
-        sql,
-        vec![SessionAttribute::setting(
-            "app.roles",
-            SessionAttributeKind::SetAttribute,
-        )],
-    );
+    let classified = declared(sql, vec![delimited_set("app.roles", ",")]);
     assert!(
         matches!(
             &classified[0].1,
@@ -808,6 +761,14 @@ CREATE POLICY p ON audit_log FOR SELECT USING (
         "the request alone decides this grant, got {:?}",
         classified[0].1
     );
+}
+
+/// The token's `aal` field, declared as one text value.
+fn aal_claim() -> SessionSetting {
+    json_setting(
+        "request.jwt.claims",
+        [(&["aal"], SettingValue::Scalar(DataType::Text))],
+    )
 }
 
 /// A declared field of the caller's token reached through its helper function.
@@ -822,14 +783,7 @@ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON documents AS RESTRICTIVE FOR SELECT
     USING ((SELECT jwt() ->> 'aal') = 'aal2');
 ";
-    let classified = declared(
-        sql,
-        vec![SessionAttribute::claim(
-            "request.jwt.claims",
-            ["aal"],
-            SessionAttributeKind::ScalarAttribute,
-        )],
-    );
+    let classified = declared(sql, vec![aal_claim()]);
     assert!(
         matches!(
             &classified[0].1,
@@ -851,14 +805,7 @@ ALTER TABLE documents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON documents FOR SELECT
     USING (current_setting('request.jwt.claims')::jsonb ->> 'aal' = 'aal2');
 ";
-    let classified = declared(
-        sql,
-        vec![SessionAttribute::claim(
-            "request.jwt.claims",
-            ["aal"],
-            SessionAttributeKind::ScalarAttribute,
-        )],
-    );
+    let classified = declared(sql, vec![aal_claim()]);
     assert!(
         matches!(
             &classified[0].1,
@@ -869,7 +816,8 @@ CREATE POLICY p ON documents FOR SELECT
     );
 }
 
-/// An undeclared key stays unreadable, so the door opens only where a deployment said so.
+/// An undeclared setting stays unreadable, so the door opens only where a deployment said
+/// so.
 #[test]
 fn an_undeclared_key_still_yields_unknown() {
     let sql = r"
@@ -885,7 +833,7 @@ CREATE POLICY p ON notes FOR SELECT USING (
             &classified[0].1,
             PatternClass::Unknown(UnclassifiedExpr { .. })
         ),
-        "nothing named this key, so nothing may read it, got {:?}",
+        "nothing declared this setting, so nothing may read it, got {:?}",
         classified[0].1
     );
 }
@@ -895,13 +843,7 @@ CREATE POLICY p ON notes FOR SELECT USING (
 /// is a request-completed gate on the parent, keyed by the sharing row's parent column.
 #[test]
 fn a_declared_set_inside_a_membership_subquery_grants_through_the_parent() {
-    let classified = declared(
-        PAPER_SHARES,
-        vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )],
-    );
+    let classified = declared(PAPER_SHARES, vec![delimited_set("app.subjects", ",")]);
     assert!(
         matches!(
             &classified[0].1,
@@ -934,7 +876,7 @@ fn an_undeclared_set_inside_a_membership_subquery_yields_unknown() {
             &classified[0].1,
             PatternClass::Unknown(UnclassifiedExpr { .. })
         ),
-        "nothing named this key, so nothing may read it, got {:?}",
+        "nothing declared this setting, so nothing may read it, got {:?}",
         classified[0].1
     );
 }
@@ -956,13 +898,7 @@ CREATE POLICY p ON papers FOR SELECT USING (
     )
 );
 ";
-    let classified = declared(
-        sql,
-        vec![SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )],
-    );
+    let classified = declared(sql, vec![delimited_set("app.subjects", ",")]);
     assert!(
         matches!(
             &classified[0].1,
@@ -1026,10 +962,9 @@ CREATE POLICY p ON docs FOR SELECT USING (approved_at IS NOT NULL AND auth.uid()
     );
 }
 
-/// The subject key `PostgREST` sets, declared to arrive as a canonical `uuid`.
-fn claim_sub_declared_uuid() -> SessionAttribute {
-    SessionAttribute::setting("request.jwt.claim.sub", SessionAttributeKind::CallerId)
-        .with_identity_cast("uuid")
+/// The subject setting `PostgREST` sets, declared to hold a `uuid`.
+fn claim_sub_declared_uuid() -> SessionSetting {
+    typed_caller("request.jwt.claim.sub", DataType::Uuid)
 }
 
 /// The output types serialize and come back equal, so a consumer can store a
@@ -1044,16 +979,11 @@ CREATE FUNCTION auth_uid() RETURNS UUID LANGUAGE sql STABLE
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = auth_uid());
 ";
-    let db = parse_schema(sql).expect("schema should parse");
-    let translation = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("uuid")])
-        .build()
-        .translate(&db)
-        .expect("translation should plan");
+    let translation =
+        TranslatorBuilder::new(deployment([typed_caller("app.user_id", DataType::Uuid)]))
+            .build()
+            .translate(&db(sql))
+            .expect("translation should plan");
 
     let notes = translation.notes().to_vec();
     let json = serde_json::to_string(&notes).expect("notes serialize");
@@ -1074,32 +1004,13 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = auth_uid());
 }
 
 #[test]
-fn invalid_custom_condition_parameter_names_are_rejected_by_json() {
-    for name in ["", "tenant-id", "1tenant"] {
-        let json = serde_json::json!({
-            "key": "app.tenant_id",
-            "kind": "scalar_attribute",
-            "parameter": name,
-        });
-        let parsed = serde_json::from_value::<SessionAttribute>(json);
-        assert!(parsed.is_err(), "{name:?} is not a CEL identifier");
-    }
-}
-
-#[test]
-fn custom_condition_parameter_builders_reject_invalid_names() {
+fn the_request_time_parameter_rejects_names_cel_cannot_read() {
     for name in ["", "tenant-id", "1tenant", "in"] {
         assert!(
-            TranslatorBuilder::new()
+            translator_builder()
                 .with_request_time_parameter(name)
                 .is_err(),
             "{name:?} must be rejected for request time"
-        );
-        assert!(
-            SessionAttribute::setting("app.tenant_id", SessionAttributeKind::ScalarAttribute)
-                .with_parameter(name)
-                .is_err(),
-            "{name:?} must be rejected for session attributes"
         );
     }
 }

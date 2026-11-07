@@ -30,14 +30,16 @@ fn outputs_for(schema: &str, using: &str) -> (String, String, String) {
         "{schema}\nALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY p ON docs FOR SELECT USING ({using});"
     );
-    let db: ParserDB = parse_schema(&sql).expect("the schema should parse");
-    let outputs = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id", "app.subjects"])
-        .build()
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let db = support::deployment::db(&sql);
+    let outputs = TranslatorBuilder::new(support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+        support::deployment::caller("app.subjects"),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps();
     (
         outputs.model(),
         format_tuples(outputs.tuple_queries()),
@@ -87,7 +89,10 @@ fn a_membership_term_never_compiles_against_an_absent_inner_column() {
     )
     .expect("the schema should parse");
     let mut registry = FunctionRegistry::new();
-    registry.trust_current_user_setting_keys(["app.user_id"]);
+    registry.enrich_from_schema(
+        &db,
+        &support::deployment::deployment([support::deployment::caller("app.user_id")]),
+    );
 
     let term = parse_expr(&format!(
         "project_id IN (SELECT id FROM projects WHERE nonexistent = {CALLER})"
@@ -153,14 +158,15 @@ fn a_column_borrowed_from_a_joined_relation_is_refused() {
              order_id IN (SELECT o.id FROM orders o JOIN customers c ON o.customer_id = c.id
                           WHERE c.id = {CALLER}));"
     );
-    let db: ParserDB = parse_schema(&sql).expect("the schema should parse");
-    let outputs = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
-        .build()
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let db = support::deployment::db(&sql);
+    let outputs = TranslatorBuilder::new(support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps();
     let tuples = format_tuples(outputs.tuple_queries());
 
     assert!(

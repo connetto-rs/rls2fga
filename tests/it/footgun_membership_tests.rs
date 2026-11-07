@@ -3,16 +3,15 @@
 //!
 //! Membership through a join table, and the holder a row-independent grant gets.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::classifier::patterns::{ExistsMembership, PatternClass};
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::sql_parser::parse_schema;
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationShapes;
 use rls2fga::types::TranslationNote;
 use rls2fga::types::{RecordDerivation, ValueSource};
 
+use crate::support::deployment::{caller, delimited_set, deployment};
 use crate::support::footgun::{
     can_delete_walk, db_of, membership_translation, pg_role_relation, relation_definition,
     relation_definitions, relation_denies, scope_admits_role, translation, translator,
@@ -889,16 +888,15 @@ CREATE POLICY docs_read ON docs FOR SELECT USING (
               AND m.user_id = current_setting('app.user_id', true)));
 "
     ));
-    TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.bot_list", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
+    TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        delimited_set("app.bot_list", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps()
 }
 
 #[test]
@@ -1079,14 +1077,10 @@ CREATE POLICY p ON docs FOR SELECT USING (
     );
 }
 
-fn session_attr_plan(sql: &str) -> rls2fga::translator::Outputs {
-    let db = parse_schema(sql).expect("schema should parse");
-    let translator = TranslatorBuilder::new()
-        .with_session_attributes([SessionAttribute::setting(
-            "app.subjects",
-            SessionAttributeKind::SetAttribute,
-        )])
-        .build();
+fn session_setting_plan(sql: &str) -> rls2fga::translator::Outputs {
+    let db = db_of(sql);
+    let translator =
+        TranslatorBuilder::new(deployment([delimited_set("app.subjects", ",")])).build();
     let (classified, registry) = translator.classify_with_effective_registry(&db);
     plan_at(classified, &db, &registry, ConfidenceLevel::B)
 }
@@ -1111,7 +1105,7 @@ CREATE POLICY papers_shared ON papers FOR SELECT USING (
     )
 );
 ";
-    let outputs = session_attr_plan(sql);
+    let outputs = session_setting_plan(sql);
     let model = outputs.model();
 
     assert!(
@@ -1156,7 +1150,7 @@ CREATE POLICY papers_p ON papers FOR SELECT USING (
     )
 );
 ";
-    let outputs = session_attr_plan(sql);
+    let outputs = session_setting_plan(sql);
     let model = outputs.model();
 
     assert!(
@@ -1203,9 +1197,8 @@ ALTER TABLE line_items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON line_items FOR SELECT USING ({using});
 "
     ));
-    TranslatorBuilder::new()
+    TranslatorBuilder::new(deployment([caller("app.user_id")]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
         .build()
         .translate(&db)
         .expect("translation should plan")
@@ -1274,7 +1267,7 @@ CREATE POLICY items_p ON items FOR SELECT USING (
           WHERE team_members.team_id = items.team_id
             AND team_members.member = ANY(string_to_array(current_setting('app.subjects', true), ','))));
 ";
-    let outputs = session_attr_plan(SCHEMA);
+    let outputs = session_setting_plan(SCHEMA);
     let model = outputs.model();
     assert!(
         !outputs
@@ -1340,10 +1333,10 @@ CREATE POLICY items_p ON items FOR SELECT USING (
   EXISTS (SELECT 1 FROM team_members
           WHERE team_members.team_id = items.team_id
             AND team_members.member ";
-    let array_valued = session_attr_plan(&format!(
+    let array_valued = session_setting_plan(&format!(
         "{SCHEMA}= ANY(string_to_array(current_setting('app.subjects', true), ','))));"
     ));
-    let row_valued = session_attr_plan(&format!(
+    let row_valued = session_setting_plan(&format!(
         "{SCHEMA}IN (SELECT unnest(string_to_array(current_setting('app.subjects', true), ',')))));"
     ));
     assert_eq!(
@@ -1387,7 +1380,7 @@ CREATE POLICY items_p ON items FOR SELECT USING (
             "IN (SELECT unnest(string_to_array(current_setting('app.subjects', true), ',')) WHERE false)",
         ),
     ] {
-        let outputs = session_attr_plan(&format!("{SCHEMA}{comparison}));"));
+        let outputs = session_setting_plan(&format!("{SCHEMA}{comparison}));"));
         let model = outputs.model();
         assert!(
             !model.contains("_share"),
@@ -1437,16 +1430,15 @@ ALTER TABLE items ENABLE ROW LEVEL SECURITY;
         let db = db_of(&format!(
             "{SCHEMA}CREATE POLICY items_p ON items FOR SELECT USING ({using});"
         ));
-        let outputs = TranslatorBuilder::new()
-            .with_min_confidence(ConfidenceLevel::B)
-            .with_session_attributes([
-                SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-                SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-            ])
-            .build()
-            .translate(&db)
-            .expect("translation should plan")
-            .outputs_accepting_gaps();
+        let outputs = TranslatorBuilder::new(deployment([
+            caller("app.user_id"),
+            delimited_set("app.subjects", ","),
+        ]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .build()
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
         assert!(
             relation_denies(&outputs.model(), "items", "can_select"),
             "{label}: neither comparison alone is the policy, so the shape falls closed:\n{}",
@@ -1460,7 +1452,7 @@ ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 /// through. The caller-set spelling takes the same route.
 #[test]
 fn a_request_gate_correlated_on_a_non_key_column_groups_rows_by_the_shared_value() {
-    let outputs = session_attr_plan(
+    let outputs = session_setting_plan(
         "CREATE TABLE papers(id INT PRIMARY KEY, batch TEXT);
 CREATE TABLE shares(id INT PRIMARY KEY, paper_batch TEXT, viewer TEXT);
 ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
@@ -1491,7 +1483,7 @@ CREATE POLICY p ON papers FOR SELECT USING (EXISTS (
 /// bridge from the row to its share rows reads both columns.
 #[test]
 fn a_request_gate_bridged_on_a_composite_key_reads_the_whole_key() {
-    let outputs = session_attr_plan(
+    let outputs = session_setting_plan(
         "CREATE TABLE papers(tenant_id INT NOT NULL, id INT NOT NULL, PRIMARY KEY(tenant_id, id));
 CREATE TABLE shares(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT NULL,
     PRIMARY KEY(tenant_id, paper_id, viewer));
@@ -1660,17 +1652,16 @@ CREATE POLICY resources_delete ON resources FOR DELETE USING (
 #[test]
 fn a_witness_link_and_a_caller_set_gate_do_not_share_a_tupleset() {
     let db = db_of(TWO_MEMBERSHIP_COLUMNS_SCHEMA);
-    let dsl = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::A)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .model();
+    let dsl = TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        delimited_set("app.subjects", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::A)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps()
+    .model();
     let share_links: Vec<_> = relation_definitions(&dsl, "owners")
         .into_iter()
         .filter(|(_, body)| body.starts_with('[') && body.contains("_share"))
@@ -1703,12 +1694,8 @@ CREATE POLICY docs_delete ON docs FOR DELETE USING (
     AND m.user_id = current_setting('app.user_id', true) AND m.expires_at > now()));
 ",
     );
-    let dsl = TranslatorBuilder::new()
+    let dsl = TranslatorBuilder::new(deployment([caller("app.user_id")]))
         .with_min_confidence(ConfidenceLevel::A)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )])
         .build()
         .translate(&db)
         .expect("translation should plan")

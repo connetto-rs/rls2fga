@@ -23,7 +23,7 @@ use crate::no_std_prelude::*;
 
 use sqlparser::ast::Expr;
 
-use crate::classifier::function_registry::{FunctionRegistry, SessionAttribute};
+use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     filter_policies_for_output, AbacAnd, ClassifiedExpr, ClassifiedPolicy, Composite,
     ConfidenceLevel, ExpandedFunction, MembershipExclusion, MembershipInCallerSet,
@@ -104,7 +104,7 @@ pub enum TermCaller {
     /// subject is any element of it.
     Subjects {
         /// The declaration the filter reads the set from.
-        source: SessionAttribute,
+        source: DeclaredSource,
         /// Separator the filter splits the setting on, absent where the source is
         /// already a list.
         separator: Option<String>,

@@ -5,9 +5,9 @@ use std::path::Path;
 
 use alloc::sync::Arc;
 
-use crate::classifier::function_registry::{FunctionRegistry, RegistryLoadError, SessionAttribute};
+use crate::classifier::function_registry::{FunctionRegistry, RegistryLoadError};
 use crate::classifier::patterns::{ClassifiedPolicy, ConfidenceLevel};
-use crate::classifier::policy_classifier::classify_policies_with_effective_registry_and_settings;
+use crate::classifier::policy_classifier::classify_policies_with_effective_registry;
 use crate::clock::{ClockContextError, ClockParameter};
 use crate::generator::action_relations::action_relations;
 use crate::generator::json_model::{json_model_from_plan, AuthorizationModel};
@@ -26,8 +26,7 @@ use crate::generator::well_known::WellKnownTypes;
 #[cfg(feature = "std")]
 use crate::output::formatter::{write_output, WriteError};
 use crate::output::report::build_report;
-use crate::parser::function_analyzer::AccessorInferenceSettings;
-use crate::parser::sql_parser::DatabaseLike;
+use crate::parser::sql_parser::{DatabaseLike, Deployment};
 use crate::types::{
     ActionRelations, NoteSeverity, Record, RelationShapes, RowNaming, TranslationNote,
 };
@@ -40,17 +39,26 @@ pub use crate::generator::model_generator::PlanningError;
 /// Builder for a [`Translator`].
 #[derive(Debug, Clone)]
 pub struct TranslatorBuilder {
+    deployment: Deployment,
     registry: FunctionRegistry,
-    settings: AccessorInferenceSettings,
     min_confidence: ConfidenceLevel,
     generator: GeneratorSettings,
 }
 
 impl TranslatorBuilder {
-    /// Create a new translator builder with default settings.
+    /// A builder translating for `deployment`, the roles its requests run as and the
+    /// session settings its policies may read.
+    ///
+    /// Every caller identity, value and set a policy reads comes from the deployment's
+    /// settings, and a setting it does not declare is refused wherever a policy reads it.
     #[must_use]
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(deployment: Deployment) -> Self {
+        Self {
+            deployment,
+            registry: FunctionRegistry::new(),
+            generator: GeneratorSettings::default(),
+            min_confidence: ConfidenceLevel::B,
+        }
     }
 
     /// Name the condition parameter a caller supplies for a guard against statement
@@ -92,41 +100,6 @@ impl TranslatorBuilder {
         Ok(self)
     }
 
-    /// Replace the `current_setting` keys this builder names as holding the caller's
-    /// identity. A key the base registry already names is kept.
-    ///
-    /// A call reading one names the caller wherever it appears: inline in a policy, or
-    /// as the whole body of a function the policy calls.
-    #[must_use]
-    pub fn with_current_user_setting_keys<I, S>(mut self, keys: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.settings = AccessorInferenceSettings::from_keys(keys);
-        self
-    }
-
-    /// Declare the request-scoped values a policy may read, of any kind.
-    ///
-    /// A source is a `current_setting` key, optionally with a field path taken out of
-    /// the value at that key. Declaring one is a contract with the caller: the condition
-    /// parameter it names has to be supplied in every check context.
-    #[must_use]
-    pub fn with_session_attributes<I>(mut self, attributes: I) -> Self
-    where
-        I: IntoIterator<Item = SessionAttribute>,
-    {
-        self.settings = AccessorInferenceSettings::from_attributes(
-            self.settings
-                .session_attributes()
-                .iter()
-                .cloned()
-                .chain(attributes),
-        );
-        self
-    }
-
     /// Declare `SECURITY DEFINER` helpers a policy may compare a column with, named as a
     /// call spells them (`authz.projects_with`).
     ///
@@ -160,21 +133,10 @@ impl TranslatorBuilder {
     /// Build the translator.
     pub fn build(self) -> Translator {
         Translator {
+            deployment: self.deployment,
             registry: self.registry,
-            settings: self.settings,
             min_confidence: self.min_confidence,
             generator: self.generator,
-        }
-    }
-}
-
-impl Default for TranslatorBuilder {
-    fn default() -> Self {
-        Self {
-            registry: FunctionRegistry::new(),
-            settings: AccessorInferenceSettings::default(),
-            generator: GeneratorSettings::default(),
-            min_confidence: ConfidenceLevel::B,
         }
     }
 }
@@ -182,14 +144,14 @@ impl Default for TranslatorBuilder {
 /// High-level classification and translation facade.
 #[derive(Debug, Clone)]
 pub struct Translator {
+    deployment: Deployment,
     registry: FunctionRegistry,
-    settings: AccessorInferenceSettings,
     min_confidence: ConfidenceLevel,
     generator: GeneratorSettings,
 }
 
 impl Translator {
-    /// Classify policies using the configured settings.
+    /// Classify policies for the configured deployment.
     pub fn classify<DB: DatabaseLike>(&self, db: &DB) -> Vec<ClassifiedPolicy> {
         self.classify_with_effective_registry(db).0
     }
@@ -199,13 +161,19 @@ impl Translator {
         &self,
         db: &DB,
     ) -> (Vec<ClassifiedPolicy>, FunctionRegistry) {
-        classify_policies_with_effective_registry_and_settings(db, &self.registry, &self.settings)
+        classify_policies_with_effective_registry(db, &self.registry, &self.deployment)
     }
 
     /// Plan a translation of `db`.
     ///
     /// Classification, planning, tuple queries, and relation shapes are each derived once.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PlanningError::Deployment`] when `db` does not declare a role the
+    /// deployment names, and any other [`PlanningError`] planning raises.
     pub fn translate<DB: DatabaseLike>(&self, db: &DB) -> Result<Translation, PlanningError> {
+        self.deployment.resolve(db)?;
         let (classified, effective_registry) = self.classify_with_effective_registry(db);
         Translation::plan(
             classified,
@@ -221,9 +189,9 @@ impl Translator {
         &self.registry
     }
 
-    /// Read-only access to accessor inference settings.
-    pub fn settings(&self) -> &AccessorInferenceSettings {
-        &self.settings
+    /// The deployment the translator reads every schema for.
+    pub fn deployment(&self) -> &Deployment {
+        &self.deployment
     }
 
     /// Configured minimum confidence for output generation.
@@ -274,6 +242,11 @@ pub struct Translation {
 impl Translation {
     /// Plan a translation from policies already classified, which is how an oracle's
     /// answers reach the generators.
+    ///
+    /// `registry` is the one the classification returned
+    /// ([`Translator::classify_with_effective_registry`]), since it carries the
+    /// deployment's settings and the semantics read from the schema, which planning reads
+    /// again for every membership table a policy reads.
     pub fn plan<DB: DatabaseLike>(
         policies: Vec<ClassifiedPolicy>,
         db: &DB,
@@ -382,19 +355,22 @@ impl Translation {
     /// month window answers as `PostgreSQL` does only in that zone.
     ///
     /// ```
-    /// use rls2fga::parser::sql_parser::parse_schema;
+    /// use rls2fga::parser::sql_parser::{parse_schema, Deployment};
     /// use rls2fga::translator::TranslatorBuilder;
     /// use rls2fga::types::ConfidenceLevel;
     /// use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
     ///
     /// let db = parse_schema(
-    ///     "CREATE TABLE docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);
+    ///     "CREATE ROLE authenticator LOGIN;
+    ///      CREATE ROLE web_user;
+    ///      CREATE TABLE docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);
     ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     ///      CREATE POLICY docs_sel ON docs FOR SELECT
     ///          USING (expires_at > now() - interval '1 day');",
     /// )
     /// .unwrap();
-    /// let translation = TranslatorBuilder::new()
+    /// let deployment = Deployment::new("authenticator", ["web_user"], []).unwrap();
+    /// let translation = TranslatorBuilder::new(deployment)
     ///     .with_min_confidence(ConfidenceLevel::B)
     ///     .build()
     ///     .translate(&db)
@@ -621,10 +597,15 @@ mod tests {
     #[test]
     fn column_bound_discovery_runs_once_per_output_derivation() {
         for source_count in [1, 8, 32] {
-            let db = parse_schema(&schema_with_sources(source_count)).expect("schema parses");
+            let schema = format!(
+                "{}{}",
+                crate::test_support::ROLES_SQL,
+                schema_with_sources(source_count)
+            );
+            let db = parse_schema(&schema).expect("schema parses");
             reset_unbounded_columns_resolutions();
 
-            let translation = TranslatorBuilder::new()
+            let translation = TranslatorBuilder::new(crate::test_support::caller_deployment())
                 .build()
                 .translate(&db)
                 .expect("translation plans");

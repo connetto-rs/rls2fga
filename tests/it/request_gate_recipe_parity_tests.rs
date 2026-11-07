@@ -13,15 +13,11 @@ use rls2fga::types::{
 
 use crate::support;
 
+use crate::support::deployment;
 use crate::support::parity::{
     assert_agrees, assert_postgres, request_predicate_holds, Cluster, ParityCase, Principal,
 };
 use crate::support::JsonRowValues;
-
-const ATTRIBUTES: &str = r#"[
-    { "key": "app.user_id", "kind": "caller_id" },
-    { "key": "app.bot_list", "kind": "set_attribute" }
-]"#;
 
 /// The four gates connetto puts on every synced table, one per command.
 fn gates(table: &str) -> String {
@@ -203,10 +199,12 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
         ],
         callers(),
     )
-    .with_attributes(ATTRIBUTES);
+    .with_settings([deployment::delimited_set("app.bot_list", ",")]);
 
-    let (classified, db, registry) =
-        support::classify_sql_with_session_attributes(&schema, ATTRIBUTES);
+    let (classified, db, registry) = support::classify_sql_with_settings(
+        &schema,
+        [deployment::delimited_set("app.bot_list", ",")],
+    );
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let translation = planned.translation();
     let rows = rows();

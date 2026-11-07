@@ -39,8 +39,10 @@ use rls2fga::types::identity::MAX_OBJECT_NAME_CHARS;
 ///    membership table is outside the class, and the translation says so.
 pub(crate) const PRECONDITIONS: usize = 8;
 
-/// The request-scoped values every admitted case declares, satisfying precondition 6.
-pub(crate) const DECLARED_KEY: &str = r#"[{ "key": "app.who", "kind": "caller_id" }]"#;
+/// The setting every admitted case declares as the caller, satisfying precondition 6.
+pub(crate) fn declared_key() -> rls2fga::parser::sql_parser::SessionSetting {
+    super::deployment::caller("app.who")
+}
 
 /// The type a key column carries, which decides how an object name is spelled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

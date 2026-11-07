@@ -115,7 +115,7 @@ impl CastChain {
 
 /// A cast's target type as a declaration names it: lower case, without the
 /// `pg_catalog` schema every built-in type lives in.
-fn cast_type_name(data_type: &DataType) -> String {
+pub(crate) fn cast_type_name(data_type: &DataType) -> String {
     let rendered = data_type.to_string().to_ascii_lowercase();
     match rendered.strip_prefix("pg_catalog.") {
         Some(unqualified) => unqualified.to_string(),

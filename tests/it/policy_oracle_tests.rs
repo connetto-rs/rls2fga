@@ -1,6 +1,6 @@
 //! The seam a consumer uses to classify what this crate refuses.
 
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
+use rls2fga::classifier::function_registry::DeclaredSource;
 use rls2fga::classifier::oracle::{
     consult_oracle, OracleAnswer, PolicyClause, PolicyOracle, RefusedExpr,
 };
@@ -51,7 +51,7 @@ struct Silent;
 impl PolicyOracle for Silent {}
 
 fn translator() -> Translator {
-    TranslatorBuilder::new()
+    support::deployment::translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
         .build()
 }
@@ -326,6 +326,32 @@ fn an_answered_pattern_emits_what_the_crate_emits_for_it() {
     );
 }
 
+/// The source a deployment declares for `app.subjects`. A deployment is the only thing
+/// that builds one, so it is borrowed from the pattern the recognizer recognizes for
+/// that declaration.
+fn subjects_source() -> DeclaredSource {
+    let sql = "CREATE TABLE papers(id INT PRIMARY KEY);\n\
+               CREATE TABLE shares(id INT PRIMARY KEY, paper_id INT REFERENCES papers(id), viewer TEXT);\n\
+               ALTER TABLE papers ENABLE ROW LEVEL SECURITY;\n\
+               CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (\n\
+               SELECT 1 FROM shares s WHERE s.paper_id = papers.id\n\
+               AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))));\n";
+    let db = parse_schema(sql).expect("schema parses");
+    let classified = TranslatorBuilder::new(support::deployment::caller_deployment_with([
+        support::deployment::delimited_set("app.subjects", ","),
+    ]))
+    .build()
+    .classify(&db);
+    let PatternClass::P18MembershipInCallerSet(membership) = &classified[0]
+        .using_classification()
+        .expect("the policy classifies")
+        .pattern
+    else {
+        panic!("the recognized membership carries the declared source");
+    };
+    membership.source.clone()
+}
+
 /// Answers the bit test with a caller-set membership whose two pairs match no key of
 /// either table, which the recognizer would never have produced.
 struct UnkeyedShare;
@@ -348,10 +374,7 @@ impl PolicyOracle for UnkeyedShare {
                     extra_predicates: ResidualPredicates::default(),
                 },
                 separator: Some(",".to_string()),
-                source: SessionAttribute::setting(
-                    "app.subjects",
-                    SessionAttributeKind::SetAttribute,
-                ),
+                source: subjects_source(),
             }),
             confidence: ConfidenceLevel::A,
         }))

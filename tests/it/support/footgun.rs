@@ -6,19 +6,21 @@
 use rls2fga::classifier::patterns::{PatternClass, UnclassifiedExpr};
 use rls2fga::generator::tuple_generator::{format_tuples, TupleQuery};
 use rls2fga::generator::well_known::{NOBODY_TYPE, USER_TYPE};
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translator, TranslatorBuilder};
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::Translator;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RecordDerivation;
 use rls2fga::types::RelationName;
 use rls2fga::types::TranslationNote;
 
+use super::deployment;
+
 pub(crate) fn db_of(sql: &str) -> ParserDB {
-    parse_schema(sql).expect("schema should parse")
+    deployment::db(sql)
 }
 
 pub(crate) fn translator(min_confidence: ConfidenceLevel) -> Translator {
-    TranslatorBuilder::new()
+    deployment::translator_builder()
         .with_min_confidence(min_confidence)
         .build()
 }

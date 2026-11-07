@@ -22,8 +22,12 @@ fn fixture_model_and_tuples(
     confidence: ConfidenceLevel,
 ) {
     let db = support::parse_fixture_db(fixture);
-    let classified = policy_classifier::classify_policies(&db, registry);
-    let outputs = support::plan_at(classified, &db, registry, confidence);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        registry,
+        &support::deployment::fixture_deployment(fixture),
+    );
+    let outputs = support::plan_at(classified, &db, &registry, confidence);
     insta::assert_snapshot!(format!("generate_{fixture}_model"), outputs.model().trim());
     insta::assert_snapshot!(
         format!("generate_{fixture}_tuples"),
@@ -42,7 +46,11 @@ fn generate_emi_model() {
 fn generate_emi_tuples() {
     let db = support::parse_fixture_db("earth_metabolome");
     let registry = support::load_fixture_registry("earth_metabolome");
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("earth_metabolome"),
+    );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
     insta::assert_snapshot!(tuple_generator::format_tuples(tuples));
@@ -68,7 +76,11 @@ fn generate_simple_ownership_model() {
         },
     );
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("simple_ownership"),
+    );
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     insta::assert_snapshot!(model.model().trim());
 }
@@ -78,7 +90,11 @@ fn generate_public_flag_model() {
     let db = support::parse_fixture_db("public_flag");
     let registry = FunctionRegistry::new();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("public_flag"),
+    );
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     insta::assert_snapshot!(model.model().trim());
 }
@@ -112,7 +128,11 @@ fn generate_public_flag_tuples() {
     let db = support::parse_fixture_db("public_flag");
     let registry = FunctionRegistry::new();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("public_flag"),
+    );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
     insta::assert_snapshot!(tuple_generator::format_tuples(tuples));
@@ -158,9 +178,13 @@ CREATE TABLE auth.users (id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY;
 CREATE POLICY auth_users_select ON auth.users FOR SELECT USING (owner_id = current_user);
 ";
-    let db = sql_parser::parse_schema(sql).expect("schema should parse");
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
 
     // Both tables must have a type in the DSL. They should NOT be merged.
@@ -435,7 +459,11 @@ fn generate_shared_policy_name_model_and_tuples() {
 fn generate_shared_owner_grants_model_and_tuples() {
     let db = support::parse_fixture_db("shared_owner_grants");
     let registry = support::load_fixture_registry("shared_owner_grants");
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("shared_owner_grants"),
+    );
 
     let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let dsl = model.model();
@@ -484,7 +512,11 @@ fn generate_shared_owner_grants_model_and_tuples() {
 fn generate_two_owner_columns_model_and_tuples() {
     let db = support::parse_fixture_db("two_owner_columns");
     let registry = support::load_fixture_registry("two_owner_columns");
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("two_owner_columns"),
+    );
 
     let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let dsl = model.model();
@@ -525,7 +557,11 @@ fn generate_two_owner_columns_model_and_tuples() {
 #[test]
 fn generate_two_role_functions_keeps_their_ladders_apart() {
     let (db, registry) = support::load_fixture_db_and_registry("two_role_functions");
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("two_role_functions"),
+    );
 
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let dsl = model.model();
@@ -579,7 +615,11 @@ fn generate_two_role_functions_keeps_their_ladders_apart() {
 fn generate_two_role_functions_tuples() {
     let db = support::parse_fixture_db("two_role_functions");
     let registry = support::load_fixture_registry("two_role_functions");
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
+        &db,
+        &registry,
+        &support::deployment::fixture_deployment("two_role_functions"),
+    );
 
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
@@ -629,7 +669,11 @@ fn generate_simple_ownership_tuples() {
         },
     );
     let outputs = support::plan_at(
-        policy_classifier::classify_policies(&db, &registry),
+        policy_classifier::classify_policies(
+            &db,
+            &registry,
+            &support::deployment::fixture_deployment("simple_ownership"),
+        ),
         &db,
         &registry,
         ConfidenceLevel::B,

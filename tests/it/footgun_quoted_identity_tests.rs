@@ -13,6 +13,7 @@ use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 
+use crate::support::deployment::caller_deployment;
 use crate::support::footgun::{db_of, relation_definition, translator};
 
 /// The classification of the only policy's `USING` clause.
@@ -60,7 +61,7 @@ CREATE POLICY p ON public.docs FOR SELECT USING ("Public" = TRUE);
     let db = db_of(sql);
     let mut registry = FunctionRegistry::new();
     registry.register_public_flag_column(registered);
-    let classified = TranslatorBuilder::new()
+    let classified = TranslatorBuilder::new(caller_deployment())
         .with_registry(registry)
         .with_min_confidence(ConfidenceLevel::B)
         .build()

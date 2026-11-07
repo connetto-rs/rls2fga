@@ -490,6 +490,17 @@ pub enum TranslationNote {
         /// Nullable column whose NULL rows fall closed.
         column: ColumnName,
     },
+    /// A request may leave a setting unset, and the empty text `PostgreSQL` then reads
+    /// once a transaction-local value has ended admits rows through this comparison. A
+    /// request leaving it unset sends no value, so the model admits none of them.
+    UnsetSettingReadAsEmpty {
+        /// Policy carrying the comparison.
+        policy: String,
+        /// The setting a request may leave unset.
+        setting: String,
+        /// The comparison the empty reading makes true.
+        expression: String,
+    },
     /// The parent-side rule could not be translated.
     ParentRuleUntranslated {
         /// Policy inheriting from the parent.
@@ -582,6 +593,7 @@ impl TranslationNote {
             }
             Self::MembershipTableGuarded { .. }
             | Self::NullableBooleanFlagNarrowed { .. }
+            | Self::UnsetSettingReadAsEmpty { .. }
             | Self::AttributeNeedsRuntimeEnforcement { .. }
             | Self::InheritanceParentReadsOwnRowsOnly { .. } => NoteSeverity::Partial,
             Self::ReadsDeniedSoWritesCannotName { .. }
@@ -656,6 +668,7 @@ impl TranslationNote {
             | Self::MembershipExtraPredicate { policy, .. }
             | Self::MembershipResidualReadsUnrestrictedTables { policy, .. }
             | Self::NullableBooleanFlagNarrowed { policy, .. }
+            | Self::UnsetSettingReadAsEmpty { policy, .. }
             | Self::ParentRuleUntranslated { policy, .. }
             | Self::AttributeNeedsRuntimeEnforcement { policy, .. }
             | Self::StandaloneAttributePolicy { policy, .. }
@@ -921,6 +934,16 @@ impl fmt::Display for TranslationNote {
             Self::NullableBooleanFlagNarrowed { column, .. } => write!(
                 f,
                 "'{column} IS NOT FALSE' admits NULL rows, but generated tuples include only TRUE"
+            ),
+            Self::UnsetSettingReadAsEmpty {
+                setting,
+                expression,
+                ..
+            } => write!(
+                f,
+                "A request may leave {setting} unset, and once a transaction-local value has \
+                 ended PostgreSQL reads it as '', which makes '{expression}' admit rows the \
+                 model refuses, since such a request sends no value"
             ),
             Self::ParentRuleUntranslated { parent_table, .. } => write!(
                 f,

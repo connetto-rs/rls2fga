@@ -7,9 +7,9 @@
 
 use rls2fga::classifier::patterns::{PatternClass, UnclassifiedExpr};
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
+
+use crate::support::deployment::{db, translator_builder};
 
 const CALLER: &str = "current_setting('app.user_id', true)";
 
@@ -42,10 +42,9 @@ fn translate_qualified(customer_fk: &str, using: &str) -> (String, String) {
 }
 
 fn translate_sql(sql: &str) -> (String, String) {
-    let db: ParserDB = parse_schema(sql).expect("the schema should parse");
-    let outputs = TranslatorBuilder::new()
+    let db = db(sql);
+    let outputs = translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
-        .with_current_user_setting_keys(["app.user_id"])
         .build()
         .translate(&db)
         .expect("translation should plan")
@@ -245,11 +244,8 @@ fn refusal_reason(using: &str) -> String {
         "{}\nCREATE POLICY p ON line_items FOR SELECT USING ({using});",
         schema(WITH_FK)
     );
-    let db: ParserDB = parse_schema(&sql).expect("the schema should parse");
-    let classified = TranslatorBuilder::new()
-        .with_current_user_setting_keys(["app.user_id"])
-        .build()
-        .classify(&db);
+    let db = db(&sql);
+    let classified = translator_builder().build().classify(&db);
     let [policy] = classified.as_slice() else {
         panic!("expected one policy");
     };

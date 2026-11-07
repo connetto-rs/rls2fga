@@ -11,6 +11,7 @@ use rls2fga::translator::Translation;
 use rls2fga::types::{ConfidenceLevel, TranslationNote};
 use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
 
+use crate::support::deployment;
 use crate::support::footgun::{db_of, relation_definition, translation, translator};
 
 fn schema(clause: &str) -> String {
@@ -455,7 +456,7 @@ fn a_fixed_length_window_still_rides_the_request_clock() {
 #[test]
 fn a_threshold_parameter_is_named_after_the_configured_clock() {
     let db = db_of(&schema("expires_at > now() - interval '1 day'"));
-    let dsl = rls2fga::translator::TranslatorBuilder::new()
+    let dsl = rls2fga::translator::TranslatorBuilder::new(deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
         .with_request_time_parameter("as_of")
         .expect("as_of is a valid parameter")
@@ -467,7 +468,7 @@ fn a_threshold_parameter_is_named_after_the_configured_clock() {
     assert!(dsl.contains("expires_at > as_of_minus_1_day"), "{dsl}");
 
     let long = "a".repeat(45);
-    let clamped = rls2fga::translator::TranslatorBuilder::new()
+    let clamped = rls2fga::translator::TranslatorBuilder::new(deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
         .with_request_time_parameter(long.as_str())
         .expect("forty five letters are a valid parameter")
@@ -501,20 +502,15 @@ fn a_threshold_parameter_is_named_after_the_configured_clock() {
     );
 }
 
-/// A request parameter the deployment configured under the name a threshold would take
+/// A request parameter the deployment declares under the name a threshold would take
 /// keeps it, and the threshold takes that name with a hash after it.
 #[test]
 fn a_configured_request_parameter_keeps_the_name_a_threshold_would_take() {
-    use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
-
-    let translation = rls2fga::translator::TranslatorBuilder::new()
+    let translation =
+        rls2fga::translator::TranslatorBuilder::new(deployment::deployment([deployment::scalar(
+            "request_time.minus_1_day",
+        )]))
         .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.cutoff",
-            SessionAttributeKind::ScalarAttribute,
-        )
-        .with_parameter("request_time_minus_1_day")
-        .expect("a valid parameter")])
         .build()
         .translate(&db_of(&schema("expires_at > now() - interval '1 day'")))
         .expect("translation should plan");

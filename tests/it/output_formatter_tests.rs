@@ -1,16 +1,11 @@
-use rls2fga::classifier::function_registry::FunctionRegistry;
-use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator;
-use rls2fga::parser::sql_parser::parse_schema;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
 
 #[test]
 fn formatter_uses_same_tuple_format_as_tuple_generator_helper() {
-    let (db, registry) = support::load_fixture_db_and_registry("earth_metabolome");
-
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let (classified, db, registry) = support::load_fixture_classified("earth_metabolome");
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::D);
     let expected = tuple_generator::format_tuples(outputs.tuple_queries());
 
@@ -28,18 +23,15 @@ fn formatter_uses_same_tuple_format_as_tuple_generator_helper() {
 /// tell the operator it was lost.
 #[test]
 fn formatter_report_discloses_policies_below_min_confidence() {
-    let db = parse_schema(
+    let (classified, db, registry) = support::classify_sql(
         r"
 CREATE TABLE docs(id uuid primary key, owner_id uuid);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_owner ON docs FOR SELECT USING (owner_id = current_user);
 CREATE POLICY p_unknown ON docs FOR SELECT USING (owner_id IS NULL);
 ",
-    )
-    .expect("schema should parse");
-    let registry = FunctionRegistry::new();
-
-    let classified = policy_classifier::classify_policies(&db, &registry);
+        None,
+    );
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
 
     let out_dir = support::unique_temp_dir("rls2fga_formatter_report_threshold");

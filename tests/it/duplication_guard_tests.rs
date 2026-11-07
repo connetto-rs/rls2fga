@@ -9,6 +9,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use rls2fga::parser::sql_parser::{Deployment, SessionSetting, SettingValue};
+use sqlparser::ast::DataType;
+
 /// Read a single module's source, test code included.
 ///
 /// For the two guards that are about one file rather than about the crate.
@@ -1104,6 +1107,9 @@ fn fenced_block(text: &str, language: &str) -> String {
 #[test]
 fn the_readme_example_blocks_match_the_output() {
     let schema = "
+    CREATE ROLE authenticator LOGIN NOINHERIT;
+    CREATE ROLE web_user NOLOGIN;
+    GRANT web_user TO authenticator WITH INHERIT FALSE, SET TRUE;
     CREATE TABLE documents (
         id       UUID PRIMARY KEY,
         owner_id UUID NOT NULL
@@ -1123,18 +1129,16 @@ fn the_readme_example_blocks_match_the_output() {
     );
 
     let db = rls2fga::parser::sql_parser::parse_schema(schema).expect("the schema parses");
-    let caller = rls2fga::classifier::function_registry::SessionAttribute::setting(
-        "app.current_user_id",
-        rls2fga::classifier::function_registry::SessionAttributeKind::CallerId,
-    )
-    .with_identity_cast("uuid");
     assert!(
-        readme.contains(".with_identity_cast(\"uuid\")"),
+        readme.contains("SettingValue::Caller(DataType::Uuid)"),
         "the README usage fence no longer declares the caller this guard declares"
     );
-    let outputs = rls2fga::translator::TranslatorBuilder::new()
+    let caller = SessionSetting::value("app.current_user_id", SettingValue::Caller(DataType::Uuid))
+        .expect("a custom setting name");
+    let deployment =
+        Deployment::new("authenticator", ["web_user"], [caller]).expect("one acting role");
+    let outputs = rls2fga::translator::TranslatorBuilder::new(deployment)
         .with_min_confidence(rls2fga::types::ConfidenceLevel::B)
-        .with_session_attributes([caller])
         .build()
         .translate(&db)
         .expect("the schema plans")

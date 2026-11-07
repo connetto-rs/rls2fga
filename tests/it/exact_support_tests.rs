@@ -7,7 +7,7 @@
 use crate::support;
 
 use crate::support::exact_support::{
-    every_case, Accessor, KeyLength, KeyType, Shape, CALLERS, DECLARED_KEY, PRECONDITIONS,
+    declared_key, every_case, Accessor, KeyLength, KeyType, Shape, CALLERS, PRECONDITIONS,
 };
 
 use rls2fga::generator::model_generator::GeneratorSettings;
@@ -19,8 +19,7 @@ use rls2fga::types::{
 
 /// Plan one generated schema at the threshold the parity runner uses.
 fn plan(schema: &str) -> Translation {
-    let (classified, db, registry) =
-        support::classify_sql_with_session_attributes(schema, DECLARED_KEY);
+    let (classified, db, registry) = support::classify_sql_with_settings(schema, [declared_key()]);
     Translation::plan(
         classified,
         &db,
@@ -229,7 +228,7 @@ CREATE POLICY p ON \"{name}\" FOR SELECT USING (who = current_setting('app.who',
 "
         );
         let (classified, db, registry) =
-            support::classify_sql_with_session_attributes(&schema, DECLARED_KEY);
+            support::classify_sql_with_settings(&schema, [declared_key()]);
         let refusal = Translation::plan(
             classified,
             &db,

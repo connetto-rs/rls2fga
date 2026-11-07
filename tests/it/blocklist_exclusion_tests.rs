@@ -1,9 +1,9 @@
 use core::fmt::Write as _;
-use rls2fga::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
 use rls2fga::classifier::patterns::{MembershipExclusion, PatternClass};
 use rls2fga::parser::sql_parser::parse_schema;
 use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::{records_from_row, ConfidenceLevel, Record, TableId};
+use sqlparser::ast::DataType;
 
 use crate::support;
 
@@ -22,13 +22,12 @@ const BLOCKED: &str = "EXISTS (SELECT 1 FROM blocks b WHERE b.doc = docs.id
                             AND b.user_id = current_setting('app.user_id', true))";
 
 fn translator() -> rls2fga::translator::Translator {
-    TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([
-            SessionAttribute::setting("app.user_id", SessionAttributeKind::CallerId),
-            SessionAttribute::setting("app.subjects", SessionAttributeKind::SetAttribute),
-        ])
-        .build()
+    TranslatorBuilder::new(support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+        support::deployment::delimited_set("app.subjects", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
 }
 
 fn schema(clause: &str) -> String {
@@ -36,8 +35,9 @@ fn schema(clause: &str) -> String {
 }
 
 fn translate(sql: &str) -> Translation {
-    let db = parse_schema(sql).expect("schema parses");
-    translator().translate(&db).expect("translation plans")
+    translator()
+        .translate(&support::deployment::db(sql))
+        .expect("translation plans")
 }
 
 fn records(translation: &Translation, table: &str, doc: &str, user: &str) -> Vec<Record> {
@@ -65,7 +65,9 @@ fn an_owner_minus_a_blocklist_keeps_the_memberships_grade() {
         positive[0].using_classification().unwrap().confidence
     );
     let translated = translator
-        .translate(&parse_schema(&schema(&format!("{OWNER} AND NOT {BLOCKED}"))).unwrap())
+        .translate(&support::deployment::db(&schema(&format!(
+            "{OWNER} AND NOT {BLOCKED}"
+        ))))
         .unwrap();
     assert!(
         translated
@@ -110,7 +112,7 @@ fn a_restrictive_blocklist_wrapped_in_a_function_matches_the_inline_clause() {
         .expect("function-wrapped restrictive clause classifies");
     assert_eq!(wrapped_blocks.confidence, inline_blocks.confidence);
     let translated = translator
-        .translate(&parse_schema(&wrapped_sql).expect("schema parses"))
+        .translate(&support::deployment::db(&wrapped_sql))
         .expect("translation plans");
     assert!(
         translated
@@ -172,7 +174,7 @@ fn a_restrictive_blocklist_behind_a_chain_of_functions_matches_the_inline_clause
         chained_blocks.pattern
     );
     let translated = translator
-        .translate(&parse_schema(&chained_sql).expect("schema parses"))
+        .translate(&support::deployment::db(&chained_sql))
         .expect("translation plans");
     assert!(
         translated
@@ -225,7 +227,7 @@ fn an_and_mixed_function_wrapped_exclusion_keeps_its_base_and_subtract() {
         mixed_blocks.pattern
     );
     let translated = translator
-        .translate(&parse_schema(&mixed_sql).expect("schema parses"))
+        .translate(&support::deployment::db(&mixed_sql))
         .expect("translation plans");
     assert!(
         translated
@@ -268,7 +270,7 @@ fn a_restrictive_exclusion_with_two_positive_conjuncts_folds_its_base() {
         blocks.pattern
     );
     let translated = translator()
-        .translate(&parse_schema(&sql).expect("schema parses"))
+        .translate(&support::deployment::db(&sql))
         .expect("translation plans");
     assert!(
         translated
@@ -782,48 +784,14 @@ fn cast_caller_blocklist_with_declared_identity_is_accepted() {
              SELECT 1 FROM blocks b WHERE b.doc = docs.id
              AND b.user_id = current_setting('app.user_id', true)::integer));"
     );
-    let db = parse_schema(&sql).expect("schema parses");
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("integer")])
-        .build();
-    let translated = translator.translate(&db).expect("translation plans");
-    assert!(
-        translated
-            .notes()
-            .iter()
-            .all(|note| !note.severity().diverges_from_database()),
-        "{:?}",
-        translated.notes()
-    );
-}
-
-#[test]
-fn declared_identity_cast_matches_the_written_cast_case_insensitively() {
-    let tables = TABLES.replace(
-        "CREATE TABLE blocks(doc TEXT NOT NULL REFERENCES docs(id), user_id TEXT NOT NULL,\n                    PRIMARY KEY(doc, user_id));",
-        "CREATE TABLE blocks(doc TEXT NOT NULL REFERENCES docs(id), user_id INTEGER NOT NULL,\n                    PRIMARY KEY(doc, user_id));",
-    );
-    let sql = format!(
-        "{tables} CREATE POLICY docs_read ON docs FOR SELECT USING (
-           {OWNER} AND NOT EXISTS (
-             SELECT 1 FROM blocks b WHERE b.doc = docs.id
-             AND b.user_id = current_setting('app.user_id', true)::integer));"
-    );
-    let db = parse_schema(&sql).expect("schema parses");
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("INTEGER")])
-        .build();
-    let translated = translator.translate(&db).expect("translation plans");
+    let translator = TranslatorBuilder::new(support::deployment::deployment([
+        support::deployment::typed_caller("app.user_id", DataType::Integer(None)),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build();
+    let translated = translator
+        .translate(&support::deployment::db(&sql))
+        .expect("translation plans");
     assert!(
         translated
             .notes()
@@ -842,16 +810,14 @@ fn stacked_caller_cast_blocklist_is_refused_despite_a_matching_outer_cast() {
              SELECT 1 FROM blocks b WHERE b.doc = docs.id
              AND b.user_id = current_setting('app.user_id', true)::integer::text));"
     );
-    let db = parse_schema(&sql).expect("schema parses");
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("text")])
-        .build();
-    let translated = translator.translate(&db).expect("translation plans");
+    let translator = TranslatorBuilder::new(support::deployment::deployment([
+        support::deployment::caller("app.user_id"),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build();
+    let translated = translator
+        .translate(&support::deployment::db(&sql))
+        .expect("translation plans");
     assert!(
         translated
             .notes()
@@ -877,16 +843,14 @@ fn stacked_caller_cast_blocklist_is_accepted_under_a_declared_inner_cast() {
              SELECT 1 FROM blocks b WHERE b.doc = docs.id
              AND b.user_id = current_setting('app.user_id', true)::integer::text));"
     );
-    let db = parse_schema(&sql).expect("schema parses");
-    let translator = TranslatorBuilder::new()
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("integer")])
-        .build();
-    let translated = translator.translate(&db).expect("translation plans");
+    let translator = TranslatorBuilder::new(support::deployment::deployment([
+        support::deployment::typed_caller("app.user_id", DataType::Integer(None)),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build();
+    let translated = translator
+        .translate(&support::deployment::db(&sql))
+        .expect("translation plans");
     assert!(
         translated
             .notes()
@@ -933,9 +897,6 @@ mod parity {
     use crate::support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
     use rls2fga::types::ActionStatement;
 
-    const ATTRIBUTES: &str = r#"[{"key":"app.user_id","kind":"caller_id"}]"#;
-    const UUID_ATTRIBUTES: &str =
-        r#"[{"key":"app.user_id","kind":"caller_id","identity_cast":"uuid"}]"#;
     const SEED: &[&str] = &[
         "INSERT INTO docs VALUES ('d1', 'alice'), ('d2', 'bob'), ('d3', 'alice');",
         "INSERT INTO shares VALUES ('d1', 'carol'), ('d2', 'carol'), ('d3', 'carol');",
@@ -956,7 +917,6 @@ mod parity {
                 .map(|user| Principal::with_setting(user, user, "app.user_id", user))
                 .collect(),
         )
-        .with_attributes(ATTRIBUTES)
     }
 
     #[tokio::test]
@@ -1081,7 +1041,7 @@ mod parity {
                 ["alice", "bob", "carol"].into_iter()
                     .map(|user| Principal::with_setting(user, user, "app.user_id", user))
                     .collect(),
-            ).with_attributes(ATTRIBUTES).loading_from_rows();
+            ).loading_from_rows();
             let run = support::parity::run(&cluster, &filtered).await;
             assert_postgres(&filtered, &run, "bob", "docs:d2", ActionStatement::Select, true);
             assert_postgres(&filtered, &run, "carol", "docs:d1", ActionStatement::Select, false);
@@ -1101,7 +1061,7 @@ mod parity {
                 ["alice", "bob", "carol"].into_iter()
                     .map(|user| Principal::with_setting(user, user, "app.user_id", user))
                     .collect(),
-            ).with_attributes(ATTRIBUTES).loading_from_rows();
+            ).loading_from_rows();
             let run = support::parity::run(&cluster, &independent).await;
             assert_postgres(&independent, &run, "bob", "docs:d2", ActionStatement::Select, true);
             assert_postgres(&independent, &run, "carol", "docs:d1", ActionStatement::Select, true);
@@ -1233,7 +1193,10 @@ mod parity {
                         Principal::with_setting(bob, "bob", "app.user_id", bob),
                         Principal::with_setting(carol, "carol", "app.user_id", carol),
                     ],
-                ).with_attributes(UUID_ATTRIBUTES).loading_from_rows();
+                ).with_settings([support::deployment::typed_caller(
+                    "app.user_id",
+                    DataType::Uuid,
+                )]).loading_from_rows();
                 let run = support::parity::run(&cluster, &case).await;
                 for (subject, object, visible) in [
                     (alice, format!("docs:{d1}"), true),

@@ -10,7 +10,7 @@ use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::parser::sql_parser::{parse_schema, Deployment};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{
@@ -58,10 +58,15 @@ impl RowValues for MapRow {
     }
 }
 
-/// Every pure description a schema's tuple queries carry.
+/// Every pure description a schema's tuple queries carry, read for a deployment acting as
+/// one role, which the schema is parsed after.
 fn descriptions(schema: &str) -> Vec<RecordDescription> {
-    let db = parse_schema(schema).expect("benchmark schema parses");
-    let translator = TranslatorBuilder::new()
+    let db = parse_schema(&format!(
+        "CREATE ROLE bench_login LOGIN; CREATE ROLE bench_user;\n{schema}"
+    ))
+    .expect("benchmark schema parses");
+    let deployment = Deployment::new("bench_login", ["bench_user"], []).expect("one acting role");
+    let translator = TranslatorBuilder::new(deployment)
         .with_min_confidence(ConfidenceLevel::C)
         .build();
     translator

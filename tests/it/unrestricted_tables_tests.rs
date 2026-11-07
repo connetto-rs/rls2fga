@@ -5,10 +5,12 @@
 //! covered, and the only safe reading of the second is to refuse.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translation, TranslatorBuilder};
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::Translation;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{ActionAnswer, ActionStatement};
+
+use crate::support;
 
 /// The finding's own reproduction, which is also the `wasm-smoke` fixture downstream.
 const NO_ROW_LEVEL_SECURITY: &str =
@@ -97,7 +99,7 @@ CREATE POLICY d ON docs USING (
 ";
 
 fn translate(db: &ParserDB) -> Translation {
-    TranslatorBuilder::new()
+    support::deployment::translator_builder()
         .with_min_confidence(ConfidenceLevel::B)
         .build()
         .translate(db)
@@ -106,7 +108,7 @@ fn translate(db: &ParserDB) -> Translation {
 
 /// Every table the report names, in the order it names them.
 fn unrestricted(sql: &str) -> Vec<String> {
-    let db: ParserDB = parse_schema(sql).expect("schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     translate(&db)
         .unrestricted_tables()
         .iter()
@@ -131,7 +133,7 @@ fn row_level_security_with_no_policy_is_not_unrestricted() {
 /// list and answered nowhere else, the closed one is answered and named nowhere here.
 #[test]
 fn the_open_table_and_the_closed_one_are_answered_by_different_surfaces() {
-    let db: ParserDB = parse_schema(ENABLED_WITHOUT_POLICY).expect("schema should parse");
+    let db: ParserDB = support::deployment::db(ENABLED_WITHOUT_POLICY);
     let translation = translate(&db);
     let reads: Vec<ActionAnswer> = translation
         .action_relations()
@@ -171,7 +173,7 @@ fn every_type_answered_unrestricted_names_a_table_the_list_carries() {
         ("guarded and open", GUARDED_AND_OPEN),
         ("typed partition", TYPED_PARTITION_OF_A_GUARDED_ROOT),
     ] {
-        let db: ParserDB = parse_schema(sql).expect("schema should parse");
+        let db: ParserDB = support::deployment::db(sql);
         let translation = translate(&db);
         let listed: Vec<String> = translation
             .unrestricted_tables()
@@ -213,7 +215,7 @@ fn two_tables_canonicalizing_alike_are_reported_by_their_own_spelling() {
 #[test]
 fn a_table_no_key_names_rows_of_is_reported_unrestricted() {
     let sql = "CREATE TABLE audit (message TEXT);";
-    let db: ParserDB = parse_schema(sql).expect("schema should parse");
+    let db: ParserDB = support::deployment::db(sql);
     let translation = translate(&db);
     assert!(
         translation.row_naming().is_empty(),

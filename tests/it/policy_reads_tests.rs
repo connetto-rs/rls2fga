@@ -5,13 +5,15 @@
 //! counts whether or not the model translated it.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
-use rls2fga::translator::{Translation, TranslatorBuilder};
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::Translation;
 use rls2fga::types::{NoteSeverity, PolicyCommand, PolicyReads};
 
+use crate::support;
+
 fn translate(sql: &str) -> Translation {
-    let db: ParserDB = parse_schema(sql).expect("schema should parse");
-    TranslatorBuilder::new()
+    let db: ParserDB = support::deployment::db(sql);
+    support::deployment::translator_builder()
         .build()
         .translate(&db)
         .expect("translation should plan")

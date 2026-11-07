@@ -3,7 +3,6 @@ use rls2fga::classifier::patterns::*;
 use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator;
 use rls2fga::output::formatter::WriteError;
-use rls2fga::parser::sql_parser::parse_schema;
 use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::translator::Outputs;
 use rls2fga::types::ConfidenceLevel;
@@ -17,14 +16,18 @@ use crate::support;
 /// than about models.
 fn any_outputs(db: &ParserDB) -> Outputs {
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(db, &registry);
+    let classified = policy_classifier::classify_policies(
+        db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     support::plan_at(classified, db, &registry, ConfidenceLevel::D)
 }
 
 #[test]
 fn write_output_rejects_empty_name() {
     let dir = support::unique_temp_dir("rls2fga_empty_name");
-    let db = parse_schema("CREATE TABLE docs(id uuid primary key);").expect("schema parses");
+    let db = support::deployment::db("CREATE TABLE docs(id uuid primary key);");
     let err = any_outputs(&db)
         .write(&dir, "")
         .expect_err("empty name should be rejected");
@@ -37,7 +40,7 @@ fn write_output_rejects_empty_name() {
 #[test]
 fn write_output_rejects_absolute_path() {
     let dir = support::unique_temp_dir("rls2fga_abs_path");
-    let db = parse_schema("CREATE TABLE docs(id uuid primary key);").expect("schema parses");
+    let db = support::deployment::db("CREATE TABLE docs(id uuid primary key);");
     let err = any_outputs(&db)
         .write(&dir, "/etc/passwd")
         .expect_err("absolute path should be rejected");
@@ -60,7 +63,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE TABLE object_grants(id UUID PRIMARY KEY, grantee_id UUID, resource_id UUID, role_level INT);
 CREATE POLICY p ON docs FOR SELECT USING (role_level(current_user, id) >= 1);
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let mut registry = FunctionRegistry::new();
     registry
         .load_from_json(
@@ -84,7 +87,11 @@ CREATE POLICY p ON docs FOR SELECT USING (role_level(current_user, id) >= 1);
         )
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
 
     let grant_count = model
@@ -112,7 +119,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE TABLE object_grants(id UUID PRIMARY KEY, grantee_id UUID, resource_id UUID, role_level INT);
 CREATE POLICY p ON docs FOR SELECT USING (role_level(current_user, id) >= 1);
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let mut registry = FunctionRegistry::new();
     registry
         .load_from_json(
@@ -136,7 +143,11 @@ CREATE POLICY p ON docs FOR SELECT USING (role_level(current_user, id) >= 1);
         )
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
     let formatted = tuple_generator::format_tuples(tuples);
@@ -154,9 +165,13 @@ CREATE TABLE items(val TEXT, is_public BOOLEAN);
 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON items FOR SELECT USING (is_public = TRUE);
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
     let formatted = tuple_generator::format_tuples(tuples);
@@ -179,9 +194,13 @@ CREATE POLICY p ON tasks FOR SELECT
         WHERE p.id = tasks.project_id AND p.owner_id = current_user
     ));
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
     let formatted = tuple_generator::format_tuples(tuples);
@@ -208,9 +227,13 @@ CREATE POLICY p ON docs FOR SELECT
           AND is_public = TRUE
     ));
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
 
     let using = classified[0]
@@ -251,9 +274,13 @@ CREATE POLICY p ON docs FOR SELECT
           AND is_public = TRUE
     ));
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     assert_eq!(classified.len(), 1);
 
     let using = classified[0]
@@ -288,9 +315,13 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_own ON docs FOR SELECT USING (owner_id = current_user);
 CREATE POLICY p_flag ON docs FOR SELECT USING (is_public = TRUE);
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
 
     let dir = support::unique_temp_dir("rls2fga_short_names");
@@ -336,9 +367,13 @@ CREATE POLICY p ON docs FOR SELECT
         WHERE o.id = docs.org_id AND o.custom_check LIKE '%special%'
     ));
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
 
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
 
@@ -368,9 +403,13 @@ CREATE POLICY p ON docs FOR SELECT
         WHERE o.id = docs.org_id AND o.owner_id = current_user
     ));
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
 
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
@@ -405,9 +444,13 @@ CREATE POLICY p ON docs FOR SELECT
         WHERE o.id = docs.org_id AND TRUE
     ));
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
 
     let model = outputs.model();
@@ -433,7 +476,7 @@ ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 CREATE TABLE object_grants(id UUID PRIMARY KEY, grantee_id UUID, resource_id UUID, role_level INT);
 CREATE POLICY p ON items FOR SELECT USING (role_level(current_user, val) >= 1);
 ";
-    let db = parse_schema(sql).unwrap();
+    let db = support::deployment::db(sql);
     let mut registry = FunctionRegistry::new();
     registry
         .load_from_json(
@@ -452,7 +495,11 @@ CREATE POLICY p ON items FOR SELECT USING (role_level(current_user, val) >= 1);
         )
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(&db, &registry);
+    let classified = policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &support::deployment::caller_deployment(),
+    );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
     let tuples = outputs.tuple_queries();
     let formatted = tuple_generator::format_tuples(tuples);

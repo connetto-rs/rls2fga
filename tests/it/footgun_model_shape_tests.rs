@@ -7,6 +7,7 @@ use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
+use crate::support::deployment::{caller_deployment, fixture_deployment};
 
 use crate::support::footgun::{
     assert_model_is_internally_consistent, db_of, feeds, overlength_name_schema,
@@ -560,7 +561,11 @@ fn support_classify(
     registry
         .load_from_json(registry_json)
         .expect("the registry parses");
-    let classified = rls2fga::classifier::policy_classifier::classify_policies(&db, &registry);
+    let classified = rls2fga::classifier::policy_classifier::classify_policies(
+        &db,
+        &registry,
+        &caller_deployment(),
+    );
     (classified, db, registry)
 }
 
@@ -663,7 +668,11 @@ fn no_type_declares_a_relation_no_permission_names() {
         if let Some(json) = registry_json {
             registry.load_from_json(json).expect("registry parses");
         }
-        let classified = rls2fga::classifier::policy_classifier::classify_policies(&db, &registry);
+        let classified = rls2fga::classifier::policy_classifier::classify_policies(
+            &db,
+            &registry,
+            &caller_deployment(),
+        );
         let dsl = support::plan_at(classified, &db, &registry, ConfidenceLevel::B).model();
         // Not `assert_model_is_internally_consistent` here: its tupleset-assignability
         // rule is stricter than `OpenFGA` v1.11.6, which accepts this fixture's model
@@ -789,8 +798,11 @@ fn every_fixture_stays_consistent_without_one_row_security_flag() {
                 continue;
             };
             let registry = support::try_load_fixture_classified(&fixture).2;
-            let classified =
-                rls2fga::classifier::policy_classifier::classify_policies(&db, &registry);
+            let classified = rls2fga::classifier::policy_classifier::classify_policies(
+                &db,
+                &registry,
+                &fixture_deployment(&fixture),
+            );
             let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::D);
             assert_model_is_internally_consistent(&outputs.json_model());
         }

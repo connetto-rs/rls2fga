@@ -2,177 +2,76 @@
 use crate::no_std_prelude::*;
 use alloc::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
-
 use crate::classifier::recognizers::row_valued_set;
+use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
     body_setting_key, body_single_projection, normalize_setting_key, renamed_caller_body,
-    AccessorInferenceSettings, FunctionSemantic,
+    FunctionSemantic,
 };
 use crate::parser::names::stored_relation_name;
 use crate::parser::sql_parser::{
-    DatabaseLike, Deployment, FunctionLike, SessionSetting, SettingValue,
+    DatabaseLike, Deployment, FunctionLike, SessionSetting, SetPacking, SettingContent,
+    SettingPresence, SettingValue,
 };
-use crate::types::{ConditionParameterName, ConditionParameterNameError};
-use sql_traits::errors::DeploymentError;
+use crate::types::ConditionParameterName;
 use sql_traits::structs::{IdentifierCase, TargetName};
-use sqlparser::ast::{DataType, FunctionSecurity};
+use sqlparser::ast::FunctionSecurity;
 
-/// The role [`FunctionRegistry::helper_deployment`] names, which `sql-traits` needs and
-/// never reads when answering what a helper returns.
-const HELPER_DEPLOYMENT_ROLE: &str = "rls2fga";
-
-/// What a declared request-scoped source holds.
+/// One value a policy may read from the request as the deployment declares it, a whole
+/// custom setting or one field of a setting holding a JSON document.
 ///
-/// The kind is what keeps a wrong allow impossible rather than merely checked: a set read
-/// where one value belongs, or one value read where a set belongs, finds no matching kind
-/// and stays unclassified.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SessionAttributeKind {
-    /// The caller's own identity.
-    CallerId,
-    /// One value the request carries.
-    ScalarAttribute,
-    /// A set of values the request carries.
-    SetAttribute,
-}
-
-/// One request-scoped value a deployment has declared readable.
-///
-/// A source is a `current_setting` key, optionally with a field path taken out of the
-/// value at that key. A function whose body reads the key resolves to the same source, so
-/// the two spellings are one declaration and cannot disagree.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
-#[serde(try_from = "SessionAttributeSpec")]
-pub struct SessionAttribute {
+/// Built only from a [`Deployment`], so the declaration a policy is read against is the
+/// one every other consumer of that deployment reads. A function whose body reads the
+/// setting resolves to the same source, so the inline and the wrapped spelling cannot
+/// disagree.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredSource {
     key: String,
     path: Vec<String>,
-    kind: SessionAttributeKind,
+    value: SettingValue,
+    presence: SettingPresence,
     parameter: ConditionParameterName,
-    identity_cast: Option<String>,
 }
 
-/// The written form of a declaration, so a deployment can ship its list as data.
-///
-/// Separate from [`SessionAttribute`] because the parameter name is derived when it is
-/// not given, and a directly deserialized struct could carry one that does not match its
-/// source.
-#[derive(Debug, Clone, Deserialize)]
-pub struct SessionAttributeSpec {
-    /// The `current_setting` key.
-    pub key: String,
-    /// Field path taken out of the value at that key.
-    #[serde(default)]
-    pub path: Vec<String>,
-    /// What the source holds.
-    pub kind: SessionAttributeKind,
-    /// Condition parameter the caller supplies, derived from the source when absent.
-    #[serde(default)]
-    pub parameter: Option<String>,
-    /// Cast target the value already arrives canonical for, so a cast to it renames
-    /// nothing.
-    #[serde(default)]
-    pub identity_cast: Option<String>,
-}
-
-impl TryFrom<SessionAttributeSpec> for SessionAttribute {
-    type Error = ConditionParameterNameError;
-
-    fn try_from(spec: SessionAttributeSpec) -> Result<Self, Self::Error> {
-        let mut attribute = SessionAttribute::build(&spec.key, spec.path, spec.kind);
-        attribute.identity_cast = spec.identity_cast.map(|cast| cast.to_ascii_lowercase());
-        match spec.parameter {
-            Some(name) => attribute.with_parameter(name),
-            None => Ok(attribute),
-        }
-    }
-}
-
-impl SessionAttribute {
-    /// Declare the value at `key`.
-    pub fn setting(key: impl AsRef<str>, kind: SessionAttributeKind) -> Self {
-        Self::build(key.as_ref(), Vec::new(), kind)
-    }
-
-    /// Declare the field at `path` inside the value at `key`.
-    ///
-    /// A field is an attribute and never the caller: `sub` inside a token is an identity
-    /// and so is `tenant`, and nothing in the expression says which the caller is. A
-    /// declaration built this way and given [`SessionAttributeKind::CallerId`] is inert,
-    /// so the identity door stays the one door configuration cannot open.
-    pub fn claim<I, S>(key: impl AsRef<str>, path: I, kind: SessionAttributeKind) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        Self::build(
-            key.as_ref(),
-            path.into_iter().map(Into::into).collect(),
-            kind,
-        )
-    }
-
-    fn build(key: &str, path: Vec<String>, kind: SessionAttributeKind) -> Self {
-        let key = normalize_setting_key(key);
-        let parameter = default_parameter_name(&key, &path);
+impl DeclaredSource {
+    fn new(setting: &SessionSetting, path: Vec<String>, value: SettingValue) -> Self {
+        let key = normalize_setting_key(setting.name());
+        let parameter = parameter_name(&key, &path);
         Self {
             key,
             path,
-            kind,
+            value,
+            presence: setting.presence(),
             parameter,
-            identity_cast: None,
         }
     }
 
-    /// Name the condition parameter the caller supplies for this value, which every
-    /// check context then has to use. Defaults to the source spelled as an identifier.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when `name` is not a usable `CEL` identifier.
-    pub fn with_parameter(
-        mut self,
-        name: impl Into<String>,
-    ) -> Result<Self, ConditionParameterNameError> {
-        self.parameter = ConditionParameterName::try_from(name.into())?;
-        Ok(self)
-    }
-
-    /// Declare this value already canonical for `cast`, so a comparison that casts it to
-    /// `cast` changes no value. Any other cast but `text` or an unbounded `varchar` is
-    /// refused wherever the value is read.
-    #[must_use]
-    pub fn with_identity_cast(mut self, cast: impl Into<String>) -> Self {
-        self.identity_cast = Some(cast.into().to_ascii_lowercase());
-        self
-    }
-
-    /// The `current_setting` key this source reads.
+    /// The `current_setting` name this source reads, lower case as `PostgreSQL` compares
+    /// it.
     #[must_use]
     pub fn setting_key(&self) -> &str {
         &self.key
     }
 
-    /// The field path taken out of that value, empty for the value itself.
+    /// The JSON field path taken out of the setting, empty for the whole value.
     #[must_use]
     pub fn path(&self) -> &[String] {
         &self.path
     }
 
-    /// What this source holds, as declared.
+    /// What the source holds, as the deployment declares it.
     #[must_use]
-    pub fn kind(&self) -> SessionAttributeKind {
-        self.kind
+    pub fn value(&self) -> &SettingValue {
+        &self.value
     }
 
-    /// The cast target this value is declared already canonical for.
+    /// Whether every request sets the setting.
     #[must_use]
-    pub fn identity_cast(&self) -> Option<&str> {
-        self.identity_cast.as_deref()
+    pub fn presence(&self) -> SettingPresence {
+        self.presence
     }
 
-    /// The condition parameter name the caller supplies.
+    /// The condition parameter the caller supplies, the source spelled as an identifier.
     #[must_use]
     pub fn request_parameter(&self) -> &str {
         self.parameter.as_str()
@@ -181,11 +80,71 @@ impl SessionAttribute {
     pub(crate) fn condition_parameter(&self) -> &ConditionParameterName {
         &self.parameter
     }
+
+    /// Whether the source is the caller's identity.
+    pub(crate) fn is_caller(&self) -> bool {
+        matches!(self.value, SettingValue::Caller(_))
+    }
+
+    /// Whether the source is one value the request carries, other than the caller.
+    pub(crate) fn is_scalar(&self) -> bool {
+        matches!(self.value, SettingValue::Scalar(_))
+    }
+
+    /// How a set's elements are packed, or `None` for a single value.
+    pub(crate) fn packing(&self) -> Option<&SetPacking> {
+        match &self.value {
+            SettingValue::Set { packing, .. } => Some(packing),
+            SettingValue::Caller(_) | SettingValue::Scalar(_) => None,
+        }
+    }
+
+    /// The delimiter `string_to_array` splits the set on, absent for a single value and
+    /// for a JSON array.
+    pub(crate) fn separator(&self) -> Option<&str> {
+        match self.packing()? {
+            SetPacking::Delimited(separator) => Some(separator),
+            SetPacking::JsonArray => None,
+        }
+    }
+
+    /// The type the value, or each element of a set, arrives canonical for, spelled as a
+    /// cast names it. A cast to it renames nothing.
+    pub(crate) fn canonical_type(&self) -> String {
+        let (SettingValue::Caller(data_type)
+        | SettingValue::Scalar(data_type)
+        | SettingValue::Set {
+            element: data_type, ..
+        }) = &self.value;
+        cast_type_name(data_type)
+    }
+
+    /// Whether a request may leave the setting unset, in which state `PostgreSQL` reads
+    /// it as `NULL` or as `''` depending on the connection's history.
+    pub(crate) fn may_be_unset(&self) -> bool {
+        self.presence == SettingPresence::MayBeUnset
+    }
+
+    /// How the source is declared, for a reason naming a read that does not match it.
+    pub(crate) fn declared_as(&self) -> String {
+        match &self.value {
+            SettingValue::Caller(_) => "the caller".to_string(),
+            SettingValue::Scalar(_) => "one value".to_string(),
+            SettingValue::Set {
+                packing: SetPacking::Delimited(separator),
+                ..
+            } => format!("a set joined by '{separator}'"),
+            SettingValue::Set {
+                packing: SetPacking::JsonArray,
+                ..
+            } => "a set packed as a JSON array".to_string(),
+        }
+    }
 }
 
 /// A source spelled as an identifier, since a condition parameter name shares a namespace
-/// with `CEL` identifiers and a setting key carries dots.
-fn default_parameter_name(key: &str, path: &[String]) -> ConditionParameterName {
+/// with `CEL` identifiers and a setting name carries dots.
+fn parameter_name(key: &str, path: &[String]) -> ConditionParameterName {
     let mut source = String::with_capacity(key.len());
     for segment in core::iter::once(key).chain(path.iter().map(String::as_str)) {
         if !source.is_empty() {
@@ -194,6 +153,54 @@ fn default_parameter_name(key: &str, path: &[String]) -> ConditionParameterName 
         source.push_str(segment);
     }
     ConditionParameterName::derived(&source)
+}
+
+/// Every source a deployment declares, keyed on the setting and the field path.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct DeclaredSources(BTreeMap<(String, Vec<String>), DeclaredSource>);
+
+impl DeclaredSources {
+    /// The sources `deployment` declares, each whole setting and each field of a JSON
+    /// one.
+    pub(crate) fn of(deployment: &Deployment) -> Self {
+        let mut sources = BTreeMap::new();
+        for setting in deployment.settings() {
+            let mut declare = |path: &[String], value: &SettingValue| {
+                let source = DeclaredSource::new(setting, path.to_vec(), value.clone());
+                sources.insert((source.key.clone(), source.path.clone()), source);
+            };
+            match setting.content() {
+                SettingContent::Value(value) => declare(&[], value),
+                SettingContent::Json(fields) => {
+                    for field in fields {
+                        declare(field.path(), field.value());
+                    }
+                }
+            }
+        }
+        Self(sources)
+    }
+
+    /// The source at `key` and `path`, the key compared without case.
+    pub(crate) fn get(&self, key: &str, path: &[String]) -> Option<&DeclaredSource> {
+        self.0.get(&(normalize_setting_key(key), path.to_vec()))
+    }
+
+    /// The source at `key` and `path`, when it is the caller.
+    pub(crate) fn caller(&self, key: &str, path: &[String]) -> Option<&DeclaredSource> {
+        self.get(key, path).filter(|source| source.is_caller())
+    }
+
+    /// Whether `key` is declared at all, as a whole value or through a field.
+    pub(crate) fn declares_key(&self, key: &str) -> bool {
+        let key = normalize_setting_key(key);
+        self.0.keys().any(|(declared, _)| *declared == key)
+    }
+
+    /// Every source, ordered by setting and field path.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &DeclaredSource> {
+        self.0.values()
+    }
 }
 
 /// Why a function registry JSON payload was refused.
@@ -329,9 +336,11 @@ pub struct FunctionRegistry {
     /// Functions whose body reads the caller through a cast that can rename it, with the
     /// reason the report gives.
     renamed_accessors: BTreeMap<FunctionKey, String>,
-    /// Request-scoped sources a deployment declared readable, keyed on the setting key
-    /// and the field path taken out of it.
-    session_attributes: BTreeMap<(String, Vec<String>), SessionAttribute>,
+    /// The deployment the schema is read for, set by [`FunctionRegistry::enrich_from_schema`].
+    deployment: Option<Deployment>,
+    /// Request-scoped sources the deployment declares, keyed on the setting and the field
+    /// path taken out of it.
+    sources: DeclaredSources,
 }
 
 impl FunctionRegistry {
@@ -344,7 +353,8 @@ impl FunctionRegistry {
             public_flag_columns: BTreeSet::new(),
             owner_bound_accessors: BTreeMap::new(),
             renamed_accessors: BTreeMap::new(),
-            session_attributes: BTreeMap::new(),
+            deployment: None,
+            sources: DeclaredSources::default(),
         }
     }
 
@@ -385,22 +395,6 @@ impl FunctionRegistry {
         self.public_flag_columns.contains(column)
     }
 
-    /// Name the `current_setting` keys whose value is the caller's identity.
-    ///
-    /// A wrapper function is not required: the key is what carries the meaning, so a
-    /// policy spelling the call inline says the same thing as one calling a function
-    /// whose whole body is that call.
-    pub fn trust_current_user_setting_keys<I, S>(&mut self, keys: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        self.declare_session_attributes(
-            keys.into_iter()
-                .map(|key| SessionAttribute::setting(key, SessionAttributeKind::CallerId)),
-        );
-    }
-
     /// Declare `SECURITY DEFINER` helpers whose returned sets translate to the grants
     /// their bodies read, each named as a call spells it (`authz.projects_with`).
     ///
@@ -428,65 +422,20 @@ impl FunctionRegistry {
         )
     }
 
-    /// The request settings as `sql-traits` describes them, for answering what a declared
-    /// helper returns.
-    ///
-    /// That answer asks only whether a setting the body compares with is the caller, so
-    /// each declared whole value is the caller or a text scalar, a field path names no
-    /// setting of its own, and the roles are a placeholder no answer reads. A key that is
-    /// no custom setting name is left out, since `sql-traits` takes the caller only from a
-    /// custom setting, and a body reading it is then refused as reading an undeclared one.
-    pub(crate) fn helper_deployment(&self) -> Result<Deployment, DeploymentError> {
-        let settings: Vec<SessionSetting> = self
-            .session_attributes
-            .values()
-            .filter(|attribute| attribute.path.is_empty())
-            .filter_map(|attribute| {
-                let value = if attribute.kind == SessionAttributeKind::CallerId {
-                    SettingValue::Caller(DataType::Text)
-                } else {
-                    SettingValue::Scalar(DataType::Text)
-                };
-                SessionSetting::value(attribute.key.as_str(), value).ok()
-            })
-            .collect();
-        Deployment::new(HELPER_DEPLOYMENT_ROLE, [HELPER_DEPLOYMENT_ROLE], settings)
+    /// The deployment the schema is read for, which answers what a declared helper
+    /// returns. `None` until [`FunctionRegistry::enrich_from_schema`] has run.
+    pub(crate) fn deployment(&self) -> Option<&Deployment> {
+        self.deployment.as_ref()
     }
 
-    /// Declare request-scoped values, replacing an earlier declaration for the same source.
-    pub fn declare_session_attributes<I>(&mut self, attributes: I)
-    where
-        I: IntoIterator<Item = SessionAttribute>,
-    {
-        for attribute in attributes {
-            let key = (attribute.key.clone(), attribute.path.clone());
-            self.session_attributes.insert(key, attribute);
-        }
+    /// The source at `key` and `path`, if the deployment declares one.
+    pub(crate) fn declared_source(&self, key: &str, path: &[String]) -> Option<&DeclaredSource> {
+        self.sources.get(key, path)
     }
 
-    /// The declaration for a source, if a deployment named one.
-    pub(crate) fn session_attribute(
-        &self,
-        key: &str,
-        path: &[String],
-    ) -> Option<&SessionAttribute> {
-        self.session_attributes
-            .get(&(normalize_setting_key(key), path.to_vec()))
-    }
-
-    /// True when `key` was named as holding the caller's identity.
-    ///
-    /// Only a declaration of the whole value can answer: the lookup asks for the empty
-    /// field path, so a claim path is unreachable here whatever kind it named. That is
-    /// the door configuration cannot open.
-    pub(crate) fn names_caller_setting_key(&self, key: &str) -> bool {
-        self.session_attribute(key, &[])
-            .is_some_and(|attribute| attribute.kind() == SessionAttributeKind::CallerId)
-    }
-
-    /// Every declared source, so the effective registry can carry a caller's list.
-    pub(crate) fn session_attributes(&self) -> impl Iterator<Item = &SessionAttribute> {
-        self.session_attributes.values()
+    /// The deployment's sources, as the classifier reads them.
+    pub(crate) fn sources(&self) -> &DeclaredSources {
+        &self.sources
     }
 
     /// Load function semantics from a JSON string.
@@ -622,20 +571,17 @@ impl FunctionRegistry {
         matches!(self.get(name), Some(FunctionSemantic::RoleAccessor { .. }))
     }
 
-    /// Infer function semantics from parsed in-schema function bodies.
-    /// Explicitly provided registry entries take precedence.
-    pub fn enrich_from_schema<DB: DatabaseLike>(&mut self, db: &DB) {
-        let settings = AccessorInferenceSettings::default();
-        self.enrich_from_schema_with_settings(db, &settings);
+    /// Read the sources `deployment` declares, which every later lookup answers from.
+    pub(crate) fn adopt(&mut self, deployment: &Deployment) {
+        self.sources = DeclaredSources::of(deployment);
+        self.deployment = Some(deployment.clone());
     }
 
-    /// Infer function semantics from parsed in-schema function bodies using
-    /// explicit accessor-inference settings.
-    pub fn enrich_from_schema_with_settings<DB: DatabaseLike>(
-        &mut self,
-        db: &DB,
-        settings: &AccessorInferenceSettings,
-    ) {
+    /// Read `db` for `deployment` by adopting the sources it declares and then inferring
+    /// the semantics of the schema's function bodies. Explicitly provided registry entries
+    /// take precedence.
+    pub fn enrich_from_schema<DB: DatabaseLike>(&mut self, db: &DB, deployment: &Deployment) {
+        self.adopt(deployment);
         self.prepare_function_resolution(db);
         for function in db.functions() {
             let Some(body) = function.body() else {
@@ -656,21 +602,21 @@ impl FunctionRegistry {
                 .map(|name| name.to_string())
                 .unwrap_or_default();
             let security = function.security_mode();
-            if let Some(semantic) = FunctionSemantic::analyze_body_with_settings(
+            if let Some(semantic) = FunctionSemantic::analyze_body_with_sources(
                 body,
                 &return_type,
                 &language,
                 &security,
-                settings,
+                &self.sources,
             ) {
                 self.register_target_if_absent(&target, &semantic);
             } else if self.get_target(&target).is_none()
-                && FunctionSemantic::analyze_body_with_settings(
+                && FunctionSemantic::analyze_body_with_sources(
                     body,
                     &return_type,
                     &language,
                     &FunctionSecurity::Invoker,
-                    settings,
+                    &self.sources,
                 )
                 .is_some()
             {
@@ -686,12 +632,13 @@ impl FunctionRegistry {
                 if let Some(key) = body_setting_key(body)
                     .map(|(key, casts)| (normalize_setting_key(&key), casts.without_json_parse()))
                     .filter(|(key, casts)| {
-                        settings.declares_setting_key(key)
+                        self.sources.declares_key(key)
                             && casts
                                 .renaming(
-                                    settings
-                                        .attribute(key, &[])
-                                        .and_then(SessionAttribute::identity_cast),
+                                    self.sources
+                                        .get(key, &[])
+                                        .map(DeclaredSource::canonical_type)
+                                        .as_deref(),
                                 )
                                 .is_none()
                     })
@@ -702,7 +649,7 @@ impl FunctionRegistry {
                         &FunctionSemantic::SettingReader { key },
                     );
                 } else if let Some(reason) =
-                    renamed_caller_body(body, &return_type, &language, settings)
+                    renamed_caller_body(body, &return_type, &language, &self.sources)
                 {
                     let target_key = self.target_key(&target);
                     self.renamed_accessors.entry(target_key).or_insert(reason);
@@ -724,15 +671,9 @@ impl FunctionRegistry {
                 .and_then(body_single_projection)
                 .and_then(|expr| row_valued_set(&expr, self))
                 .filter(|source| {
-                    settings.declares_setting_key(&source.key)
-                        && source
-                            .casts
-                            .renaming(
-                                settings
-                                    .attribute(&source.key, &source.path)
-                                    .and_then(SessionAttribute::identity_cast),
-                            )
-                            .is_none()
+                    self.sources
+                        .get(&source.key, &source.path)
+                        .is_some_and(|declared| source.reads_as(declared))
                 })
             else {
                 continue;
@@ -762,6 +703,7 @@ impl Default for FunctionRegistry {
 mod tests {
     use super::*;
     use crate::parser::sql_parser::parse_schema;
+    use crate::test_support::{caller, caller_deployment, deployment, sources};
 
     #[test]
     fn load_from_json_reports_invalid_payload() {
@@ -789,7 +731,7 @@ CREATE FUNCTION opaque_lookup() RETURNS TEXT
         let db = parse_schema(sql).expect("schema should parse");
 
         let mut registry = FunctionRegistry::new();
-        registry.enrich_from_schema(&db);
+        registry.enrich_from_schema(&db, &caller_deployment());
 
         assert!(registry.is_current_user_accessor("current_tenant_id"));
         assert!(
@@ -810,7 +752,7 @@ CREATE FUNCTION current_tenant_id() RETURNS UUID
         let db = parse_schema(sql).expect("schema should parse");
 
         let mut registry = FunctionRegistry::new();
-        registry.enrich_from_schema(&db);
+        registry.enrich_from_schema(&db, &caller_deployment());
 
         assert!(
             registry.get("declared_only").is_none(),
@@ -862,7 +804,7 @@ CREATE FUNCTION other.uid() RETURNS UUID LANGUAGE sql AS 'SELECT NULL::uuid';
         registry
             .load_from_json(r#"{"uid":{"kind":"current_user_accessor","returns":"uuid"}}"#)
             .expect("registry should parse");
-        registry.enrich_from_schema(&db);
+        registry.enrich_from_schema(&db, &caller_deployment());
 
         assert!(matches!(
             registry.get("uid"),
@@ -887,7 +829,7 @@ CREATE FUNCTION wrong_user_id() RETURNS UUID
         let db = parse_schema(sql).expect("schema should parse");
 
         let mut registry = FunctionRegistry::new();
-        registry.enrich_from_schema(&db);
+        registry.enrich_from_schema(&db, &caller_deployment());
 
         assert!(
             registry.get("wrong_user_id").is_none(),
@@ -895,29 +837,17 @@ CREATE FUNCTION wrong_user_id() RETURNS UUID
         );
     }
 
-    /// A key is named once and looked up under whatever spelling a policy uses, since
-    /// `PostgreSQL` folds a setting name when it reads it.
+    /// A setting is declared once and looked up under whatever spelling a policy uses,
+    /// since `PostgreSQL` folds a setting name when it reads it.
     #[test]
-    fn a_named_setting_key_is_found_under_any_spelling_and_no_other_key_is() {
-        let mut registry = FunctionRegistry::new();
-        assert!(
-            !registry.names_caller_setting_key("app.user_id"),
-            "an empty registry names no key"
-        );
+    fn a_declared_setting_is_found_under_any_spelling_and_no_other_is() {
+        let sources = sources([caller("App.User_Id")]);
 
-        registry.trust_current_user_setting_keys([" App.User_Id "]);
-
-        assert!(registry.names_caller_setting_key("app.user_id"));
-        assert!(registry.names_caller_setting_key("APP.USER_ID"));
+        assert!(sources.caller("app.user_id", &[]).is_some());
+        assert!(sources.caller("APP.USER_ID", &[]).is_some());
         assert!(
-            !registry.names_caller_setting_key("app.tenant_id"),
-            "naming one key must not name another"
-        );
-
-        registry.trust_current_user_setting_keys(["app.tenant_id"]);
-        assert!(
-            registry.names_caller_setting_key("app.user_id"),
-            "naming a second key keeps the first"
+            sources.caller("app.tenant_id", &[]).is_none(),
+            "declaring one setting must not declare another"
         );
     }
 
@@ -929,10 +859,9 @@ CREATE FUNCTION tenant_user_id() RETURNS UUID
   AS 'SELECT current_setting(''tenant.current_user_uuid'')';
 ";
         let db = parse_schema(sql).expect("schema should parse");
-        let settings = AccessorInferenceSettings::from_keys(["tenant.current_user_uuid"]);
 
         let mut registry = FunctionRegistry::new();
-        registry.enrich_from_schema_with_settings(&db, &settings);
+        registry.enrich_from_schema(&db, &deployment([caller("tenant.current_user_uuid")]));
 
         assert!(
             registry.is_current_user_accessor("tenant_user_id"),
@@ -950,7 +879,7 @@ CREATE FUNCTION listed_ids_accessor() RETURNS UUID[]
         let db = parse_schema(sql).expect("schema should parse");
 
         let mut registry = FunctionRegistry::new();
-        registry.enrich_from_schema(&db);
+        registry.enrich_from_schema(&db, &caller_deployment());
 
         assert!(
             !registry.is_current_user_accessor("listed_ids_accessor"),
@@ -977,7 +906,7 @@ CREATE FUNCTION listed_ids_accessor() RETURNS UUID[]
             let db = parse_schema(&sql).expect("schema should parse");
 
             let mut registry = FunctionRegistry::new();
-            registry.enrich_from_schema(&db);
+            registry.enrich_from_schema(&db, &caller_deployment());
 
             assert!(
                 !registry.is_current_user_accessor(name),
@@ -996,36 +925,11 @@ CREATE FUNCTION plpgsql_user_id() RETURNS UUID
         let db = parse_schema(sql).expect("schema should parse");
 
         let mut registry = FunctionRegistry::new();
-        registry.enrich_from_schema(&db);
+        registry.enrich_from_schema(&db, &caller_deployment());
 
         assert!(
             !registry.is_current_user_accessor("plpgsql_user_id"),
             "a plpgsql function must not be inferred as a current-user accessor"
-        );
-    }
-
-    #[test]
-    fn explicit_identity_cast_outranks_the_default_caller_key() {
-        use crate::classifier::policy_classifier::classify_policies_with_effective_registry_and_settings;
-        use crate::parser::function_analyzer::AccessorInferenceSettings;
-
-        let db =
-            parse_schema("CREATE TABLE docs(id UUID PRIMARY KEY);").expect("schema should parse");
-        let mut registry = FunctionRegistry::new();
-        registry.declare_session_attributes([SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )
-        .with_identity_cast("uuid")]);
-        let settings = AccessorInferenceSettings::default();
-        let (_, effective) =
-            classify_policies_with_effective_registry_and_settings(&db, &registry, &settings);
-        assert_eq!(
-            effective
-                .session_attribute("app.user_id", &[])
-                .and_then(SessionAttribute::identity_cast),
-            Some("uuid"),
-            "the default convenience key must not erase an explicit identity_cast"
         );
     }
 }

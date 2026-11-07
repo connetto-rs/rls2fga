@@ -5,18 +5,24 @@
 use core::fmt::Write;
 use core::time::Duration;
 
+use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::ActionStatement;
 
 use crate::support;
 
+use crate::support::deployment;
 use crate::support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
 
-const ATTRIBUTES: &str = r#"[
-    { "key": "app.user_id", "kind": "caller_id" },
-    { "key": "app.bot_list", "kind": "set_attribute" },
-    { "key": "app.mode", "kind": "scalar_attribute" },
-    { "key": "app.members", "kind": "set_attribute" }
-]"#;
+/// The declared values a gated table reads beside the suite's callers, the caller's
+/// command list, its mode and its member set, the sets joined by the comma the gates split
+/// on.
+fn gate_settings() -> [SessionSetting; 3] {
+    [
+        deployment::delimited_set("app.bot_list", ","),
+        deployment::scalar("app.mode"),
+        deployment::delimited_set("app.members", ","),
+    ]
+}
 
 const DOCS: &str = "
 CREATE TABLE teams(id INT PRIMARY KEY);
@@ -54,7 +60,7 @@ fn docs_case(name: &str, policies: &str, principals: Vec<Principal>) -> ParityCa
         ],
         principals,
     )
-    .with_attributes(ATTRIBUTES)
+    .with_settings(gate_settings())
 }
 
 async fn assert_exact(cluster: &Cluster, mut case: ParityCase, pairs: &[(&str, &str, bool)]) {
@@ -244,7 +250,7 @@ async fn gated_membership_parity() {
                 Principal::with_bot_list("expired", Some(&["staff:read"])).with_clock(),
                 Principal::with_bot_list("nonmember", Some(&["staff:read"])).with_clock(),
             ],
-        ).with_attributes(ATTRIBUTES);
+        ).with_settings(gate_settings());
         assert_exact(
             &cluster,
             case,
@@ -350,7 +356,7 @@ async fn gated_membership_parity() {
                 .map(|user| Principal::with_bot_list(user, Some(&["members:read"])))
                 .collect(),
         )
-        .with_attributes(ATTRIBUTES);
+        .with_settings(gate_settings());
         assert_exact(
             &cluster,
             case,
@@ -420,7 +426,7 @@ async fn gated_membership_parity() {
                  GRANT SELECT ON teams, members, docs TO app_reader",
             ],
             principals,
-        ).with_attributes(ATTRIBUTES);
+        ).with_settings(gate_settings());
         assert_exact(
             &cluster,
             case,
@@ -493,7 +499,7 @@ async fn gated_membership_parity() {
                  GRANT SELECT ON teams, members, docs TO app_reader",
             ],
             principals,
-        ).with_attributes(ATTRIBUTES);
+        ).with_settings(gate_settings());
         assert_exact(
             &cluster,
             case,

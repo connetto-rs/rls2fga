@@ -9,6 +9,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+# The type the harness deployment declares its caller settings to hold.
+sqlparser = "0.64"
 
 # Default features (std) are kept on so sqlparser's recursive-protection guards
 # deeply nested input: the parser returns an error instead of overflowing the

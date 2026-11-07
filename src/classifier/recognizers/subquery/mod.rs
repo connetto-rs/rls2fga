@@ -1,6 +1,6 @@
 use super::*;
 use crate::classifier::expansion::ExpansionState;
-use crate::classifier::function_registry::SessionAttribute;
+use crate::classifier::function_registry::DeclaredSource;
 use crate::parser::names::{lookup_table_id, resolve_table_id, table_identity};
 use crate::parser::sql_parser::DataTypeLike;
 use crate::types::{ColumnName, TableId};
@@ -1022,7 +1022,7 @@ fn classify_membership_select<DB: DatabaseLike>(
                     extra_predicates,
                 },
                 separator,
-                source,
+                source: *source,
             }),
             confidence: ConfidenceLevel::A,
         }),
@@ -1979,7 +1979,7 @@ pub(super) enum MemberMatch {
     /// The column holds a value the caller's declared set has to contain.
     InCallerSet {
         /// The declared source, carrying the parameter the caller supplies.
-        source: SessionAttribute,
+        source: Box<DeclaredSource>,
         /// Separator the policy splits the setting on.
         separator: Option<String>,
     },
@@ -2101,7 +2101,7 @@ fn analyze_membership_eq_predicate(
                 return MembershipEqAnalysis::UserColumn(
                     column,
                     MemberMatch::InCallerSet {
-                        source: source.clone(),
+                        source: Box::new(source.clone()),
                         separator,
                     },
                 );

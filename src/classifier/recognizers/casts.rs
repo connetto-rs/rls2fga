@@ -14,7 +14,7 @@ use sqlparser::ast::{BinaryOperator, Expr, InTarget};
 
 use super::session::{declared_read, set_read, sole_projection};
 use super::{
-    accessor_read, caller_renaming_cast, caller_session_attribute, comparison_renaming_cast,
+    accessor_read, caller_renaming_cast, caller_source, comparison_renaming_cast,
     is_coalesce_wrapped, positional_function_arg, reads_the_caller,
 };
 use crate::classifier::function_registry::FunctionRegistry;
@@ -104,12 +104,12 @@ pub(crate) fn compared_cast_reason(expr: &Expr) -> Option<String> {
 }
 
 /// Why reading `subject` through a cast to `cast` cannot translate, and what makes it hold
-/// where `declarable` names the key a declaration goes on.
+/// where `declarable` names the setting whose declared type would prove the cast.
 pub(crate) fn renaming_reason(subject: &str, cast: &str, declarable: Option<&str>) -> String {
     let remedy = match declarable {
         Some(key) => format!(
-            "declare identity_cast '{}' on {key} if every request sends it in that type's \
-             canonical form, or compare it uncast",
+            "declare {key} in the deployment as holding {} if every request sends it in that \
+             type's canonical form, or compare it uncast",
             element_type(cast)
         ),
         None => "compare it uncast or as text".to_string(),
@@ -147,12 +147,12 @@ fn request_read(node: &Expr, registry: &FunctionRegistry) -> Option<RequestRead>
             }
         }
     }
-    let (attribute, casts) = declared_read(node, registry).or_else(|| set_read(node, registry))?;
+    let (source, casts) = declared_read(node, registry).or_else(|| set_read(node, registry))?;
     Some(RequestRead {
-        subject: format!("current_setting('{}')", attribute.setting_key()),
-        declarable: Some(attribute.setting_key().to_string()),
+        subject: format!("current_setting('{}')", source.setting_key()),
+        declarable: Some(source.setting_key().to_string()),
         renaming: casts
-            .renaming(attribute.identity_cast())
+            .renaming(Some(&source.canonical_type()))
             .map(str::to_string),
         casts,
     })
@@ -166,8 +166,7 @@ fn caller_read(
 ) -> Option<RequestRead> {
     let renaming = caller_renaming_cast(caller, &outer, registry);
     let read = accessor_read(caller)?;
-    let declarable = caller_session_attribute(read.root, registry)
-        .map(|attribute| attribute.setting_key().to_string());
+    let declarable = caller_source(&read, registry).map(|source| source.setting_key().to_string());
     outer.extend(read.casts);
     Some(RequestRead {
         subject: format!("the caller's identity {}", read.root),
@@ -222,19 +221,15 @@ fn compared_operands<'e>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classifier::function_registry::{SessionAttribute, SessionAttributeKind};
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
+    use crate::test_support::{caller, registry};
 
     /// `GLOBAL IN` is `ClickHouse` syntax that `PostgreSqlDialect` never parses, so the only
     /// way it reaches this matcher is a hand-built AST (the fuzzer's `Arbitrary` derive
     /// included), and the field has to be read, not wildcarded away.
     #[test]
     fn a_global_in_subquery_is_not_a_compared_operand() {
-        let mut registry = FunctionRegistry::new();
-        registry.declare_session_attributes(vec![SessionAttribute::setting(
-            "app.user_id",
-            SessionAttributeKind::CallerId,
-        )]);
+        let registry = registry([caller("app.user_id")]);
         let expr = parse_expr("id IN (SELECT current_setting('app.user_id', true))");
         assert!(
             !compared_operands(&expr, &registry).is_empty(),

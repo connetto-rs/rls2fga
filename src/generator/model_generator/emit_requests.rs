@@ -99,7 +99,7 @@ fn request_comparison_spec(
 #[derive(Clone, Copy)]
 pub(crate) struct RequestSide<'a> {
     /// The declared source, carrying the parameter the caller supplies.
-    pub(crate) source: &'a SessionAttribute,
+    pub(crate) source: &'a DeclaredSource,
     /// How the two sides are compared.
     pub(crate) comparison: RequestComparison,
     /// Separator the policy splits the setting on, for a set.

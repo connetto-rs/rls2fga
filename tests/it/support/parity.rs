@@ -19,6 +19,7 @@ use diesel::sql_types::Jsonb;
 use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
 use testcontainers::{ContainerAsync, GenericImage};
 
+use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ConfidenceLevel,
     NoteSeverity, RequestComparison, RequestPredicate, RowNaming, RowVersion, TableId,
@@ -189,9 +190,9 @@ pub(crate) struct ParityCase {
     /// Accessor metadata the deployment declares, as a fixture's
     /// `function_registry.json` holds it.
     pub(crate) registry_json: Option<String>,
-    /// Request-scoped values the deployment declares, as a fixture's
-    /// `session_attributes.json` holds them.
-    pub(crate) attributes_json: Option<String>,
+    /// Settings the deployment declares beside the suite's callers, as a fixture's
+    /// `deployment.json` holds them.
+    pub(crate) settings: Vec<SessionSetting>,
     /// Tables whose rows are not read through the table itself.
     ///
     /// A partition with row-level security off is unfiltered when it is queried directly,
@@ -242,7 +243,7 @@ impl ParityCase {
             principals,
             mutations: BTreeMap::new(),
             registry_json: None,
-            attributes_json: None,
+            settings: Vec::new(),
             not_read_directly: Vec::new(),
             loading_from_rows: false,
             future: None,
@@ -281,9 +282,10 @@ impl ParityCase {
         case.registry_json =
             std::fs::read_to_string(super::fixture_dir(fixture).join("function_registry.json"))
                 .ok();
-        case.attributes_json =
-            std::fs::read_to_string(super::fixture_dir(fixture).join("session_attributes.json"))
-                .ok();
+        case.settings =
+            std::fs::read_to_string(super::fixture_dir(fixture).join("deployment.json"))
+                .map(|json| super::deployment::settings_from_json(&json))
+                .unwrap_or_default();
         case
     }
 
@@ -293,9 +295,12 @@ impl ParityCase {
         self
     }
 
-    /// The same case, with the request-scoped values its deployment declares.
-    pub(crate) fn with_attributes(mut self, attributes_json: &str) -> Self {
-        self.attributes_json = Some(attributes_json.to_string());
+    /// The same case, its deployment declaring `settings` beside the suite's callers.
+    pub(crate) fn with_settings(
+        mut self,
+        settings: impl IntoIterator<Item = SessionSetting>,
+    ) -> Self {
+        self.settings = settings.into_iter().collect();
         self
     }
 
@@ -1026,7 +1031,7 @@ fn plan_case(
     let (classified, db, registry) = super::classify_with(
         &case.schema,
         case.registry_json.as_deref(),
-        case.attributes_json.as_deref(),
+        &super::deployment::caller_deployment_with(case.settings.iter().cloned()),
     );
     let planned = super::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let disclosed: Vec<Disclosure> = planned

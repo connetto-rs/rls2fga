@@ -488,7 +488,11 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user OR my_mystery(
 ";
         let db = parse_schema(sql).expect("schema should parse");
         let registry = crate::classifier::function_registry::FunctionRegistry::new();
-        let classified = crate::classifier::policy_classifier::classify_policies(&db, &registry);
+        let classified = crate::classifier::policy_classifier::classify_policies(
+            &db,
+            &registry,
+            &crate::test_support::caller_deployment(),
+        );
         let report = build_report(&[], &classified, ConfidenceLevel::B);
         let section = report
             .split("## Dropped Below")
@@ -519,7 +523,11 @@ CREATE POLICY p ON docs FOR SELECT USING (my_mystery(meta));
 ";
         let db = parse_schema(sql).expect("schema should parse");
         let registry = crate::classifier::function_registry::FunctionRegistry::new();
-        let classified = crate::classifier::policy_classifier::classify_policies(&db, &registry);
+        let classified = crate::classifier::policy_classifier::classify_policies(
+            &db,
+            &registry,
+            &crate::test_support::caller_deployment(),
+        );
         let report = build_report(&[], &classified, ConfidenceLevel::B);
 
         assert!(
@@ -547,7 +555,11 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
         );
         let db = parse_schema(&sql).expect("schema should parse");
         let registry = crate::classifier::function_registry::FunctionRegistry::new();
-        let classified = crate::classifier::policy_classifier::classify_policies(&db, &registry);
+        let classified = crate::classifier::policy_classifier::classify_policies(
+            &db,
+            &registry,
+            &crate::test_support::caller_deployment(),
+        );
         let report = build_report(&[], &classified, ConfidenceLevel::B);
         report
             .lines()

@@ -23,7 +23,7 @@
 //! use rls2fga::classifier::oracle::{consult_oracle, OracleAnswer, PolicyOracle, RefusedExpr};
 //! use rls2fga::classifier::patterns::{ClassifiedExpr, ConstantBool, PatternClass};
 //! use rls2fga::types::ConfidenceLevel;
-//! use rls2fga::parser::sql_parser::parse_schema;
+//! use rls2fga::parser::sql_parser::{parse_schema, Deployment};
 //! use rls2fga::translator::TranslatorBuilder;
 //!
 //! struct BitFlagIsPublic;
@@ -49,7 +49,8 @@
 //!      CREATE POLICY docs_sel ON docs FOR SELECT\n\
 //!        USING ((flags & 4) = 4 AND owner_id = current_user);\n",
 //! )?;
-//! let translator = TranslatorBuilder::new()
+//! let deployment = Deployment::new("authenticator", ["web_user"], []).expect("one acting role");
+//! let translator = TranslatorBuilder::new(deployment)
 //!     .with_min_confidence(ConfidenceLevel::B)
 //!     .build();
 //!

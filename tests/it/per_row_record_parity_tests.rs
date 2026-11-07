@@ -1013,12 +1013,12 @@ async fn an_expiring_share_settles_and_matches_its_own_sql() {
     conn.batch_execute(EXPIRING_SHARE_SEED)
         .expect("failed to seed the expiring shares");
 
-    let (classified, db, registry) = support::classify_sql_with_session_attributes(
+    let (classified, db, registry) = support::classify_sql_with_settings(
         support::EXPIRING_SHARE_SCHEMA,
-        r#"[
-      { "key": "app.user_id", "kind": "caller_id" },
-      { "key": "app.subjects", "kind": "set_attribute" }
-    ]"#,
+        [
+            support::deployment::caller("app.user_id"),
+            support::deployment::delimited_set("app.subjects", ","),
+        ],
     );
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();

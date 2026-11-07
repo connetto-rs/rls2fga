@@ -1912,7 +1912,11 @@ mod tests {
     use crate::translator::Translation;
 
     fn plan_queries<DB: DatabaseLike>(db: &DB, registry: &FunctionRegistry) -> Vec<TupleQuery> {
-        let classified = crate::classifier::policy_classifier::classify_policies(db, registry);
+        let classified = crate::classifier::policy_classifier::classify_policies(
+            db,
+            registry,
+            &crate::test_support::caller_deployment(),
+        );
         Translation::plan(
             classified,
             db,

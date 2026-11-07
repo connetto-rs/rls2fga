@@ -5,9 +5,7 @@ use sqlparser::ast::{
     UnaryOperator, Value,
 };
 
-use crate::classifier::function_registry::{
-    FunctionRegistry, SessionAttribute, SessionAttributeKind,
-};
+use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
 pub use crate::parser::expr::extract_column_name;
 pub(crate) use crate::parser::expr::unwrap_cast_or_nested;
@@ -35,6 +33,8 @@ mod invariant;
 mod session;
 /// P4/P5 membership and parent-inheritance recognizers (correlated EXISTS / IN subqueries).
 mod subquery;
+/// Comparisons an unset setting's empty reading makes true.
+mod unset;
 
 use attribute::attribute_literal;
 pub use attribute::{
@@ -60,6 +60,7 @@ pub(crate) use subquery::{
 };
 pub use subquery::{recognize_p4, recognize_p4_in_subquery, recognize_p5};
 pub(crate) use subquery::{resolve_membership_pairing, MembershipPairing};
+pub(crate) use unset::empty_readings;
 
 /// Recognize P1: `role_fn(user, resource) >= N`, in either operand order.
 pub fn recognize_p1<DB: DatabaseLike>(
@@ -327,32 +328,32 @@ pub fn recognize_p3<DB: DatabaseLike>(
     };
 
     // Either operand may carry the accessor, and either may reach its column through a
-    // COALESCE default, which `extract_column_name` alone does not see through.
-    let (col_name, accessor_name, column_side, accessor_side) = if let (Some(col), Some(accessor)) =
-        (extract_column_name(left), current_user_accessor_name(right))
-    {
-        (col, accessor, left, right)
-    } else if let (Some(accessor), Some(col)) =
-        (current_user_accessor_name(left), extract_column_name(right))
-    {
-        (col, accessor, right, left)
-    } else if let (Some(col), Some(accessor)) = (
-        extract_column_name_through_coalesce(left),
-        current_user_accessor_name(right),
-    ) {
-        (col, accessor, left, right)
-    } else if let (Some(accessor), Some(col)) = (
-        current_user_accessor_name(left),
-        extract_column_name_through_coalesce(right),
-    ) {
-        (col, accessor, right, left)
-    } else {
-        return None;
+    // COALESCE default, which `extract_column_name` alone does not see through. A field
+    // the deployment declares as the caller is an accessor too, though it has no name.
+    let accessor = |expr: &Expr| {
+        current_user_accessor_name(expr)
+            .or_else(|| reads_declared_caller(expr, registry).then(String::new))
     };
+    let (col_name, accessor_name, column_side, accessor_side) =
+        if let (Some(col), Some(accessor)) = (extract_column_name(left), accessor(right)) {
+            (col, accessor, left, right)
+        } else if let (Some(accessor), Some(col)) = (accessor(left), extract_column_name(right)) {
+            (col, accessor, right, left)
+        } else if let (Some(col), Some(accessor)) =
+            (extract_column_name_through_coalesce(left), accessor(right))
+        {
+            (col, accessor, left, right)
+        } else if let (Some(accessor), Some(col)) =
+            (accessor(left), extract_column_name_through_coalesce(right))
+        {
+            (col, accessor, right, left)
+        } else {
+            return None;
+        };
 
     // Determine how we matched the accessor and assign confidence accordingly.
     let is_named = registry.is_current_user_accessor(&accessor_name)
-        || reads_caller_setting_key(accessor_side, registry);
+        || reads_declared_caller(accessor_side, registry);
     let is_sql_keyword = is_sql_current_user_keyword_expr(accessor_side);
 
     // Guard against false positives like `owner_id = author_id`:
@@ -995,41 +996,48 @@ fn current_user_accessor_name(expr: &Expr) -> Option<String> {
     }
 }
 
-/// Whether the accessor `expr` reads a `current_setting` key named as the caller.
-fn reads_caller_setting_key(expr: &Expr, registry: &FunctionRegistry) -> bool {
-    accessor_root(expr)
-        .and_then(current_setting_literal_key)
-        .is_some_and(|key| registry.names_caller_setting_key(&key))
+/// The declared caller source `read` reads, either a setting the deployment declares as
+/// the caller read inline, or a field of a JSON setting it declares as the caller, read
+/// inline or through a wrapper whose whole body reads the setting.
+///
+/// A wrapper returning the whole caller setting names the caller only once its body has
+/// been read as an accessor, which checks what it returns and how it runs, so it is not
+/// accepted here.
+pub(super) fn caller_source<'r>(
+    read: &AccessorRead<'_>,
+    registry: &'r FunctionRegistry,
+) -> Option<&'r DeclaredSource> {
+    let key = match current_setting_literal_key(read.root) {
+        Some(key) => key,
+        None if !read.path.is_empty() => session::setting_key_read_by(read.root, registry)?,
+        None => return None,
+    };
+    registry.sources().caller(&key, &read.path)
 }
 
-/// The declared `CallerId` attribute `root` reads, when it is a `current_setting` key a
-/// deployment declared as the caller.
-fn caller_session_attribute<'r>(
-    root: &Expr,
-    registry: &'r FunctionRegistry,
-) -> Option<&'r SessionAttribute> {
-    let key = current_setting_literal_key(root)?;
-    let attribute = registry.session_attribute(&key, &[])?;
-    (attribute.kind() == SessionAttributeKind::CallerId).then_some(attribute)
+/// Whether `expr` reads a source the deployment declares as the caller.
+fn reads_declared_caller(expr: &Expr, registry: &FunctionRegistry) -> bool {
+    accessor_read(expr).is_some_and(|read| caller_source(&read, registry).is_some())
 }
 
 /// The cast on `expr`'s read of the caller that can rename the caller, inside the casts
 /// `outer` already found around it.
 ///
-/// A cast is proven by the `identity_cast` of a declared caller key, or for an accessor
-/// function by the type it returns, which a cast to that same type cannot change.
+/// A cast is proven by the type the deployment declares the caller canonical for, or for
+/// an accessor function by the type it returns, which a cast to that same type cannot
+/// change.
 fn caller_renaming_cast(
     expr: &Expr,
     outer: &CastChain,
     registry: &FunctionRegistry,
 ) -> Option<String> {
     let read = accessor_read(expr)?;
-    let declared = caller_session_attribute(read.root, registry)
-        .and_then(SessionAttribute::identity_cast)
-        .or_else(|| accessor_return_type(read.root, registry));
+    let declared = caller_source(&read, registry)
+        .map(DeclaredSource::canonical_type)
+        .or_else(|| accessor_return_type(read.root, registry).map(str::to_string));
     outer
-        .renaming(declared)
-        .or_else(|| read.casts.renaming(declared))
+        .renaming(declared.as_deref())
+        .or_else(|| read.casts.renaming(declared.as_deref()))
         .map(str::to_string)
 }
 
@@ -1113,11 +1121,13 @@ pub(crate) fn is_current_user_expr(expr: &Expr, registry: &FunctionRegistry) -> 
 
 /// Whether `expr` reads the caller, whatever casts it is written under.
 fn reads_the_caller(expr: &Expr, registry: &FunctionRegistry) -> bool {
+    if reads_declared_caller(expr, registry) {
+        return true;
+    }
     let Some(name) = current_user_accessor_name(expr) else {
         return false;
     };
     registry.is_current_user_accessor(&name)
-        || reads_caller_setting_key(expr, registry)
         || (is_current_user_keyword(&name) && is_sql_current_user_keyword_expr(expr))
 }
 
