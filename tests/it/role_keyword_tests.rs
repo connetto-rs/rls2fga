@@ -84,4 +84,55 @@ mod parity {
             assert_agrees(&case, &run);
         }
     }
+
+    /// A column's name decides nothing once `current_user` is a role literal, so literal,
+    /// null, list and clock tests on columns named like owners guard rows as any column's do.
+    #[tokio::test]
+    #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+    async fn user_like_columns_guard_rows_like_any_column() {
+        let cluster = Cluster::start().await;
+        let case = ParityCase::reading(
+            "user-like-column-guards",
+            "CREATE TABLE docs(
+                 id INT PRIMARY KEY,
+                 owner_id TEXT,
+                 created_by TEXT,
+                 author_id TEXT,
+                 owner_id_expires_at TIMESTAMPTZ NOT NULL
+             );
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY by_owner ON docs FOR SELECT USING (owner_id = 'alice');
+             CREATE POLICY unclaimed ON docs FOR SELECT USING (created_by IS NULL);
+             CREATE POLICY by_author ON docs FOR SELECT USING (author_id IN ('bob', 'carol'));
+             CREATE POLICY unexpired ON docs FOR SELECT USING (owner_id_expires_at > now());",
+            &[
+                "INSERT INTO docs VALUES
+                     (1, 'alice', 'x', 'x', now() - interval '1 day'),
+                     (2, 'x', NULL, 'x', now() - interval '1 day'),
+                     (3, 'x', 'x', 'carol', now() - interval '1 day'),
+                     (4, 'x', 'x', 'x', now() + interval '1 day'),
+                     (5, 'x', 'x', 'x', now() - interval '1 day')",
+                "CREATE ROLE reader; GRANT SELECT ON docs TO reader",
+            ],
+            vec![Principal::as_role("dave", "reader").with_clock()],
+        );
+        let run = support::parity::run(&cluster, &case).await;
+        for (object, visible) in [
+            ("docs:1", true),
+            ("docs:2", true),
+            ("docs:3", true),
+            ("docs:4", true),
+            ("docs:5", false),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                "dave",
+                object,
+                ActionStatement::Select,
+                visible,
+            );
+        }
+        assert_agrees(&case, &run);
+    }
 }
