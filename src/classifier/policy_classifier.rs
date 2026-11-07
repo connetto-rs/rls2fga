@@ -723,11 +723,11 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return unknown_d(expr, undeclared_sets.join(". "));
     }
 
-    // A clock shifted by an interval with no fixed length, at any depth, is why the
-    // guard falls closed, so the operator reads that rather than the clock's own call.
-    let offset_refusals = recognizers::clock_offset_refusals(expr);
-    if !offset_refusals.is_empty() {
-        return unknown_d(expr, offset_refusals.join(". "));
+    // A clock or shift no threshold follows, at any depth, is why the guard falls closed,
+    // so the operator reads that rather than the clock's own call.
+    let clock_refusals = recognizers::clock_refusals(expr);
+    if !clock_refusals.is_empty() {
+        return unknown_d(expr, clock_refusals.join(". "));
     }
 
     let mut blamed: Vec<String> = recognizers::subquery_set_constructors(expr)

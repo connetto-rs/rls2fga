@@ -2942,11 +2942,11 @@ fn a_membership_grace_window_rides_the_clock_as_a_duration() {
     );
 }
 
-/// The same arm counting its grace in days has no fixed length, since `PostgreSQL` adds a
-/// day on the calendar of the session `TimeZone`. It falls closed, and the report names the
-/// interval rather than the clock's own call.
+/// The same arm counting its grace in days compares the row with a threshold the checker
+/// computes in the request's zone, since `PostgreSQL` adds a day on the calendar of the
+/// session `TimeZone`.
 #[test]
-fn a_membership_grace_window_in_days_falls_closed_naming_why() {
+fn a_membership_grace_window_in_days_reads_its_threshold_parameter() {
     let schema = GRACE_SHARE.replace("'36 hours'", "'30 days'");
     let (db, registry) = parsed_with_session_attributes(&schema, EXPIRING_SHARE_ATTRIBUTES);
     let outputs = translation(
@@ -2958,16 +2958,22 @@ fn a_membership_grace_window_in_days_falls_closed_naming_why() {
     .outputs_accepting_gaps();
     let dsl = outputs.model();
     assert!(
-        dsl.contains("define can_select: no_access"),
-        "a calendar window must fall closed:\n{dsl}"
+        dsl.lines().any(|line| line
+            .contains("viewer in app_subjects && expires_at > request_time_minus_30_days")),
+        "the membership condition joins the viewer set and the threshold:\n{dsl}"
     );
-    let report = outputs.report();
     assert!(
-        report.contains(
-            "Unknown: INTERVAL '30 days' counts days, which PostgreSQL adds as calendar days \
-             in the session TimeZone, so it has no fixed CEL duration"
-        ),
-        "the report must name the interval as the reason:\n{report}"
+        dsl.contains("request_time_minus_30_days: timestamp") && !dsl.contains("request_time:"),
+        "the condition declares the threshold and no other clock:\n{dsl}"
+    );
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::CallerSuppliesConditionParameter { parameter, setting_key, .. }
+                if parameter == "request_time_minus_30_days" && setting_key.is_none()
+        )),
+        "the request supplies the threshold: {:?}",
+        outputs.notes()
     );
 }
 

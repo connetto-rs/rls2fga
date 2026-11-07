@@ -1222,208 +1222,71 @@ fn a_fixed_temporal_offset_rides_the_request_clock_as_a_duration() {
     }
 }
 
-/// An interval that counts days or months has no fixed length. `PostgreSQL` adds such a
-/// term to a `timestamptz` on the calendar of the session `TimeZone`, so across a
-/// daylight-saving change `now() - interval '1 day'` is 23 or 25 hours back. Nor does an
-/// infinite interval or text `PostgreSQL` does not read give a duration. Each falls closed,
-/// and the report names why, beside the value `PostgreSQL` 18.6 stores for the literal.
+/// An interval no threshold follows falls closed: an infinite one, text `PostgreSQL` does
+/// not read, a qualifier it refuses, a cast this does not follow, and a fixed length
+/// beyond a CEL duration. The report names why, beside the value `PostgreSQL` 18.6 stores
+/// for the literal.
 #[test]
-fn an_offset_without_a_fixed_length_falls_closed_naming_why() {
-    const DAYS: &str = "counts days, which PostgreSQL adds as calendar days in the session \
-                        TimeZone, so it has no fixed CEL duration";
-    const MONTHS: &str = "counts months, which PostgreSQL adds as calendar months in the \
-                          session TimeZone, so it has no fixed CEL duration";
-    const BOTH: &str = "counts months and days, which PostgreSQL adds as calendar months and \
-                        days in the session TimeZone, so it has no fixed CEL duration";
+fn an_offset_no_threshold_follows_falls_closed_naming_why() {
     for (interval_sql, stored, reason) in [
-        (
-            "interval '1 day'",
-            "1 day",
-            format!("INTERVAL '1 day' {DAYS}"),
-        ),
-        (
-            "interval '30 days'",
-            "30 days",
-            format!("INTERVAL '30 days' {DAYS}"),
-        ),
-        (
-            "interval '1.5 days'",
-            "1 day 12:00:00",
-            format!("INTERVAL '1.5 days' {DAYS}"),
-        ),
-        (
-            "interval '30' day",
-            "30 days",
-            format!("INTERVAL '30' DAY {DAYS}"),
-        ),
-        (
-            "interval 'P30D'",
-            "30 days",
-            format!("INTERVAL 'P30D' {DAYS}"),
-        ),
-        (
-            "interval '1 day ago'",
-            "-1 days",
-            format!("INTERVAL '1 day ago' {DAYS}"),
-        ),
-        (
-            "interval '1 week'",
-            "7 days",
-            format!("INTERVAL '1 week' {DAYS}"),
-        ),
-        (
-            "interval 'P1DT2H'",
-            "1 day 02:00:00",
-            format!("INTERVAL 'P1DT2H' {DAYS}"),
-        ),
-        (
-            "interval '1 mon'",
-            "1 mon",
-            format!("INTERVAL '1 mon' {MONTHS}"),
-        ),
-        (
-            "interval '1 year'",
-            "1 year",
-            format!("INTERVAL '1 year' {MONTHS}"),
-        ),
-        (
-            "interval '2' year",
-            "2 years",
-            format!("INTERVAL '2' YEAR {MONTHS}"),
-        ),
-        (
-            "interval '3' month",
-            "3 mons",
-            format!("INTERVAL '3' MONTH {MONTHS}"),
-        ),
-        (
-            "interval '1-2' year to month",
-            "1 year 2 mons",
-            format!("INTERVAL '1-2' YEAR TO MONTH {MONTHS}"),
-        ),
-        (
-            "interval '1 2' day to hour",
-            "1 day 02:00:00",
-            format!("INTERVAL '1 2' DAY TO HOUR {DAYS}"),
-        ),
-        (
-            "interval '1 2:03' day to minute",
-            "1 day 02:03:00",
-            format!("INTERVAL '1 2:03' DAY TO MINUTE {DAYS}"),
-        ),
-        (
-            "interval '1 2:03:04' day to second",
-            "1 day 02:03:04",
-            format!("INTERVAL '1 2:03:04' DAY TO SECOND {DAYS}"),
-        ),
         (
             "interval '1' day(3)",
             "a syntax error",
-            "PostgreSQL does not read the field qualifier of INTERVAL '1' DAY (3)".to_string(),
+            "PostgreSQL does not read the field qualifier of INTERVAL '1' DAY (3)",
         ),
         (
             "interval '1' minute to hour",
             "a syntax error",
-            "PostgreSQL does not read the field qualifier of INTERVAL '1' MINUTE TO HOUR"
-                .to_string(),
+            "PostgreSQL does not read the field qualifier of INTERVAL '1' MINUTE TO HOUR",
         ),
         (
             "interval 1 hour",
             "a syntax error",
-            "INTERVAL 1 HOUR is not a quoted string, so it has no fixed CEL duration".to_string(),
-        ),
-        (
-            "interval '1 mon 2 days'",
-            "1 mon 2 days",
-            format!("INTERVAL '1 mon 2 days' {BOTH}"),
+            "INTERVAL 1 HOUR is not a quoted string, so it has no fixed CEL duration",
         ),
         (
             "interval 'infinity'",
             "infinity",
-            "INTERVAL 'infinity' has no finite length, so it has no CEL duration".to_string(),
+            "INTERVAL 'infinity' has no finite length, so it has no CEL duration",
         ),
         (
             "interval '2562048 hours'",
             "2562048:00:00",
-            "INTERVAL '2562048 hours' is longer than a CEL duration holds".to_string(),
+            "INTERVAL '2562048 hours' is longer than a CEL duration holds",
+        ),
+        (
+            "interval '-2147483648 days'",
+            "-2147483648 days, the subtraction raising interval out of range",
+            "PostgreSQL raises interval out of range subtracting INTERVAL '-2147483648 days'",
         ),
         (
             "interval 'fortnight'",
             "an error",
             "PostgreSQL does not read 'fortnight' as an interval \
-             (invalid input syntax for type interval)"
-                .to_string(),
-        ),
-        (
-            "'30 days'::interval",
-            "30 days",
-            format!("'30 days'::INTERVAL {DAYS}"),
-        ),
-        (
-            "CAST('1 mon' AS interval)",
-            "1 mon",
-            format!("CAST('1 mon' AS INTERVAL) {MONTHS}"),
-        ),
-        (
-            "'2'::interval year",
-            "2 years",
-            format!("'2'::INTERVAL YEAR {MONTHS}"),
-        ),
-        (
-            "'3'::interval month",
-            "3 mons",
-            format!("'3'::INTERVAL MONTH {MONTHS}"),
-        ),
-        (
-            "'4'::interval day",
-            "4 days",
-            format!("'4'::INTERVAL DAY {DAYS}"),
-        ),
-        (
-            "'1-2'::interval year to month",
-            "1 year 2 mons",
-            format!("'1-2'::INTERVAL YEAR TO MONTH {MONTHS}"),
-        ),
-        (
-            "'1 2'::interval day to hour",
-            "1 day 02:00:00",
-            format!("'1 2'::INTERVAL DAY TO HOUR {DAYS}"),
-        ),
-        (
-            "'1 2:03'::interval day to minute",
-            "1 day 02:03:00",
-            format!("'1 2:03'::INTERVAL DAY TO MINUTE {DAYS}"),
-        ),
-        (
-            "'1 2:03:04'::interval day to second",
-            "1 day 02:03:04",
-            format!("'1 2:03:04'::INTERVAL DAY TO SECOND {DAYS}"),
+             (invalid input syntax for type interval)",
         ),
         (
             "'fortnight'::interval",
             "an error",
             "PostgreSQL does not read 'fortnight' as an interval \
-             (invalid input syntax for type interval)"
-                .to_string(),
+             (invalid input syntax for type interval)",
         ),
         (
             "'1.75'::text::interval minute",
             "00:00:00, where '1.75'::interval minute stores 00:01:00",
             "'1.75'::TEXT::INTERVAL MINUTE casts through another type before the interval, \
-             which this does not follow, so it has no fixed CEL duration"
-                .to_string(),
+             which this does not follow, so it has no fixed CEL duration",
         ),
         (
             "(interval '90 minutes')::interval hour",
             "01:00:00",
             "(INTERVAL '90 minutes')::INTERVAL HOUR casts the interval again, which this \
-             does not follow, so it has no fixed CEL duration"
-                .to_string(),
+             does not follow, so it has no fixed CEL duration",
         ),
         (
             "now()::interval",
             "an error",
-            "now()::INTERVAL is not a quoted string, so it has no fixed CEL duration".to_string(),
+            "now()::INTERVAL is not a quoted string, so it has no fixed CEL duration",
         ),
     ] {
         for predicate in [
@@ -1447,7 +1310,7 @@ fn an_offset_without_a_fixed_length_falls_closed_naming_why() {
             );
             let report = outputs.report();
             assert!(
-                report.contains(&reason),
+                report.contains(reason),
                 "`{predicate}` must be refused with `{reason}`:\n{report}"
             );
         }

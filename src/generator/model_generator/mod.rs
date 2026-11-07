@@ -7,12 +7,14 @@ use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::{FunctionRegistry, SessionAttribute};
 use crate::classifier::patterns::*;
 use crate::classifier::readability::{table_readability, ReadGate, TableReadability};
+use crate::clock::{cel_duration, ClockParameter, ClockReading, ClockThreshold};
 use crate::generator::db_lookup::{
     column_is_nullable, column_kind, composite_primary_key_columns, resolve_row_identity,
     row_uniquely_keys, single_identity_column,
 };
 use crate::generator::identity::MAX_OBJECT_NAME_CHARS;
 use crate::generator::ir::{GateContextColumn, MembershipGate, PrincipalInfo, TupleSource};
+use crate::generator::model_bounds::MAX_PARAMETER_NAME_CHARS;
 use crate::generator::notes::SkippedTuples;
 use crate::generator::role_relations::{sorted_role_relation_names, RoleRelationName};
 use crate::generator::tuple_generator::{resolve_bridge_columns, UnboundedColumns};
@@ -190,8 +192,9 @@ impl ConditionSpec {
         let mut key = self.expression.clone();
         for (parameter, kind) in &self.parameters {
             let (shape, element) = match kind {
-                ConditionParameter::Scalar(element) => ("scalar", element),
-                ConditionParameter::ListOf(element) => ("list", element),
+                ConditionParameter::Scalar(element) => ("scalar", *element),
+                ConditionParameter::ListOf(element) => ("list", *element),
+                ConditionParameter::Clock(_) => ("scalar", TIMESTAMP_PARAMETER_TYPE),
             };
             for part in [parameter.as_str(), shape, element] {
                 key.push('\0');
@@ -213,6 +216,8 @@ pub(crate) enum ConditionParameter {
     Scalar(&'static str),
     /// A list of values of the named element type.
     ListOf(&'static str),
+    /// A timestamp the checker computes from the request clock, under its own name.
+    Clock(ClockParameter),
 }
 
 /// Structural identity of a subject list, stable against `Debug` formatting.
@@ -629,6 +634,8 @@ pub(crate) struct SchemaPlan {
     pub confidence_summary: Vec<(String, ConfidenceLevel)>,
     /// Conditions any relation reference names, keyed by name.
     pub conditions: BTreeMap<ConditionName, ConditionSpec>,
+    /// The clock parameters those conditions read, ordered by name.
+    pub clocks: Vec<ClockParameter>,
     pub well_known: WellKnownTypes,
 }
 
@@ -684,6 +691,9 @@ pub enum PlanningError {
 
 struct ConditionParameterAllocator {
     request_sources: BTreeMap<ConditionParameterName, String>,
+    /// The parameter the bare request instant takes, after which every clock parameter
+    /// is named.
+    request_time: ConditionParameterName,
 }
 
 impl ConditionParameterAllocator {
@@ -693,6 +703,7 @@ impl ConditionParameterAllocator {
     ) -> Result<Self, PlanningError> {
         let mut allocator = Self {
             request_sources: BTreeMap::new(),
+            request_time: settings.request_time_parameter.clone(),
         };
         allocator.reserve_request(
             settings.request_time_parameter.clone(),
@@ -738,6 +749,70 @@ impl ConditionParameterAllocator {
             .collect();
         ConditionParameterNamespace { used }
     }
+
+    /// What a condition compares a row with for `threshold`. The instant shifted by a
+    /// fixed length is the request clock and a CEL duration, and every other threshold
+    /// is a parameter of its own.
+    fn clock_operand(&self, threshold: ClockThreshold) -> ClockOperand {
+        let ClockThreshold { reading, offset } = threshold;
+        if reading == ClockReading::Instant && offset.is_fixed() {
+            let clock = &self.request_time;
+            let cel = match offset.microseconds {
+                0 => clock.to_string(),
+                // `{:?}` wraps the CEL duration in the quotes it needs.
+                shift => format!(
+                    "{clock} {} duration({:?})",
+                    if shift < 0 { "-" } else { "+" },
+                    cel_duration(shift.unsigned_abs())
+                ),
+            };
+            return ClockOperand {
+                cel,
+                parameter: ClockParameter::new(clock.clone(), ClockThreshold::INSTANT),
+            };
+        }
+        let name = self.clock_parameter(threshold);
+        ClockOperand {
+            cel: name.to_string(),
+            parameter: ClockParameter::new(name, threshold),
+        }
+    }
+
+    /// The parameter `threshold` takes: the request clock's name followed by the
+    /// threshold's, kept apart from every configured request parameter, and clamped
+    /// with a hash to the characters `OpenFGA` takes.
+    fn clock_parameter(&self, threshold: ClockThreshold) -> ConditionParameterName {
+        let derived = |name: &str| ConditionParameterName::derived(name);
+        let mut name = derived(&format!("{}{}", self.request_time, threshold.name_suffix()));
+        if self.request_sources.contains_key(&name) {
+            name = derived(&format!("{name}_{}", stable_hex_suffix(name.as_str())));
+        }
+        if name.as_str().len() <= MAX_PARAMETER_NAME_CHARS {
+            return name;
+        }
+        let suffix = stable_hex_suffix(name.as_str());
+        let mut clamped = name.to_string();
+        clamped.truncate(MAX_PARAMETER_NAME_CHARS - suffix.len() - 1);
+        derived(&format!("{clamped}_{suffix}"))
+    }
+}
+
+/// What a condition compares a row with for one clock threshold.
+pub(crate) struct ClockOperand {
+    /// The CEL operand, the parameter or the request clock shifted by a duration.
+    pub(crate) cel: String,
+    /// The parameter the operand reads.
+    pub(crate) parameter: ClockParameter,
+}
+
+impl ClockOperand {
+    /// The parameter as the condition declares it.
+    pub(crate) fn declaration(&self) -> (String, ConditionParameter) {
+        (
+            self.parameter.name().to_string(),
+            ConditionParameter::Clock(self.parameter.clone()),
+        )
+    }
 }
 
 struct ConditionParameterNamespace {
@@ -745,6 +820,11 @@ struct ConditionParameterNamespace {
 }
 
 impl ConditionParameterNamespace {
+    /// Keep `parameter`, a clock parameter the condition reads, from any row's name.
+    fn reserve(&mut self, parameter: &ConditionParameterName) {
+        self.used.insert(parameter.clone());
+    }
+
     fn allocate_row(&mut self, source: &str) -> ConditionParameterName {
         let base = ConditionParameterName::derived(source);
         if self.used.insert(base.clone()) {
@@ -1100,7 +1180,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     bounds,
                     db,
                 );
-                note_request_contracts(build.plan, build.notes, settings);
+                note_request_contracts(build.plan, build.notes);
 
                 let blocked_commands = build.set_action_relations(
                     &action_buckets,
@@ -1172,12 +1252,23 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
 
     let types = ordered_types(all_types, &settings.well_known.user);
     let conditions = surviving_conditions(&types)?;
+    let clocks = clock_parameters(&conditions)?;
+    notes.extend(
+        clocks
+            .iter()
+            .map(|clock| TranslationNote::CallerSuppliesConditionParameter {
+                parameter: clock.name().to_string(),
+                setting_key: None,
+                separator: None,
+            }),
+    );
 
     let plan = SchemaPlan {
         types,
         notes,
         confidence_summary,
         conditions,
+        clocks,
         well_known: settings.well_known.clone(),
     };
     crate::generator::model_bounds::check(&crate::generator::json_model::json_model_from_plan(
@@ -1734,21 +1825,20 @@ fn scar_unfillable_grants<DB: DatabaseLike>(
 /// it.
 ///
 /// Read back off the sources the arms recorded, so the note and the emitted conditions cannot name
-/// different parameters.
-fn note_request_contracts(
-    plan: &TypePlan,
-    notes: &mut Vec<TranslationNote>,
-    settings: &GeneratorSettings,
-) {
-    // Every request-scoped gate is a contract with the caller, and the model itself
-    // has nowhere to carry it. Read the parameters back off the sources the arms
-    // recorded, so the note and the emitted conditions cannot name different ones.
+/// different parameters. The clock's parameters are noted off the surviving conditions instead.
+fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
     let mut contracts: BTreeSet<(String, Option<String>, Option<String>)> = BTreeSet::new();
     for source in &plan.table_tuple_sources {
         match source {
             // A set carried against a row column and one carried against a membership row
             // state the same caller contract.
             TupleSource::SessionAttributeGate {
+                request_parameter,
+                setting_key,
+                separator,
+                ..
+            }
+            | TupleSource::CallerSetShareGate {
                 request_parameter,
                 setting_key,
                 separator,
@@ -1766,31 +1856,6 @@ fn note_request_contracts(
                     Some(atom.setting_key.clone()),
                     atom.separator.clone(),
                 ));
-            }
-            TupleSource::CallerSetShareGate {
-                request_parameter,
-                setting_key,
-                separator,
-                temporal_context,
-                ..
-            } => {
-                contracts.insert((
-                    request_parameter.clone(),
-                    Some(setting_key.clone()),
-                    separator.clone(),
-                ));
-                // A clock composed into the gate is a second value the caller supplies.
-                if !temporal_context.is_empty() {
-                    contracts.insert((settings.request_time_parameter.to_string(), None, None));
-                }
-            }
-            // The clock is a request value the caller supplies, whether it gates a single
-            // row or rides a member tuple.
-            TupleSource::ConditionalAttributeGate { .. }
-            | TupleSource::ExistsMembership { gate: Some(_), .. }
-            | TupleSource::HolderMembers { gate: Some(_), .. }
-            | TupleSource::MembershipShareMembers { .. } => {
-                contracts.insert((settings.request_time_parameter.to_string(), None, None));
             }
             _ => {}
         }
@@ -1856,6 +1921,37 @@ fn surviving_conditions(
         }
     }
     Ok(conditions)
+}
+
+/// Every clock parameter `conditions` read, by name, each holding the one threshold its
+/// name was derived from.
+fn clock_parameters(
+    conditions: &BTreeMap<ConditionName, ConditionSpec>,
+) -> Result<Vec<ClockParameter>, PlanningError> {
+    let mut clocks: BTreeMap<&str, &ClockParameter> = BTreeMap::new();
+    for clock in conditions
+        .values()
+        .flat_map(|spec| spec.parameters.values())
+        .filter_map(|kind| match kind {
+            ConditionParameter::Clock(clock) => Some(clock),
+            ConditionParameter::Scalar(_) | ConditionParameter::ListOf(_) => None,
+        })
+    {
+        match clocks.get(clock.name().as_str()) {
+            Some(held) if held.threshold() != clock.threshold() => {
+                return Err(PlanningError::ConditionParameterCollision {
+                    parameter: clock.name().clone(),
+                    first: format!("{:?}", held.threshold()),
+                    second: format!("{:?}", clock.threshold()),
+                })
+            }
+            Some(_) => {}
+            None => {
+                clocks.insert(clock.name().as_str(), clock);
+            }
+        }
+    }
+    Ok(clocks.into_values().cloned().collect())
 }
 
 fn source_carries_condition(source: &TupleSource) -> bool {

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr, Owner};
 
 use crate::classifier::function_registry::SessionAttribute;
+use crate::clock::ClockThreshold;
 use crate::parser::names::{stored_ident_name, table_identity};
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
 pub(crate) use crate::types::{
@@ -58,37 +59,17 @@ pub enum BoolOp {
     Or,
 }
 
-/// A column compared against a value only the request knows, which no static tuple
-/// can decide. The row supplies the column, the caller supplies the rest.
+/// A column compared against the request clock, which no static tuple can decide. The
+/// row supplies the column, the caller supplies the clock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AttributeRequestPredicate {
     /// Column the guard reads, folded to its stored name.
     pub column: ColumnName,
     /// Comparison applied, oriented with the column on the left.
     pub operator: AttributeOperator,
-    /// What the request supplies.
-    pub request_value: RequestValue,
-    /// A fixed offset applied to the request clock, from `now() - interval '36 hours'`
-    /// and its spellings. `None` when the guard compares against the bare clock.
-    pub offset: Option<TemporalOffset>,
-}
-
-/// A value the request supplies rather than the row.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum RequestValue {
-    /// The moment the statement runs, from `now()` and its spellings.
-    StatementTimestamp,
-}
-
-/// A fixed-length shift of the request clock, lifted from a `PostgreSQL` interval of
-/// microseconds alone.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TemporalOffset {
-    /// The offset as a CEL duration, such as `36h` for `interval '36 hours'`.
-    pub cel_duration: String,
-    /// `true` subtracts it from the clock (`now() - interval`), `false` adds it.
-    pub subtract: bool,
+    /// The clock reading the column is compared with, from `now()`, `current_date` or
+    /// `localtimestamp`, shifted by any interval such as `now() - interval '36 hours'`.
+    pub threshold: ClockThreshold,
 }
 
 /// One residual conjunct on a membership row.

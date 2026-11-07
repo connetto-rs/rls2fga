@@ -1139,7 +1139,8 @@ impl TupleSource {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::classifier::patterns::{AttributeRequestPredicate, RequestValue, ResidualPredicate};
+    use crate::classifier::patterns::{AttributeRequestPredicate, ResidualPredicate};
+    use crate::clock::ClockThreshold;
     use crate::generator::well_known::{member_relation, owner_user_relation};
     use rls2fga_types::AttributeOperator;
 
@@ -1346,8 +1347,7 @@ mod tests {
             request: from_request.then(|| AttributeRequestPredicate {
                 column: ColumnName::from_stored("expires_at"),
                 operator: AttributeOperator::Gt,
-                request_value: RequestValue::StatementTimestamp,
-                offset: None,
+                threshold: ClockThreshold::INSTANT,
             }),
             relations: Vec::new(),
         }

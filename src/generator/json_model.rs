@@ -57,6 +57,10 @@ fn condition_param_type(kind: &ConditionParameter) -> ConditionParamType {
             parameter_type: (*type_name).to_string(),
             generic_types: None,
         },
+        ConditionParameter::Clock(_) => ConditionParamType {
+            parameter_type: crate::generator::well_known::TIMESTAMP_PARAMETER_TYPE.to_string(),
+            generic_types: None,
+        },
         ConditionParameter::ListOf(element) => ConditionParamType {
             parameter_type: LIST_PARAMETER_TYPE.to_string(),
             generic_types: Some(vec![ConditionParamType {

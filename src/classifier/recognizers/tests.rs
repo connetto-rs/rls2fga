@@ -4405,7 +4405,7 @@ fn residual_predicate_extracts_a_temporal_request() {
         .expect("a clock comparison is completed by the request, not the row");
     assert_eq!(request.column.as_str(), "expires_at");
     assert_eq!(request.operator, AttributeOperator::Gt);
-    assert_eq!(request.request_value, RequestValue::StatementTimestamp);
+    assert_eq!(request.threshold, crate::clock::ClockThreshold::INSTANT);
     assert!(
         conjunct.guard.is_none(),
         "the clock is nobody's, so no row guard decides it"

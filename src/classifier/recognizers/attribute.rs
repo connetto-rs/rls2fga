@@ -1,4 +1,5 @@
 use super::*;
+use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::parser::expr::peel_noting_casts;
 use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
 use sqlparser::ast::{self, DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
@@ -16,65 +17,41 @@ pub fn attribute_request_predicate(expr: &Expr) -> Option<AttributeRequestPredic
     };
     let operator = attribute_operator(op)?;
     if let Some(column) = extract_column_name(left) {
-        if let Some(side) = temporal_request_side(right) {
+        if let Some(threshold) = temporal_request_side(right) {
             if !is_user_related_column_name(column.as_str()) {
                 return Some(AttributeRequestPredicate {
                     column,
                     operator,
-                    request_value: RequestValue::StatementTimestamp,
-                    offset: side.into_offset(),
+                    threshold,
                 });
             }
         }
     }
     let column = extract_column_name(right)?;
-    let offset = temporal_request_side(left)?.into_offset();
+    let threshold = temporal_request_side(left)?;
     if is_user_related_column_name(column.as_str()) {
         return None;
     }
     Some(AttributeRequestPredicate {
         column,
         operator: mirrored(operator),
-        request_value: RequestValue::StatementTimestamp,
-        offset,
+        threshold,
     })
 }
 
-/// A request side of a temporal comparison: `now()` and its spellings, optionally shifted
-/// by a fixed interval such as `now() - interval '36 hours'`.
-enum TemporalRequestSide {
-    /// The bare request clock.
-    Clock,
-    /// The clock shifted by a fixed offset.
-    Offset(TemporalOffset),
+/// The threshold a temporal comparison reads, or `None` when the side is not the clock
+/// or the clock shifted by an interval the threshold can follow, so the caller leaves
+/// the guard in SQL and the shape stays joined.
+fn temporal_request_side(expr: &Expr) -> Option<ClockThreshold> {
+    clock_threshold(&clock_shift(expr)?).ok()
 }
 
-impl TemporalRequestSide {
-    /// The offset the side carries, absent for the bare clock.
-    fn into_offset(self) -> Option<TemporalOffset> {
-        match self {
-            Self::Clock => None,
-            Self::Offset(offset) => Some(offset),
-        }
-    }
-}
-
-/// The clock a temporal comparison reads, or `None` when the side is neither the clock
-/// nor the clock shifted by an interval of fixed length, so the caller leaves the guard
-/// in SQL and the shape stays joined.
-fn temporal_request_side(expr: &Expr) -> Option<TemporalRequestSide> {
-    match clock_shift(expr)? {
-        ClockShift::Clock => Some(TemporalRequestSide::Clock),
-        ClockShift::Shifted { interval, subtract } => shifted_side(interval, subtract).ok(),
-    }
-}
-
-/// Why each `column op now() ± interval`, or `BETWEEN` bounded so, within `expr` falls
-/// closed, for every such interval that has no fixed length and so no CEL duration.
-pub(crate) fn clock_offset_refusals(expr: &Expr) -> Vec<String> {
+/// Why each `column op clock`, or `BETWEEN` bounded so, within `expr` falls closed, for
+/// every clock or shift no threshold follows.
+pub(crate) fn clock_refusals(expr: &Expr) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
     let _ = ast::visit_expressions(expr, |node| {
-        if let Some(refusal) = clock_offset_refusal(node) {
+        if let Some(refusal) = clock_refusal(node) {
             reasons.push(refusal.to_string());
         }
         core::ops::ControlFlow::<()>::Continue(())
@@ -82,8 +59,8 @@ pub(crate) fn clock_offset_refusals(expr: &Expr) -> Vec<String> {
     reasons
 }
 
-/// Why one `column op now() ± interval` or `BETWEEN` bounded so falls closed.
-fn clock_offset_refusal(expr: &Expr) -> Option<OffsetRefusal> {
+/// Why one `column op clock` or `BETWEEN` bounded so falls closed.
+fn clock_refusal(expr: &Expr) -> Option<ClockRefusal> {
     let (column, bounds): (_, [&Expr; 2]) = match unparenthesize(expr) {
         Expr::BinaryOp { left, op, right } => {
             attribute_operator(op)?;
@@ -105,30 +82,31 @@ fn clock_offset_refusal(expr: &Expr) -> Option<OffsetRefusal> {
     }
     bounds
         .into_iter()
-        .find_map(|bound| match clock_shift(bound)? {
-            ClockShift::Clock => None,
-            ClockShift::Shifted { interval, subtract } => shifted_side(interval, subtract).err(),
-        })
+        .find_map(|bound| clock_threshold(&clock_shift(bound)?).err())
 }
 
 /// The request clock as written, bare or shifted by an interval.
-enum ClockShift<'e> {
-    /// `now()` and its spellings.
-    Clock,
-    /// The clock with an interval added or subtracted.
-    Shifted {
-        /// The interval side as written, a literal or a value cast to an interval type.
-        interval: &'e Expr,
-        /// `true` for `now() - interval`.
-        subtract: bool,
-    },
+struct ClockShift<'e> {
+    /// `now()` or one of its spellings, with any cast written around it.
+    clock: &'e Expr,
+    /// What the clock function reads.
+    function: ClockFunction,
+    /// The interval added or subtracted, a literal or a value cast to an interval type.
+    interval: Option<&'e Expr>,
+    /// `true` for `clock - interval`.
+    subtract: bool,
 }
 
 /// The clock or the clock shifted by an interval, whatever the interval's length.
 fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
     let expr = unwrap_cast_or_nested(expr);
-    if is_well_known_temporal_function(expr) {
-        return Some(ClockShift::Clock);
+    if let Some(function) = clock_function(expr) {
+        return Some(ClockShift {
+            clock: expr,
+            function,
+            interval: None,
+            subtract: false,
+        });
     }
     let Expr::BinaryOp { left, op, right } = expr else {
         return None;
@@ -138,12 +116,12 @@ fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
         BinaryOperator::Plus => false,
         _ => return None,
     };
-    let interval = if is_well_known_temporal_function(unwrap_cast_or_nested(left)) {
-        right
-    } else if !subtract && is_well_known_temporal_function(unwrap_cast_or_nested(right)) {
+    let (clock, function, interval) = if let Some(function) = clock_function(left) {
+        (left, function, right)
+    } else if let (false, Some(function)) = (subtract, clock_function(right)) {
         // Addition commutes here, while subtraction is one-sided because a timestamp
         // does not subtract from an interval.
-        left
+        (right, function, left)
     } else {
         return None;
     };
@@ -153,12 +131,36 @@ fn clock_shift(expr: &Expr) -> Option<ClockShift<'_>> {
     });
     let is_interval = matches!(peeled, Expr::Interval(_))
         || matches!(outermost_cast, Some(DataType::Interval { .. }));
-    is_interval.then_some(ClockShift::Shifted { interval, subtract })
+    is_interval.then_some(ClockShift {
+        clock,
+        function,
+        interval: Some(interval),
+        subtract,
+    })
 }
 
-/// Why a clock shifted by an interval has no CEL duration.
+/// Why a clock reading or the interval shifting it has no threshold.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum OffsetRefusal {
+pub(crate) enum ClockRefusal {
+    /// `localtime` or `current_time`, a time of day.
+    #[error(
+        "{clock} is a time of day, which no timestamp condition parameter carries and \
+         PostgreSQL does not compare with a timestamptz"
+    )]
+    TimeOfDay {
+        /// The clock as written.
+        clock: String,
+    },
+    /// `current_date` or `localtimestamp` cast before an interval shifts it, which turns
+    /// the zoneless shift into one on the zone's calendar.
+    #[error(
+        "{clock} casts the local clock before shifting it, which this does not follow, so \
+         it has no threshold"
+    )]
+    CastLocalClock {
+        /// The clock as written.
+        clock: String,
+    },
     /// The interval is not written as a quoted string.
     #[error("{interval} is not a quoted string, so it has no fixed CEL duration")]
     NotAString {
@@ -205,18 +207,13 @@ pub(crate) enum OffsetRefusal {
         /// The interval as written.
         interval: String,
     },
-    /// A month or day count, which `PostgreSQL` adds on the calendar of the session zone.
-    #[error(
-        "{interval} counts {terms}, which PostgreSQL adds as calendar {terms} in the session \
-         TimeZone, so it has no fixed CEL duration"
-    )]
-    Calendar {
+    /// An interval `interval_um` refuses to negate for the subtraction.
+    #[error("PostgreSQL raises interval out of range subtracting {interval}")]
+    Unnegatable {
         /// The interval as written.
         interval: String,
-        /// The calendar terms it counts.
-        terms: CalendarTerms,
     },
-    /// A length beyond the nanosecond count a CEL duration holds.
+    /// A fixed shift of the instant beyond the nanosecond count a CEL duration holds.
     #[error("{interval} is longer than a CEL duration holds")]
     TooLong {
         /// The interval as written.
@@ -224,70 +221,64 @@ pub(crate) enum OffsetRefusal {
     },
 }
 
-/// The calendar terms of an interval, each of which `PostgreSQL` adds in the session zone.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CalendarTerms {
-    /// A nonzero month count.
-    Months,
-    /// A nonzero day count.
-    Days,
-    /// Both.
-    MonthsAndDays,
-}
-
-impl core::fmt::Display for CalendarTerms {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str(match self {
-            Self::Months => "months",
-            Self::Days => "days",
-            Self::MonthsAndDays => "months and days",
-        })
-    }
-}
-
 /// The microseconds a CEL duration holds, a Go `time.Duration` of nanoseconds.
 const CEL_DURATION_MAX_MICROSECONDS: u64 = i64::MAX.unsigned_abs() / 1_000;
 
-/// The clock shifted by `interval`, when the interval has one length in every time zone.
-fn shifted_side(interval: &Expr, subtract: bool) -> Result<TemporalRequestSide, OffsetRefusal> {
-    let value = interval_value(interval)?;
-    let written = || interval.to_string();
-    if !value.is_finite() {
-        return Err(OffsetRefusal::Infinite {
-            interval: written(),
-        });
-    }
-    let terms = match (value.months != 0, value.days != 0) {
-        (false, false) => None,
-        (true, false) => Some(CalendarTerms::Months),
-        (false, true) => Some(CalendarTerms::Days),
-        (true, true) => Some(CalendarTerms::MonthsAndDays),
+/// What `shift`'s clock reads, or why no threshold follows it. A local clock cast before
+/// an interval shifts it is refused, since the cast moves the shift onto the zone's
+/// calendar.
+fn clock_reading(shift: &ClockShift<'_>) -> Result<ClockReading, ClockRefusal> {
+    let clock = || shift.clock.to_string();
+    let ClockFunction::Reading(reading) = shift.function else {
+        return Err(ClockRefusal::TimeOfDay { clock: clock() });
     };
-    if let Some(terms) = terms {
-        return Err(OffsetRefusal::Calendar {
+    let mut cast = false;
+    peel_noting_casts(shift.clock, |_| cast = true);
+    if cast && shift.interval.is_some() && reading != ClockReading::Instant {
+        return Err(ClockRefusal::CastLocalClock { clock: clock() });
+    }
+    Ok(reading)
+}
+
+/// The threshold `shift` reads, or why it has none.
+fn clock_threshold(shift: &ClockShift<'_>) -> Result<ClockThreshold, ClockRefusal> {
+    let reading = clock_reading(shift)?;
+    let Some(interval) = shift.interval else {
+        return Ok(ClockThreshold {
+            reading,
+            offset: ClockOffset::ZERO,
+        });
+    };
+    let written = || interval.to_string();
+    let value = interval_value(interval)?;
+    if !value.is_finite() {
+        return Err(ClockRefusal::Infinite {
             interval: written(),
-            terms,
         });
     }
-    let magnitude = value.microseconds.unsigned_abs();
-    if magnitude == 0 {
-        return Ok(TemporalRequestSide::Clock);
-    }
-    if magnitude > CEL_DURATION_MAX_MICROSECONDS {
-        return Err(OffsetRefusal::TooLong {
+    let value = if shift.subtract {
+        value.checked_neg().map_err(|_| ClockRefusal::Unnegatable {
+            interval: written(),
+        })?
+    } else {
+        value
+    };
+    let offset = ClockOffset::from(value);
+    // Only the instant shifted by a fixed length rides the clock as a CEL duration.
+    if reading == ClockReading::Instant
+        && offset.is_fixed()
+        && offset.microseconds.unsigned_abs() > CEL_DURATION_MAX_MICROSECONDS
+    {
+        return Err(ClockRefusal::TooLong {
             interval: written(),
         });
     }
-    Ok(TemporalRequestSide::Offset(TemporalOffset {
-        cel_duration: cel_duration(magnitude),
-        // `now() - interval '1 hour ago'` is an hour after the clock.
-        subtract: subtract != value.microseconds.is_negative(),
-    }))
+    Ok(ClockThreshold { reading, offset })
 }
 
 /// The interval as `PostgreSQL` stores it, from `interval '…'` or from a quoted string
 /// cast once to an interval type, which `PostgreSQL` reads alike.
-fn interval_value(written: &Expr) -> Result<sql_values::PgInterval, OffsetRefusal> {
+fn interval_value(written: &Expr) -> Result<sql_values::PgInterval, ClockRefusal> {
     let mut casts: Vec<&DataType> = Vec::new();
     let peeled = peel_noting_casts(written, |data_type| casts.push(data_type));
     let interval = || written.to_string();
@@ -304,7 +295,7 @@ fn interval_value(written: &Expr) -> Result<sql_values::PgInterval, OffsetRefusa
                 )
             };
             if !casts.iter().all(identity) {
-                return Err(OffsetRefusal::Recast {
+                return Err(ClockRefusal::Recast {
                     interval: interval(),
                 });
             }
@@ -314,18 +305,18 @@ fn interval_value(written: &Expr) -> Result<sql_values::PgInterval, OffsetRefusa
             (operand, cast_typmod(fields.as_ref(), *precision))
         }
         _ => {
-            return Err(OffsetRefusal::CastChain {
+            return Err(ClockRefusal::CastChain {
                 interval: interval(),
             })
         }
     };
-    let text = quoted_text(text).ok_or_else(|| OffsetRefusal::NotAString {
+    let text = quoted_text(text).ok_or_else(|| ClockRefusal::NotAString {
         interval: interval(),
     })?;
-    let typmod = typmod.ok_or_else(|| OffsetRefusal::UnreadableQualifier {
+    let typmod = typmod.ok_or_else(|| ClockRefusal::UnreadableQualifier {
         interval: interval(),
     })?;
-    parse_interval_typmod(text, typmod).map_err(|source| OffsetRefusal::Unreadable {
+    parse_interval_typmod(text, typmod).map_err(|source| ClockRefusal::Unreadable {
         text: text.to_string(),
         source,
     })
@@ -428,21 +419,6 @@ fn interval_typmod(
         fields,
         precision.map(|precision| u8::try_from(precision).unwrap_or(u8::MAX)),
     )
-}
-
-/// A positive count of microseconds as a CEL duration, in the coarsest unit holding it
-/// exactly.
-fn cel_duration(microseconds: u64) -> String {
-    let (size, unit) = [
-        (3_600_000_000, "h"),
-        (60_000_000, "m"),
-        (1_000_000, "s"),
-        (1_000, "ms"),
-    ]
-    .into_iter()
-    .find(|&(size, _)| microseconds.is_multiple_of(size))
-    .unwrap_or((1, "us"));
-    format!("{}{unit}", microseconds / size)
 }
 
 /// The guard as structure, but only when every compared value is a literal constant
@@ -1238,24 +1214,34 @@ fn operand_renaming_cast(operand: &Expr) -> Option<(&Expr, String)> {
     shifted_clock(peeled).and_then(operand_renaming_cast)
 }
 
-/// (within a statement) date/time value.
+/// Whether `expr` reads the statement's clock, through any cast around it.
 fn is_well_known_temporal_function(expr: &Expr) -> bool {
+    clock_function(expr).is_some()
+}
+
+/// A function reading the statement's clock.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClockFunction {
+    /// A reading a timestamp threshold can carry.
+    Reading(ClockReading),
+    /// `localtime` and `current_time`, a time of day.
+    TimeOfDay,
+}
+
+/// The clock function `expr` calls, through any cast around it.
+fn clock_function(expr: &Expr) -> Option<ClockFunction> {
     let Expr::Function(func) = unwrap_cast_or_nested(expr) else {
-        return false;
+        return None;
     };
-    let name = builtin_function_name(func);
-    matches!(
-        name.as_deref(),
-        Some(
-            "now"
-                | "current_timestamp"
-                | "current_date"
-                | "current_time"
-                | "clock_timestamp"
-                | "statement_timestamp"
-                | "transaction_timestamp"
-                | "localtime"
-                | "localtimestamp"
-        )
-    )
+    Some(match builtin_function_name(func).as_deref()? {
+        "now"
+        | "current_timestamp"
+        | "clock_timestamp"
+        | "statement_timestamp"
+        | "transaction_timestamp" => ClockFunction::Reading(ClockReading::Instant),
+        "localtimestamp" => ClockFunction::Reading(ClockReading::LocalTimestamp),
+        "current_date" => ClockFunction::Reading(ClockReading::LocalDate),
+        "localtime" | "current_time" => ClockFunction::TimeOfDay,
+        _ => return None,
+    })
 }
