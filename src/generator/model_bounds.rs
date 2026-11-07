@@ -34,7 +34,7 @@ const MAX_CONDITION_EXPRESSION_BYTES: usize = 512;
 const MAX_TYPE_NAME_CHARS: usize = 254;
 
 /// The number of characters a `Condition.parameters` key may carry.
-const MAX_PARAMETER_NAME_CHARS: usize = 50;
+pub(crate) const MAX_PARAMETER_NAME_CHARS: usize = 50;
 
 /// A `validate.rules` bound in `openfga/api` the written model must satisfy, read
 /// from `openfga/v1/authzmodel.proto` and `openfga/v1/openfga_service.proto`.

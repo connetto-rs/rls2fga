@@ -106,6 +106,7 @@ async fn every_parity_case_agrees() {
             a_missing_session_setting_is_not_a_denial,
             a_request_time_guard_holds_at_two_instants,
             a_grace_period_keeps_its_offset,
+            a_day_window_spans_a_daylight_saving_change,
             an_expiring_share_leaves_the_owner_arm_alone,
             an_expiring_share_keeps_its_grace_period,
             an_expiring_membership_row_gates_its_own_document,
@@ -2689,6 +2690,59 @@ CREATE POLICY docs_grace ON docs FOR SELECT USING (expires_at > now() - interval
         ("docs:g-grace", true),
         ("docs:g-stale", false),
         ("docs:g-null", false),
+    ] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            "app_user",
+            object,
+            ActionStatement::Select,
+            visible,
+        );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A day window in a zone whose daylight-saving change fell two hours ago, so `PostgreSQL`
+/// reaches back 23 hours and a row 23.5 hours old has left the window a 24-hour reading
+/// would keep it in. The checker computes the threshold in the session's zone.
+async fn a_day_window_spans_a_daylight_saving_change(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-day-window-daylight-saving",
+        "
+CREATE TABLE docs (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_window ON docs FOR SELECT USING (expires_at > now() - interval '1 day');
+",
+        &[
+            // UTC until the hour two hours back, an hour ahead of it for 150 days after.
+            "DO $$
+             DECLARE
+                 change_at timestamp := date_trunc('hour', now() AT TIME ZONE 'UTC')
+                     - interval '2 hours';
+                 change_day int := extract(doy FROM change_at)::int - 1;
+             BEGIN
+                 EXECUTE format(
+                     'ALTER DATABASE %I SET timezone = %L',
+                     current_database(),
+                     format('<+00>0<+01>,%s/%s,%s/0',
+                         change_day, extract(hour FROM change_at)::int, (change_day + 150) % 365)
+                 );
+             END $$",
+            "INSERT INTO docs (id, expires_at) VALUES
+                 ('w-inside', now() - interval '22 hours 30 minutes'),
+                 ('w-between', now() - interval '23 hours 30 minutes'),
+                 ('w-outside', now() - interval '24 hours 30 minutes')",
+            "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+        ],
+        vec![Principal::as_role("app_user", "app_user").with_clock()],
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    for (object, visible) in [
+        ("docs:w-inside", true),
+        // Inside 24 hours and outside the 23 the calendar day spans.
+        ("docs:w-between", false),
+        ("docs:w-outside", false),
     ] {
         support::parity::assert_postgres(
             &case,

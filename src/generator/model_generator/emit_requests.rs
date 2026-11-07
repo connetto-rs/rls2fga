@@ -273,32 +273,26 @@ pub(crate) fn conditional_gate_expr<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     condition_parameters: &ConditionParameterAllocator,
     db: &DB,
-    request_time_parameter: &ConditionParameterName,
 ) -> Option<UsersetExpr> {
     let identity_cols = resolve_row_identity(source_table, db)?;
     let parameter_type = condition_parameter_type(source_table, request.column.as_str(), db)?;
 
-    let request_parameter = request_time_parameter.clone();
-    let mut namespace = condition_parameters.namespace([&request_parameter]);
+    let clock = condition_parameters.clock_operand(request.threshold);
+    let mut namespace = condition_parameters.namespace([]);
+    namespace.reserve(clock.parameter.name());
     let row_parameter = namespace.allocate_row(request.column.as_str());
     let operator = request.operator.cel();
 
     let condition = declare_condition(
         table_plan,
         ConditionSpec {
-            expression: format!(
-                "{row_parameter} {operator} {}",
-                clock_expr(request_parameter.as_str(), request.offset.as_ref())
-            ),
+            expression: format!("{row_parameter} {operator} {}", clock.cel),
             parameters: [
                 (
                     row_parameter.to_string(),
                     ConditionParameter::Scalar(parameter_type),
                 ),
-                (
-                    request_parameter.to_string(),
-                    ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
-                ),
+                clock.declaration(),
             ]
             .into_iter()
             .collect(),
@@ -330,20 +324,6 @@ pub(crate) fn conditional_gate_expr<DB: DatabaseLike>(
     Some(UsersetExpr::Computed(relation))
 }
 
-/// The request clock as a CEL expression, shifted by a fixed offset when the guard
-/// carried one (`now() - interval '36 hours'` becomes `request_time - duration("36h")`).
-pub(crate) fn clock_expr(request_time_parameter: &str, offset: Option<&TemporalOffset>) -> String {
-    match offset {
-        None => request_time_parameter.to_string(),
-        // `{:?}` wraps the CEL duration in the quotes it needs without hand-writing them.
-        Some(offset) => format!(
-            "{request_time_parameter} {} duration({:?})",
-            if offset.subtract { "-" } else { "+" },
-            offset.cel_duration
-        ),
-    }
-}
-
 /// The condition parameter type for a column, or `None` when the schema does not say
 /// or the type has no `OpenFGA` counterpart.
 pub(crate) fn condition_parameter_type<DB: DatabaseLike>(
@@ -355,13 +335,35 @@ pub(crate) fn condition_parameter_type<DB: DatabaseLike>(
 }
 
 /// One temporal comparison lifted into a condition: the parameter the row fills, the
-/// column it reads, and the CEL fragment comparing it against the request clock.
+/// column it reads, the CEL fragment comparing it against the request clock, and the
+/// clock operand that fragment reads.
 pub(crate) struct TemporalGate {
     pub(crate) parameter: ConditionParameterName,
     pub(crate) column: ColumnName,
     pub(crate) fragment: String,
+    pub(crate) clock: ClockOperand,
     pub(crate) witness: ContextWitness,
     pub(crate) monotone: bool,
+}
+
+/// Keep the clock parameters `residual`'s temporal comparisons read from every row
+/// parameter `namespace` allocates afterwards.
+pub(crate) fn reserve_temporal_clocks(
+    residual: &ResidualPredicates,
+    condition_parameters: &ConditionParameterAllocator,
+    namespace: &mut ConditionParameterNamespace,
+) {
+    let Some(decision) = residual.decidable() else {
+        return;
+    };
+    for request in &decision.requests {
+        namespace.reserve(
+            condition_parameters
+                .clock_operand(request.threshold)
+                .parameter
+                .name(),
+        );
+    }
 }
 
 /// Turn a residual's temporal comparisons (`col > now()`) into condition fragments
@@ -373,23 +375,22 @@ pub(crate) struct TemporalGate {
 pub(crate) fn temporal_gates<DB: DatabaseLike>(
     residual: &ResidualPredicates,
     table: &TableId,
-    request_time_parameter: &ConditionParameterName,
+    condition_parameters: &ConditionParameterAllocator,
     namespace: &mut ConditionParameterNamespace,
     db: &DB,
 ) -> Option<Vec<TemporalGate>> {
     let decision = residual.decidable()?;
+    reserve_temporal_clocks(residual, condition_parameters, namespace);
     let mut gates = Vec::with_capacity(decision.requests.len());
     for request in &decision.requests {
         // A zoned column has a timestamp parameter. Anything else cannot be a faithful
         // condition, so the whole residual stays in SQL.
         condition_parameter_type(table, request.column.as_str(), db)?;
         let parameter = namespace.allocate_row(request.column.as_str());
+        let clock = condition_parameters.clock_operand(request.threshold);
         gates.push(TemporalGate {
-            fragment: format!(
-                "{parameter} {} {}",
-                request.operator.cel(),
-                clock_expr(request_time_parameter.as_str(), request.offset.as_ref())
-            ),
+            fragment: format!("{parameter} {} {}", request.operator.cel(), clock.cel),
+            clock,
             column: request.column.clone(),
             witness: request.operator.context_witness(),
             monotone: request.operator.is_monotone(),
@@ -408,12 +409,11 @@ pub(crate) fn declare_temporal_condition<DB: DatabaseLike>(
     residual: &ResidualPredicates,
     table: &TableId,
     table_plan: &mut TypePlan,
-    request_time_parameter: &ConditionParameterName,
     condition_parameters: &ConditionParameterAllocator,
     db: &DB,
 ) -> Option<(ConditionName, Vec<GateContextColumn>)> {
-    let mut namespace = condition_parameters.namespace([request_time_parameter]);
-    let gates = temporal_gates(residual, table, request_time_parameter, &mut namespace, db)?;
+    let mut namespace = condition_parameters.namespace([]);
+    let gates = temporal_gates(residual, table, condition_parameters, &mut namespace, db)?;
     if gates.is_empty() {
         return None;
     }
@@ -422,19 +422,18 @@ pub(crate) fn declare_temporal_condition<DB: DatabaseLike>(
         .map(|gate| gate.fragment.as_str())
         .collect::<Vec<_>>()
         .join(" && ");
-    let mut parameters: BTreeMap<String, ConditionParameter> = gates
+    let parameters: BTreeMap<String, ConditionParameter> = gates
         .iter()
-        .map(|gate| {
-            (
-                gate.parameter.to_string(),
-                ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
-            )
+        .flat_map(|gate| {
+            [
+                (
+                    gate.parameter.to_string(),
+                    ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
+                ),
+                gate.clock.declaration(),
+            ]
         })
         .collect();
-    parameters.insert(
-        request_time_parameter.to_string(),
-        ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
-    );
     let condition = declare_condition(
         table_plan,
         ConditionSpec {
@@ -541,20 +540,15 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
     };
 
     let request_parameter = source.condition_parameter().clone();
-    let request_time = ctx.settings.request_time_parameter.clone();
-    let mut namespace = ctx
-        .condition_parameters
-        .namespace([&request_parameter, &request_time]);
+    let mut namespace = ctx.condition_parameters.namespace([&request_parameter]);
+    reserve_temporal_clocks(extra_predicates, ctx.condition_parameters, &mut namespace);
     let row_parameter = namespace.allocate_row(member_column.as_str());
 
-    // A temporal comparison such as `expires_at > now()` is completed by the request, not
-    // the row, so it joins the viewer set inside the condition rather than filtering the
-    // query. Everything else stays in the residual: a row guard the query keeps, or an
-    // inexpressible conjunct that keeps the shape joined.
+    // The clock joins the viewer set inside the condition, since the request completes it.
     let temporal = temporal_gates(
         extra_predicates,
         join_table,
-        &request_time,
+        ctx.condition_parameters,
         &mut namespace,
         db,
     )
@@ -579,12 +573,7 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
             gate.parameter.to_string(),
             ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
         ));
-    }
-    if !temporal.is_empty() {
-        parameters.push((
-            request_time.to_string(),
-            ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
-        ));
+        parameters.push(gate.clock.declaration());
     }
     let spec = ConditionSpec {
         expression,

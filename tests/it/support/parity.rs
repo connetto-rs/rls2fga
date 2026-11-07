@@ -16,6 +16,7 @@ use diesel::connection::SimpleConnection;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::sql_types::Jsonb;
+use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
 use testcontainers::{ContainerAsync, GenericImage};
 
 use rls2fga::types::{
@@ -25,6 +26,11 @@ use rls2fga::types::{
 };
 
 use super::openfga;
+
+diesel::define_sql_function! {
+    /// `PostgreSQL`'s `current_setting(setting_name)`.
+    fn current_setting(setting: diesel::sql_types::Text) -> diesel::sql_types::Text;
+}
 
 /// One caller, on both sides.
 ///
@@ -691,8 +697,31 @@ fn reads_an_unset_setting(error: &diesel::result::Error) -> bool {
 struct Model<'run> {
     client: &'run openfga::Client,
     answers: &'run [ActionRelations],
+    /// The translation whose clock parameters a check carries.
+    translation: &'run rls2fga::translator::Translation,
     /// For the case's name, which every refusal reports.
     case: &'run ParityCase,
+}
+
+/// The clock parameters a check at `instant` carries, computed as a checker computes them
+/// in the `TimeZone` `conn`'s session runs in.
+fn clock_context(
+    conn: &mut PgConnection,
+    model: &Model<'_>,
+    instant: &Instant,
+) -> serde_json::Map<String, serde_json::Value> {
+    let name = &model.case.name;
+    let zone: String = diesel::select(current_setting("TimeZone"))
+        .get_result(conn)
+        .unwrap_or_else(|error| panic!("{name}: reading the session zone: {error}"));
+    let zone = PgTimeZone::parse(&zone)
+        .unwrap_or_else(|error| panic!("{name}: the session zone {zone}: {error}"));
+    let at = PgTimestampTz::parse(&instant.instant, InputContext::new())
+        .unwrap_or_else(|error| panic!("{name}: the instant {}: {error}", instant.instant));
+    model
+        .translation
+        .clock_context(at, &zone)
+        .unwrap_or_else(|error| panic!("{name}: the clock context: {error}"))
 }
 
 /// Whether the model grants `principal` the statement on `object`.
@@ -708,6 +737,7 @@ async fn openfga_allows(
         client,
         answers,
         case,
+        ..
     } = model;
     let type_name = object
         .name
@@ -959,6 +989,7 @@ async fn run_in(
     let model = Model {
         client: &client,
         answers: &answers,
+        translation: planned.translation(),
         case,
     };
     let mutations = resolved_mutations(case, &naming);
@@ -1090,7 +1121,7 @@ async fn compare_every_pair(
     model: &Model<'_>,
     objects: &[Object],
     mutations: &BTreeMap<String, &Mutations>,
-    clock: &Instant,
+    instant: &Instant,
 ) -> Vec<Mismatch> {
     let case = model.case;
     let mut observations = Vec::new();
@@ -1102,6 +1133,10 @@ async fn compare_every_pair(
         // callers were declared in.
         let mut owned = super::containers::connect_postgres_with_retry(&cluster.url(database));
         let conn = &mut owned;
+        // Diesel sets `UTC` on connect, where a login runs in its database's zone.
+        conn.batch_execute("RESET TimeZone")
+            .unwrap_or_else(|error| panic!("{}: resetting the zone: {error}", case.name));
+        let clock = clock_context(conn, model, instant);
         let mut raised = false;
         for object in objects {
             for statement in COMPARED {
@@ -1120,7 +1155,7 @@ async fn compare_every_pair(
                 let Some(openfga) = openfga_allows(
                     model,
                     principal,
-                    &asked_context(principal, clock),
+                    &asked_context(principal, &clock),
                     object,
                     statement,
                     candidate.is_some_and(|mutations| mutations.check_neutral),
@@ -1150,15 +1185,15 @@ async fn compare_every_pair(
     observations
 }
 
-/// The context a check carries, with the database's clock where the caller needs it.
-fn asked_context(principal: &Principal, clock: &Instant) -> serde_json::Value {
+/// The context a check carries, with the clock parameters where the caller needs them.
+fn asked_context(
+    principal: &Principal,
+    clock: &serde_json::Map<String, serde_json::Value>,
+) -> serde_json::Value {
     let mut context = principal.context.clone();
     if principal.carries_request_time {
         if let Some(entries) = context.as_object_mut() {
-            entries.insert(
-                "request_time".to_string(),
-                serde_json::Value::String(clock.instant.clone()),
-            );
+            entries.extend(clock.clone());
         }
     }
     context
@@ -1368,6 +1403,7 @@ async fn compare_at_future_instant(
             )
         });
 
+    let clock = clock_context(conn, model, &instant);
     let mut observations = Vec::new();
     for principal in &case.principals {
         for object in objects {
@@ -1376,10 +1412,7 @@ async fn compare_at_future_instant(
                 .any(|pair| pair.subject == principal.subject && pair.object == object.name);
             let mut context = principal.context.clone();
             if let Some(entries) = context.as_object_mut() {
-                entries.insert(
-                    "request_time".to_string(),
-                    serde_json::Value::String(instant.instant.clone()),
-                );
+                entries.extend(clock.clone());
             }
             let Some(openfga) = openfga_allows(
                 model,

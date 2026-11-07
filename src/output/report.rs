@@ -561,23 +561,22 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
     /// them the operator reads only how many parts there were.
     #[test]
     fn a_composite_row_names_the_parts_that_set_its_grade() {
-        const CALENDAR: &str = "Unknown: INTERVAL '30 days' counts days, which PostgreSQL \
-                                adds as calendar days in the session TimeZone, so it has no \
-                                fixed CEL duration";
+        const INFINITE: &str =
+            "Unknown: INTERVAL 'infinity' has no finite length, so it has no CEL duration";
         for (using, rendered) in [
             (
-                "owner_id = current_user AND expires_at > now() - interval '30 days'",
-                format!("P8 (And of 2 parts, graded D by {CALENDAR})"),
+                "owner_id = current_user AND expires_at > now() - interval 'infinity'",
+                format!("P8 (And of 2 parts, graded D by {INFINITE})"),
             ),
             (
                 "owner_id = current_user AND (meta = 'x' AND \
-                 expires_at > now() - interval '30 days')",
-                format!("P8 (And of 2 parts, graded D by {CALENDAR})"),
+                 expires_at > now() - interval 'infinity')",
+                format!("P8 (And of 2 parts, graded D by {INFINITE})"),
             ),
             (
-                "expires_at > now() - interval '30 days' AND my_mystery(meta)",
+                "expires_at > now() - interval 'infinity' AND my_mystery(meta)",
                 format!(
-                    "P8 (And of 2 parts, graded D by {CALENDAR} and by Unknown: Function \
+                    "P8 (And of 2 parts, graded D by {INFINITE} and by Unknown: Function \
                      'my_mystery' not in registry and body not available)"
                 ),
             ),

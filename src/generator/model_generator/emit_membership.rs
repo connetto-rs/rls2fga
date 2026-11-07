@@ -184,7 +184,6 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
         extra_predicates,
         member_table,
         table_plan,
-        &ctx.settings.request_time_parameter,
         ctx.condition_parameters,
         db,
     );
@@ -714,7 +713,6 @@ fn emit_membership<DB: DatabaseLike>(
         extra_predicates,
         join_table,
         table_plan,
-        &ctx.settings.request_time_parameter,
         ctx.condition_parameters,
         db,
     );

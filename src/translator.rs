@@ -8,6 +8,7 @@ use alloc::sync::Arc;
 use crate::classifier::function_registry::{FunctionRegistry, RegistryLoadError, SessionAttribute};
 use crate::classifier::patterns::{ClassifiedPolicy, ConfidenceLevel};
 use crate::classifier::policy_classifier::classify_policies_with_effective_registry_and_settings;
+use crate::clock::{ClockContextError, ClockParameter};
 use crate::generator::action_relations::action_relations;
 use crate::generator::json_model::{json_model_from_plan, AuthorizationModel};
 use crate::generator::model_generator::{
@@ -32,6 +33,7 @@ use crate::types::{
 };
 use crate::types::{ConditionParameterName, ConditionParameterNameError};
 use crate::types::{PolicyReads, UnrestrictedTable};
+use sql_values::{PgTimeZone, PgTimestampTz};
 
 pub use crate::generator::model_generator::PlanningError;
 
@@ -52,7 +54,8 @@ impl TranslatorBuilder {
     }
 
     /// Name the condition parameter a caller supplies for a guard against statement
-    /// time, which every check context then has to use. Defaults to `request_time`.
+    /// time, which every check context then has to use and every clock threshold
+    /// parameter is named after. Defaults to `request_time`.
     ///
     /// # Errors
     ///
@@ -360,6 +363,72 @@ impl Translation {
     #[must_use]
     pub fn policy_reads(&self) -> &[PolicyReads] {
         &self.derived.policy_reads
+    }
+
+    /// Every clock parameter the model's conditions read, ordered by name: the request
+    /// clock itself, and each threshold `PostgreSQL` computes in the session `TimeZone`
+    /// that CEL cannot, such as `now() - interval '1 day'`.
+    #[must_use]
+    pub fn clock_parameters(&self) -> &[ClockParameter] {
+        &self.plan.clocks
+    }
+
+    /// The values of [`Translation::clock_parameters`] for one check, keyed by
+    /// parameter, ready to merge into its context.
+    ///
+    /// Call it per check with the instant the request runs at and the `TimeZone` its
+    /// session would run in, which for a deployment
+    /// `sql_traits::ResolvedDeployment::time_zone` names for the acting role. A day or
+    /// month window answers as `PostgreSQL` does only in that zone.
+    ///
+    /// ```
+    /// use rls2fga::parser::sql_parser::parse_schema;
+    /// use rls2fga::translator::TranslatorBuilder;
+    /// use rls2fga::types::ConfidenceLevel;
+    /// use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
+    ///
+    /// let db = parse_schema(
+    ///     "CREATE TABLE docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);
+    ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+    ///      CREATE POLICY docs_sel ON docs FOR SELECT
+    ///          USING (expires_at > now() - interval '1 day');",
+    /// )
+    /// .unwrap();
+    /// let translation = TranslatorBuilder::new()
+    ///     .with_min_confidence(ConfidenceLevel::B)
+    ///     .build()
+    ///     .translate(&db)
+    ///     .unwrap();
+    /// let at = PgTimestampTz::parse("2026-03-29 12:00+02", InputContext::new()).unwrap();
+    /// let context = translation
+    ///     .clock_context(at, &PgTimeZone::parse("Europe/Rome").unwrap())
+    ///     .unwrap();
+    /// // Twenty three hours back, across the spring change.
+    /// assert_eq!(context["request_time_minus_1_day"], "2026-03-28T11:00:00Z");
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// The first parameter whose threshold `PostgreSQL` would refuse to compute, or that
+    /// lies outside the years a CEL timestamp holds.
+    pub fn clock_context(
+        &self,
+        request_time: PgTimestampTz,
+        zone: &PgTimeZone,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, ClockContextError> {
+        self.plan
+            .clocks
+            .iter()
+            .map(|clock| {
+                clock
+                    .value(request_time, zone)
+                    .map(|value| (clock.name().to_string(), serde_json::Value::String(value)))
+                    .map_err(|source| ClockContextError {
+                        parameter: clock.name().clone(),
+                        source,
+                    })
+            })
+            .collect()
     }
 
     /// The outputs, refused while any note's severity [`diverges_from_database`](NoteSeverity::diverges_from_database).

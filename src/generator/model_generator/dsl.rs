@@ -53,6 +53,7 @@ fn dsl_parameter_type(kind: &ConditionParameter) -> String {
     }
     match kind {
         ConditionParameter::Scalar(type_name) => bare(type_name),
+        ConditionParameter::Clock(_) => bare(TIMESTAMP_PARAMETER_TYPE),
         ConditionParameter::ListOf(element) => format!("list<{}>", bare(element)),
     }
 }

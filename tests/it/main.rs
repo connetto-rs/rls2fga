@@ -10,6 +10,7 @@ mod caller_cast_tests;
 mod classifier_edge_case_tests;
 mod classifier_indirect_membership_tests;
 mod classifier_tests;
+mod clock_threshold_tests;
 mod common_patterns_tests;
 mod composite_key_membership_tests;
 mod confidence_filtering_tests;

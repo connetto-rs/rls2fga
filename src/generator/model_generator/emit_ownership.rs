@@ -166,7 +166,6 @@ pub(crate) fn emit_attribute_condition<DB: DatabaseLike>(
     let policy_name = ctx.policy_name;
     let db = ctx.db;
     let source_table = ctx.source_table;
-    let settings = ctx.settings;
     // A value only the request knows cannot be decided by a tuple, so the
     // guard becomes a condition the service evaluates per check, and the tuple
     // carries the row's own value as its context.
@@ -178,7 +177,6 @@ pub(crate) fn emit_attribute_condition<DB: DatabaseLike>(
             table_plan,
             ctx.condition_parameters,
             db,
-            &settings.request_time_parameter,
         ) {
             return expr;
         }

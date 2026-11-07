@@ -2038,3 +2038,43 @@ fn a_witness_membership_source_carries_its_condition() {
     };
     assert!(source_carries_condition(&source));
 }
+
+/// Two conditions reading one parameter name for different thresholds refuse the plan
+/// rather than hand the checker one value for both.
+#[test]
+fn two_thresholds_on_one_parameter_name_refuse_the_plan() {
+    use crate::clock::ClockOffset;
+
+    let day_before = ClockThreshold {
+        reading: ClockReading::Instant,
+        offset: ClockOffset {
+            months: 0,
+            days: -1,
+            microseconds: 0,
+        },
+    };
+    let condition = |expression: &str, threshold: ClockThreshold| {
+        let clock = ClockParameter::new(ConditionParameterName::derived("clock"), threshold);
+        let spec = ConditionSpec {
+            expression: expression.to_string(),
+            parameters: [("clock".to_string(), ConditionParameter::Clock(clock))]
+                .into_iter()
+                .collect(),
+        };
+        (spec.name(), spec)
+    };
+    let conditions = [
+        condition("a > clock", ClockThreshold::INSTANT),
+        condition("b > clock", day_before),
+    ]
+    .into_iter()
+    .collect();
+    assert_eq!(
+        clock_parameters(&conditions),
+        Err(PlanningError::ConditionParameterCollision {
+            parameter: ConditionParameterName::derived("clock"),
+            first: format!("{:?}", ClockThreshold::INSTANT),
+            second: format!("{day_before:?}"),
+        })
+    );
+}

@@ -75,6 +75,8 @@ pub mod classifier;
 /// Writing a generated model to a running `OpenFGA` server. Needs the `client` feature.
 #[cfg(feature = "client")]
 pub mod client;
+/// The request clock a guard reads, and the thresholds a checker supplies for it.
+pub mod clock;
 /// `OpenFGA` model generation from classified policies (DSL, JSON, and tuple SQL).
 pub mod generator;
 /// File output and markdown report generation.

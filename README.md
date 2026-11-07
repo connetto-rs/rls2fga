@@ -168,7 +168,7 @@ Membership tuple relations are isolated by table, correlation, user column, pred
 
 A policy scoped `TO analyst` keeps that scope through a `pg_role` type, so load `usage` tuples mapping users to `pg_role` objects or those policies match nobody.
 
-A guard against statement time such as `expires_at > now()` cannot be a tuple, since whatever it decided when written stays decided. It becomes an `OpenFGA` condition instead: the row's value travels with the tuple and every check must carry the time in its context under `request_time`, renamed by `TranslatorBuilder::with_request_time_parameter`. Nothing computes it for you, so the clock reading stays where it can be audited.
+A guard against statement time such as `expires_at > now()` cannot be a tuple, since whatever it decided when written stays decided. It becomes an `OpenFGA` condition instead: the row's value travels with the tuple and every check must carry the time in its context under `request_time`, renamed by `TranslatorBuilder::with_request_time_parameter`. A day or month window, `current_date` and `localtimestamp` read the clock in the session `TimeZone`, which CEL cannot, so each becomes a parameter of its own such as `request_time_minus_1_day`. `Translation::clock_context` computes every clock parameter of one check from the instant and the zone the request runs in.
 
 ## License
 
