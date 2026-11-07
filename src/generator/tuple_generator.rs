@@ -1822,6 +1822,24 @@ pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
             operator.sql(),
             render_attribute_literal(value)?
         )),
+        // Every value of an `IN` list compares as the column's type, so a list compared as
+        // `text` spells the array it compares against.
+        AttributeTest::In(values)
+            if values
+                .iter()
+                .any(|value| matches!(value, AttributeLiteral::AsText(_))) =>
+        {
+            let rendered = values
+                .iter()
+                .map(|value| match value {
+                    AttributeLiteral::Text(spelled) | AttributeLiteral::AsText(spelled) => {
+                        Some(quote_sql_string_literal(spelled))
+                    }
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(format!("= ANY (ARRAY[{}]::text[])", rendered.join(", ")))
+        }
         AttributeTest::In(values) if !values.is_empty() => {
             let rendered = values
                 .iter()
@@ -1842,6 +1860,7 @@ pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
 fn render_attribute_literal(value: &AttributeLiteral) -> Option<String> {
     match value {
         AttributeLiteral::Text(text) => Some(quote_sql_string_literal(text)),
+        AttributeLiteral::AsText(text) => Some(format!("{}::text", quote_sql_string_literal(text))),
         AttributeLiteral::Number(number) => Some(number.clone()),
         AttributeLiteral::Boolean(flag) => Some(if *flag { "TRUE" } else { "FALSE" }.to_string()),
         _ => None,

@@ -36,7 +36,7 @@ mod subquery;
 /// Comparisons an unset setting's empty reading makes true.
 mod unset;
 
-use attribute::attribute_literal;
+use attribute::{attribute_literal, listed_value};
 pub use attribute::{
     attribute_literal_predicate, attribute_request_predicate, is_attribute_check,
     residual_predicate,

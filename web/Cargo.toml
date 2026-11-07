@@ -68,3 +68,4 @@ opt-level = 1
 # and must match the parent crate's.
 [patch.crates-io]
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main" }

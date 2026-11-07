@@ -686,6 +686,12 @@ fn far_in_list(conjunct: &Expr) -> Option<(Expr, Vec<Expr>)> {
     let mut values: Vec<Expr> = Vec::new();
     let mut seen: Vec<AttributeLiteral> = Vec::new();
     for item in items {
+        // Every value of a list of several compares as the column's type.
+        let item = if items.len() > 1 {
+            listed_value(item)
+        } else {
+            item
+        };
         let value = attribute_literal(item)?;
         if !seen.iter().any(|seen| seen == &value) {
             seen.push(value);

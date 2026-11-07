@@ -29,3 +29,4 @@ bench = false
 # carry over. Mirror it here (see the parent Cargo.toml for the rationale).
 [patch.crates-io]
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main" }
