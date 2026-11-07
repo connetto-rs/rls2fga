@@ -57,3 +57,11 @@ fn a_null_test_on_a_nondeterministic_column_still_replays() {
         "code IS NOT NULL"
     ));
 }
+
+#[test]
+fn a_column_naming_its_character_set_leaves_its_text_guard_to_the_database() {
+    assert!(!replays_from_row(
+        "TEXT CHARACTER SET utf8mb4",
+        "code <> 'ab'"
+    ));
+}
