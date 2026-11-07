@@ -95,7 +95,7 @@ fn a_bypassing_role_is_reported() {
         "CREATE ROLE auditor BYPASSRLS;
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));",
         None,
         ConfidenceLevel::B,
     );
@@ -115,7 +115,7 @@ fn a_barrier_that_cannot_be_scoped_is_reported() {
         "CREATE ROLE auditor;
 CREATE TABLE docs(owner_id TEXT, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY bar ON docs AS RESTRICTIVE FOR SELECT TO auditor USING (tenant = 'x');",
         None,
         ConfidenceLevel::B,
@@ -135,7 +135,7 @@ fn an_inheritance_parent_reading_its_own_rows_is_reported() {
         "CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE archived_docs() INHERITS (docs);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));",
         None,
         ConfidenceLevel::B,
     );
@@ -154,7 +154,7 @@ CREATE TABLE docs(id TEXT PRIMARY KEY, body TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dp ON docs FOR SELECT
     USING (EXISTS (SELECT 1 FROM members WHERE members.project_id = docs.missing_col
-        AND members.user_id = current_user));",
+        AND members.user_id = current_setting('app.user_id')));",
         None,
         ConfidenceLevel::B,
     );
@@ -174,7 +174,7 @@ fn ownership_without_a_row_identity_is_skipped() {
         "CREATE TABLE users(id TEXT PRIMARY KEY);
 CREATE TABLE docs(owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);",
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));",
         None,
         ConfidenceLevel::B,
     );
@@ -195,8 +195,8 @@ fn a_gap_carries_its_reason_and_a_statement_carries_none() {
 CREATE TABLE memos(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY memos_owner ON memos FOR SELECT USING (owner_id = current_user);",
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY memos_owner ON memos FOR SELECT USING (owner_id = current_setting('app.user_id'));",
         None,
     );
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
@@ -234,7 +234,7 @@ fn an_owner_pointer_without_a_row_identity_is_skipped() {
             "CREATE TABLE users(id TEXT PRIMARY KEY);{GRANT_TABLE}
 CREATE TABLE docs(owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_user, owner_id) >= 2);"
+CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_setting('app.user_id'), owner_id) >= 2);"
         ),
         Some(GRANTS),
         ConfidenceLevel::B,
@@ -255,7 +255,7 @@ fn an_owner_pointer_without_a_column_is_skipped() {
             "CREATE TABLE users(id TEXT PRIMARY KEY);{GRANT_TABLE}
 CREATE TABLE docs(id TEXT PRIMARY KEY, title TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_user, lower(title)) >= 2);"
+CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_setting('app.user_id'), lower(title)) >= 2);"
         ),
         Some(GRANTS),
         ConfidenceLevel::B,
@@ -275,7 +275,7 @@ fn a_grant_without_a_principal_table_is_skipped_twice() {
         "{GRANT_TABLE}
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_user, owner_id) >= 2);"
+CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_setting('app.user_id'), owner_id) >= 2);"
     );
     let (_, skips) = reported(&sql, Some(GRANTS), ConfidenceLevel::B);
     assert_reports(
@@ -299,7 +299,7 @@ fn a_team_arm_without_a_team_table_is_skipped() {
 CREATE TABLE team_members(user_id TEXT, team_id TEXT);{GRANT_TABLE}
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_user, owner_id) >= 2);"
+CREATE POLICY p ON docs FOR SELECT USING (get_owner_role(current_setting('app.user_id'), owner_id) >= 2);"
         ),
         Some(GRANTS_WITH_TEAMS),
         ConfidenceLevel::B,
@@ -322,7 +322,7 @@ fn an_attribute_left_to_the_application_is_reported_and_skipped() {
 CREATE TABLE ownables(id TEXT PRIMARY KEY, owner_id TEXT, status TEXT);
 ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;
 CREATE POLICY ownables_update ON ownables FOR UPDATE
-    USING (get_owner_role(current_user, owner_id) >= 3 AND status LIKE 'live%');"
+    USING (get_owner_role(current_setting('app.user_id'), owner_id) >= 3 AND status LIKE 'live%');"
         ),
         Some(GRANTS),
     );
@@ -406,7 +406,7 @@ CREATE TABLE docs(id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id));
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pp ON projects FOR SELECT USING (true);
-CREATE POLICY dp ON docs FOR SELECT USING (project_id IN (SELECT id FROM projects WHERE id IN (SELECT project_id FROM members WHERE user_id = current_user)));",
+CREATE POLICY dp ON docs FOR SELECT USING (project_id IN (SELECT id FROM projects WHERE id IN (SELECT project_id FROM members WHERE user_id = current_setting('app.user_id'))));",
         None,
         ConfidenceLevel::B,
     );

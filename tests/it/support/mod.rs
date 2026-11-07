@@ -287,8 +287,9 @@ pub(crate) fn read_fixture_sql(fixture: &str) -> String {
     std::fs::read_to_string(path).expect("fixture SQL should be readable")
 }
 
+/// The fixture's schema parsed after the suite's roles, the roles its deployment names.
 pub(crate) fn parse_fixture_db(fixture: &str) -> ParserDB {
-    sql_parser::parse_schema(&read_fixture_sql(fixture)).expect("fixture SQL should parse")
+    deployment::db(&read_fixture_sql(fixture))
 }
 
 pub(crate) fn read_fixture_registry_json(fixture: &str) -> String {

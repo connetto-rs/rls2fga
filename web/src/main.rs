@@ -496,7 +496,7 @@ fn InputPane(
                     }
                 }
                 p { class: "field-help",
-                    "Heuristic confidence of the policy translation. Level A is a fully recognised single pattern, such as ownership where owner_id = current_user. Level B is a composite of well-understood parts, such as owner OR a public flag. Level C is only partially recognised and mapped conservatively, such as an attribute check like status = 'active', which becomes a no_access relation to review by hand. Level D is unrecognised or unsupported."
+                    "Heuristic confidence of the policy translation. Level A is a fully recognised single pattern, such as ownership where owner_id = current_user_id(). Level B is a composite of well-understood parts, such as owner OR a public flag. Level C is only partially recognised and mapped conservatively, such as an attribute check like status = 'active', which becomes a no_access relation to review by hand. Level D is unrecognised or unsupported."
                 }
             }
         }

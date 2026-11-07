@@ -47,10 +47,10 @@ GRANT SELECT ON docs TO auditor;
 
 ALTER TABLE docs OWNER TO auditor;
 
--- A function that identifies its caller, and the same body running as its owner, where
--- the value is the owner's for everybody and therefore not per-user ownership.
+-- A function that identifies its caller through a session setting, and one returning the
+-- acting role while running as its owner, where the value is the owner's for everybody.
 CREATE FUNCTION caller_id() RETURNS UUID LANGUAGE sql STABLE SECURITY INVOKER
-    AS 'SELECT current_user::uuid';
+    AS 'SELECT current_setting(''app.user_id'')::uuid';
 
 CREATE FUNCTION owner_id() RETURNS UUID LANGUAGE sql STABLE SECURITY DEFINER
     AS 'SELECT current_user::uuid';
@@ -61,12 +61,12 @@ CREATE FUNCTION doc_ids() RETURNS SETOF UUID LANGUAGE sql STABLE
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE doc_links ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_login = current_setting('app.user_id'));
 
 CREATE POLICY docs_auditor ON docs FOR SELECT TO auditor USING (true);
 
 CREATE POLICY doc_links_visible ON doc_links FOR SELECT
-    USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_user));
+    USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_setting('app.user_id')));
 
 -- A trigger and its function. Every real schema has these, and no fixture carried one
 -- until the normalizer stopped panicking on `RETURNS TRIGGER`.

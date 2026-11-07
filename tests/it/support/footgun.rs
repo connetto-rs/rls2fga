@@ -86,17 +86,17 @@ pub(crate) fn overlength_name_schema(role: Option<&str>) -> String {
     format!(
         "CREATE TABLE {long_parent}(id UUID PRIMARY KEY, owner_id UUID);\n\
          ALTER TABLE {long_parent} ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY parent_sel ON {long_parent} FOR SELECT USING (owner_id = current_user);\n\
+         CREATE POLICY parent_sel ON {long_parent} FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
          CREATE TABLE {long_table}(\n\
            id UUID PRIMARY KEY,\n\
            {long_column}_id UUID,\n\
            parent_ref UUID REFERENCES {long_parent}(id)\n\
          );\n\
          ALTER TABLE {long_table} ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY own_sel ON {long_table} FOR SELECT USING ({long_column}_id = current_user);\n\
+         CREATE POLICY own_sel ON {long_table} FOR SELECT USING ({long_column}_id = current_setting('app.user_id', true));\n\
          CREATE POLICY inherit_upd ON {long_table} FOR UPDATE{role_clause} USING (\n\
            EXISTS (SELECT 1 FROM {long_parent} p\n\
-                   WHERE p.id = {long_table}.parent_ref AND p.owner_id = current_user));\n",
+                   WHERE p.id = {long_table}.parent_ref AND p.owner_id = current_setting('app.user_id', true)));\n",
         role_clause = role.map(|role| format!(" TO {role}")).unwrap_or_default()
     )
 }
@@ -429,7 +429,7 @@ CREATE POLICY docs_members ON docs FOR SELECT USING (
   EXISTS (
     SELECT 1 FROM memberships m
     WHERE m.doc_id = docs.id
-      AND m.user_id = current_user
+      AND m.user_id = current_setting('app.user_id', true)
       AND EXISTS (
         SELECT 1 FROM "Memberships"
       )

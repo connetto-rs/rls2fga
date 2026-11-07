@@ -2415,7 +2415,7 @@ CREATE POLICY docs_select ON docs FOR SELECT USING (
     SELECT 1
     FROM doc_members dm
     WHERE dm.doc_id = docs.id
-      AND dm.user_id = current_user
+      AND dm.user_id = current_setting('app.user_id')
       AND dm.role = 'admin'
   )
 );
@@ -2423,7 +2423,7 @@ CREATE POLICY docs_select ON docs FOR SELECT USING (
         )
         .expect("schema should parse");
 
-        let queries = plan_queries(&db, &FunctionRegistry::new());
+        let queries = plan_queries(&db, &crate::test_support::caller_registry());
 
         let membership_query = queries
             .iter()
@@ -2459,12 +2459,12 @@ CREATE POLICY docs_select ON docs FOR SELECT USING (
 CREATE SCHEMA app;
 CREATE TABLE app.docs(id uuid primary key, owner_id uuid);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_select ON app.docs USING (owner_id = current_user);
+CREATE POLICY docs_select ON app.docs USING (owner_id = current_setting('app.user_id'));
 ",
         )
         .expect("schema should parse");
 
-        let queries = plan_queries(&db, &FunctionRegistry::new());
+        let queries = plan_queries(&db, &crate::test_support::caller_registry());
 
         let ownership_query = queries
             .iter()
@@ -2484,12 +2484,12 @@ CREATE TABLE public."Doc Items"(
 );
 ALTER TABLE "Doc Items" ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON "Doc Items" FOR SELECT
-  USING ("OwnerID" = current_user);
+  USING ("OwnerID" = current_setting('app.user_id'));
 "#,
         )
         .expect("schema should parse");
 
-        let queries = plan_queries(&db, &FunctionRegistry::new());
+        let queries = plan_queries(&db, &crate::test_support::caller_registry());
 
         let ownership_query = queries
             .iter()

@@ -496,7 +496,12 @@ async fn a_nested_protected_read_denies_on_both_sides(cluster: Arc<Cluster>) {
             r#"CREATE ROLE app_reader LOGIN;
                GRANT SELECT ON docs, memberships, "Memberships" TO app_reader"#,
         ],
-        vec![Principal::as_role("app_reader", "app_reader")],
+        vec![Principal::with_setting(
+            "app_reader",
+            "app_reader",
+            "app.user_id",
+            "app_reader",
+        )],
     );
     support::parity::expect_denied(&cluster, &case, "app_reader", "docs:d1").await;
 }
@@ -588,8 +593,8 @@ CREATE TABLE "self"(id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE t_self(id TEXT PRIMARY KEY, editor_id TEXT);
 ALTER TABLE "self" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE t_self ENABLE ROW LEVEL SECURITY;
-CREATE POLICY a ON "self" FOR SELECT USING (owner_id = current_user);
-CREATE POLICY b ON t_self FOR SELECT USING (editor_id = current_user);
+CREATE POLICY a ON "self" FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY b ON t_self FOR SELECT USING (editor_id = current_setting('app.user_id', true));
 "#,
         &[
             r#"INSERT INTO "self"(id, owner_id) VALUES ('shared', 'alice');
@@ -598,8 +603,8 @@ CREATE POLICY b ON t_self FOR SELECT USING (editor_id = current_user);
                GRANT SELECT ON "self", t_self TO alice, bob"#,
         ],
         vec![
-            Principal::as_role("alice", "alice"),
-            Principal::as_role("bob", "bob"),
+            Principal::with_setting("alice", "alice", "app.user_id", "alice"),
+            Principal::with_setting("bob", "bob", "app.user_id", "bob"),
         ],
     );
     let run = support::parity::run(&cluster, &case).await;
@@ -630,9 +635,9 @@ CREATE TABLE "self"(id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE child_docs(id TEXT PRIMARY KEY, parent_id TEXT REFERENCES "self"(id));
 ALTER TABLE "self" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE child_docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY parent_owner ON "self" FOR SELECT USING (owner_id = current_user);
+CREATE POLICY parent_owner ON "self" FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY inherit ON child_docs FOR SELECT USING (EXISTS (
-    SELECT 1 FROM "self" p WHERE p.id = child_docs.parent_id AND p.owner_id = current_user));
+    SELECT 1 FROM "self" p WHERE p.id = child_docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 "#,
         &[
             r#"INSERT INTO "self"(id, owner_id) VALUES ('p1', 'alice');
@@ -641,8 +646,8 @@ CREATE POLICY inherit ON child_docs FOR SELECT USING (EXISTS (
                GRANT SELECT ON "self", child_docs TO alice, bob"#,
         ],
         vec![
-            Principal::as_role("alice", "alice"),
-            Principal::as_role("bob", "bob"),
+            Principal::with_setting("alice", "alice", "app.user_id", "alice"),
+            Principal::with_setting("bob", "bob", "app.user_id", "bob"),
         ],
     );
     let run = support::parity::run(&cluster, &case).await;
@@ -1338,7 +1343,7 @@ CREATE POLICY m_owner ON "M" FOR SELECT USING (
   EXISTS (
     SELECT 1 FROM members m
     WHERE m.doc_id = "M".id
-      AND "M".owner_id = current_user
+      AND "M".owner_id = current_setting('app.user_id', true)
   )
 );
 "#,
@@ -1347,7 +1352,12 @@ CREATE POLICY m_owner ON "M" FOR SELECT USING (
                INSERT INTO members(doc_id, owner_id) VALUES ('d1', 'app_reader')"#,
             r#"CREATE ROLE app_reader LOGIN; GRANT SELECT ON "M", members TO app_reader"#,
         ],
-        vec![Principal::as_role("app_reader", "app_reader")],
+        vec![Principal::with_setting(
+            "app_reader",
+            "app_reader",
+            "app.user_id",
+            "app_reader",
+        )],
     );
     support::parity::expect_denied(&cluster, &case, "app_reader", "m:d1").await;
 }
@@ -1874,7 +1884,7 @@ CREATE POLICY docs_members ON docs FOR SELECT USING (
   EXISTS (
     SELECT 1 FROM doc_members m
     WHERE m.doc_id = docs.id
-      AND m.user_id = current_user
+      AND m.user_id = current_setting('app.user_id', true)
       AND pg_has_role(m.tenant, 'USAGE')
   )
 );
@@ -1887,7 +1897,12 @@ CREATE POLICY docs_members ON docs FOR SELECT USING (
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON docs, doc_members TO app_reader",
         ],
-        vec![Principal::as_role("app_reader", "app_reader")],
+        vec![Principal::with_setting(
+            "app_reader",
+            "app_reader",
+            "app.user_id",
+            "app_reader",
+        )],
     )
     .after(&["CREATE ROLE tenant_a"]);
     support::parity::expect_denied(&cluster, &case, "app_reader", "docs:d1").await;
@@ -1907,7 +1922,7 @@ CREATE TABLE leveled_members(doc_id TEXT REFERENCES leveled_docs(id), user_id TE
 ALTER TABLE leveled_docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION can_see(d TEXT, req INT) RETURNS BOOLEAN LANGUAGE sql
 SET search_path TO public, pg_catalog, pg_temp AS
-'SELECT EXISTS (SELECT 1 FROM leveled_members m WHERE m.doc_id = d AND m.user_id = current_user AND m.min_level <= req)';
+'SELECT EXISTS (SELECT 1 FROM leveled_members m WHERE m.doc_id = d AND m.user_id = current_setting(''app.user_id'', true) AND m.min_level <= req)';
 CREATE POLICY p ON leveled_docs FOR SELECT USING (can_see(id, coalesce(level, 0)));
 ",
         &[
@@ -1919,7 +1934,12 @@ CREATE POLICY p ON leveled_docs FOR SELECT USING (can_see(id, coalesce(level, 0)
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON leveled_docs, leveled_members TO app_reader",
         ],
-        vec![Principal::as_role("app_reader", "app_reader")],
+        vec![Principal::with_setting(
+            "app_reader",
+            "app_reader",
+            "app.user_id",
+            "app_reader",
+        )],
     );
     // `min_level` 50 against the row's level 0, so the database denies.
     support::parity::expect_denied(&cluster, &case, "app_reader", "leveled_docs:d1").await;
@@ -1936,12 +1956,17 @@ async fn a_failed_case_leaves_no_role_behind(cluster: Arc<Cluster>) {
             "runner-planted-panic",
             "CREATE TABLE only_docs(id TEXT PRIMARY KEY);
              ALTER TABLE only_docs ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY p ON only_docs FOR SELECT USING (id = current_user);",
+             CREATE POLICY p ON only_docs FOR SELECT USING (id = current_setting('app.user_id', true));",
             &[
                 "CREATE ROLE reused_reader LOGIN; GRANT SELECT ON only_docs TO reused_reader",
                 "INSERT INTO absent_table(id) VALUES ('x')",
             ],
-            vec![Principal::as_role("reused_reader", "reused_reader")],
+            vec![Principal::with_setting(
+                "reused_reader",
+                "reused_reader",
+                "app.user_id",
+                "reused_reader",
+            )],
         )
     };
     let shared = Arc::clone(&cluster);
@@ -1960,12 +1985,17 @@ async fn a_failed_case_leaves_no_role_behind(cluster: Arc<Cluster>) {
         "runner-planted-panic-successor",
         "CREATE TABLE only_docs(id TEXT PRIMARY KEY);
          ALTER TABLE only_docs ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY p ON only_docs FOR SELECT USING (id = current_user);",
+         CREATE POLICY p ON only_docs FOR SELECT USING (id = current_setting('app.user_id', true));",
         &[
             "INSERT INTO only_docs(id) VALUES ('reused_reader'), ('someone_else')",
             "CREATE ROLE reused_reader LOGIN; GRANT SELECT ON only_docs TO reused_reader",
         ],
-        vec![Principal::as_role("reused_reader", "reused_reader")],
+        vec![Principal::with_setting(
+            "reused_reader",
+            "reused_reader",
+            "app.user_id",
+            "reused_reader",
+        )],
     );
     let run = support::parity::run(&cluster, &successor).await;
     support::parity::assert_postgres(
@@ -2516,12 +2546,12 @@ CREATE POLICY filter_p ON filter_docs FOR SELECT USING (
   EXISTS (
     SELECT 1 FROM filter_members m
     WHERE m.doc_id = filter_docs.id
-      AND m.user_id = current_user
+      AND m.user_id = current_setting('app.user_id', true)
       AND filter_docs.owner_id = filter_docs.reviewer_id
   )
 );
 CREATE POLICY sentinel_p ON sentinel_docs FOR SELECT USING (
-  NULLIF(owner_id, 'system') = current_user
+  NULLIF(owner_id, 'system') = current_setting('app.user_id', true)
 );
 ",
         &[
@@ -2536,8 +2566,8 @@ CREATE POLICY sentinel_p ON sentinel_docs FOR SELECT USING (
              GRANT SELECT ON sentinel_docs TO system",
         ],
         vec![
-            Principal::as_role("app_reader", "app_reader"),
-            Principal::as_role("system", "system"),
+            Principal::with_setting("app_reader", "app_reader", "app.user_id", "app_reader"),
+            Principal::with_setting("system", "system", "app.user_id", "system"),
         ],
     );
     let run = support::parity::run_disclosing(&cluster, &case).await;
@@ -2954,7 +2984,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_p ON docs FOR SELECT USING (
     EXISTS (
         SELECT 1 FROM doc_shares s
-        WHERE s.doc_id = docs.id AND s.user_id = current_user AND s.expires_at > now()
+        WHERE s.doc_id = docs.id AND s.user_id = current_setting('app.user_id', true) AND s.expires_at > now()
     )
 );
 ",
@@ -2968,8 +2998,8 @@ CREATE POLICY docs_p ON docs FOR SELECT USING (
              GRANT SELECT ON docs, doc_shares TO alice, bob",
         ],
         vec![
-            Principal::as_role("alice", "alice").with_clock(),
-            Principal::as_role("bob", "bob").with_clock(),
+            Principal::with_setting("alice", "alice", "app.user_id", "alice").with_clock(),
+            Principal::with_setting("bob", "bob", "app.user_id", "bob").with_clock(),
         ],
     )
     .also_at(
@@ -3013,7 +3043,7 @@ ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY memos_p ON memos FOR SELECT USING (
     EXISTS (
         SELECT 1 FROM reviewers
-        WHERE reviewers.user_id = current_user AND reviewers.vetted_at > now()
+        WHERE reviewers.user_id = current_setting('app.user_id', true) AND reviewers.vetted_at > now()
     )
 );
 ",
@@ -3027,8 +3057,8 @@ CREATE POLICY memos_p ON memos FOR SELECT USING (
              GRANT SELECT ON memos, reviewers TO alice, bob",
         ],
         vec![
-            Principal::as_role("alice", "alice").with_clock(),
-            Principal::as_role("bob", "bob").with_clock(),
+            Principal::with_setting("alice", "alice", "app.user_id", "alice").with_clock(),
+            Principal::with_setting("bob", "bob", "app.user_id", "bob").with_clock(),
         ],
     )
     .also_at(
@@ -3378,7 +3408,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_p ON docs FOR SELECT USING (
     EXISTS (
         SELECT 1 FROM members m
-        WHERE m.doc_id = docs.id AND m.user_id = current_user
+        WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)
           AND m.trial_ends > now() AND m.support_ends > now()
     )
 );
@@ -3395,8 +3425,8 @@ CREATE POLICY docs_p ON docs FOR SELECT USING (
              GRANT SELECT ON docs, members TO bob, carol",
         ],
         vec![
-            Principal::as_role("bob", "bob").with_clock(),
-            Principal::as_role("carol", "carol").with_clock(),
+            Principal::with_setting("bob", "bob", "app.user_id", "bob").with_clock(),
+            Principal::with_setting("carol", "carol", "app.user_id", "carol").with_clock(),
         ],
     );
     let run = support::parity::run(&cluster, &case).await;

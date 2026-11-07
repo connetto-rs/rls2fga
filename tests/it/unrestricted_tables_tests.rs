@@ -28,7 +28,7 @@ const GUARDED_AND_OPEN: &str = "
 CREATE TABLE orders (id INT PRIMARY KEY, quantity BIGINT NOT NULL);
 CREATE TABLE docs (id INT PRIMARY KEY, owner TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY d ON docs USING (owner = current_user);
+CREATE POLICY d ON docs USING (owner = current_setting('app.user_id', true));
 ";
 
 /// A parent and a membership table the model reaches from a guarded table, both of
@@ -48,7 +48,7 @@ CREATE SCHEMA app;
 CREATE TABLE app.orders (id INT PRIMARY KEY, owner TEXT);
 CREATE TABLE public.orders (id INT PRIMARY KEY, quantity BIGINT);
 ALTER TABLE app.orders ENABLE ROW LEVEL SECURITY;
-CREATE POLICY o ON app.orders USING (owner = current_user);
+CREATE POLICY o ON app.orders USING (owner = current_setting('app.user_id', true));
 ";
 
 /// A partitioned root carrying the policy, its partitions carrying none, which is what
@@ -58,7 +58,7 @@ const GUARDED_PARTITION_ROOT: &str = "
 CREATE TABLE events(id INT, tenant TEXT, at DATE, PRIMARY KEY (id, at)) PARTITION BY RANGE (at);
 CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
-CREATE POLICY e ON events USING (tenant = current_user);
+CREATE POLICY e ON events USING (tenant = current_setting('app.user_id', true));
 ";
 
 /// The same shape with the policy on the partition instead. A read through the open root
@@ -67,7 +67,7 @@ const OPEN_PARTITION_ROOT: &str = "
 CREATE TABLE events(id INT, tenant TEXT, at DATE, PRIMARY KEY (id, at)) PARTITION BY RANGE (at);
 CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 ALTER TABLE events_2026 ENABLE ROW LEVEL SECURITY;
-CREATE POLICY e ON events_2026 USING (tenant = current_user);
+CREATE POLICY e ON events_2026 USING (tenant = current_setting('app.user_id', true));
 ";
 
 /// An `INHERITS` child of a guarded parent. A read through the parent applies the
@@ -77,7 +77,7 @@ const GUARDED_INHERITANCE_PARENT: &str = "
 CREATE TABLE docs(id INT PRIMARY KEY, owner TEXT);
 CREATE TABLE secret_docs(extra TEXT) INHERITS (docs);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY d ON docs USING (owner = current_user);
+CREATE POLICY d ON docs USING (owner = current_setting('app.user_id', true));
 ";
 
 /// A partition of a guarded root that the plan gives a type to anyway, because a declared
@@ -93,9 +93,9 @@ CREATE TABLE docs(id TEXT PRIMARY KEY, event_id TEXT, region TEXT,
   FOREIGN KEY (event_id, region) REFERENCES events_eu(id, region));
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY e ON events USING (tenant = current_user);
+CREATE POLICY e ON events USING (tenant = current_setting('app.user_id', true));
 CREATE POLICY d ON docs USING (
-  event_id IN (SELECT event_id FROM event_members WHERE user_id = current_user));
+  event_id IN (SELECT event_id FROM event_members WHERE user_id = current_setting('app.user_id', true)));
 ";
 
 fn translate(db: &ParserDB) -> Translation {
@@ -266,7 +266,7 @@ CREATE TABLE events_2026 PARTITION OF events FOR VALUES FROM ('2026-01-01') TO (
   PARTITION BY RANGE (at);
 CREATE TABLE events_2026_h1 PARTITION OF events_2026 FOR VALUES FROM ('2026-01-01') TO ('2026-07-01');
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
-CREATE POLICY e ON events USING (tenant = current_user);
+CREATE POLICY e ON events USING (tenant = current_setting('app.user_id', true));
 ";
     assert_eq!(unrestricted(sql), Vec::<String>::new());
 }

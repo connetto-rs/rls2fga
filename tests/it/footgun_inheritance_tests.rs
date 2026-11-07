@@ -24,15 +24,15 @@ CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
 CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE aaa.projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE zzz.projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY zzz_sel ON zzz.projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY zzz_sel ON zzz.projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES zzz.projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM zzz.projects p
-          WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+          WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -81,13 +81,13 @@ CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
 CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE aaa.projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id UUID);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES zzz.projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM zzz.projects p
-          WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+          WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -114,12 +114,12 @@ fn inherited_commands_consult_the_parents_select_policy() {
         r"
 CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_all ON tasks FOR ALL USING (
   EXISTS (SELECT 1 FROM projects p
-          WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+          WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -166,10 +166,10 @@ fn no_definition_mixes_operators_without_parentheses() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT TO auditor USING (owner_id = current_user);
-CREATE POLICY docs_tenant ON docs FOR SELECT USING (tenant_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT TO auditor USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_tenant ON docs FOR SELECT USING (tenant_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -209,13 +209,13 @@ fn inheritance_requires_only_the_rule_the_policy_names() {
         r"
 CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY projects_public ON projects FOR SELECT USING (is_public = TRUE);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p
-          WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+          WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     // Level B keeps the parent's public-flag policy, which is the whole point.
@@ -253,10 +253,10 @@ CREATE TABLE docs(
   is_public BOOLEAN
 );
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (
   EXISTS (SELECT 1 FROM docs parent WHERE parent.id = docs.parent_id
-          AND (parent.owner_id = current_user OR parent.is_public = TRUE)));
+          AND (parent.owner_id = current_setting('app.user_id', true) OR parent.is_public = TRUE)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -284,16 +284,16 @@ fn an_ownership_column_cannot_take_over_a_parent_pointer() {
         r"
 CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(
   id UUID PRIMARY KEY,
   projects_id UUID,
   project_id UUID REFERENCES projects(id)
 );
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tasks_own_column ON tasks FOR SELECT USING (projects_id = current_user);
+CREATE POLICY tasks_own_column ON tasks FOR SELECT USING (projects_id = current_setting('app.user_id', true));
 CREATE POLICY tasks_parent_link ON tasks FOR DELETE USING (
-  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -348,17 +348,17 @@ fn an_inherited_parent_rule_is_named_after_the_rule_itself() {
         format!(
             "CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);\n\
              ALTER TABLE projects ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY proj_sel ON projects FOR SELECT USING (owner_id = current_user);\n\
+             CREATE POLICY proj_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
              CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));\n\
              ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY {tasks_policy} ON tasks FOR SELECT USING (\n\
                EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id\n\
-                       AND (p.owner_id = current_user OR p.is_public = TRUE)));\n\
+                       AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));\n\
              CREATE TABLE notes(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));\n\
              ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY notes_sel ON notes FOR SELECT USING (\n\
                EXISTS (SELECT 1 FROM projects p WHERE p.id = notes.project_id\n\
-                       AND (p.owner_id = current_user OR p.is_public = TRUE)));\n"
+                       AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));\n"
         )
     };
     let inherited_relations = |dsl: &str| {
@@ -422,12 +422,12 @@ fn inheritance_is_gated_by_the_parent_own_select_rule() {
         r"
 CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id
-          AND (p.owner_id = current_user OR p.is_public = TRUE)));
+          AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -474,7 +474,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id))
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id
-          AND (p.owner_id = current_user OR p.is_public = TRUE)));
+          AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -508,10 +508,10 @@ CREATE TABLE docs(
   is_public BOOLEAN
 );
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (
   EXISTS (SELECT 1 FROM docs parent WHERE parent.id = docs.parent_id
-          AND (parent.owner_id = current_user OR parent.is_public = TRUE)));
+          AND (parent.owner_id = current_setting('app.user_id', true) OR parent.is_public = TRUE)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -539,7 +539,7 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
-  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -584,7 +584,7 @@ ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY members_sel ON doc_members FOR SELECT;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user)
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true))
 );
 ",
     );
@@ -609,16 +609,16 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
 fn a_membership_policy_translates_the_same_however_it_is_parenthesised() {
     let (expected_dsl, expected_tuples) = membership_translation(
         "EXISTS (SELECT 1 FROM doc_members \
-         WHERE doc_members.doc_id = docs.id AND doc_members.user_id = current_user)",
+         WHERE doc_members.doc_id = docs.id AND doc_members.user_id = current_setting('app.user_id', true))",
     );
 
     for clause in [
         "(EXISTS ( SELECT 1 FROM doc_members \
-          WHERE ((doc_members.doc_id = docs.id) AND (doc_members.user_id = current_user))))",
+          WHERE ((doc_members.doc_id = docs.id) AND (doc_members.user_id = current_setting('app.user_id', true)))))",
         "EXISTS (SELECT 1 FROM doc_members \
-         WHERE ((doc_members.doc_id = docs.id) AND (doc_members.user_id = current_user)))",
+         WHERE ((doc_members.doc_id = docs.id) AND (doc_members.user_id = current_setting('app.user_id', true))))",
         "EXISTS (SELECT 1 FROM doc_members \
-         WHERE (doc_members.doc_id = docs.id) AND (doc_members.user_id = current_user))",
+         WHERE (doc_members.doc_id = docs.id) AND (doc_members.user_id = current_setting('app.user_id', true)))",
     ] {
         let (dsl, tuples) = membership_translation(clause);
         assert_eq!(
@@ -636,12 +636,12 @@ fn a_membership_policy_translates_the_same_however_it_is_parenthesised() {
 #[test]
 fn the_in_membership_spelling_translates_the_same_however_it_is_parenthesised() {
     let (expected_dsl, expected_tuples) = membership_translation(
-        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_user)",
+        "id IN (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true))",
     );
 
     let (dsl, tuples) = membership_translation(
         "(id IN ( SELECT doc_members.doc_id FROM doc_members \
-         WHERE ((doc_members.user_id = current_user))))",
+         WHERE ((doc_members.user_id = current_setting('app.user_id', true)))))",
     );
     assert_eq!(
         dsl, expected_dsl,
@@ -662,7 +662,7 @@ CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
     let inherited = |clause: &str| {
         let db = db_of(&format!(
@@ -679,7 +679,7 @@ CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_user
     assert_eq!(
         inherited(
             "EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id \
-             AND p.owner_id = current_user)"
+             AND p.owner_id = current_setting('app.user_id', true))"
         )
         .as_deref(),
         Some("owner from projects"),
@@ -688,7 +688,7 @@ CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_user
     assert_eq!(
         inherited(
             "(EXISTS ( SELECT 1 FROM projects p WHERE ((p.id = tasks.project_id) \
-             AND (p.owner_id = current_user))))"
+             AND (p.owner_id = current_setting('app.user_id', true)))))"
         )
         .as_deref(),
         Some("owner from projects"),
@@ -704,7 +704,7 @@ fn a_disjunctive_membership_predicate_stays_parenthesised_in_the_tuple_query() {
     let sql = format!(
         "{}CREATE POLICY docs_members ON docs FOR SELECT USING (
 EXISTS (SELECT 1 FROM doc_members WHERE doc_members.doc_id = docs.id
-  AND doc_members.user_id = current_user
+  AND doc_members.user_id = current_setting('app.user_id', true)
   AND (doc_members.role = 'editor' OR doc_members.role = 'admin')));",
         support::footgun::MEMBERSHIP_SCHEMA
     );
@@ -732,7 +732,7 @@ fn a_foreign_key_declared_by_alter_table_resolves_the_parent_type() {
              CREATE POLICY docs_team ON docs FOR SELECT USING (EXISTS (\n\
                SELECT 1 FROM team_members\n\
                WHERE team_members.team_id = docs.team_id \
-               AND team_members.user_id = current_user));\n"
+               AND team_members.user_id = current_setting('app.user_id', true)));\n"
         )
     };
     let (inline_dsl, inline_tuples) = translation(&schema("REFERENCES teams(id)", ""));
@@ -775,10 +775,10 @@ ALTER TABLE doc_links ENABLE ROW LEVEL SECURITY;
 fn an_in_subquery_naming_the_parent_by_its_key_inherits_from_the_parent() {
     let db = db_of(&format!(
         "{DOC_LINKS_SCHEMA}CREATE POLICY docs_owner ON docs FOR SELECT \
-         USING (owner_login = current_user);\n\
+         USING (owner_login = current_setting('app.user_id', true));\n\
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY doc_links_visible ON doc_links FOR SELECT \
-         USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_user));"
+         USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_setting('app.user_id', true)));"
     ));
     let outputs = translator(ConfidenceLevel::B)
         .translate(&db)
@@ -805,7 +805,7 @@ fn an_in_subquery_naming_the_parent_by_its_key_inherits_from_the_parent() {
 const INHERITANCE_PARENT_SCHEMA: &str = r"
 CREATE TABLE docs(id INT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE secret_docs(classification TEXT) INHERITS (docs);
 ";
 
@@ -860,7 +860,7 @@ fn a_partitioned_roots_tuples_still_read_every_partition() {
     let sql = r"
 CREATE TABLE measurements(id INT PRIMARY KEY, owner_id TEXT) PARTITION BY RANGE (id);
 ALTER TABLE measurements ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON measurements FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON measurements FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE public.measurements_q1 PARTITION OF measurements FOR VALUES FROM (1) TO (100);
 ";
     let db = db_of(sql);
@@ -897,11 +897,11 @@ fn an_inheritance_childs_own_type_reads_only_its_own_rows_too() {
     let sql = r"
 CREATE TABLE docs(id INT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE secret_docs(classification TEXT) INHERITS (docs);
 ALTER TABLE ONLY secret_docs ADD CONSTRAINT secret_docs_pkey PRIMARY KEY (id);
 ALTER TABLE secret_docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY c ON secret_docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY c ON secret_docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE deep_docs(reason TEXT) INHERITS (secret_docs);
 ";
     let db = db_of(sql);
@@ -1000,7 +1000,7 @@ CREATE TABLE events (id TEXT, tenant TEXT NOT NULL, region TEXT NOT NULL,
 CREATE TABLE events_eu PARTITION OF events FOR VALUES IN ('eu');
 CREATE TABLE events_us PARTITION OF events FOR VALUES IN ('us');
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
-CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_user);
+CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_setting('app.user_id', true));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -1061,7 +1061,7 @@ CREATE TABLE events_eu PARTITION OF events FOR VALUES IN ('eu') PARTITION BY RAN
 CREATE TABLE events_eu_2026 PARTITION OF events_eu
     FOR VALUES FROM ('2026-01-01') TO ('2027-01-01');
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
-CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_user);
+CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_setting('app.user_id', true));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -1103,7 +1103,7 @@ CREATE TABLE events (id TEXT, region TEXT NOT NULL, PRIMARY KEY (id, region))
 CREATE TABLE events_eu PARTITION OF events FOR VALUES IN ('eu');
 CREATE TABLE guarded(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE guarded ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON guarded FOR SELECT USING (owner_id = current_user);
+CREATE POLICY p ON guarded FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -1172,7 +1172,7 @@ fn a_bare_delegation_to_a_restricted_parent_keeps_delegating() {
 CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
 CREATE TABLE docs(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id));
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY op ON orgs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY op ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (SELECT 1 FROM orgs o WHERE o.id = docs.org_id));

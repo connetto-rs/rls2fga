@@ -71,9 +71,9 @@ CREATE TABLE members (doc_id INT, user_id TEXT);
 CREATE TABLE editors (doc_id INT, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY readers ON docs FOR SELECT
-  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_user));
+  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id')));
 CREATE POLICY writers ON docs FOR INSERT
-  WITH CHECK (id IN (SELECT doc_id FROM editors WHERE user_id = current_user));
+  WITH CHECK (id IN (SELECT doc_id FROM editors WHERE user_id = current_setting('app.user_id')));
 ",
     );
     let readers = entry(&translation, "readers");
@@ -99,7 +99,7 @@ CREATE TABLE app.members (doc_id INT, user_id TEXT);
 CREATE TABLE public.members (doc_id INT, user_id TEXT);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY d ON docs
-  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_user));
+  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id')));
 ",
     );
     let entry = entry(&translation, "d");
@@ -135,7 +135,7 @@ fn a_function_reached_through_another_counts_as_read() {
 CREATE TABLE docs (id TEXT PRIMARY KEY);
 CREATE TABLE members (doc_id TEXT, user_id TEXT);
 CREATE FUNCTION is_member(d TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
-  AS $$ SELECT EXISTS (SELECT 1 FROM members WHERE doc_id = d AND user_id = current_user) $$;
+  AS $$ SELECT EXISTS (SELECT 1 FROM members WHERE doc_id = d AND user_id = current_setting('app.user_id')) $$;
 CREATE FUNCTION can_read(d TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
   AS $$ SELECT is_member(d) $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -198,7 +198,7 @@ CREATE TABLE members (doc_id INT, user_id TEXT, active BOOLEAN);
 CREATE VIEW active_members AS SELECT doc_id, user_id FROM members WHERE active;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY d ON docs
-  USING (id IN (SELECT doc_id FROM active_members WHERE user_id = current_user));
+  USING (id IN (SELECT doc_id FROM active_members WHERE user_id = current_setting('app.user_id')));
 ",
     );
     assert_eq!(reads(entry(&translation, "d")), ["docs", "members"]);
@@ -216,7 +216,7 @@ CREATE TABLE tenants (name TEXT, user_id TEXT);
 CREATE TABLE vip_tenants (tier INT) INHERITS (tenants);
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY e ON events
-  USING (tenant IN (SELECT name FROM tenants WHERE user_id = current_user));
+  USING (tenant IN (SELECT name FROM tenants WHERE user_id = current_setting('app.user_id')));
 ",
     );
     assert_eq!(
@@ -236,7 +236,7 @@ CREATE TABLE events (id INT, tenant TEXT, region TEXT) PARTITION BY LIST (region
 CREATE TABLE events_eu PARTITION OF events FOR VALUES IN ('eu');
 CREATE FOREIGN TABLE events_us PARTITION OF events FOR VALUES IN ('us') SERVER remote;
 ALTER TABLE events ENABLE ROW LEVEL SECURITY;
-CREATE POLICY e ON events USING (tenant = current_user);
+CREATE POLICY e ON events USING (tenant = current_setting('app.user_id'));
 ",
     );
     let entry = entry(&translation, "e");
@@ -254,7 +254,7 @@ CREATE TABLE drafts (draft_note TEXT) INHERITS (docs);
 CREATE TABLE shared (share_note TEXT) INHERITS (docs);
 CREATE TABLE shared_drafts () INHERITS (drafts, shared);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY d ON docs USING (owner = current_user);
+CREATE POLICY d ON docs USING (owner = current_setting('app.user_id'));
 ",
     );
     assert_eq!(

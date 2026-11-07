@@ -44,12 +44,12 @@ fn a_quoted_parent_reference_still_inherits() {
         format!(
             "CREATE TABLE parents(id UUID PRIMARY KEY, owner_id UUID);\n\
              ALTER TABLE parents ENABLE ROW LEVEL SECURITY;\n\
-             CREATE POLICY parents_sel ON parents FOR SELECT USING (owner_id = current_user);\n\
+             CREATE POLICY parents_sel ON parents FOR SELECT USING (owner_id = current_setting('app.user_id'));\n\
              CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id));\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\n\
                SELECT 1 FROM {parent_ref} p\n\
-               WHERE p.id = docs.parent_id AND p.owner_id = current_user));\n"
+               WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id')));\n"
         )
     };
     let read_of = |parent_ref: &str| docs_read_definition(&schema(parent_ref));
@@ -75,7 +75,7 @@ fn generated_sql_names_identifiers_the_way_postgres_stores_them() {
         r"
 CREATE TABLE public.Docs(ID UUID PRIMARY KEY, Owner_Id TEXT);
 ALTER TABLE Docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON Docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON Docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let rendered = format_tuples(
@@ -107,7 +107,7 @@ fn generated_sql_does_not_split_dotted_column_names() {
         r#"
 CREATE TABLE docs(id UUID PRIMARY KEY, "docs.id" TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING ("docs.id" = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING ("docs.id" = current_setting('app.user_id'));
 "#,
     );
     let rendered = format_tuples(
@@ -136,7 +136,7 @@ fn a_quoted_column_keeps_the_case_postgres_stores_it_under() {
         r#"
 CREATE TABLE public.docs(id UUID PRIMARY KEY, "Owner_Id" TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING ("Owner_Id" = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING ("Owner_Id" = current_setting('app.user_id'));
 "#,
     );
     let rendered = format_tuples(
@@ -161,7 +161,7 @@ fn a_policy_reaches_a_column_the_declaration_spells_in_another_case() {
         r"
 CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (Owner_Id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (Owner_Id = current_setting('app.user_id'));
 ",
     );
     let translator = translator(ConfidenceLevel::B);
@@ -199,7 +199,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_members(Doc_Id UUID REFERENCES docs(id), User_Id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user)
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id'))
 );
 ",
     );
@@ -223,7 +223,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_members(doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.Doc_Id = docs.ID AND m.User_Id = current_user)
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.Doc_Id = docs.ID AND m.User_Id = current_setting('app.user_id'))
 );
 ",
     );
@@ -246,11 +246,11 @@ fn a_mixed_case_foreign_key_still_inherits_the_parent_rule() {
         r"
 CREATE TABLE public.projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE public.tasks(id UUID PRIMARY KEY, Project_Id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
-  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id')));
 ",
     );
     let translator = translator(ConfidenceLevel::B);
@@ -283,11 +283,11 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
         r"
 CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_user);
+CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
-  EXISTS (SELECT 1 FROM projects p WHERE p.ID = tasks.Project_Id AND p.Owner_Id = current_user));
+  EXISTS (SELECT 1 FROM projects p WHERE p.ID = tasks.Project_Id AND p.Owner_Id = current_setting('app.user_id')));
 ",
     );
     assert_eq!(
@@ -313,7 +313,7 @@ fn a_mixed_case_unique_id_column_identifies_a_row() {
         r"
 CREATE TABLE public.docs(ID UUID UNIQUE NOT NULL, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let rendered = format_tuples(
@@ -339,7 +339,7 @@ fn a_quoted_current_user_role_is_a_role() {
 CREATE ROLE "current_user";
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_setting('app.user_id'));
 "#,
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -406,12 +406,15 @@ fn model_with_settings(sql: &str, registry_json: Option<&str>, settings: &str) -
 
 /// `pg_dump` deparses every stored policy expression, so a literal argument
 /// comes back with a type cast: `pg_has_role(CURRENT_USER, 'editor'::name,
-/// 'MEMBER'::text)`. The dumped spelling must classify as the written one.
+/// 'MEMBER'::text)`. The call is a constant the schema's role memberships decide,
+/// and the dumped spelling must decide it the same way.
 #[test]
 fn a_cast_role_literal_in_pg_has_role_classifies_as_the_plain_one() {
     let schema = |using: &str| {
         format!(
-            "CREATE TABLE docs(id UUID PRIMARY KEY);\n\
+            "CREATE ROLE editor NOLOGIN;\n\
+             GRANT editor TO app_user;\n\
+             CREATE TABLE docs(id UUID PRIMARY KEY);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_sel ON docs FOR SELECT USING ({using});\n"
         )
@@ -427,8 +430,8 @@ fn a_cast_role_literal_in_pg_has_role_classifies_as_the_plain_one() {
         "[]",
     );
     assert!(
-        plain.contains("pg_role"),
-        "the plain spelling must gate on the role, or this proves nothing:\n{plain}"
+        plain.contains("public_viewer"),
+        "the grant the schema records decides the call, or this proves nothing:\n{plain}"
     );
     assert_eq!(plain, dumped, "the cast literals are the same policy");
 }
@@ -535,11 +538,19 @@ fn a_qualified_membership_spelling_keeps_the_scope_relation_name() {
              ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY members_read ON doc_members FOR SELECT TO auditor USING (true);\n\
              CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\n\
-               SELECT 1 FROM {members_ref} m WHERE m.doc_id = docs.id AND m.user_id = current_user));\n"
+               SELECT 1 FROM {members_ref} m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id')));\n"
         )
     };
-    let plain = model_with_settings(&schema("doc_members"), None, "[]");
-    let qualified = model_with_settings(&schema("public.doc_members"), None, "[]");
+    let plain = model_with_settings(
+        &schema("doc_members"),
+        None,
+        r#"[{ "setting": "app.user_id", "caller": "text" }]"#,
+    );
+    let qualified = model_with_settings(
+        &schema("public.doc_members"),
+        None,
+        r#"[{ "setting": "app.user_id", "caller": "text" }]"#,
+    );
     assert!(
         plain.contains("read_scope_doc_members_"),
         "the guarded membership must mint a read scope, or this proves nothing:\n{plain}"
@@ -559,11 +570,19 @@ fn a_qualified_member_table_spelling_keeps_the_holder_type_name() {
              CREATE TABLE docs(id UUID PRIMARY KEY);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\n\
-               SELECT 1 FROM {staff_ref} WHERE user_id = current_user));\n"
+               SELECT 1 FROM {staff_ref} WHERE user_id = current_setting('app.user_id')));\n"
         )
     };
-    let plain = model_with_settings(&schema("staff"), None, "[]");
-    let qualified = model_with_settings(&schema("public.staff"), None, "[]");
+    let plain = model_with_settings(
+        &schema("staff"),
+        None,
+        r#"[{ "setting": "app.user_id", "caller": "text" }]"#,
+    );
+    let qualified = model_with_settings(
+        &schema("public.staff"),
+        None,
+        r#"[{ "setting": "app.user_id", "caller": "text" }]"#,
+    );
     assert!(
         plain.contains("staff_holder_"),
         "the claimed base must force the disambiguating suffix, or this proves nothing:\n{plain}"
@@ -688,7 +707,7 @@ fn a_table_written_without_a_schema_loads_its_rows_from_public() {
     let db = db_of(
         "CREATE TABLE notes(id UUID PRIMARY KEY, owner TEXT);\n\
          ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY notes_owner ON notes FOR SELECT USING (owner = current_user);\n",
+         CREATE POLICY notes_owner ON notes FOR SELECT USING (owner = current_setting('app.user_id'));\n",
     );
     let outputs = translator(ConfidenceLevel::A)
         .translate(&db)

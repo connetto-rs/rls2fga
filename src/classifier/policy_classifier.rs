@@ -8,6 +8,7 @@ use crate::classifier::expansion::{self, ExpansionState};
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::*;
 use crate::classifier::recognizers;
+use crate::classifier::role_keywords::lower_role_keywords;
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::sql_parser::{DatabaseLike, Deployment};
 
@@ -145,6 +146,9 @@ pub fn classify_expr<DB: DatabaseLike>(
 }
 
 /// Classify a clause, allowing a negative-only exclusion only in a restrictive policy.
+///
+/// The clause's role keywords are read as the role names the deployment gives them
+/// first, so no recognizer meets a keyword.
 fn classify_clause<DB: DatabaseLike>(
     expr: &Expr,
     db: &DB,
@@ -153,6 +157,11 @@ fn classify_clause<DB: DatabaseLike>(
     command: PolicyCommand,
     mode: Option<PolicyMode>,
 ) -> ClassifiedExpr {
+    let expr = match lower_role_keywords(expr, registry) {
+        Ok(lowered) => lowered,
+        Err(refused) => return unknown_d(expr, refused.to_string()),
+    };
+    let expr = expr.as_ref();
     let state = ExpansionState::new();
     if mode != Some(PolicyMode::Restrictive) {
         return classify_expr_depth(expr, db, registry, table, command, 0, &state);
@@ -197,7 +206,10 @@ pub(crate) fn classify_expr_in_state<DB: DatabaseLike>(
     command: PolicyCommand,
     state: &ExpansionState,
 ) -> ClassifiedExpr {
-    classify_expr_depth(expr, db, registry, table, command, 0, state)
+    match lower_role_keywords(expr, registry) {
+        Ok(lowered) => classify_expr_depth(&lowered, db, registry, table, command, 0, state),
+        Err(refused) => unknown_d(expr, refused.to_string()),
+    }
 }
 
 pub(crate) fn classify_expr_depth<DB: DatabaseLike>(
@@ -669,8 +681,18 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 if reads_bypass_rls {
                     state.enter_owner_read();
                 }
-                let inner =
-                    classify_expr_depth(&body, db, registry, table, command, depth + 1, state);
+                let inner = match lower_role_keywords(&body, registry) {
+                    Ok(lowered) => classify_expr_depth(
+                        &lowered,
+                        db,
+                        registry,
+                        table,
+                        command,
+                        depth + 1,
+                        state,
+                    ),
+                    Err(refused) => unknown_d(&body, refused.to_string()),
+                };
                 if reads_bypass_rls {
                     state.leave_owner_read();
                 }
@@ -883,6 +905,7 @@ mod tests {
     use super::*;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
     use crate::parser::sql_parser::{parse_schema, ParserDB};
+    use crate::test_support::caller_registry;
     use crate::types::{ColumnName, TableId};
 
     fn docs_db() -> ParserDB {
@@ -918,8 +941,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_or_of_level_a_patterns_becomes_level_b_composite() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
-        let expr = parse_expr("owner_id = current_user OR is_public = TRUE");
+        let registry = caller_registry();
+        let expr = parse_expr("owner_id = current_setting('app.user_id') OR is_public = TRUE");
 
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
 
@@ -936,14 +959,14 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_and_with_a_literal_guard_keeps_the_composite_structure() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
 
         // A literal guard is row data the tuples carry, so the pair keeps its
         // structure rather than being flattened to the partial P7 column name.
         for expr_sql in [
-            "status = 'published' AND owner_id = current_user",
-            "owner_id = current_user AND status = 'published'",
-            "owner_id = current_user AND status IN ('active', 'pending')",
+            "status = 'published' AND owner_id = current_setting('app.user_id')",
+            "owner_id = current_setting('app.user_id') AND status = 'published'",
+            "owner_id = current_setting('app.user_id') AND status IN ('active', 'pending')",
         ] {
             let expr = parse_expr(expr_sql);
             let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
@@ -989,8 +1012,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_and_relationships_without_attributes_remains_composite() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
-        let expr = parse_expr("owner_id = current_user AND TRUE");
+        let registry = caller_registry();
+        let expr = parse_expr("owner_id = current_setting('app.user_id') AND TRUE");
 
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
 
@@ -1007,8 +1030,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_nested_expression_is_unwrapped() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
-        let expr = parse_expr("(owner_id = current_user)");
+        let registry = caller_registry();
+        let expr = parse_expr("(owner_id = current_setting('app.user_id'))");
 
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
 
@@ -1065,15 +1088,15 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_membership_ambiguity_has_specific_reason() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
         let expr_sql = "EXISTS (
                SELECT 1
                FROM doc_members dm1
                JOIN doc_members dm2 ON dm1.doc_id = dm2.doc_id
                WHERE dm1.doc_id = docs.id
-                 AND dm1.user_id = current_user
+                 AND dm1.user_id = current_setting('app.user_id')
                  AND dm2.doc_id = docs.id
-                 AND dm2.user_id = current_user
+                 AND dm2.user_id = current_setting('app.user_id')
              )";
         let expr = parse_expr(expr_sql);
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
@@ -1083,13 +1106,13 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_membership_reading_the_guarded_table_is_refused() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
         let expr_sql = "EXISTS (
                SELECT 1
                FROM doc_members dm
                JOIN docs d ON dm.doc_id = d.id
                WHERE dm.doc_id = docs.id
-                 AND dm.user_id = current_user
+                 AND dm.user_id = current_setting('app.user_id')
                  AND is_public = TRUE
              )";
         let expr = parse_expr(expr_sql);
@@ -1100,13 +1123,13 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_derived_joined_membership_with_unqualified_extra_is_ambiguous() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
         let expr_sql = "EXISTS (
                SELECT 1
                FROM doc_members dm
                JOIN (SELECT id, is_public FROM docs) d ON dm.doc_id = d.id
                WHERE dm.doc_id = docs.id
-                 AND dm.user_id = current_user
+                 AND dm.user_id = current_setting('app.user_id')
                  AND is_public = TRUE
              )";
         let expr = parse_expr(expr_sql);
@@ -1129,14 +1152,14 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 ",
         )
         .expect("schema should parse");
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
         let expr_sql = "EXISTS (
                SELECT 1
                FROM projects p, accounts a
                WHERE p.id = tasks.project_id
-                 AND p.owner_id = current_user
+                 AND p.owner_id = current_setting('app.user_id')
                  AND a.id = tasks.account_id
-                 AND a.owner_id = current_user
+                 AND a.owner_id = current_setting('app.user_id')
              )";
         let expr = parse_expr(expr_sql);
         let classified = classify_expr(&expr, &db, &registry, "tasks", PolicyCommand::Select);
@@ -1150,11 +1173,11 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
     #[test]
     fn classify_not_expression_names_the_inner_pattern() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
 
         let cases = [
             (
-                "NOT (owner_id = current_user)",
+                "NOT (owner_id = current_setting('app.user_id'))",
                 "NOT applied to direct-ownership check",
             ),
             (
@@ -1251,7 +1274,7 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
     fn classify_generic_unknown_expression_has_fallback_reason() {
         let db = docs_db();
         let registry = FunctionRegistry::new();
-        let expr = parse_expr("owner_id IS NULL");
+        let expr = parse_expr("owner_id = owner_id");
 
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
 
@@ -1397,17 +1420,17 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
         );
     }
 
-    /// `current_user` parses as a function call but is a SQL keyword nobody wrote,
-    /// so blaming it sends the operator hunting for a function that does not exist.
+    /// `current_user` is a SQL keyword, so a clause that reads it is refused for the
+    /// deployment that names it rather than blamed as a missing function.
     #[test]
     fn classify_never_blames_a_sql_current_user_keyword() {
         let db = docs_db();
         let registry = FunctionRegistry::new();
 
-        for expr_sql in [
-            "data ->> 'owner_id' = current_user",
-            "current_user = data ->> 'owner_id'",
-            "current_role = data ->> 'owner_id'",
+        for (expr_sql, keyword) in [
+            ("data ->> 'owner_id' = current_user", "current_user"),
+            ("current_user = data ->> 'owner_id'", "current_user"),
+            ("current_role = data ->> 'owner_id'", "current_role"),
         ] {
             let expr = parse_expr(expr_sql);
             let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
@@ -1415,7 +1438,11 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
                 continue;
             };
             assert!(
-                !reason.contains("current_user") && !reason.contains("current_role"),
+                reason.contains(keyword) && reason.contains("no deployment names one"),
+                "`{expr_sql}`: the refusal names the keyword and the missing deployment, got: {reason}"
+            );
+            assert!(
+                !reason.contains("not in registry"),
                 "`{expr_sql}`: a SQL keyword is not a missing function: {reason}"
             );
         }
@@ -1662,19 +1689,23 @@ CREATE POLICY docs_open ON docs;
         );
     }
 
+    /// `current_role` names the role a request acts as, so a comparison to it reads the
+    /// role's name as a literal guard rather than the caller, and is an attribute.
     #[test]
-    fn classify_current_role_is_treated_as_current_user_accessor() {
+    fn classify_current_role_reads_the_acting_role_not_the_caller() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
 
-        // `current_role` is a PostgreSQL session-variable keyword equivalent to
-        // `current_user` for authorization purposes.
+        // `current_role` reads the acting role's name, which the deployment gives it.
         let expr = parse_expr("owner_id = current_role");
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
         assert!(
-            matches!(&classified.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column })
-                if column == "owner_id"),
-            "owner_id = current_role should classify as P3, got: {:?}",
+            matches!(
+                &classified.pattern,
+                PatternClass::P9AttributeCondition(AttributeCondition { column, .. })
+                    if column == "owner_id"
+            ),
+            "owner_id = current_role reads the acting role as a literal guard, got: {:?}",
             classified.pattern
         );
     }
@@ -1925,10 +1956,10 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ",
         )
         .expect("schema should parse");
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
 
-        // (owner_id, status) = (current_user, 'active') should decompose to
-        let expr = parse_expr("(owner_id, status) = (current_user, 'active')");
+        // (owner_id, status) = (current_setting('app.user_id'), 'active') decomposes to
+        let expr = parse_expr("(owner_id, status) = (current_setting('app.user_id'), 'active')");
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
         assert!(
             matches!(
@@ -1950,8 +1981,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn row_value_single_element() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
-        let expr = parse_expr("(owner_id) = (current_user)");
+        let registry = caller_registry();
+        let expr = parse_expr("(owner_id) = (current_setting('app.user_id'))");
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
         assert!(
             matches!(&classified.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"),
@@ -1963,9 +1994,9 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn case_when_true_else_false_normalizes_to_or() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
+        let registry = caller_registry();
         let expr = parse_expr(
-            "CASE WHEN owner_id = current_user THEN TRUE \
+            "CASE WHEN owner_id = current_setting('app.user_id') THEN TRUE \
                   WHEN is_public = TRUE THEN TRUE \
                   ELSE FALSE END",
         );
@@ -1980,8 +2011,10 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     #[test]
     fn case_when_single_branch_normalizes_to_inner() {
         let db = docs_db();
-        let registry = FunctionRegistry::new();
-        let expr = parse_expr("CASE WHEN owner_id = current_user THEN TRUE ELSE FALSE END");
+        let registry = caller_registry();
+        let expr = parse_expr(
+            "CASE WHEN owner_id = current_setting('app.user_id') THEN TRUE ELSE FALSE END",
+        );
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
         assert!(
             matches!(&classified.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"),

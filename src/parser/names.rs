@@ -63,16 +63,34 @@ pub fn stored_identifier(value: &str, quoted: bool) -> alloc::borrow::Cow<'_, st
 
 pub use sql_traits::utils::identifier_resolution::stored_ident_name;
 
-/// True when `name` is a SQL keyword that resolves to the current session role.
-///
-/// `session_user` is intentionally excluded: it does not follow `SET ROLE`.
-/// `user` is intentionally excluded because it is parser-ambiguous with
-/// user-defined function names and can produce false positives.
+/// Which role a role keyword names in `PostgreSQL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoleKeyword {
+    /// `current_user`, `current_role` and `user`, the role a request acts as, which
+    /// follows `SET ROLE` and is the owner inside a `SECURITY DEFINER` body.
+    Acting,
+    /// `session_user`, the role a request logged in as.
+    Login,
+}
+
+/// The role an unquoted, unqualified keyword spelled `name` names, or `None` when it is
+/// no role keyword. A quoted or qualified spelling is a column or a function.
+pub fn role_keyword(name: &str) -> Option<RoleKeyword> {
+    let target = parse_target(name)?;
+    if target.name_is_quoted() || target.schema().is_some() {
+        return None;
+    }
+    match target.name().to_ascii_lowercase().as_str() {
+        "current_user" | "current_role" | "user" => Some(RoleKeyword::Acting),
+        "session_user" => Some(RoleKeyword::Login),
+        _ => None,
+    }
+}
+
+/// True when `name` is a keyword naming the role a request acts as, which is the
+/// function owner's inside a `SECURITY DEFINER` body.
 pub fn is_current_user_keyword_name(name: &str) -> bool {
-    matches!(
-        folded_builtin_name(name).as_deref(),
-        Some("current_user" | "current_role")
-    )
+    role_keyword(name) == Some(RoleKeyword::Acting)
 }
 
 pub use sql_traits::utils::identifier_resolution::{builtin_function_name, folded_function_name};
@@ -533,13 +551,19 @@ mod tests {
         );
     }
 
+    /// `user` is the same function as `current_user` in `PostgreSQL`, and `session_user`
+    /// names the login role, which `SET ROLE` leaves alone.
     #[test]
-    fn is_current_user_keyword_name_matches_supported_keywords_only() {
-        assert!(is_current_user_keyword_name("current_user"));
-        assert!(is_current_user_keyword_name("CURRENT_ROLE"));
-        assert!(!is_current_user_keyword_name("user"));
+    fn role_keywords_name_the_role_postgresql_reads() {
+        for acting in ["current_user", "CURRENT_ROLE", "user"] {
+            assert_eq!(role_keyword(acting), Some(RoleKeyword::Acting), "{acting}");
+            assert!(is_current_user_keyword_name(acting));
+        }
+        assert_eq!(role_keyword("session_user"), Some(RoleKeyword::Login));
         assert!(!is_current_user_keyword_name("session_user"));
-        assert!(!is_current_user_keyword_name("my_current_user"));
+        for other in ["my_current_user", "\"current_user\"", "app.current_user"] {
+            assert_eq!(role_keyword(other), None, "{other}");
+        }
     }
 
     #[test]

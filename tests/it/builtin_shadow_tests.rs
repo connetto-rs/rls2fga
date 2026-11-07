@@ -65,8 +65,8 @@ CREATE POLICY p ON docs FOR SELECT USING (expires_at > {clock});
     }
 }
 
-/// `pg_has_role` tests the caller, so a user function under another schema must not
-/// inherit the role-gate classification.
+/// `pg_has_role` is answered from the schema's role memberships, so a user function under
+/// another schema must not inherit the builtin's constant.
 #[test]
 fn a_qualified_pg_has_role_is_not_the_role_gate() {
     let sql = "
@@ -80,13 +80,15 @@ CREATE POLICY p ON docs FOR SELECT USING (app.pg_has_role('editor', 'MEMBER'));
         "`app.pg_has_role` is somebody's function, got {pattern:?}"
     );
     let control = "
+CREATE ROLE editor NOLOGIN;
+GRANT editor TO app_user;
 CREATE TABLE docs(id UUID PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (pg_has_role('editor', 'MEMBER'));
 ";
     let pattern = using_pattern(control, "docs");
     assert!(
-        matches!(&pattern, PatternClass::P2RoleNameInList(_)),
+        matches!(&pattern, PatternClass::P10ConstantBool(_)),
         "the unqualified spelling is the builtin, got {pattern:?}"
     );
 }
@@ -126,7 +128,8 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE members(doc_id UUID REFERENCES docs(id), user_id TEXT, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id
+    AND m.user_id = current_setting('app.user_id', true)
     AND app.lower(m.status) = 'active'));
 ";
     let pattern = using_pattern(sql, "docs");
@@ -139,7 +142,8 @@ CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE members(doc_id UUID REFERENCES docs(id), user_id TEXT, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
-  SELECT 1 FROM members m WHERE m.doc_id = docs.id AND m.user_id = current_user
+  SELECT 1 FROM members m WHERE m.doc_id = docs.id
+    AND m.user_id = current_setting('app.user_id', true)
     AND lower(m.status) = 'active'));
 ";
     let pattern = using_pattern(control, "docs");

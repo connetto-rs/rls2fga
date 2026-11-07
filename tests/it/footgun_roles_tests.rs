@@ -19,7 +19,7 @@ fn untranslatable_restrictive_policy_denies_instead_of_widening_access() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
   USING (tenant = current_setting('app.tenant'));
 ",
@@ -50,9 +50,9 @@ CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
 const ROLE_SCOPED_BARRIER: &str = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 ";
 
 /// A RESTRICTIVE policy binds only the roles it names, so a user outside them keeps
@@ -63,9 +63,9 @@ fn a_role_scoped_restrictive_policy_leaves_other_roles_unconstrained() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -149,11 +149,11 @@ fn two_role_scoped_barriers_each_bind_their_own_role() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID, approver_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 CREATE POLICY docs_approve ON docs AS RESTRICTIVE FOR SELECT TO auditor
-  USING (approver_id = current_user);
+  USING (approver_id = current_setting('app.user_id', true));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -206,10 +206,10 @@ fn a_write_behind_a_barrier_keeps_its_read_gate() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_edit ON docs FOR UPDATE USING (editor_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_edit ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR ALL TO contractor
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -235,13 +235,13 @@ fn a_barrier_over_an_inherited_rule_keeps_its_references() {
         r"
 CREATE TABLE parents(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE parents ENABLE ROW LEVEL SECURITY;
-CREATE POLICY parents_own ON parents FOR SELECT USING (owner_id = current_user);
+CREATE POLICY parents_own ON parents FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id), reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_inherit ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM parents p WHERE p.id = docs.parent_id AND p.owner_id = current_user));
+  EXISTS (SELECT 1 FROM parents p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
     let json = translator(ConfidenceLevel::B)
@@ -260,9 +260,9 @@ fn an_unscoped_restrictive_policy_binds_every_role() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT
-  USING (reviewer_id = current_user);
+  USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -294,7 +294,7 @@ CREATE POLICY dm_audit ON doc_members FOR SELECT TO auditor USING (true);
 CREATE POLICY dm_support ON doc_members FOR SELECT TO support USING (true);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ";
     let db = db_of(sql);
     let translator = translator(ConfidenceLevel::B);
@@ -331,7 +331,7 @@ fn a_clauseless_policy_mints_no_role_scope() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR ALL TO auditor;
 ",
     );
@@ -372,10 +372,10 @@ fn a_restrictive_update_barrier_binds_both_halves_of_the_update() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user)
-  WITH CHECK (editor_id = current_user);
-CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE USING (reviewer_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true))
+  WITH CHECK (editor_id = current_setting('app.user_id', true));
+CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -410,7 +410,7 @@ fn a_role_that_bypasses_row_level_security_is_reported() {
                   CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   ALTER TABLE docs FORCE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n";
+                  CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
     let db = db_of(schema);
     let outputs = translator(ConfidenceLevel::B)
         .translate(&db)
@@ -463,7 +463,7 @@ fn a_table_that_does_not_force_row_level_security_is_reported() {
             "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              {force}\
-             CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n"
+             CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n"
         )
     };
     let unforced = exempt_notes(&schema(""));
@@ -493,10 +493,10 @@ fn the_exempt_table_owner_is_named_when_the_schema_says_who_it_is() {
                  CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                  ALTER TABLE docs OWNER TO app_owner;\n\
                  ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n";
+                 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
     let unowned = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                    ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                   CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n";
+                   CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
     let named = exempt_notes(owned);
     assert_eq!(named.len(), 1, "one table, one owner bypass: {named:?}");
     assert!(
@@ -524,7 +524,7 @@ fn barrier_outputs(key: &str) -> (String, Vec<String>) {
         r"
 CREATE TABLE docs ({key}, owner_id UUID, secret BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT TO contractor
     USING (secret = false);
 "
@@ -610,7 +610,7 @@ fn a_to_scoped_policy_walks_usage_not_member() {
 CREATE ROLE editors;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO editors USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT TO editors USING (owner_id = current_setting('app.user_id', true));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -660,7 +660,7 @@ CREATE ROLE editors;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (true);
-CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO editors USING (owner_id = current_user);
+CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO editors USING (owner_id = current_setting('app.user_id', true));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -703,7 +703,7 @@ ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY m ON doc_members FOR SELECT TO auditor USING (true);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
-  EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_user)
+  EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))
 );
 ",
     );
@@ -738,7 +738,7 @@ fn a_pseudo_role_scope_is_refused_not_minted() {
             r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO {spelling} USING (owner_id = current_user);
+CREATE POLICY p ON docs FOR SELECT TO {spelling} USING (owner_id = current_setting('app.user_id', true));
 "
         ));
         let outputs = translator(ConfidenceLevel::B)
@@ -804,7 +804,7 @@ fn a_pseudo_role_barrier_binds_everyone() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (true);
-CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO {to_clause} USING (owner_id = current_user);
+CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO {to_clause} USING (owner_id = current_setting('app.user_id', true));
 "
         ));
         let outputs = translator(ConfidenceLevel::B)
@@ -858,7 +858,7 @@ fn a_policy_the_threshold_emptied_mints_no_scope_relation() {
         "CREATE ROLE auditor;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_scoped ON docs FOR SELECT TO auditor USING (opaque_gate(id));
 ",
     );
@@ -999,24 +999,18 @@ fn scope_relations(dsl: &str, type_name: &str) -> Vec<String> {
         .collect()
 }
 
-/// A `TO` list and a role gate in one policy are two scopes, read through two different
-/// privileges, so they cannot share one object.
-///
-/// **One role under both privileges**, so the privilege is the only thing telling the two
-/// scopes apart and a key built from the roles alone cannot pass this. `TO editor` is
-/// checked as usage of `editor` and `pg_has_role('editor', 'member')` as membership of it,
-/// and `PostgreSQL` demands both. Pooled onto one object the rule asks for usage of the
-/// pooled set and membership of the pooled set, which is the same question twice.
-/// Separating them needs two relations: one relation pointing at two objects still unions
-/// them.
+/// A `pg_has_role` gate asks about roles the schema creates, so the schema's memberships
+/// answer it for every request and every row. One that answers yes is a true constant,
+/// and the `TO` clause alone carries the grant.
 #[test]
-fn a_to_list_and_a_role_gate_in_one_policy_do_not_share_a_scope() {
+fn a_role_gate_the_schema_answers_yes_keeps_only_the_to_scope() {
     let db = db_of(
         r"
 CREATE ROLE editor;
+GRANT editor TO app_user;
 CREATE TABLE public.docs(id TEXT PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO editor USING (pg_has_role('editor', 'member'));
+CREATE POLICY p ON docs FOR SELECT TO editor USING (pg_has_role('editor', 'MEMBER'));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -1029,72 +1023,70 @@ CREATE POLICY p ON docs FOR SELECT TO editor USING (pg_has_role('editor', 'membe
 
     assert_eq!(
         scopes.len(),
-        2,
-        "the TO list and the role gate are two scopes, so docs points at two:\n{dsl}"
+        1,
+        "the gate is a constant the schema answers, so only the TO clause scopes:\n{dsl}"
     );
-    let can_select =
-        relation_definition(&dsl, "docs", "can_select").expect("docs should define can_select");
-    let [first, second] = scopes.as_slice() else {
+    let [scope] = scopes.as_slice() else {
         unreachable!("checked above")
     };
-    assert_ne!(
-        first, second,
-        "two scopes cannot be one name, or the walks below ask the same question twice"
+    let can_select =
+        relation_definition(&dsl, "docs", "can_select").expect("docs should define can_select");
+    assert!(
+        can_select.contains(scope.as_str()),
+        "the surviving scope has to be read: 'define can_select: {can_select}'"
     );
-    for scope in &scopes {
-        assert!(
-            can_select.contains(scope.as_str()),
-            "both scopes have to be read, and {scope} is not in 'define can_select: {can_select}'"
-        );
-        // The companion half: each scope really does carry the role, so declaring two
-        // relations and filling neither would not pass.
-        assert!(
-            scope_admits_role(tuples, "docs:", scope, "editor"),
-            "{scope} stands for a test on editor, so its object carries editor"
-        );
-    }
+    assert!(
+        can_select.contains("public_viewer"),
+        "the gate answered yes, so the grant itself survives: 'define can_select: {can_select}'"
+    );
+    assert!(
+        can_select.contains("usage from") && !can_select.contains("member from"),
+        "the TO scope walks usage like every other TO consumer:\n{dsl}"
+    );
+    assert!(
+        scope_admits_role(tuples, "docs:", scope, "editor"),
+        "the scope object still carries the role: {tuples:#?}"
+    );
 }
 
-/// Two role gates joined by `AND` are two scopes, and pooling them turns the `AND` into
-/// an `OR`.
-///
-/// `pg_has_role('alpha', 'member') AND pg_has_role('beta', 'member')` demands both. On one
-/// pooled object the rule reads `member from x and member from x`, which is `member from x`,
-/// so membership of either role passes.
+/// Two gates joined by `AND` are two constants the schema's memberships answer, so the
+/// conjunction admits exactly where the acting role is a member of both. A grant missing
+/// on either side is a no the conjunction has to keep.
 #[test]
-fn two_role_gates_joined_by_and_do_not_share_a_scope() {
-    let db = db_of(
-        r"
+fn two_role_gates_joined_by_and_answer_as_their_conjunction() {
+    let schema = |grants: &str| {
+        format!(
+            r"
 CREATE ROLE alpha;
 CREATE ROLE beta;
+{grants}
 CREATE TABLE public.docs(id TEXT PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
-  USING (pg_has_role('alpha', 'member') AND pg_has_role('beta', 'member'));
-",
-    );
+  USING (pg_has_role('alpha', 'MEMBER') AND pg_has_role('beta', 'MEMBER'));
+"
+        )
+    };
+
     let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
+        .translate(&db_of(&schema(
+            "GRANT alpha TO app_user;\nGRANT beta TO app_user;\n",
+        )))
         .expect("translation should plan")
         .outputs_accepting_gaps();
     let dsl = outputs.model();
-    let tuples = outputs.tuple_queries();
-    let scopes = scope_relations(&dsl, "docs");
-
-    assert_eq!(
-        scopes.len(),
-        2,
-        "each gate is its own scope, so the conjunction stays a conjunction:\n{dsl}"
+    assert!(
+        !relation_denies(&dsl, "docs", "can_select"),
+        "the schema grants both roles to the acting one, so the conjunction admits:\n{dsl}"
     );
-    for scope in &scopes {
-        let roles: Vec<&str> = ["alpha", "beta"]
-            .into_iter()
-            .filter(|role| scope_admits_role(tuples, "docs:", scope, role))
-            .collect();
-        assert_eq!(
-            roles.len(),
-            1,
-            "{scope} stands for one gate, so it admits one role, admitted {roles:?}"
-        );
-    }
+
+    let one = translator(ConfidenceLevel::B)
+        .translate(&db_of(&schema("GRANT alpha TO app_user;\n")))
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = one.model();
+    assert!(
+        relation_denies(&dsl, "docs", "can_select"),
+        "the missing grant is a no the conjunction has to keep:\n{dsl}"
+    );
 }

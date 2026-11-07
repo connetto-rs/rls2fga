@@ -84,3 +84,11 @@ pub(crate) fn registry(settings: impl IntoIterator<Item = SessionSetting>) -> Fu
     registry.adopt(&deployment(settings));
     registry
 }
+
+/// A registry read for [`caller_deployment`], so a `current_setting` of a caller name
+/// reads the caller and a role keyword reads the acting role's name.
+pub(crate) fn caller_registry() -> FunctionRegistry {
+    let mut registry = FunctionRegistry::new();
+    registry.adopt(&caller_deployment());
+    registry
+}
