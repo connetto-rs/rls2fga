@@ -1147,8 +1147,10 @@ fn compare_guard<DB: DatabaseLike>(
     let row_decides = match &predicate.test {
         AttributeTest::Compare { operator, value } => {
             literal_row_decides(kind, value)
-                && (!matches!(value, AttributeLiteral::Text(_))
-                    || matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq))
+                && (!matches!(
+                    value,
+                    AttributeLiteral::Text(_) | AttributeLiteral::AsText(_)
+                ) || matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq))
         }
         AttributeTest::In(values) => {
             !values.is_empty() && values.iter().all(|value| literal_row_decides(kind, value))
@@ -1173,6 +1175,9 @@ fn literal_row_decides(kind: ColumnKind, value: &AttributeLiteral) -> bool {
                 ColumnKind::Integer | ColumnKind::Decimal,
                 AttributeLiteral::Number(_)
             )
-            | (ColumnKind::Text, AttributeLiteral::Text(_))
+            | (
+                ColumnKind::Text | ColumnKind::Bpchar,
+                AttributeLiteral::Text(_) | AttributeLiteral::AsText(_)
+            )
     )
 }

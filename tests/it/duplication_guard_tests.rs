@@ -1083,7 +1083,7 @@ fn the_lightweight_contract_has_only_contract_dependencies() {
         .filter_map(|line| line.split_once('=').map(|(name, _)| name.trim()))
         .collect();
     names.sort_unstable();
-    assert_eq!(names, ["serde", "thiserror"]);
+    assert_eq!(names, ["serde", "sql-values", "thiserror"]);
 }
 
 /// The first fenced block of `language` in `text`, without the fence lines.

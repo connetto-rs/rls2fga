@@ -1,6 +1,6 @@
 use super::*;
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
-use crate::parser::expr::peel_noting_casts;
+use crate::parser::expr::{element_type, peel_noting_casts};
 use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
 use sqlparser::ast::{self, DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
 
@@ -435,7 +435,8 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
         return None;
     }
     if let Some((column, list)) = constant_in_list(expr) {
-        return literal_list_predicate(column, list);
+        let as_text = column_cast_to_text(column) || list_compares_as_text(expr, list)?;
+        return literal_list_predicate(column, list, as_text);
     }
     let null_test = match expr {
         Expr::IsNull(operand) => Some((operand, AttributeTest::IsNull)),
@@ -456,9 +457,13 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     if let Some(column) = extract_column_name(left) {
         if let Some(value) = attribute_literal(right) {
             if !is_user_related_column_name(column.as_str()) {
+                let as_text = column_cast_to_text(left) || literal_cast_to_text(right);
                 return Some(AttributePredicate {
                     column,
-                    test: AttributeTest::Compare { operator, value },
+                    test: AttributeTest::Compare {
+                        operator,
+                        value: compared_as_text(value, as_text),
+                    },
                 });
             }
         }
@@ -468,25 +473,105 @@ pub fn attribute_literal_predicate(expr: &Expr) -> Option<AttributePredicate> {
     if is_user_related_column_name(column.as_str()) {
         return None;
     }
+    let as_text = column_cast_to_text(right) || literal_cast_to_text(left);
     Some(AttributePredicate {
         column,
         test: AttributeTest::Compare {
             operator: mirrored(operator),
-            value,
+            value: compared_as_text(value, as_text),
         },
     })
 }
 
+/// The literal as compared with its column, marked [`AttributeLiteral::AsText`] where it
+/// ends in a blank and compares as `text`.
+///
+/// `PostgreSQL` compares a `char(n)` column with an untyped, `varchar` or `char` value as
+/// `char(n)`, ignoring trailing blanks on both sides, and with a `text` value as `text`,
+/// where the value's trailing blanks count. A literal without one compares the same either
+/// way, and so does a column of any other type, so only this literal needs the mark.
+fn compared_as_text(value: AttributeLiteral, as_text: bool) -> AttributeLiteral {
+    match value {
+        AttributeLiteral::Text(text) if as_text && text.ends_with(' ') => {
+            AttributeLiteral::AsText(text)
+        }
+        other => other,
+    }
+}
+
+/// Whether a column operand is cast to an unbounded text type, which compares it as `text`.
+fn column_cast_to_text(column: &Expr) -> bool {
+    CastChain::peeled(column).0.casts_to_text()
+}
+
+/// Whether a literal operand is cast to `text` itself. A `varchar` literal still compares
+/// with a `char(n)` column as `char(n)`.
+fn literal_cast_to_text(literal: &Expr) -> bool {
+    CastChain::peeled(literal).0.outermost() == Some("text")
+}
+
+/// Whether the values of a list compare with an uncast column as `text`, `None` where
+/// their common type depends on the order they are written in.
+///
+/// An `IN` list of several values takes the column's type whatever the values are cast
+/// to, and a list of one is the equality it spells. `= ANY (ARRAY[...])` takes the array's
+/// type, which is `text[]` unless the array or an item is cast to another string type.
+fn list_compares_as_text(expr: &Expr, list: &[Expr]) -> Option<bool> {
+    let Expr::AnyOp { right, .. } = expr else {
+        return Some(matches!(list, [only] if literal_cast_to_text(only)));
+    };
+    if let Some(array_type) = CastChain::peeled(right).0.outermost() {
+        return Some(element_type(array_type) == "text");
+    }
+    let (mut varying, mut padded) = (false, false);
+    for item in list {
+        match CastChain::peeled(item).0.outermost() {
+            Some("text") => return Some(true),
+            Some(name)
+                if ["varchar", "character varying", "char varying"]
+                    .iter()
+                    .any(|family| name.starts_with(family)) =>
+            {
+                varying = true;
+            }
+            Some(name)
+                if ["char", "character", "bpchar"]
+                    .iter()
+                    .any(|family| name.starts_with(family)) =>
+            {
+                padded = true;
+            }
+            _ => {}
+        }
+    }
+    (!(varying && padded)).then_some(!varying && !padded)
+}
+
+/// The list item a list of several values compares, without the `text` and unbounded
+/// `varchar` casts its column's type overrides.
+pub(super) fn listed_value(item: &Expr) -> &Expr {
+    let (casts, inner) = CastChain::peeled(item);
+    if casts.renaming(None).is_none() {
+        inner
+    } else {
+        item
+    }
+}
+
 /// A literal list in one spelling per set of values: sorted, without repeats, and a
 /// single value as the equality it means, so every spelling of one guard mints one gate.
-fn literal_list_predicate(column: &Expr, list: &[Expr]) -> Option<AttributePredicate> {
+fn literal_list_predicate(
+    column: &Expr,
+    list: &[Expr],
+    as_text: bool,
+) -> Option<AttributePredicate> {
     let column = extract_column_name(column)?;
     if is_user_related_column_name(column.as_str()) {
         return None;
     }
     let mut values = list
         .iter()
-        .map(attribute_literal)
+        .map(|item| attribute_literal(item).map(|value| compared_as_text(value, as_text)))
         .collect::<Option<Vec<_>>>()?;
     values.sort();
     values.dedup();
@@ -869,9 +954,9 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
                 .then_some(AttributeLiteral::Number(printed))
         }
         sql_values::CastValue::Text(text) => Some(AttributeLiteral::Text(text)),
-        sql_values::CastValue::Bpchar(text) => Some(AttributeLiteral::Text(
-            text.trim_end_matches(' ').to_string(),
-        )),
+        sql_values::CastValue::Bpchar(text) => {
+            Some(AttributeLiteral::Text(text.as_text().to_string()))
+        }
         sql_values::CastValue::Date(_)
         | sql_values::CastValue::Timestamp(_)
         | sql_values::CastValue::TimestampTz(_) => None,

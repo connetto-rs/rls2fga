@@ -167,12 +167,20 @@ const fn column_kind_from_scalar_family(family: Option<ScalarFamily>) -> ColumnK
     }
 }
 
+/// The modelled kind of one declared type, `char(n)` apart from the rest of its family
+/// because it compares and prints without its blank padding.
+fn data_type_kind<DB: DatabaseLike>(data_type: &DB::DataType, db: &DB) -> ColumnKind {
+    if data_type.normalized_name(db) == "CHAR" {
+        return ColumnKind::Bpchar;
+    }
+    column_kind_from_scalar_family(data_type.scalar_family(db))
+}
+
 /// The modelled kind of one stored scalar column.
 pub(crate) fn column_kind<DB: DatabaseLike>(table: &TableId, column: &str, db: &DB) -> ColumnKind {
-    column_kind_from_scalar_family(
-        declared_column(table, column, db)
-            .and_then(|column| column.data_type(db).scalar_family(db)),
-    )
+    declared_column(table, column, db).map_or(ColumnKind::Unsupported, |column| {
+        data_type_kind(column.data_type(db), db)
+    })
 }
 
 /// The modelled element kind of one stored list column, `Unsupported` for an array of arrays.
@@ -181,14 +189,17 @@ pub(crate) fn list_element_kind<DB: DatabaseLike>(
     column: &str,
     db: &DB,
 ) -> ColumnKind {
-    let family = declared_column(table, column, db).and_then(|column| {
-        let declared = column.data_type(db);
-        if declared.array_dimensions(db).map(NonZeroU32::get) != Some(1) {
-            return None;
-        }
-        declared.array_element(db)?.scalar_family(db)
-    });
-    column_kind_from_scalar_family(family)
+    declared_column(table, column, db)
+        .and_then(|column| {
+            let declared = column.data_type(db);
+            if declared.array_dimensions(db).map(NonZeroU32::get) != Some(1) {
+                return None;
+            }
+            declared.array_element(db)
+        })
+        .map_or(ColumnKind::Unsupported, |element| {
+            data_type_kind(element, db)
+        })
 }
 
 /// Column names of `table`'s primary key when it spans more than one column.
@@ -438,10 +449,13 @@ CREATE TABLE family_columns (
         .expect("schema parses");
         let columns = table("family_columns");
 
-        assert_eq!(column_kind(&columns, "label", &db), ColumnKind::Text);
+        assert_eq!(column_kind(&columns, "label", &db), ColumnKind::Bpchar);
         assert_eq!(column_kind(&columns, "balance", &db), ColumnKind::Decimal);
         assert_eq!(column_kind(&columns, "clock", &db), ColumnKind::Time);
-        assert_eq!(list_element_kind(&columns, "labels", &db), ColumnKind::Text);
+        assert_eq!(
+            list_element_kind(&columns, "labels", &db),
+            ColumnKind::Bpchar
+        );
     }
 
     #[test]

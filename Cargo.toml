@@ -115,3 +115,6 @@ debug = "none"
 # forbidden) until sqlparser ships a release above 0.62.0 carrying the no_std fixes.
 [patch.crates-io]
 sqlparser = { git = "https://github.com/apache/datafusion-sqlparser-rs", branch = "main" }
+# Route sql-values (and sql-traits through it) to main, which carries PostgreSQL's bpchar
+# equality ahead of a release.
+sql-values = { git = "https://github.com/connetto-rs/sql-values", branch = "main" }

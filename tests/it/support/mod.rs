@@ -112,7 +112,7 @@ impl RowValues for Row {
             return RowCell::Absent;
         };
         match kind {
-            ColumnKind::Text => RowCell::Text(value.as_str().into()),
+            ColumnKind::Text | ColumnKind::Bpchar => RowCell::Text(value.as_str().into()),
             ColumnKind::Integer => RowCell::Integer(value.as_str().into()),
             ColumnKind::Decimal => RowCell::Decimal(value.as_str().into()),
             ColumnKind::Date => RowCell::Date(value.as_str().into()),
@@ -206,7 +206,7 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 fn scalar_cell(value: &serde_json::Value, kind: ColumnKind) -> RowCell<'_> {
     match (value, kind) {
         (serde_json::Value::Null, _) => RowCell::Null,
-        (serde_json::Value::String(text), ColumnKind::Text) => {
+        (serde_json::Value::String(text), ColumnKind::Text | ColumnKind::Bpchar) => {
             RowCell::Text(Cow::Borrowed(text.as_str()))
         }
         (serde_json::Value::String(text), ColumnKind::Uuid) => {

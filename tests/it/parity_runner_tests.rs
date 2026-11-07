@@ -123,6 +123,7 @@ async fn every_parity_case_agrees() {
             two_deadlines_need_one_witnessing_row,
             a_clock_gated_record_replays_from_its_own_row,
             a_share_record_replays_onto_another_types_object,
+            a_char_column_compares_without_its_padding,
             a_role_ladder_answers_four_thresholds,
             an_insert_that_reads_back_applies_the_select_policy,
             an_upsert_applies_the_update_policy_too,
@@ -3509,6 +3510,67 @@ async fn a_share_record_replays_onto_another_types_object(cluster: Arc<Cluster>)
         ],
     )
     .await;
+}
+
+/// A `char(4)` cell reaches the row replay blank-padded, as `to_jsonb` prints it. Each guard
+/// replays from the row and must agree with the database, which ignores trailing blanks
+/// against an untyped or `varchar` value and keeps the value's own against `text`. The key
+/// is a `char(4)` too, so the replayed object must name the row as the database prints it.
+async fn a_char_column_compares_without_its_padding(cluster: Arc<Cluster>) {
+    for (name, clause, visible) in [
+        ("untyped", "code = 'ab '", &["d1"][..]),
+        ("leading-blank", "code = ' ab'", &["d2"]),
+        ("empty", "code = ''", &["d4"]),
+        ("unequal", "code <> 'ab '", &["d2", "d3", "d4"]),
+        (
+            "text-literal",
+            "code <> 'ab '::text",
+            &["d1", "d2", "d3", "d4"],
+        ),
+        ("text-column", "code::text = 'ab '", &[]),
+        ("in-list", "code IN ('ab ', 'x'::text)", &["d1"]),
+        ("any-array", "code = ANY (ARRAY['ab ', 'x'])", &[]),
+        (
+            "any-varchar-array",
+            "code = ANY (ARRAY['ab '::varchar, 'x'])",
+            &["d1"],
+        ),
+        (
+            "any-text-array",
+            "code = ANY (ARRAY['ab ', 'x']::text[])",
+            &[],
+        ),
+    ] {
+        let case = ParityCase::reading(
+            &format!("runner-char-padding-{name}"),
+            &format!(
+                "
+CREATE TABLE docs (id CHAR(4) PRIMARY KEY, code CHAR(4));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_code ON docs FOR SELECT USING ({clause});
+"
+            ),
+            &[
+                "INSERT INTO docs (id, code) VALUES
+                     ('d1', 'ab'), ('d2', ' ab'), ('d3', 'ab' || chr(9)), ('d4', '')",
+                "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+            ],
+            vec![Principal::as_role("app_user", "app_user")],
+        )
+        .loading_from_rows();
+        let run = support::parity::run(&cluster, &case).await;
+        for id in ["d1", "d2", "d3", "d4"] {
+            support::parity::assert_postgres(
+                &case,
+                &run,
+                "app_user",
+                &format!("docs:{id}"),
+                ActionStatement::Select,
+                visible.contains(&id),
+            );
+        }
+        assert_agrees(&case, &run);
+    }
 }
 
 /// Ported from `translated_schema_parity_postgres18_and_openfga`.

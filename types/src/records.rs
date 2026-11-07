@@ -17,6 +17,7 @@ use crate::identity::{
 use crate::{AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest};
 use crate::{ColumnName, ConditionName, RelationName, TableId, TypeName};
 use serde::{Deserialize, Serialize};
+use sql_values::PgBpchar;
 
 /// One `(object, relation, subject)` fact, rendered exactly as the whole-table
 /// SQL renders it.
@@ -58,6 +59,10 @@ pub struct RecordContextValue {
 pub enum ColumnKind {
     /// Text types.
     Text,
+    /// Blank-padded `char(n)` text, read without the trailing blanks `PostgreSQL` drops
+    /// when it compares or prints the value as `text`. A consumer hands its cell over as
+    /// [`RowCell::Text`], padded or not.
+    Bpchar,
     /// UUID values.
     Uuid,
     /// Boolean values.
@@ -1126,9 +1131,12 @@ fn compare_holds<R: RowValues + ?Sized>(
         _ if matches!(cell, RowCell::Null) => Eval::Empty,
         AttributeTest::Compare { operator, value } => {
             // Text orders by collation, which only the database knows.
-            let ordered = matches!(value, AttributeLiteral::Text(_))
-                && !matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq);
-            match literal_ordering(&cell, value) {
+            let ordered =
+                matches!(
+                    value,
+                    AttributeLiteral::Text(_) | AttributeLiteral::AsText(_)
+                ) && !matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq);
+            match literal_ordering(column.kind(), &cell, value) {
                 Some(ordering) if !ordered => {
                     if ordering_matches(*operator, ordering) {
                         Eval::Value(())
@@ -1142,7 +1150,7 @@ fn compare_holds<R: RowValues + ?Sized>(
         AttributeTest::In(values) => {
             let mut decided = true;
             for value in values {
-                match literal_ordering(&cell, value) {
+                match literal_ordering(column.kind(), &cell, value) {
                     Some(ordering) if ordering.is_eq() => return Eval::Value(()),
                     Some(_) => {}
                     None => decided = false,
@@ -1158,16 +1166,31 @@ fn compare_holds<R: RowValues + ?Sized>(
 }
 
 /// How the row's value orders against one literal, absent where only SQL can tell.
-fn literal_ordering(cell: &RowCell<'_>, value: &AttributeLiteral) -> Option<core::cmp::Ordering> {
+///
+/// A `char(n)` cell arrives without its padding, and an untyped literal compares with it as
+/// `char(n)` too, so the literal loses its trailing blanks the same way.
+fn literal_ordering(
+    kind: ColumnKind,
+    cell: &RowCell<'_>,
+    value: &AttributeLiteral,
+) -> Option<core::cmp::Ordering> {
     match (cell, value) {
         (RowCell::Bool(actual), AttributeLiteral::Boolean(expected)) => Some(actual.cmp(expected)),
         (
             RowCell::Integer(actual) | RowCell::Decimal(actual),
             AttributeLiteral::Number(expected),
         ) => compare_decimals(actual.as_ref(), expected),
-        (RowCell::Text(actual), AttributeLiteral::Text(expected)) => {
-            Some(actual.as_ref().cmp(expected.as_str()))
+        (RowCell::Text(actual), AttributeLiteral::Text(expected)) if kind == ColumnKind::Bpchar => {
+            Some(
+                actual
+                    .as_ref()
+                    .cmp(PgBpchar::new(expected.as_str()).as_text()),
+            )
         }
+        (
+            RowCell::Text(actual),
+            AttributeLiteral::Text(expected) | AttributeLiteral::AsText(expected),
+        ) => Some(actual.as_ref().cmp(expected.as_str())),
         _ => None,
     }
 }
@@ -1268,6 +1291,9 @@ fn checked_cell<'a, R: RowValues + ?Sized>(row: &'a R, column: &ColumnRead) -> E
 
 fn checked_list_cell<'a>(column: &ColumnRead, cell: RowCell<'a>) -> Eval<RowCell<'a>> {
     match cell {
+        RowCell::Text(padded) if column.kind() == ColumnKind::Bpchar => {
+            Eval::Value(RowCell::Text(bpchar_text(padded)))
+        }
         RowCell::Absent => Eval::Refuse(RecordError::ColumnAbsent(column.to_string())),
         RowCell::Null => Eval::Value(RowCell::Null),
         RowCell::Undecodable => Eval::Refuse(RecordError::ColumnUndecodable(column.to_string())),
@@ -1277,6 +1303,19 @@ fn checked_list_cell<'a>(column: &ColumnRead, cell: RowCell<'a>) -> Eval<RowCell
             } else {
                 Eval::Refuse(type_mismatch(column, &cell))
             }
+        }
+    }
+}
+
+/// The `text` a `char(n)` value casts to, which `PostgreSQL` prints without the trailing
+/// blanks that pad it.
+fn bpchar_text(padded: Cow<'_, str>) -> Cow<'_, str> {
+    let length = PgBpchar::new(padded.as_ref()).as_text().len();
+    match padded {
+        Cow::Borrowed(text) => Cow::Borrowed(&text[..length]),
+        Cow::Owned(mut text) => {
+            text.truncate(length);
+            Cow::Owned(text)
         }
     }
 }

@@ -99,6 +99,12 @@ impl CastChain {
         self.outermost().is_none_or(renders_as_text)
     }
 
+    /// Whether the outermost cast renders the value as unbounded text, so it compares as
+    /// `text` whatever type it held.
+    pub(crate) fn casts_to_text(&self) -> bool {
+        self.outermost().is_some_and(renders_as_text)
+    }
+
     /// The chain without the parse into `json` or `jsonb` that an arrow or a jsonb
     /// expander needs, which is the read's structure rather than a renaming.
     pub(crate) fn without_json_parse(mut self) -> Self {

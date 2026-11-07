@@ -86,6 +86,7 @@ fn attribute_gate_key(predicate: &AttributePredicate) -> Option<String> {
 fn literal_gate_key(value: &AttributeLiteral) -> Option<String> {
     Some(match value {
         AttributeLiteral::Text(text) => format!("t{}:{text}", text.len()),
+        AttributeLiteral::AsText(text) => format!("x{}:{text}", text.len()),
         AttributeLiteral::Number(number) => format!("n{}:{number}", number.len()),
         AttributeLiteral::Boolean(value) => format!("b:{value}"),
         _ => return None,

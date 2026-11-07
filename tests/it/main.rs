@@ -7,6 +7,7 @@ mod attribute_null_test_tests;
 mod blocklist_exclusion_tests;
 mod builtin_shadow_tests;
 mod caller_cast_tests;
+mod char_padding_tests;
 mod classifier_edge_case_tests;
 mod classifier_indirect_membership_tests;
 mod classifier_tests;
