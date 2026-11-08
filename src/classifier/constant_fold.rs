@@ -8,34 +8,33 @@
 use alloc::borrow::Cow;
 use core::ops::ControlFlow;
 
-use sqlparser::ast::{BinaryOperator, DataType, Expr, InTarget, Value, VisitMut, VisitorMut};
+use sqlparser::ast::{BinaryOperator, Expr, InTarget, Value, VisitMut, VisitorMut};
 
-/// The text `expr` holds when it is a string literal, under casts that keep text as
-/// written. A `char(n)` cast pads and compares without trailing blanks, so it is no such
-/// cast.
+use crate::parser::expr::CastChain;
+
+/// The longest text a `name` holds, `NAMEDATALEN` less its terminator.
+const NAME_MAX_BYTES: usize = 63;
+
+/// The text `expr` holds when it is a string literal under casts that keep it as written.
+/// A `char(n)` or `varchar(n)` cast pads or truncates, and a `name` truncates past
+/// [`NAME_MAX_BYTES`], so none of them keeps it.
 fn text_constant(expr: &Expr) -> Option<&str> {
-    match expr {
-        Expr::Value(value) => match &value.value {
-            Value::SingleQuotedString(text) => Some(text),
-            _ => None,
-        },
-        Expr::Nested(inner) => text_constant(inner),
-        Expr::Cast {
-            expr, data_type, ..
-        } if keeps_text(data_type) => text_constant(expr),
-        _ => None,
-    }
-}
-
-/// Whether a cast to `data_type` leaves a text literal's value as written.
-fn keeps_text(data_type: &DataType) -> bool {
-    match data_type {
-        DataType::Text | DataType::Varchar(None) | DataType::CharacterVarying(None) => true,
-        DataType::Custom(name, modifiers) => {
-            modifiers.is_empty() && name.to_string().eq_ignore_ascii_case("name")
-        }
-        _ => false,
-    }
+    let (casts, inner) = CastChain::peeled(expr);
+    let Expr::Value(value) = inner else {
+        return None;
+    };
+    let Value::SingleQuotedString(text) = &value.value else {
+        return None;
+    };
+    let kept: &[&str] = if text.len() <= NAME_MAX_BYTES {
+        &["name"]
+    } else {
+        &[]
+    };
+    casts
+        .renaming_beyond(kept)
+        .is_none()
+        .then_some(text.as_str())
 }
 
 /// The truth of `expr` when it compares constants alone.
@@ -126,13 +125,16 @@ mod tests {
         }
     }
 
-    /// A column, a padded `char(n)` cast, a case-folding comparison or a list holding a
-    /// non-constant is no comparison between constants.
+    /// A column, a padding or truncating cast, a case-folding comparison or a list holding
+    /// a non-constant is no comparison between constants.
     #[test]
     fn anything_but_two_text_constants_is_left_alone() {
+        let long_name = format!("'{}'::name = 'x'", "x".repeat(NAME_MAX_BYTES + 1));
         for sql in [
             "owner = 'reader'",
             "'reader '::CHAR(7) = 'reader'",
+            "'reader'::VARCHAR(3) = 'rea'",
+            long_name.as_str(),
             "'reader' ILIKE 'READER'",
             "'reader' IN ('writer', owner)",
             "'1' < '2'",
