@@ -6,6 +6,7 @@
 use rls2fga::parser::sql_parser::{DatabaseLike, ParserDB, PolicyLike};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use crate::support::footgun::{
     assert_model_is_internally_consistent, db_of, relation_definition, relation_denies,
@@ -89,28 +90,45 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id'));
 ",
     );
-    let dsl = translator(ConfidenceLevel::A)
+    let planned = translator(ConfidenceLevel::A)
         .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .model();
+        .expect("translation should plan");
+    let entries = planned.action_relations().to_vec();
+    let dsl = planned.outputs_accepting_gaps().model();
 
+    let insert = entries
+        .iter()
+        .find(|entry| {
+            entry.type_name.as_str() == "docs" && entry.statement == ActionStatement::Insert
+        })
+        .expect("an INSERT entry for docs");
+    assert!(
+        matches!(insert.answer, ActionAnswer::Judged(_)),
+        "the insert policy admits the insert:\n{dsl}"
+    );
+    let upsert = entries
+        .iter()
+        .find(|entry| {
+            entry.type_name.as_str() == "docs"
+                && entry.statement == ActionStatement::InsertOnConflictUpdate
+        })
+        .expect("an upsert entry for docs");
     assert_eq!(
-        relation_definition(&dsl, "docs", "can_upsert").as_deref(),
-        Some("can_insert and can_update"),
-        "an upsert needs the UPDATE policies as well as the INSERT ones:\n{dsl}"
+        upsert.answer,
+        ActionAnswer::Denied,
+        "no UPDATE policy leaves the upsert denied:\n{dsl}"
     );
     assert_eq!(
         relation_definition(&dsl, "docs", "can_update").as_deref(),
         Some("no_access"),
-        "no UPDATE policy leaves the upsert denied:\n{dsl}"
+        "the denial is the update half's:\n{dsl}"
     );
 }
 
-/// Where no row can be inserted at all the upsert relation repeats `can_insert`,
-/// and a relation that says nothing is noise.
+/// Where no row can be inserted at all the upsert is refused outright, rather than
+/// naming a relation that can only be no.
 #[test]
-fn upsert_relation_is_absent_where_no_row_can_be_inserted() {
+fn an_upsert_where_no_row_can_be_inserted_is_refused() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
@@ -118,19 +136,27 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
-    let dsl = translator(ConfidenceLevel::A)
+    let planned = translator(ConfidenceLevel::A)
         .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .model();
+        .expect("translation should plan");
+    let entries = planned.action_relations().to_vec();
+    let dsl = planned.outputs_accepting_gaps().model();
 
     assert_eq!(
         relation_definition(&dsl, "docs", "can_insert").as_deref(),
         Some("no_access"),
         "no INSERT policy denies inserts:\n{dsl}"
     );
-    assert!(
-        relation_definition(&dsl, "docs", "can_upsert").is_none(),
+    let upsert = entries
+        .iter()
+        .find(|entry| {
+            entry.type_name.as_str() == "docs"
+                && entry.statement == ActionStatement::InsertOnConflictUpdate
+        })
+        .expect("an upsert entry for docs");
+    assert_eq!(
+        upsert.answer,
+        ActionAnswer::Denied,
         "a denied insert already denies the upsert:\n{dsl}"
     );
 }

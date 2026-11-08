@@ -153,7 +153,6 @@ fn a_column_named_after_an_action_relation_does_not_take_it() {
         "can_update_using",
         "can_update_check",
         "can_insert_returning",
-        "can_upsert",
         "can_select_for_update",
     ] {
         let db = db_of(&format!(

@@ -685,7 +685,6 @@ fn well_known_names_have_a_single_source_of_truth() {
         "can_update_using",
         "can_update_check",
         "can_insert_returning",
-        "can_upsert",
         "can_select_for_update",
     ] {
         let literals = count_excluding(&exempt, &format!("\"{name}\""));

@@ -23,7 +23,6 @@ type paper_shares
     define can_select_for_update: can_update
     define can_update: no_access
     define can_update_without_reading: can_update
-    define can_upsert: can_insert and can_update
 
 type paper_shares_share
   relations

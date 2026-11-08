@@ -356,8 +356,8 @@ pub(crate) fn derived_action_relations() -> [RelationName; 6] {
         can_update_using_relation(),
         can_update_check_relation(),
         can_update_without_reading_relation(),
+        can_update_without_reading_check_relation(),
         can_insert_returning_relation(),
-        can_upsert_relation(),
         can_select_for_update_relation(),
     ]
 }
@@ -493,32 +493,6 @@ pub(crate) fn fill_uncovered_actions_with_deny(table_plan: &mut TypePlan) -> Vec
         table_plan.set_computed(relation.clone(), deny.clone());
     }
     missing.into_iter().map(|(_, command)| command).collect()
-}
-
-/// Answer for `INSERT ... ON CONFLICT ... DO UPDATE`, which updates the conflicting
-/// row and so needs the UPDATE policies too. Runs once the actions are final, and
-/// is left out wherever it would add no requirement to `can_insert`.
-pub(crate) fn define_upsert_relations(all_types: &mut BTreeMap<TypeName, TypePlan>) {
-    for plan in all_types.values_mut() {
-        let Some(insert) = plan.computed_relations.get(&can_insert_relation()) else {
-            continue;
-        };
-        let adds_nothing = grants_nothing(insert, plan, &mut BTreeSet::new())
-            || plan
-                .computed_relations
-                .get(&can_update_relation())
-                .is_some_and(|update| update == insert);
-        if adds_nothing {
-            continue;
-        }
-        plan.set_computed(
-            can_upsert_relation(),
-            UsersetExpr::Intersection(vec![
-                UsersetExpr::Computed(can_insert_relation()),
-                UsersetExpr::Computed(can_update_relation()),
-            ]),
-        );
-    }
 }
 
 /// Answer for a locking read, which `PostgreSQL` filters by the `UPDATE` policies'

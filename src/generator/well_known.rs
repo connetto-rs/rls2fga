@@ -293,18 +293,18 @@ pub fn can_update_without_reading_relation() -> RelationName {
     RelationName::canonicalized("can_update_without_reading")
 }
 
+/// The `UPDATE` `WITH CHECK` half without the read gate, which judges the row an update
+/// naming no row writes. Defined only where it differs from the `USING` half.
+#[must_use]
+pub fn can_update_without_reading_check_relation() -> RelationName {
+    RelationName::canonicalized("can_update_without_reading_check")
+}
+
 /// Inserting a row and reading it back, which returning a table column or naming
 /// an `ON CONFLICT` target both do, so the `SELECT` policies apply to the new row.
 #[must_use]
 pub fn can_insert_returning_relation() -> RelationName {
     RelationName::canonicalized("can_insert_returning")
-}
-
-/// Inserting with `ON CONFLICT ... DO UPDATE`, which updates the conflicting row,
-/// so the `UPDATE` policies apply to it and to the merged row.
-#[must_use]
-pub fn can_upsert_relation() -> RelationName {
-    RelationName::canonicalized("can_upsert")
 }
 
 /// Reading a row under a locking clause (`FOR UPDATE`, `FOR NO KEY UPDATE`,

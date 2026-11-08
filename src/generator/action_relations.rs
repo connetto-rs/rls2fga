@@ -18,7 +18,8 @@ use crate::generator::unrestricted;
 use crate::generator::well_known::{
     can_delete_relation, can_insert_relation, can_insert_returning_relation,
     can_select_for_update_relation, can_select_relation, can_update_check_relation,
-    can_update_relation, can_update_using_relation, can_update_without_reading_relation,
+    can_update_relation, can_update_using_relation, can_update_without_reading_check_relation,
+    can_update_without_reading_relation,
 };
 use crate::parser::names::lookup_table_id;
 use crate::parser::sql_parser::DatabaseLike;
@@ -76,22 +77,19 @@ fn update_judgements(plan: &TypePlan) -> Vec<ActionJudgement> {
 }
 
 /// A blind update applies both clauses without the read gate. The unread relation is
-/// the `USING` half, so where the clauses differ the check half is judged beside it
-/// against the result.
+/// the `USING` half against the row as it is, and the unread check half, defined where
+/// the clauses differ, judges the result.
 fn blind_update_answer(plan: &TypePlan) -> ActionAnswer {
     let relation = can_update_without_reading_relation();
     if !plan.computed_relations.contains_key(&relation) {
         return ActionAnswer::Judged(update_judgements(plan));
     }
-    if clauses_answered_apart(plan) {
-        return ActionAnswer::Judged(vec![
-            judge(relation, RowVersion::Existing),
-            judge(can_update_check_relation(), RowVersion::Resulting),
-        ]);
-    }
     ActionAnswer::Judged(vec![
         judge(relation.clone(), RowVersion::Existing),
-        judge(relation, RowVersion::Resulting),
+        judge(
+            defined_or(plan, can_update_without_reading_check_relation(), relation),
+            RowVersion::Resulting,
+        ),
     ])
 }
 
@@ -120,10 +118,14 @@ fn answer(plan: &TypePlan, statement: ActionStatement) -> ActionAnswer {
                 RowVersion::Existing,
             ),
         ]),
-        // `can_upsert` fuses an insert judging the result with an update judging both
-        // versions, so its halves are named instead.
+        // The inserted row is read back, then the conflicting row is read and updated, so
+        // the readback and both update halves are named. Where PostgreSQL filters a row
+        // failing an update half, an upsert raises instead, which a check answers alike.
         ActionStatement::InsertOnConflictUpdate => {
-            let mut required = vec![judge(can_insert_relation(), RowVersion::Resulting)];
+            let mut required = vec![judge(
+                defined_or(plan, can_insert_returning_relation(), can_insert_relation()),
+                RowVersion::Resulting,
+            )];
             required.extend(update_judgements(plan));
             ActionAnswer::Judged(required)
         }
