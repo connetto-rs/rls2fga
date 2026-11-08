@@ -7,7 +7,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 
 use crate::parser::expr::parse_expr_for_tests as parse_expr;
-use crate::test_support::{caller, delimited_set, registry};
+use crate::test_support::{caller, caller_registry, delimited_set, registry};
 
 fn parse_select(sql: &str) -> Select {
     let stmts = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("query should parse");
@@ -234,43 +234,74 @@ fn recognize_p2_role_in_list_refuses_the_clickhouse_global_modifier() {
     );
 }
 
+/// A schema whose acting role `app_user` is a member of `editor` and not of `viewer`, and
+/// a registry read for a deployment acting as `app_user`.
+fn editor_membership() -> (ParserDB, FunctionRegistry) {
+    let db = parse_schema(
+        "CREATE ROLE editor NOLOGIN; CREATE ROLE viewer NOLOGIN; \
+         CREATE ROLE app_user NOLOGIN; GRANT editor TO app_user;",
+    )
+    .expect("schema should parse");
+    let mut registry = FunctionRegistry::new();
+    registry.adopt(
+        &crate::parser::sql_parser::Deployment::new("app_login", ["app_user"], [])
+            .expect("a valid deployment"),
+    );
+    (db, registry)
+}
+
+/// `pg_has_role` asks about roles the schema creates, so the call is a constant the
+/// schema's memberships decide, the two-argument form asking about the acting role.
 #[test]
-fn recognize_p2_pg_has_role_three_and_two_arg_forms() {
-    let db = db_with_docs_and_members();
-    let registry = FunctionRegistry::new(); // pg_has_role is a built-in, no registry needed.
-
-    // Three-arg form: pg_has_role(current_user, 'admin', 'MEMBER').
-    let three_arg = parse_expr("pg_has_role(current_user, 'admin', 'MEMBER')");
-    let c3 = recognize_p2(&three_arg, &db, &registry).expect("expected P2 for pg_has_role 3-arg");
-    assert!(
-        matches!(
-            &c3.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { function_name, role_names, .. })
-                if function_name == "pg_has_role" && role_names == &["admin"]
+fn pg_has_role_is_decided_by_the_schema_memberships() {
+    let (db, registry) = editor_membership();
+    for (sql, value) in [
+        ("pg_has_role('app_user', 'editor', 'MEMBER')", true),
+        ("pg_has_role('app_user', 'viewer', 'MEMBER')", false),
+        ("pg_has_role('editor', 'USAGE')", true),
+        ("pg_has_role('viewer', 'USAGE')", false),
+        (
+            "pg_has_role('app_user'::name, 'editor'::name, 'MEMBER'::text)",
+            true,
         ),
-        "three-arg pg_has_role should produce P2 with role 'admin', got: {:?}",
-        c3.pattern
-    );
-    assert_eq!(c3.confidence, ConfidenceLevel::A);
+    ] {
+        let classified = recognize_p2(&parse_expr(sql), &db, &registry)
+            .unwrap_or_else(|| panic!("{sql} is a pg_has_role call"));
+        assert!(
+            matches!(
+                classified.pattern,
+                PatternClass::P10ConstantBool(ConstantBool { value: got }) if got == value
+            ),
+            "{sql} reads as {value}, got {:?}",
+            classified.pattern
+        );
+    }
+}
 
-    // Two-arg form: pg_has_role('editor', 'USAGE'), current user is implied.
-    let two_arg = parse_expr("pg_has_role('editor', 'USAGE')");
-    let c2 = recognize_p2(&two_arg, &db, &registry).expect("expected P2 for pg_has_role 2-arg");
-    assert!(
-        matches!(
-            &c2.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { function_name, role_names, .. })
-                if function_name == "pg_has_role" && role_names == &["editor"]
-        ),
-        "two-arg pg_has_role should produce P2 with role 'editor', got: {:?}",
-        c2.pattern
-    );
-
-    let bad_user = parse_expr("pg_has_role(other_user_id, 'admin', 'MEMBER')");
-    assert!(
-        recognize_p2(&bad_user, &db, &registry).is_none(),
-        "pg_has_role with non-current-user first arg should not match"
-    );
+/// A role the schema does not create makes PostgreSQL raise, the implicit acting role of
+/// a registry read for no deployment has no name, and a member that is no literal is no
+/// role this call names.
+#[test]
+fn pg_has_role_refuses_a_role_it_cannot_name() {
+    let (db, registry) = editor_membership();
+    for (sql, registry) in [
+        ("pg_has_role('app_user', 'ghost', 'MEMBER')", &registry),
+        ("pg_has_role('editor', 'MEMBER')", &FunctionRegistry::new()),
+    ] {
+        assert!(
+            matches!(
+                recognize_p2(&parse_expr(sql), &db, registry).map(|c| c.pattern),
+                Some(PatternClass::Unknown(_))
+            ),
+            "{sql} is refused"
+        );
+    }
+    assert!(recognize_p2(
+        &parse_expr("pg_has_role(other_user_id, 'editor', 'MEMBER')"),
+        &db,
+        &registry
+    )
+    .is_none());
 }
 
 #[test]
@@ -354,16 +385,15 @@ fn p2_in_list_refuses_a_mixed_literal_and_non_literal_list() {
 
 #[test]
 fn recognize_array_patterns_matches_the_caller_in_every_spelling() {
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
-    // The caller as an element is an exact relationship, verified on PostgreSQL 18
-    // against an UNNEST enumeration, so it is P11 at confidence A.
+    // The caller as an element is an exact relationship, so it is P11 at confidence A.
     for spelling in [
-        "current_user = ANY(allowed_users)",
-        "allowed_users @> ARRAY[current_user]",
-        "ARRAY[current_user] <@ allowed_users",
-        "ARRAY[current_user] && allowed_users",
-        "allowed_users && ARRAY[current_user]",
+        "current_setting('app.user_id') = ANY(allowed_users)",
+        "allowed_users @> ARRAY[current_setting('app.user_id')]",
+        "ARRAY[current_setting('app.user_id')] <@ allowed_users",
+        "ARRAY[current_setting('app.user_id')] && allowed_users",
+        "allowed_users && ARRAY[current_setting('app.user_id')]",
     ] {
         let expr = parse_expr(spelling);
         let classified = recognize_array_patterns(&expr, &registry)
@@ -397,12 +427,13 @@ fn recognize_array_patterns_matches_the_caller_in_every_spelling() {
         "overlap against a literal is an attribute guard"
     );
 
-    let non_array = parse_expr("owner_id = current_user");
+    let non_array = parse_expr("owner_id = current_setting('app.user_id')");
     assert!(recognize_array_patterns(&non_array, &registry).is_none());
 
     // A subquery is membership through a table, and expanding it would name a column
     // that does not exist.
-    let subquery = parse_expr("current_user = ANY(SELECT user_id FROM doc_members)");
+    let subquery =
+        parse_expr("current_setting('app.user_id') = ANY(SELECT user_id FROM doc_members)");
     assert!(recognize_array_patterns(&subquery, &registry).is_none());
 }
 
@@ -453,21 +484,6 @@ fn recognize_p3_refuses_null_safe_equality() {
 }
 
 #[test]
-fn recognize_p3_accepts_null_safe_equality_for_the_sql_caller() {
-    let db = db_with_docs_and_members();
-    let registry = registry_with_role_level();
-    let expr = parse_expr("owner_id IS NOT DISTINCT FROM current_user");
-
-    assert!(matches!(
-        recognize_p3(&expr, &db, &registry),
-        Some(ClassifiedExpr {
-            pattern: PatternClass::P3DirectOwnership(DirectOwnership { column }),
-            confidence: ConfidenceLevel::A,
-        }) if column == "owner_id"
-    ));
-}
-
-#[test]
 fn recognize_p3_scalar_subquery_wrapper_caps_confidence_at_b() {
     let db = db_with_docs_and_members();
     // `registry_with_role_level` has `auth_current_user_id` as a confirmed accessor.
@@ -499,13 +515,14 @@ fn recognize_p3_scalar_subquery_wrapper_caps_confidence_at_b() {
         "subquery-wrapped registry accessor should be capped at B"
     );
 
-    // SQL keyword in subquery → still B (subquery always caps).
-    let kw_subquery = parse_expr("owner_id = (SELECT current_user)");
-    let c_kw = recognize_p3(&kw_subquery, &db, &registry).expect("expected P3 match");
+    // A subquery around the declared caller caps at B, like the one around the accessor.
+    let caller = caller_registry();
+    let caller_subquery = parse_expr("owner_id = (SELECT current_setting('app.current_user_id'))");
+    let c_caller = recognize_p3(&caller_subquery, &db, &caller).expect("expected P3 match");
     assert_eq!(
-        c_kw.confidence,
+        c_caller.confidence,
         ConfidenceLevel::B,
-        "subquery around SQL keyword should also be capped at B"
+        "a subquery around the caller should also be capped at B"
     );
 }
 
@@ -704,16 +721,16 @@ fn recognize_p4_exists_refuses_a_subquery_reading_the_guarded_table() {
 }
 
 #[test]
-fn recognize_p4_with_alias_and_current_user_keyword_strips_correlated_predicates() {
+fn recognize_p4_with_alias_and_the_caller_strips_correlated_predicates() {
     let db = db_with_docs_and_members();
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
                SELECT 1
                FROM doc_members dm
                WHERE dm.doc_id = docs.id
-                 AND dm.user_id = current_user
+                 AND dm.user_id = current_setting('app.user_id')
                  AND dm.role = 'admin'
              )",
     );
@@ -818,14 +835,14 @@ fn recognize_p4_fails_closed_for_outer_table_distinct_predicates() {
 #[test]
 fn recognize_p4_supports_function_wrapped_membership_predicates_without_alias_leak() {
     let db = db_with_docs_and_members();
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
                SELECT 1
                FROM doc_members dm
                WHERE dm.doc_id = docs.id
-                 AND dm.user_id = current_user
+                 AND dm.user_id = current_setting('app.user_id')
                  AND lower(dm.role) = 'admin'
              )",
     );
@@ -1068,7 +1085,7 @@ CREATE TABLE s2(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT N
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
@@ -1076,7 +1093,7 @@ CREATE TABLE s2(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT N
                FROM s2 s
                WHERE s.tenant_id = p2.tenant_id
                  AND s.paper_id = p2.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
              )",
     );
 
@@ -1115,7 +1132,7 @@ CREATE TABLE s3(region_id INT NOT NULL, tenant_id INT NOT NULL, paper_id INT NOT
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
@@ -1124,7 +1141,7 @@ CREATE TABLE s3(region_id INT NOT NULL, tenant_id INT NOT NULL, paper_id INT NOT
                WHERE s.region_id = p3.region_id
                  AND s.tenant_id = p3.tenant_id
                  AND s.paper_id = p3.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
              )",
     );
 
@@ -1173,7 +1190,7 @@ CREATE TABLE project_members(tenant_id INT NOT NULL, project_id INT NOT NULL,
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
@@ -1181,7 +1198,7 @@ CREATE TABLE project_members(tenant_id INT NOT NULL, project_id INT NOT NULL,
                FROM project_members m
                WHERE m.tenant_id = docs.tenant_id
                  AND m.project_id = docs.project_id
-                 AND m.user_id = current_user
+                 AND m.user_id = current_setting('app.user_id')
              )",
     );
 
@@ -1298,7 +1315,7 @@ CREATE TABLE s6(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT N
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
@@ -1306,7 +1323,7 @@ CREATE TABLE s6(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT N
                FROM s6 s
                WHERE s.tenant_id = p6.tenant_id
                  AND s.paper_id = p6.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
              )",
     );
 
@@ -1414,7 +1431,7 @@ fn papers_membership(residual: &str) -> Expr {
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND {residual}
              )"
     ))
@@ -1424,7 +1441,7 @@ fn papers_refuses(extra: &str, residual: &str) -> bool {
     recognize_p4(
         &papers_membership(residual),
         &papers_schema(extra),
-        &FunctionRegistry::new(),
+        &caller_registry(),
         "papers",
         &ExpansionState::new(),
     )
@@ -1435,7 +1452,7 @@ fn papers_refuses_on(db: &ParserDB, residual: &str) -> bool {
     recognize_p4(
         &papers_membership(residual),
         db,
-        &FunctionRegistry::new(),
+        &caller_registry(),
         "papers",
         &ExpansionState::new(),
     )
@@ -1449,14 +1466,14 @@ fn average_weight_membership() -> Expr {
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND s.weight > (SELECT avg(weight) FROM paper_shares)
              )",
     )
 }
 
 fn recognized_residual_sql(db: &ParserDB, expr: &Expr) -> String {
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
     let classified = recognize_p4(expr, db, &registry, "papers", &ExpansionState::new())
         .expect("a residual over relations the database filters nothing on is translatable");
     assert_eq!(
@@ -1491,7 +1508,7 @@ fn a_residual_over_an_unrestricted_relation_is_recognized() {
 #[test]
 fn a_residual_over_a_row_secured_relation_is_refused() {
     let db = papers_schema("ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
     assert!(
         recognize_p4(
             &average_weight_membership(),
@@ -1540,7 +1557,7 @@ fn a_residual_reading_a_third_unrestricted_relation_is_recognized() {
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND s.weight > (SELECT max(cutoff) FROM tiers)
              )",
         ),
@@ -1570,7 +1587,7 @@ fn gated_residual(residual: &str) -> Expr {
            SELECT 1
            FROM paper_shares s
            WHERE s.paper_id = papers.id
-             AND s.viewer = current_user
+             AND s.viewer = current_setting('app.user_id')
              AND {residual}
        )"
     ))
@@ -1803,7 +1820,7 @@ ALTER TABLE weights ENABLE ROW LEVEL SECURITY;
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND s.weight > (SELECT avg(weight) FROM weights_eu)
              )",
         ),
@@ -1913,7 +1930,7 @@ fn a_residual_casting_between_exact_numbers_is_recognized() {
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND (s.weight)::numeric > (SELECT avg(weight) FROM paper_shares)
              )",
         ),
@@ -2126,7 +2143,7 @@ CREATE TABLE tiers(cutoff INT);
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND s.weight > (SELECT max(cutoff) FROM tiers WHERE cutoff < category)
              )",
         ),
@@ -2140,14 +2157,14 @@ CREATE TABLE tiers(cutoff INT);
 #[test]
 fn recognize_p4_allows_single_source_unqualified_extra_predicate() {
     let db = db_with_docs_and_members();
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let exists_expr = parse_expr(
         "EXISTS (
                SELECT 1
                FROM doc_members
                WHERE doc_members.doc_id = docs.id
-                 AND doc_members.user_id = current_user
+                 AND doc_members.user_id = current_setting('app.user_id')
                  AND role = 'admin'
              )",
     );
@@ -2564,8 +2581,14 @@ fn extractor_helpers_and_attribute_detection_work_for_edge_cases() {
         Some("priority")
     );
 
+    // A user-named column is an attribute guard like any other column.
     let user_attr = parse_expr("user_id = 'x'");
-    assert!(is_attribute_check(&user_attr).is_none());
+    assert_eq!(
+        is_attribute_check(&user_attr)
+            .as_ref()
+            .map(ColumnName::as_str),
+        Some("user_id")
+    );
 
     let non_literal = parse_expr("status = other_status");
     assert!(is_attribute_check(&non_literal).is_none());
@@ -2613,36 +2636,39 @@ fn table_extractors_cover_non_table_and_alias_paths() {
 
 #[test]
 fn current_user_expr_detection_supports_identity_casts_and_nested() {
-    let registry = registry_with_role_level();
+    let accessor_registry = registry_with_role_level();
     let nested = parse_expr("(auth_current_user_id())");
     let casted = parse_expr("CAST(auth_current_user_id() AS TEXT)");
     let own_type = parse_expr("CAST(auth_current_user_id() AS UUID)");
     let renamed = parse_expr("CAST(auth_current_user_id() AS INTEGER)");
-    let keyword = parse_expr("current_user");
-    let quoted_keyword = parse_expr("\"user\"");
-    let schema_qualified_keyword_fn = parse_expr("auth.user()");
+    let caller = parse_expr("current_setting('app.user_id')");
+    let quoted_identifier = parse_expr("\"user\"");
+    let schema_qualified_function = parse_expr("auth.user()");
     let other = parse_expr("owner_id");
 
-    assert!(is_current_user_expr(&nested, &registry));
-    assert!(is_current_user_expr(&casted, &registry));
+    assert!(is_current_user_expr(&nested, &accessor_registry));
+    assert!(is_current_user_expr(&casted, &accessor_registry));
     assert!(
-        is_current_user_expr(&own_type, &registry),
+        is_current_user_expr(&own_type, &accessor_registry),
         "a cast to the type the accessor returns changes nothing"
     );
     assert!(
-        !is_current_user_expr(&renamed, &registry),
+        !is_current_user_expr(&renamed, &accessor_registry),
         "an accessor declares no identity cast, so a cast to another type renames the caller"
     );
-    assert!(is_current_user_expr(&keyword, &registry));
     assert!(
-        !is_current_user_expr(&quoted_keyword, &registry),
-        "quoted keyword identifier must not be treated as current-user accessor"
+        is_current_user_expr(&caller, &caller_registry()),
+        "the declared caller setting is the caller the deployment names"
     );
     assert!(
-        !is_current_user_expr(&schema_qualified_keyword_fn, &registry),
-        "schema-qualified function names that normalize to SQL keywords are not accessors"
+        !is_current_user_expr(&quoted_identifier, &accessor_registry),
+        "a quoted identifier is a column, not the caller"
     );
-    assert!(!is_current_user_expr(&other, &registry));
+    assert!(
+        !is_current_user_expr(&schema_qualified_function, &accessor_registry),
+        "a schema-qualified function name is not the caller"
+    );
+    assert!(!is_current_user_expr(&other, &accessor_registry));
 }
 
 #[test]
@@ -2832,11 +2858,8 @@ CREATE TABLE odd_members(alpha text, beta text);
 
 #[test]
 fn recognize_p4_exists_without_outer_row_correlation_is_not_per_row_membership() {
-    // EXISTS (SELECT 1 FROM members WHERE user_id = current_user), with no predicate
-    // tying members to the outer row. Reading it as P4 would key the membership by
-    // `doc_id` and grant every doc the user belongs to, which is the over-grant this
-    // test was written for. It is now translated through a holder instead, which grants
-    // every row of the guarded table together, exactly as PostgreSQL does.
+    // No predicate ties the member rows to the outer row, so a per-row P4 would grant
+    // every doc the caller belongs to; the check instead keys by membership alone.
     let db = parse_schema(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
@@ -2844,13 +2867,13 @@ CREATE TABLE doc_members(doc_id UUID NOT NULL, user_id UUID NOT NULL);
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     let uncorrelated = parse_expr(
         "EXISTS (
                SELECT 1
                FROM doc_members
-               WHERE doc_members.user_id = current_user
+               WHERE doc_members.user_id = current_setting('app.user_id')
              )",
     );
     let classified = recognize_p4(
@@ -3129,13 +3152,13 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(proj
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
     let expr = parse_expr(
         "EXISTS (
                SELECT 1
                FROM projects p
                WHERE project_uuid = tasks.project_id
-                 AND p.owner_id = current_user
+                 AND p.owner_id = current_setting('app.user_id')
              )",
     );
 
@@ -3238,11 +3261,13 @@ fn is_attribute_check_recognizes_like_ilike_in_list_and_null_forms() {
         "negated IN list should not be an attribute check"
     );
 
-    // User-related columns are excluded.
+    // A user-named column is an attribute guard like any other column.
     let user_like = parse_expr("user_id LIKE '%admin%'");
-    assert!(
-        is_attribute_check(&user_like).is_none(),
-        "user-related column should not be classified as attribute"
+    assert_eq!(
+        is_attribute_check(&user_like)
+            .as_ref()
+            .map(ColumnName::as_str),
+        Some("user_id")
     );
 }
 
@@ -3258,19 +3283,19 @@ fn parse_select_panics_for_non_query_and_non_select_body() {
 #[test]
 fn pg_has_role_rejects_non_string_role_value() {
     let registry = FunctionRegistry::new();
-    let expr = parse_expr("pg_has_role(current_user, 42, 'MEMBER')");
-    assert!(recognize_pg_has_role(&expr, &registry).is_none());
+    let db = db_with_docs_and_members();
+    let expr = parse_expr("pg_has_role('app_user', 42, 'MEMBER')");
+    assert!(recognize_pg_has_role(&expr, &db, &registry).is_none());
 }
 
 #[test]
 fn pg_has_role_rejects_wrong_arg_count() {
     let registry = FunctionRegistry::new();
-    // Single arg
+    let db = db_with_docs_and_members();
     let expr = parse_expr("pg_has_role('admin')");
-    assert!(recognize_pg_has_role(&expr, &registry).is_none());
-    // Four args
-    let expr = parse_expr("pg_has_role(current_user, 'admin', 'MEMBER', 'extra')");
-    assert!(recognize_pg_has_role(&expr, &registry).is_none());
+    assert!(recognize_pg_has_role(&expr, &db, &registry).is_none());
+    let expr = parse_expr("pg_has_role('app_user', 'admin', 'MEMBER', 'extra')");
+    assert!(recognize_pg_has_role(&expr, &db, &registry).is_none());
 }
 
 #[test]
@@ -3917,15 +3942,15 @@ CREATE TABLE doc_editors(doc_id UUID, user_id UUID);
 ",
     )
     .unwrap();
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
     // IN subquery form with two FROM sources
     let expr = parse_expr(
         "id IN (
                 SELECT dm.doc_id
                 FROM doc_members dm, doc_editors de
-                WHERE dm.user_id = current_user
-                  AND de.user_id = current_user
+                WHERE dm.user_id = current_setting('app.user_id')
+                  AND de.user_id = current_setting('app.user_id')
                   AND dm.doc_id = docs.id
                   AND de.doc_id = docs.id
             )",
@@ -4245,31 +4270,31 @@ fn recognize_pg_has_role_returns_none_for_no_arg_list() {
         uses_odbc_syntax: false,
     });
     assert!(
-        recognize_pg_has_role(&func_expr, &registry).is_none(),
+        recognize_pg_has_role(&func_expr, &db_with_docs_and_members(), &registry).is_none(),
         "pg_has_role with FunctionArguments::None should return None"
     );
 }
 
-/// A `WHERE` that spells the caller in any comparison references it, a bare
-/// `current_user` references it too, and a selection without a `WHERE` references nobody.
+/// A `WHERE` that spells the caller in any comparison references it, a bare caller
+/// references it too, and a selection without a `WHERE` references nobody.
 #[test]
 fn selection_references_current_user_across_its_where_clause_spellings() {
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
     for (sql, references, note) in [
         (
-            "SELECT 1 FROM doc_members WHERE user_id IS NOT DISTINCT FROM current_user",
+            "SELECT 1 FROM doc_members WHERE user_id IS NOT DISTINCT FROM current_setting('app.user_id')",
             true,
-            "IS NOT DISTINCT FROM current_user should be detected",
+            "IS NOT DISTINCT FROM the caller should be detected",
         ),
         (
-            "SELECT 1 FROM doc_members WHERE user_id IS DISTINCT FROM current_user",
+            "SELECT 1 FROM doc_members WHERE user_id IS DISTINCT FROM current_setting('app.user_id')",
             true,
-            "IS DISTINCT FROM current_user should be detected",
+            "IS DISTINCT FROM the caller should be detected",
         ),
         (
-            "SELECT 1 FROM doc_members WHERE current_user",
+            "SELECT 1 FROM doc_members WHERE current_setting('app.user_id')",
             true,
-            "bare current_user in WHERE should be detected via catch-all",
+            "bare caller in WHERE should be detected via catch-all",
         ),
         (
             "SELECT 1 FROM doc_members",
@@ -4442,26 +4467,36 @@ fn residual_predicate_keeps_a_null_test_as_a_row_guard() {
 }
 
 #[test]
-fn a_null_test_on_the_caller_column_yields_no_literal_predicate() {
-    for sql in ["owner_id IS NULL", "owner_id IS NOT NULL"] {
-        assert!(
-            attribute_literal_predicate(&parse_expr(sql)).is_none(),
-            "`{sql}`"
-        );
+fn a_null_test_on_a_user_named_column_yields_a_null_predicate() {
+    let cases = [
+        ("owner_id IS NULL", AttributeTest::IsNull),
+        ("owner_id IS NOT NULL", AttributeTest::IsNotNull),
+    ];
+    for (sql, test) in cases {
+        let predicate = attribute_literal_predicate(&parse_expr(sql))
+            .expect("a null test on a user-named column is a row guard");
+        assert_eq!(predicate.column.as_str(), "owner_id", "`{sql}`");
+        assert_eq!(predicate.test, test, "`{sql}`");
     }
 }
 
 #[test]
-fn a_list_no_gate_may_carry_yields_no_literal_predicate() {
-    for sql in [
-        "owner_id IN ('alice', 'bob')",
-        "status = ANY (ARRAY[]::text[])",
-    ] {
-        assert!(
-            attribute_literal_predicate(&parse_expr(sql)).is_none(),
-            "`{sql}`"
-        );
-    }
+fn a_literal_list_carries_a_gate_and_an_empty_array_carries_none() {
+    let carried = attribute_literal_predicate(&parse_expr("owner_id IN ('alice', 'bob')"))
+        .expect("a literal list over a user-named column is a row guard");
+    assert_eq!(carried.column.as_str(), "owner_id");
+    assert_eq!(
+        carried.test,
+        AttributeTest::In(vec![
+            AttributeLiteral::Text("alice".to_string()),
+            AttributeLiteral::Text("bob".to_string()),
+        ])
+    );
+
+    assert!(
+        attribute_literal_predicate(&parse_expr("status = ANY (ARRAY[]::text[])")).is_none(),
+        "an empty array holds no value a gate may carry"
+    );
 }
 
 #[test]
@@ -4505,9 +4540,9 @@ fn residual_predicates_refuse_to_decide_a_pure_sql_conjunct() {
 #[test]
 fn coalesce_wrapped_ownership_classified_as_p3_confidence_b() {
     let db = db_with_docs_and_members();
-    let registry = registry_with_role_level();
+    let registry = caller_registry();
     let expr =
-        parse_expr("COALESCE(owner_id, '00000000-0000-0000-0000-000000000000') = current_user");
+        parse_expr("COALESCE(owner_id, '00000000-0000-0000-0000-000000000000') = current_setting('app.user_id')");
     let classified = recognize_p3(&expr, &db, &registry);
     assert!(
         matches!(&classified, Some(c) if matches!(&c.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id")),
@@ -4537,8 +4572,8 @@ fn nullif_wrapped_ownership_refuses() {
 #[test]
 fn coalesce_wrapped_ownership_classified_as_p3_with_the_caller_on_the_left() {
     let db = db_with_docs_and_members();
-    let registry = registry_with_role_level();
-    let expr = parse_expr("current_user = COALESCE(owner_id, '')");
+    let registry = caller_registry();
+    let expr = parse_expr("current_setting('app.user_id') = COALESCE(owner_id, '')");
     let classified = recognize_p3(&expr, &db, &registry);
     assert!(
         matches!(&classified, Some(c) if matches!(&c.pattern, PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id")),
@@ -4718,7 +4753,7 @@ fn review_membership(residual: &str) -> Expr {
                SELECT 1
                FROM paper_shares s
                WHERE s.paper_id = papers.id
-                 AND s.viewer = current_user
+                 AND s.viewer = current_setting('app.user_id')
                  AND {residual}
              )"
     ))
@@ -4728,7 +4763,7 @@ fn review_refuses(residual: &str) -> bool {
     recognize_p4(
         &review_membership(residual),
         &review_schema(),
-        &FunctionRegistry::new(),
+        &caller_registry(),
         "papers",
         &ExpansionState::new(),
     )

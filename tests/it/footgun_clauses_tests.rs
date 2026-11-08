@@ -15,8 +15,8 @@ use crate::support::footgun::{
 const SPLIT_INSERT_AND_SELECT: &str = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, author_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (author_id = current_user);
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (author_id = current_setting('app.user_id'));
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
 
 /// A `docs` the owner reads by `SELECT`, with an `UPDATE` whose only stored clause is
@@ -24,8 +24,8 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
 const CLAUSELESS_UPDATE: &str = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_setting('app.user_id'));
 ";
 
 /// Returning a table column, or naming an `ON CONFLICT` target, also checks the
@@ -60,8 +60,8 @@ fn readback_relation_is_absent_when_inserting_implies_reading() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_user)
-    WITH CHECK (owner_id = current_user);
+CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_setting('app.user_id'))
+    WITH CHECK (owner_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -85,8 +85,8 @@ fn an_upsert_requires_the_update_policies_as_well_as_the_insert() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -115,7 +115,7 @@ fn upsert_relation_is_absent_where_no_row_can_be_inserted() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -143,10 +143,10 @@ fn updating_and_deleting_a_row_requires_being_able_to_select_it() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (editor_id = current_user);
-CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_user);
-CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id'));
+CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id'));
+CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -185,7 +185,7 @@ fn without_a_select_policy_no_row_can_be_updated_or_deleted() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, editor_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_user);
+CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -316,7 +316,7 @@ fn a_locking_read_needs_the_rows_an_update_may_touch() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (TRUE);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user) WITH CHECK (TRUE);
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id')) WITH CHECK (TRUE);
 ",
     );
     let model = translator(ConfidenceLevel::A)
@@ -384,7 +384,7 @@ fn a_locking_read_is_answered_even_where_the_update_clauses_agree() {
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (TRUE);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user);
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id'));
 ",
     );
     let model = translator(ConfidenceLevel::A)
@@ -438,7 +438,7 @@ fn a_clauseless_policy_beside_a_working_one_is_not_reported_as_a_denial() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_bare ON docs FOR SELECT;
 ",
     );
@@ -478,9 +478,9 @@ fn a_restrictive_update_check_narrows_the_write_but_not_the_lock() {
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user);
-CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE WITH CHECK (reviewer_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE WITH CHECK (reviewer_id = current_setting('app.user_id'));
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -520,7 +520,7 @@ fn a_clauseless_policy_is_found_through_any_spelling_of_its_table() {
         r#"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_bare ON "docs" FOR SELECT;
 "#,
     );
@@ -552,8 +552,8 @@ CREATE POLICY docs_bare ON "docs" FOR SELECT;
 fn a_blanket_update_answers_through_its_own_relation() {
     let schema = "CREATE TABLE notes(id UUID PRIMARY KEY, reader_id TEXT, writer_id TEXT);\n\
                   ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY notes_read ON notes FOR SELECT USING (reader_id = current_user);\n\
-                  CREATE POLICY notes_write ON notes FOR UPDATE USING (writer_id = current_user);\n";
+                  CREATE POLICY notes_read ON notes FOR SELECT USING (reader_id = current_setting('app.user_id'));\n\
+                  CREATE POLICY notes_write ON notes FOR UPDATE USING (writer_id = current_setting('app.user_id'));\n";
     let (dsl, _) = translation(schema);
 
     assert_eq!(
@@ -575,7 +575,7 @@ fn a_blanket_update_answers_through_its_own_relation() {
 fn every_table_defines_the_blanket_update_relation() {
     let schema = "CREATE TABLE notes(id UUID PRIMARY KEY, owner_id TEXT);\n\
                   ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY notes_read ON notes FOR SELECT USING (owner_id = current_user);\n";
+                  CREATE POLICY notes_read ON notes FOR SELECT USING (owner_id = current_setting('app.user_id'));\n";
     let (dsl, _) = translation(schema);
 
     assert_eq!(
@@ -599,15 +599,15 @@ fn every_table_defines_the_blanket_update_relation() {
 fn an_illegal_clause_refuses_the_policy() {
     let cases = [
         (
-            "CREATE POLICY p ON docs FOR INSERT USING (owner_id = current_user);",
+            "CREATE POLICY p ON docs FOR INSERT USING (owner_id = current_setting('app.user_id'));",
             "only WITH CHECK expression allowed for INSERT",
         ),
         (
-            "CREATE POLICY p ON docs FOR SELECT WITH CHECK (owner_id = current_user);",
+            "CREATE POLICY p ON docs FOR SELECT WITH CHECK (owner_id = current_setting('app.user_id'));",
             "WITH CHECK cannot be applied to SELECT or DELETE",
         ),
         (
-            "CREATE POLICY p ON docs FOR DELETE WITH CHECK (owner_id = current_user);",
+            "CREATE POLICY p ON docs FOR DELETE WITH CHECK (owner_id = current_setting('app.user_id'));",
             "WITH CHECK cannot be applied to SELECT or DELETE",
         ),
     ];

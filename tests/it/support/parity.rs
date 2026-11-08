@@ -193,6 +193,9 @@ pub(crate) struct ParityCase {
     /// Settings the deployment declares beside the suite's callers, as a fixture's
     /// `deployment.json` holds them.
     pub(crate) settings: Vec<SessionSetting>,
+    /// The one role the deployment acts as, where the case names its own in place of the
+    /// suite's.
+    pub(crate) acting_role: Option<String>,
     /// Tables whose rows are not read through the table itself.
     ///
     /// A partition with row-level security off is unfiltered when it is queried directly,
@@ -247,6 +250,7 @@ impl ParityCase {
             mutations: BTreeMap::new(),
             registry_json: None,
             settings: Vec::new(),
+            acting_role: None,
             not_read_directly: Vec::new(),
             loading_from_rows: false,
             future: None,
@@ -311,6 +315,12 @@ impl ParityCase {
         settings: impl IntoIterator<Item = SessionSetting>,
     ) -> Self {
         self.settings = settings.into_iter().collect();
+        self
+    }
+
+    /// The same case, its deployment acting as `role` alone.
+    pub(crate) fn acting_as(mut self, role: &str) -> Self {
+        self.acting_role = Some(role.to_string());
         self
     }
 
@@ -1051,7 +1061,13 @@ fn plan_case(
     let (classified, db, registry) = super::classify_db(
         db,
         case.registry_json.as_deref(),
-        &super::deployment::caller_deployment_with(case.settings.iter().cloned()),
+        &super::deployment::caller_deployment_acting_as(
+            &[case
+                .acting_role
+                .as_deref()
+                .unwrap_or(super::deployment::ACTING_ROLE)],
+            case.settings.iter().cloned(),
+        ),
     );
     let planned = super::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let disclosed: Vec<Disclosure> = planned

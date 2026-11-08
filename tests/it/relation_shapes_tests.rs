@@ -73,7 +73,7 @@ CREATE TABLE owner_grants (granted_owner_id TEXT, grantee_owner_id TEXT, role_id
 CREATE FUNCTION get_owner_role(a TEXT, b TEXT) RETURNS INT LANGUAGE sql STABLE
     AS 'SELECT 1';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (get_owner_role(current_user, id) >= 2);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (get_owner_role(current_setting('app.user_id', true), id) >= 2);
 ";
 
 const GRANT_REGISTRY: &str = r#"{
@@ -567,7 +567,7 @@ CREATE FUNCTION get_owner_role(a TEXT, b TEXT) RETURNS INT LANGUAGE sql STABLE
     AS 'SELECT 1';
 ALTER TABLE readings ENABLE ROW LEVEL SECURITY;
 CREATE POLICY readings_sel ON readings FOR SELECT
-    USING (get_owner_role(current_user, owner_id) >= 2);
+    USING (get_owner_role(current_setting('app.user_id', true), owner_id) >= 2);
 ";
 
 /// A shape naming a row of the object's own table has to name the whole row.
@@ -721,75 +721,6 @@ fn every_row_derived_shape_reads_the_row_it_names() {
         "every row-derived shape must read its row, found {}:\n{}",
         offenders.len(),
         offenders.join("\n")
-    );
-}
-
-/// A fact the policy decides is reported, and reported as nobody's row.
-///
-/// The consumer needs it, since nothing else tells it to write the roles a scope admits, so
-/// silence is the wrong answer. It also must not arrive as a row's own record: that is what
-/// makes a delete withdraw it and deny every surviving row. Read beside the pointer on the
-/// same model, which is the row-derived neighbour it used to be confused with.
-#[test]
-fn a_constant_fact_is_reported_without_claiming_a_row_decides_it() {
-    let (classified, db, registry) = support::try_load_fixture_classified("pg_role_gate");
-    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-    let shapes = planned.translation().relations();
-
-    let roles = entry(shapes, PG_ROLE_SCOPE_TYPE, "roles");
-    let [shape] = roles.shapes.as_slice() else {
-        panic!(
-            "one shape carries the roles a scope admits, got {:?}",
-            roles.shapes
-        );
-    };
-    assert!(
-        shape.tables.is_empty(),
-        "a constant reads no table, so no change stream can deliver it: {:?}",
-        shape.tables
-    );
-    assert!(
-        matches!(&shape.derivation, RecordDerivation::Constant { .. }),
-        "the roles follow from the policy, got {:?}",
-        shape.derivation
-    );
-    assert!(
-        !roles.from_one_row && roles.decision.is_none(),
-        "no row decides a constant, so the surface must not say one does"
-    );
-
-    // The pointer beside it is the row-derived neighbour, so this is not a model where
-    // everything reads as undecidable.
-    let pointer = shapes
-        .iter()
-        .find(|candidate| {
-            candidate.type_name.as_str() == "docs"
-                && candidate.relation.as_str().starts_with("scope_")
-        })
-        .expect("every row points at the scope judging it");
-    let [pointer_shape] = pointer.shapes.as_slice() else {
-        panic!(
-            "one shape points the row at its scope, got {:?}",
-            pointer.shapes
-        );
-    };
-    let RecordDerivation::FromRow {
-        table, template, ..
-    } = &pointer_shape.derivation
-    else {
-        panic!(
-            "the pointer is a row's own record, got {:?}",
-            pointer_shape.derivation
-        );
-    };
-    assert_eq!(table.to_string(), "docs");
-    assert!(
-        template
-            .object_key
-            .parts()
-            .iter()
-            .any(|part| matches!(part, ValueSource::Column(_))),
-        "the pointer names the row it is about"
     );
 }
 
@@ -1439,7 +1370,7 @@ CREATE TABLE owner_grants (granted_owner_id TEXT, grantee_owner_id TEXT, role_id
 CREATE FUNCTION get_owner_role(a TEXT, b TEXT) RETURNS INT LANGUAGE sql STABLE
     AS 'SELECT 1';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (get_owner_role(current_user, id) >= 2);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (get_owner_role(current_setting('app.user_id', true), id) >= 2);
 ";
 
 /// The row points at the owner the policy named, never at a column found by its name.
@@ -2337,7 +2268,7 @@ const RESTRICTIVE_DROP: &str = "
 CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT USING (is_public);
 ";
 
@@ -3060,7 +2991,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_p ON docs FOR SELECT USING (
     EXISTS (
         SELECT 1 FROM doc_shares s
-        WHERE s.doc_id = docs.id AND s.user_id = current_user AND s.expires_at > now()
+        WHERE s.doc_id = docs.id AND s.user_id = current_setting('app.user_id', true) AND s.expires_at > now()
     )
 );
 ";
@@ -3639,7 +3570,7 @@ ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
 CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (
   SELECT 1 FROM paper_shares s
   WHERE s.paper_id = papers.id
-    AND s.viewer = current_user
+    AND s.viewer = current_setting('app.user_id', true)
     AND s.weight > (SELECT max(cutoff) FROM tiers)));
 ";
 
@@ -3798,7 +3729,7 @@ ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
 CREATE POLICY papers_p ON papers FOR SELECT USING (EXISTS (
   SELECT 1 FROM paper_shares s
   WHERE s.paper_id = papers.id
-    AND s.viewer = current_user
+    AND s.viewer = current_setting('app.user_id', true)
     AND s.expires_at > now()
     AND s.weight > (SELECT max(cutoff) FROM tiers)));
 ";
@@ -3922,5 +3853,80 @@ CREATE POLICY docs_public ON docs FOR SELECT USING (is_public = true);
     assert!(
         entry(&shapes, "docs", "can_select").from_one_row,
         "the read is the flag alone"
+    );
+}
+
+/// A fact the policy decides is reported, and reported as nobody's row.
+///
+/// The consumer needs it, since nothing else tells it to write the roles a scope admits, so
+/// silence is the wrong answer. It also must not arrive as a row's own record: that is what
+/// makes a delete withdraw it and deny every surviving row. Read beside the pointer on the
+/// same model, which is the row-derived neighbour it used to be confused with.
+#[test]
+fn a_constant_fact_is_reported_without_claiming_a_row_decides_it() {
+    let (classified, db, registry) = support::classify_sql(
+        "CREATE ROLE analyst;
+         CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT);
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY docs_select ON docs FOR SELECT TO analyst USING (true);",
+        None,
+    );
+    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    let shapes = planned.translation().relations();
+
+    let roles = entry(shapes, PG_ROLE_SCOPE_TYPE, "roles");
+    let [shape] = roles.shapes.as_slice() else {
+        panic!(
+            "one shape carries the roles a scope admits, got {:?}",
+            roles.shapes
+        );
+    };
+    assert!(
+        shape.tables.is_empty(),
+        "a constant reads no table, so no change stream can deliver it: {:?}",
+        shape.tables
+    );
+    assert!(
+        matches!(&shape.derivation, RecordDerivation::Constant { .. }),
+        "the roles follow from the policy, got {:?}",
+        shape.derivation
+    );
+    assert!(
+        !roles.from_one_row && roles.decision.is_none(),
+        "no row decides a constant, so the surface must not say one does"
+    );
+
+    // The pointer beside it is the row-derived neighbour, so this is not a model where
+    // everything reads as undecidable.
+    let pointer = shapes
+        .iter()
+        .find(|candidate| {
+            candidate.type_name.as_str() == "docs"
+                && candidate.relation.as_str().starts_with("scope_")
+        })
+        .expect("every row points at the scope judging it");
+    let [pointer_shape] = pointer.shapes.as_slice() else {
+        panic!(
+            "one shape points the row at its scope, got {:?}",
+            pointer.shapes
+        );
+    };
+    let RecordDerivation::FromRow {
+        table, template, ..
+    } = &pointer_shape.derivation
+    else {
+        panic!(
+            "the pointer is a row's own record, got {:?}",
+            pointer_shape.derivation
+        );
+    };
+    assert_eq!(table.to_string(), "docs");
+    assert!(
+        template
+            .object_key
+            .parts()
+            .iter()
+            .any(|part| matches!(part, ValueSource::Column(_))),
+        "the pointer names the row it is about"
     );
 }

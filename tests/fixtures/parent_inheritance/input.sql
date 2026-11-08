@@ -10,12 +10,12 @@ CREATE TABLE tasks (
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_owner ON projects FOR SELECT TO PUBLIC
-  USING (owner_id = current_user);
+  USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY tasks_inherit_project ON tasks FOR SELECT TO PUBLIC USING (
   EXISTS (
     SELECT 1
     FROM projects p
     WHERE p.id = tasks.project_id
-      AND p.owner_id = current_user
+      AND p.owner_id = current_setting('app.user_id', true)
   )
 );

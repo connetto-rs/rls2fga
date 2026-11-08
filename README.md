@@ -129,9 +129,9 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P8 | `Composite` | `expr OR expr`, `expr AND expr` | Union, intersection |
 | P9 | `AttributeCondition` | `status IN ('active', 'pending')`, `team_id IS NULL`, `expires_at > now()` | A row-decided value guards the tuple query, a clock-decided one becomes a condition |
 | P10 | `ConstantBool` | `TRUE`, `FALSE` | `[user:*]`, or no access |
-| P11 | `ArrayMembership` | `current_user = ANY (editors)` | Relation named after the column, one tuple per element |
-| P12 | `JsonbFieldOwnership` | `data ->> 'owner' = current_user` | `owner: [user]`, read from the field |
-| P13 | `UncorrelatedMembership` | `EXISTS (SELECT 1 FROM staff WHERE user_id = current_user)` | One holder object with source-specific membership relations |
+| P11 | `ArrayMembership` | `current_setting('app.user_id') = ANY (editors)` | Relation named after the column, one tuple per element |
+| P12 | `JsonbFieldOwnership` | `data ->> 'owner' = current_user_id()` | `owner: [user]`, read from the field |
+| P13 | `UncorrelatedMembership` | `EXISTS (SELECT 1 FROM staff WHERE user_id = current_user_id())` | One holder object with source-specific membership relations |
 | P14 | `RowValueInCallerSet` | `owner = ANY(string_to_array(current_setting('app.subjects', true), ','))` | A gate asking whether the caller's list holds the row's value |
 | P15 | `RowValueEqualsCallerScalar` | `tenant_id = current_setting('app.tenant_id')::uuid` | The same gate, equality against the caller's value |
 | P16 | `ConstantInCallerSet` | `'admin' = ANY(string_to_array(current_setting('app.roles', true), ','))` | A test of the caller's list, held once per table, see below |
@@ -143,6 +143,8 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | - | `Unknown` | Anything else | Denied, with a TODO, unless an oracle classifies it |
 
 Blocklist subqueries must be correlated caller-identity memberships over tables with no own or inherited row-level security. `NOT IN` and `<> ALL` require a provably non-null projected column. A negative-only `RESTRICTIVE` clause subtracts from the action's existing grants, while standalone permissive negation and caller-set blocklists are refused.
+
+`current_user`, `current_role` and `user` name the role a request acts as, and `session_user` the role it logs in as, so each reads as the name the deployment gives that role and never as the caller. A deployment acting as several roles has no one name for the first three, so a policy reading them is refused. `pg_has_role` is decided by the roles and grants the schema declares, before any row is read.
 
 ## Gates that read only the request
 

@@ -5,8 +5,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
-    body_setting_key, body_single_projection, normalize_setting_key, renamed_caller_body,
-    FunctionSemantic,
+    body_returns_acting_role, body_setting_key, body_single_projection, normalize_setting_key,
+    renamed_caller_body, FunctionSemantic,
 };
 use crate::parser::names::stored_relation_name;
 use crate::parser::sql_parser::{
@@ -601,27 +601,19 @@ impl FunctionRegistry {
                 .return_type_name(db)
                 .map(|name| name.to_string())
                 .unwrap_or_default();
-            let security = function.security_mode();
             if let Some(semantic) = FunctionSemantic::analyze_body_with_sources(
                 body,
                 &return_type,
                 &language,
-                &security,
                 &self.sources,
             ) {
                 self.register_target_if_absent(&target, &semantic);
             } else if self.get_target(&target).is_none()
-                && FunctionSemantic::analyze_body_with_sources(
-                    body,
-                    &return_type,
-                    &language,
-                    &FunctionSecurity::Invoker,
-                    &self.sources,
-                )
-                .is_some()
+                && matches!(function.security_mode(), FunctionSecurity::Definer)
+                && body_returns_acting_role(body, &return_type, &language)
             {
-                // The same body as `SECURITY INVOKER` is an accessor, so the security
-                // mode is what stops it identifying the caller.
+                // Inside a definer body the acting role is the owner, the same name for
+                // every caller.
                 let target_key = self.target_key(&target);
                 self.owner_bound_accessors
                     .entry(target_key)

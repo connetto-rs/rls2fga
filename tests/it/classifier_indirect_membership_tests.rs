@@ -148,8 +148,17 @@ fn refusals_do_not_match_p19() {
 }
 
 #[test]
-fn native_caller_membership_uses_the_same_two_hop_shape() {
-    let c = classify(&NESTED_ROLE.replace("current_setting('app.user_id', true)", "current_user"));
+fn another_caller_setting_keeps_the_same_two_hop_shape() {
+    let predicate = NESTED_ROLE.replace(
+        "current_setting('app.user_id', true)",
+        "current_setting('app.current_user_id', true)",
+    );
+    let c = classify_in_attrs(
+        "orders",
+        SCHEMA,
+        &predicate,
+        [deployment::caller("app.current_user_id")],
+    );
     assert_eq!(p19(&c).memberships[0].user_column.as_str(), "member_id");
 }
 

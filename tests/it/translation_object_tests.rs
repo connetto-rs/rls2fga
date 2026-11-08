@@ -17,8 +17,9 @@ use crate::support::footgun::{db_of, translator};
 const CLEAN: &str = "CREATE TABLE users(id UUID PRIMARY KEY);\n\
                      CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID NOT NULL REFERENCES users(id));\n\
                      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-                     CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_user) \
-                     WITH CHECK (owner_id = current_user);\n";
+                     CREATE POLICY docs_all ON docs FOR ALL \
+                     USING (owner_id = current_setting('app.user_id', true)) \
+                     WITH CHECK (owner_id = current_setting('app.user_id', true));\n";
 
 /// A bit test this crate has no translation for.
 const REFUSED: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
@@ -31,7 +32,8 @@ const REFUSED: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, bit
 const RESTRICTIVE_BELOW_THRESHOLD: &str =
     "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);\n\
      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-     CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);\n\
+     CREATE POLICY docs_sel ON docs FOR SELECT \
+     USING (owner_id = current_setting('app.user_id', true));\n\
      CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT USING (is_public);\n";
 
 /// An expression nobody classified means the model denies what the database grants, so
@@ -251,7 +253,7 @@ fn an_attribute_left_to_runtime_enforcement_refuses() {
         "CREATE TABLE docs(id INT PRIMARY KEY, owner_id TEXT, status TEXT);
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
          CREATE POLICY docs_read ON docs FOR SELECT
-             USING (owner_id = current_user AND status LIKE 'pub%');",
+             USING (owner_id = current_setting('app.user_id', true) AND status LIKE 'pub%');",
     );
     let translation = translator(ConfidenceLevel::C)
         .translate(&db)
@@ -311,7 +313,9 @@ fn operator_requirements_alone_do_not_refuse() {
         "CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
          ALTER TABLE docs FORCE ROW LEVEL SECURITY;
-         CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_user) WITH CHECK (owner_id = current_user);"
+         CREATE POLICY docs_all ON docs FOR ALL \
+         USING (owner_id = current_setting('app.user_id', true)) \
+         WITH CHECK (owner_id = current_setting('app.user_id', true));",
     );
     let translation = translator(ConfidenceLevel::B)
         .translate(&db)

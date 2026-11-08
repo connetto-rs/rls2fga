@@ -141,7 +141,7 @@ fn a_policy_expression_altered_after_creation_is_the_one_translated() {
     let sql = "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ALTER POLICY docs_sel ON docs USING (FALSE);
 ";
     let db = parse_schema(sql).expect("an altered policy no longer refuses the schema");
@@ -164,7 +164,7 @@ fn renaming_a_policy_is_still_accepted() {
     let sql = "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ALTER POLICY docs_sel ON docs RENAME TO docs_select;
 ";
     parse_schema(sql).expect("a rename does not change the expression");
@@ -178,7 +178,7 @@ fn a_grant_naming_a_role_the_schema_does_not_create_is_accepted() {
     const SCHEMA: &str = "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";
     for dcl in [
         "GRANT SELECT ON docs TO app;",
@@ -391,7 +391,9 @@ ALTER TABLE ONLY doc_members ADD CONSTRAINT doc_members_pkey PRIMARY KEY (id);
 ALTER TABLE ONLY doc_members ADD CONSTRAINT doc_members_doc_id_fkey FOREIGN KEY (doc_id) REFERENCES docs(id);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT
-  USING (EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_user));
+  USING (EXISTS (
+    SELECT 1 FROM doc_members m
+    WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ",
     );
     let translation = support::deployment::translator_builder()

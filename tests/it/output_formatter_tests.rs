@@ -27,8 +27,8 @@ fn formatter_report_discloses_policies_below_min_confidence() {
         r"
 CREATE TABLE docs(id uuid primary key, owner_id uuid);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_owner ON docs FOR SELECT USING (owner_id = current_user);
-CREATE POLICY p_unknown ON docs FOR SELECT USING (owner_id IS NULL);
+CREATE POLICY p_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+CREATE POLICY p_unknown ON docs FOR SELECT USING (mystery_auth(owner_id));
 ",
         None,
     );
