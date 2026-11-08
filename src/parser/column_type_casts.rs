@@ -93,10 +93,18 @@ pub(crate) fn without_column_type_casts<DB: DatabaseLike>(
     }
     let walk = VisitMut::visit(&mut query, &mut Uncast { marked: &marked });
     debug_assert!(walk.is_continue(), "the rewrite never breaks");
-    match *query.body {
-        SetExpr::Select(select) => select.selection.unwrap_or_else(|| clause.clone()),
-        _ => clause.clone(),
-    }
+    let mut rewritten = Expr::Value(Value::Null.with_empty_span());
+    let walk = VisitMut::visit(
+        &mut query,
+        &mut Restore {
+            target: &mut rewritten,
+        },
+    );
+    debug_assert!(
+        walk.is_break(),
+        "the clause is the wrapper query's first expression"
+    );
+    rewritten
 }
 
 /// The type a quoted literal is cast to once, when it is a date or timestamp type.
@@ -303,5 +311,20 @@ impl VisitorMut for Uncast<'_> {
             *expr = peel_noting_casts(expr, |_| {}).clone();
         }
         ControlFlow::Continue(())
+    }
+}
+
+/// Swaps `target` with the first expression a walk meets, which in the wrapper query is
+/// its clause, and stops.
+struct Restore<'t> {
+    target: &'t mut Expr,
+}
+
+impl VisitorMut for Restore<'_> {
+    type Break = ();
+
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
+        core::mem::swap(self.target, expr);
+        ControlFlow::Break(())
     }
 }

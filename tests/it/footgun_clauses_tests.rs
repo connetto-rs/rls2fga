@@ -753,6 +753,49 @@ fn a_restrictive_policy_whose_literal_cannot_be_read_denies() {
     );
 }
 
+/// A `WITH CHECK` of unknown value refuses the new rows it judges, while the readable `USING`
+/// beside it still grants reads.
+#[test]
+fn a_check_whose_literal_cannot_be_read_closes_only_the_writes_it_judges() {
+    let db = db_of(&format!(
+        "{UNREADABLE_LITERAL_TABLE}\
+         CREATE POLICY p ON docs USING (owner_id = current_user)
+           WITH CHECK (owner_id = current_user AND expires > '2026-01-01 09:00');"
+    ));
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = outputs.model();
+
+    assert!(
+        !relation_denies(&dsl, "docs", "can_select"),
+        "the readable USING still grants reads:\n{dsl}"
+    );
+    for action in ["can_insert", "can_update"] {
+        assert!(
+            relation_denies(&dsl, "docs", action),
+            "a check of unknown value admits no new row, {action}:\n{dsl}"
+        );
+    }
+    let expected = db
+        .policies()
+        .next()
+        .expect("the schema declares p")
+        .check_expression(&db)
+        .expect_err("the literal cannot be read")
+        .to_string();
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::ExpressionRefused { policy, reason }
+                if policy == "p" && *reason == expected
+        )),
+        "the refusal must name the check's literal, got: {:#?}",
+        outputs.notes()
+    );
+}
+
 /// A restrictive `FOR ALL` barrier storing no `WITH CHECK` checks the new row with its
 /// `USING`, so a `USING` the threshold drops still closes inserts.
 #[test]

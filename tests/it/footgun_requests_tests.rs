@@ -1551,6 +1551,7 @@ fn a_literal_cast_to_its_columns_own_type_translates() {
     for (guard, stored) in [
         ("'2026-01-01' < day_on", "'2026-01-01'"),
         ("day_on > '2026-01-01'", "'2026-01-01'"),
+        ("(day_on) > '2026-01-01'", "'2026-01-01'"),
         ("starts_on > '2026-01-01 09:00'", "'2026-01-01 09:00:00'"),
         (
             "starts_on > '2026-01-01 09:00'::timestamp",
@@ -1585,19 +1586,23 @@ fn a_literal_cast_to_its_columns_own_type_translates() {
             "`{guard}` is stored as {stored}, so its tuples must read it:\n{tuples}"
         );
     }
-    // `BETWEEN` grades below the bar whatever its operands, so only its reading is checked.
-    let report = translator(ConfidenceLevel::B)
-        .translate(&db_of(&format!(
-            "{TEMPORAL_GUARDED}CREATE POLICY p ON docs FOR SELECT USING \
-             (expires_at BETWEEN '2026-01-01 00:00:00+00' AND '2026-02-01 00:00:00+00');\n"
-        )))
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .report();
-    assert!(
-        !report.contains("is cast to"),
-        "the bounds compare as the column's own type:\n{report}"
-    );
+    // These grade below the bar whatever their operands, so only their reading is checked.
+    for guard in [
+        "expires_at BETWEEN '2026-01-01 00:00:00+00' AND '2026-02-01 00:00:00+00'",
+        "day_on IS DISTINCT FROM '2026-01-01'",
+    ] {
+        let report = translator(ConfidenceLevel::B)
+            .translate(&db_of(&format!(
+                "{TEMPORAL_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"
+            )))
+            .expect("translation should plan")
+            .outputs_accepting_gaps()
+            .report();
+        assert!(
+            !report.contains("is cast to"),
+            "`{guard}` compares as the column's own type:\n{report}"
+        );
+    }
 }
 
 /// A literal of another date or time type is converted where `PostgreSQL` compares it, and
