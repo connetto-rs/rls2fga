@@ -1997,6 +1997,19 @@ fn a_cycle_between_relations_implies_nothing() {
     ));
 }
 
+/// A userset subject names objects of its type, so a walk through it resolves to that type.
+#[test]
+fn a_userset_subject_resolves_to_the_type_of_the_objects_it_names() {
+    let subject = DirectSubject::Userset {
+        type_name: TypeName::canonicalized("pg_role"),
+        relation: RelationName::canonicalized("usage"),
+    };
+    assert_eq!(
+        subject.resolved_type_name(),
+        Some(&TypeName::canonicalized("pg_role"))
+    );
+}
+
 /// The walk reaches a target type through a conditional subject exactly as through a
 /// plain one: the condition restricts which tuples exist, not which type they name.
 #[test]
