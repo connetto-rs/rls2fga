@@ -213,6 +213,95 @@ fn an_owning_acting_role_skips_the_policies_only_without_force() {
     assert_eq!(forced.model(), kinds("").model());
 }
 
+/// A superuser acting role skips every policy, and the report says why.
+#[test]
+fn a_superuser_acting_role_skips_the_policies() {
+    let outputs = acting_as(&["chief"], "CREATE ROLE chief SUPERUSER;");
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::ActingRoleExempt { role, reason, .. }
+                if role == "chief" && reason == "is a superuser"
+        )),
+        "{:#?}",
+        outputs.notes()
+    );
+    assert_eq!(
+        relation_definition(&outputs.model(), "docs", "can_select").as_deref(),
+        Some("acting_chief from request_gate")
+    );
+}
+
+/// An acting role that owns the membership table reads all of it, even where no read
+/// policy reaches the role.
+#[test]
+fn a_membership_table_its_acting_role_owns_is_read_whole() {
+    let owned = format!(
+        "{}ALTER TABLE members OWNER TO authenticated;",
+        membership("support_staff")
+    );
+    let model = acting_as(&["authenticated"], &owned).model();
+    let can_select =
+        relation_definition(&model, "docs", "can_select").expect("docs keeps can_select");
+    assert!(can_select.contains("member"), "{model}");
+}
+
+/// A membership table holding `members_open` and the barrier `barrier`.
+fn barred_membership(barrier: &str) -> String {
+    format!(
+        "CREATE TABLE members (doc_id TEXT NOT NULL, user_id TEXT NOT NULL, since TIMESTAMPTZ, PRIMARY KEY (doc_id, user_id));
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY members_open ON members FOR SELECT USING (true);
+{barrier}
+CREATE POLICY shared ON docs FOR SELECT
+  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
+"
+    )
+}
+
+/// A membership barrier whose literal cannot be read may admit no row, so the membership
+/// grants nothing.
+#[test]
+fn an_unreadable_membership_barrier_grants_nothing() {
+    let outputs = acting_as(
+        &["authenticated"],
+        &barred_membership(
+            "CREATE POLICY members_since ON members AS RESTRICTIVE FOR SELECT USING (since > '2026-01-01 09:00');",
+        ),
+    );
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::MembershipTableGrantsNoReads { policy, .. } if policy == "shared"
+        )),
+        "{:#?}",
+        outputs.notes()
+    );
+}
+
+/// A row-dependent barrier keeps the membership guarded whatever request-only barrier
+/// stands beside it.
+#[test]
+fn a_request_barrier_beside_a_row_barrier_stays_guarded() {
+    let outputs = acting_as(
+        &["authenticated"],
+        &barred_membership(
+            "CREATE POLICY a_mine ON members AS RESTRICTIVE FOR SELECT
+  USING (user_id = current_setting('app.user_id', true));
+CREATE POLICY b_cap ON members AS RESTRICTIVE FOR SELECT
+  USING (current_setting('app.read_caps', true) = 'members:read');",
+        ),
+    );
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::MembershipTableGuarded { policy, .. } if policy == "shared"
+        )),
+        "{:#?}",
+        outputs.notes()
+    );
+}
+
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 mod parity {
     use rls2fga::types::ActionStatement;
