@@ -221,7 +221,7 @@ fn a_superuser_acting_role_skips_the_policies() {
         outputs.notes().iter().any(|note| matches!(
             note,
             TranslationNote::ActingRoleExempt { role, reason, .. }
-                if role == "chief" && reason == "is a superuser"
+                if role == "chief" && reason == "the role is a superuser"
         )),
         "{:#?}",
         outputs.notes()

@@ -286,7 +286,7 @@ pub enum TranslationNote {
         table: TableId,
         /// The acting role.
         role: String,
-        /// Why it is exempt.
+        /// Why it is exempt, as a clause naming the role and the table.
         reason: String,
     },
     /// No permissive policy covers these commands, so the database denies them too.
@@ -728,7 +728,7 @@ impl fmt::Display for TranslationNote {
                 reason,
             } => write!(
                 f,
-                "Acting role '{role}' {reason}, so row security on '{table}' skips it and the \
+                "Row security on '{table}' skips acting role '{role}' because {reason}, so the \
                  model grants it every row"
             ),
             Self::NoPermissivePolicy { table, commands } => write!(

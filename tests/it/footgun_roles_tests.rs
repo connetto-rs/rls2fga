@@ -357,7 +357,7 @@ fn a_role_that_bypasses_row_level_security_is_reported() {
     let exempt: Vec<&TranslationNote> = outputs
         .notes()
         .iter()
-        .filter(|note| matches!(note, TranslationNote::ActingRoleExempt { reason, .. } if reason == "has BYPASSRLS"))
+        .filter(|note| matches!(note, TranslationNote::ActingRoleExempt { reason, .. } if reason == "the role has BYPASSRLS"))
         .collect();
     assert_eq!(
         exempt.len(),

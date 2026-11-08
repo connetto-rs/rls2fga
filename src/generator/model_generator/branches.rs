@@ -163,19 +163,6 @@ impl Asked {
     }
 }
 
-/// Why an exempt role skips the table, as a note says it.
-fn exemption_reason(exemption: RowSecurityExemption) -> &'static str {
-    match exemption {
-        RowSecurityExemption::Disabled => "meets no row level security",
-        RowSecurityExemption::Superuser => "is a superuser",
-        RowSecurityExemption::BypassRls => "has BYPASSRLS",
-        RowSecurityExemption::Owner => {
-            "owns the table, or inherits from its owner, and the table does not FORCE row \
-             level security"
-        }
-    }
-}
-
 /// The SQL commands these targets feed, for a note.
 fn commands_of(targets: &BTreeSet<ActionTarget>) -> Vec<String> {
     commands_fed_by(&targets.iter().copied().collect::<Vec<_>>())
@@ -282,7 +269,7 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
         notes.push(TranslationNote::ActingRoleExempt {
             table: source_table.clone(),
             role: branch.name().to_string(),
-            reason: exemption_reason(exemption).to_string(),
+            reason: exemption.to_string(),
         });
     }
     for (relation, targets) in recursion {
