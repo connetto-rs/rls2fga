@@ -86,7 +86,8 @@ fn walk_policies<DB: DatabaseLike>(
         if !policy_covers_reads(policy) {
             continue;
         }
-        let Some(using) = policy.using_expression(db) else {
+        // A clause whose literal cannot be read proves nothing either way, like an absent one.
+        let Ok(Some(using)) = policy.using_expression(db) else {
             row_independent = false;
             continue;
         };

@@ -3,10 +3,12 @@ use crate::no_std_prelude::*;
 use alloc::collections::BTreeSet;
 use core::fmt;
 use serde::{Deserialize, Serialize};
+use sql_traits::errors::LookupError;
 use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr, Owner};
 
 use crate::classifier::function_registry::DeclaredSource;
 use crate::clock::ClockThreshold;
+use crate::parser::column_type_casts::without_column_type_casts;
 use crate::parser::names::{stored_ident_name, table_identity};
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
 pub(crate) use crate::types::{
@@ -733,7 +735,25 @@ pub(crate) fn policy_covers_reads<P: PolicyLike>(policy: &P) -> bool {
 pub fn policy_grants_select<P: PolicyLike>(policy: &P, db: &P::DB) -> bool {
     derive_policy_mode(policy) == PolicyMode::Permissive
         && policy_covers_reads(policy)
-        && policy.using_expression(db).is_some()
+        && using_shape(policy, db).is_some()
+}
+
+/// The stored `USING` clause for a walk of its relations, subqueries and calls, read or not.
+pub(crate) fn using_shape<'p, P: PolicyLike>(policy: &'p P, db: &'p P::DB) -> Option<&'p Expr> {
+    policy
+        .using_clause(db)
+        .ok()
+        .flatten()
+        .map(|clause| clause.expression())
+}
+
+/// The stored `WITH CHECK` clause for a walk of its shape, as [`using_shape`].
+pub(crate) fn check_shape<'p, P: PolicyLike>(policy: &'p P, db: &'p P::DB) -> Option<&'p Expr> {
+    policy
+        .check_clause(db)
+        .ok()
+        .flatten()
+        .map(|clause| clause.expression())
 }
 
 /// Roles in `TO (...)` that constrain policy applicability, named and resolvable.
@@ -780,6 +800,54 @@ fn split_scoped_roles<P: PolicyLike>(policy: &P, db: &P::DB) -> (Vec<String>, Ve
     ddl_time.sort();
     ddl_time.dedup();
     (named, ddl_time)
+}
+
+/// A clause a policy stores, as the catalog reads it.
+#[derive(Debug, Clone)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the readable clause is the common case, and boxing it would allocate per clause"
+)]
+pub(crate) enum StoredClause {
+    /// The clause, each literal holding the value `PostgreSQL` stored for it.
+    Read(Expr),
+    /// A clause holding a literal whose stored value the input does not settle, and why.
+    Unreadable(String),
+}
+
+impl StoredClause {
+    /// The clause as `catalog` answers it on `table`, `None` when the policy stores none.
+    fn of<DB: DatabaseLike>(
+        catalog: Result<Option<&Expr>, LookupError>,
+        table: Option<&DB::Table>,
+        db: &DB,
+    ) -> Option<Self> {
+        match catalog {
+            Ok(expr) => expr.map(|expr| {
+                Self::Read(match table {
+                    Some(table) => without_column_type_casts(expr, table, db),
+                    None => expr.clone(),
+                })
+            }),
+            Err(error) => Some(Self::Unreadable(error.to_string())),
+        }
+    }
+
+    /// The expression, when its value is known.
+    pub(crate) fn expr(&self) -> Option<&Expr> {
+        match self {
+            Self::Read(expr) => Some(expr),
+            Self::Unreadable(_) => None,
+        }
+    }
+
+    /// Why the clause's value is unknown, when it is.
+    fn unreadable(&self) -> Option<&str> {
+        match self {
+            Self::Read(_) => None,
+            Self::Unreadable(reason) => Some(reason),
+        }
+    }
 }
 
 /// The refusal `PostgreSQL` answers a policy storing `clause` for `command`, if any.
@@ -848,8 +916,8 @@ pub struct ClassifiedPolicy {
     pub(crate) mode: PolicyMode,
     pub(crate) scoped_roles: Vec<String>,
     pub(crate) ddl_time_roles: Vec<String>,
-    pub(crate) using: Option<Expr>,
-    pub(crate) with_check: Option<Expr>,
+    pub(crate) using: Option<StoredClause>,
+    pub(crate) with_check: Option<StoredClause>,
     pub(crate) using_classification: Option<ClassifiedExpr>,
     pub(crate) with_check_classification: Option<ClassifiedExpr>,
     /// Grade the `USING` classification held when `filter_policies_for_output` dropped it,
@@ -870,20 +938,20 @@ impl ClassifiedPolicy {
     pub fn from_policy<P: PolicyLike>(policy: &P, db: &P::DB) -> Self {
         let (scoped_roles, ddl_time_roles) = split_scoped_roles(policy, db);
         let target = policy.target_table_name();
+        let table = db
+            .resolve_target_table(target, IdentifierCase::AsWritten)
+            .ok()
+            .flatten();
         Self {
             name: policy.name().to_string(),
-            table: target.to_string(),
-            resolved_table: db
-                .resolve_target_table(target, IdentifierCase::AsWritten)
-                .ok()
-                .flatten()
-                .map(table_identity),
+            table: policy.target_table_name().to_string(),
+            resolved_table: table.map(table_identity),
             command: policy_command(policy.command()),
             mode: derive_policy_mode(policy),
             scoped_roles,
             ddl_time_roles,
-            using: policy.using_expression(db).cloned(),
-            with_check: policy.check_expression(db).cloned(),
+            using: StoredClause::of(policy.using_expression(db), table, db),
+            with_check: StoredClause::of(policy.check_expression(db), table, db),
             using_classification: None,
             with_check_classification: None,
             using_filtered_at: None,
@@ -929,14 +997,24 @@ impl ClassifiedPolicy {
         self.mode
     }
 
-    /// The `USING` expression the policy stores, if any.
+    /// The `USING` expression the policy stores, if any and if its value is known.
     pub fn using(&self) -> Option<&Expr> {
-        self.using.as_ref()
+        self.using.as_ref().and_then(StoredClause::expr)
     }
 
-    /// The `WITH CHECK` expression the policy stores, if any.
+    /// The `WITH CHECK` expression the policy stores, if any and if its value is known.
     pub fn with_check(&self) -> Option<&Expr> {
-        self.with_check.as_ref()
+        self.with_check.as_ref().and_then(StoredClause::expr)
+    }
+
+    /// Why the stored `USING` cannot be read, when a literal's stored value is unknown.
+    pub fn using_unreadable(&self) -> Option<&str> {
+        self.using.as_ref().and_then(StoredClause::unreadable)
+    }
+
+    /// Why the stored `WITH CHECK` cannot be read, when a literal's stored value is unknown.
+    pub fn with_check_unreadable(&self) -> Option<&str> {
+        self.with_check.as_ref().and_then(StoredClause::unreadable)
     }
 
     /// Classification of the `USING` expression, if present.
@@ -988,9 +1066,10 @@ impl ClassifiedPolicy {
 /// forbids. A PERMISSIVE one has to be for the opposite reason: dropping it is pure
 /// subtraction, and a union with fewer arms is indistinguishable from one that never
 /// had more, so the generator could not say the model came out narrower than the
-/// database. Neither contributes an expression. A policy whose reads loop needs no
-/// such retention, since the generator reads that loop off the schema rather than off
-/// the classifications.
+/// database. Neither contributes an expression. A policy with an unreadable clause is
+/// retained for the same reason, since it carries no classification to drop. A policy
+/// whose reads loop needs no such retention, since the generator reads that loop off the
+/// schema rather than off the classifications.
 pub fn filter_policies_for_output(
     policies: &[ClassifiedPolicy],
     min_confidence: ConfidenceLevel,
@@ -1019,6 +1098,8 @@ pub fn filter_policies_for_output(
                 || filtered.using_filtered_at.is_some()
                 || filtered.with_check_filtered_at.is_some()
                 || filtered.mode() == PolicyMode::Restrictive
+                || filtered.using_unreadable().is_some()
+                || filtered.with_check_unreadable().is_some()
             {
                 Some(filtered)
             } else {

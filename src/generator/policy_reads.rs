@@ -64,11 +64,12 @@ fn read_set<'db, DB: DatabaseLike>(
         unresolved: Vec::new(),
     };
     reads.through(guarded);
-    for clause in [policy.using_expression(db), policy.check_expression(db)]
-        .into_iter()
-        .flatten()
-    {
-        reads.subqueries(clause);
+    for clause in [policy.using_clause(db), policy.check_clause(db)] {
+        match clause {
+            Ok(Some(clause)) => reads.subqueries(clause.expression()),
+            Ok(None) => {}
+            Err(error) => reads.unresolved(error.to_string()),
+        }
     }
     let mut called = Vec::new();
     match policy.using_functions(db) {

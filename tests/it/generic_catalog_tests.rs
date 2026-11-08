@@ -83,6 +83,7 @@ fn drive<DB: DatabaseLike>(db: &DB) -> Driven {
     let policy = db.policies().next().expect("the schema declares a policy");
     let expr = policy
         .using_expression(db)
+        .expect("the policy's literals read")
         .expect("the policy stores a USING clause")
         .clone();
     let expr_pattern = classify_expr(&expr, db, &registry, "docs", PolicyCommand::Select).pattern;

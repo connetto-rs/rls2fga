@@ -149,6 +149,7 @@ ALTER POLICY docs_sel ON docs USING (FALSE);
     assert_eq!(
         policy
             .using_expression(&db)
+            .expect("the policy's literals read")
             .map(ToString::to_string)
             .as_deref(),
         Some("false"),

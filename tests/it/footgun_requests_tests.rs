@@ -874,6 +874,7 @@ fn parse_using_expr(schema: &str) -> sqlparser::ast::Expr {
         .next()
         .expect("the schema declares one policy")
         .using_expression(&db)
+        .expect("the policy's literals read")
         .expect("the policy stores a USING clause")
         .clone();
     expr
@@ -1402,12 +1403,12 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
         (
             "starts_on < '2030-01-01 00:00:00+02'::timestamptz",
             "starts_on 2029-12-31 23:00, false under UTC and true under Europe/Athens",
-            "'2030-01-01 00:00:00+02'::TIMESTAMPTZ is cast to timestamptz",
+            "'2029-12-31 22:00:00+00'::TIMESTAMPTZ is cast to timestamptz",
         ),
         (
-            "starts_on < '2026-01-01 23:00'::date",
-            "starts_on 2026-01-01 12:00",
-            "'2026-01-01 23:00'::DATE is cast to date",
+            "expires_at < '2026-01-01'::date",
+            "expires_at 2025-12-31 23:30+00, true under UTC and false under Europe/Athens",
+            "'2026-01-01'::DATE is cast to date",
         ),
         (
             "starts_on < '2026-01-01 23:00:00.6'::timestamp(0)",
@@ -1531,6 +1532,89 @@ fn a_literal_cast_folds_into_the_value_postgresql_compares() {
         assert!(
             !dsl.contains("define can_select: no_access"),
             "`{guard}` must translate:\n{dsl}"
+        );
+    }
+}
+
+/// The cast tests' table with a `DATE` column and a `TIMESTAMP(0)` one beside it.
+const TEMPORAL_GUARDED: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, \
+                                starts_on TIMESTAMP, expires_at TIMESTAMPTZ, day_on DATE, \
+                                starts_whole TIMESTAMP(0));\n\
+                                ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n";
+
+/// `PostgreSQL` stores a date or time literal as its value cast to the type it compares
+/// as, and a cast to the compared column's own type reads the literal as the column would,
+/// so the guard translates with the stored value. An operator compares a `timestamp(0)`
+/// column as `timestamp`, so a literal compared with it keeps its digits.
+#[test]
+fn a_literal_cast_to_its_columns_own_type_translates() {
+    for (guard, stored) in [
+        ("'2026-01-01' < day_on", "'2026-01-01'"),
+        ("day_on > '2026-01-01'", "'2026-01-01'"),
+        ("starts_on > '2026-01-01 09:00'", "'2026-01-01 09:00:00'"),
+        (
+            "starts_on > '2026-01-01 09:00'::timestamp",
+            "'2026-01-01 09:00:00'",
+        ),
+        (
+            "starts_whole > '2026-01-01 09:00:00.6'",
+            "'2026-01-01 09:00:00.6'",
+        ),
+        (
+            "starts_whole > '2026-01-01 09:00:00.6'::timestamp",
+            "'2026-01-01 09:00:00.6'",
+        ),
+        (
+            "expires_at > '2026-01-01 00:00:00+02'",
+            "'2025-12-31 22:00:00+00'",
+        ),
+        (
+            "expires_at IN ('2026-01-01 00:00:00+00', '2026-02-01 00:00:00+00')",
+            "'2026-02-01 00:00:00+00'",
+        ),
+    ] {
+        let (dsl, tuples) = translation(&format!(
+            "{TEMPORAL_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"
+        ));
+        assert!(
+            !dsl.contains("define can_select: no_access"),
+            "`{guard}` must translate:\n{dsl}"
+        );
+        assert!(
+            tuples.contains(stored),
+            "`{guard}` is stored as {stored}, so its tuples must read it:\n{tuples}"
+        );
+    }
+    // `BETWEEN` grades below the bar whatever its operands, so only its reading is checked.
+    let report = translator(ConfidenceLevel::B)
+        .translate(&db_of(&format!(
+            "{TEMPORAL_GUARDED}CREATE POLICY p ON docs FOR SELECT USING \
+             (expires_at BETWEEN '2026-01-01 00:00:00+00' AND '2026-02-01 00:00:00+00');\n"
+        )))
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .report();
+    assert!(
+        !report.contains("is cast to"),
+        "the bounds compare as the column's own type:\n{report}"
+    );
+}
+
+/// A literal of another date or time type is converted where `PostgreSQL` compares it, and
+/// a cast with a precision rounds the literal, so the guard stays refused.
+#[test]
+fn a_literal_cast_to_another_temporal_type_stays_refused() {
+    for guard in [
+        "expires_at > '2026-01-01'::date",
+        "expires_at > '2026-01-01 09:00'::timestamp",
+        "starts_on > '2026-01-01 09:00:00.6'::timestamp(0)",
+    ] {
+        let (dsl, _) = translation(&format!(
+            "{TEMPORAL_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"
+        ));
+        assert!(
+            dsl.contains("define can_select: no_access"),
+            "`{guard}` compares across types, so it must fall closed:\n{dsl}"
         );
     }
 }

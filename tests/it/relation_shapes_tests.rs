@@ -2287,8 +2287,20 @@ fn every_declared_clause_reaches_the_summary_or_a_note_that_names_it() {
             let name = policy.name().to_string();
             let table = policy.target_table_name().to_string();
             for (label, stored) in [
-                ("USING", policy.using_expression(&db).is_some()),
-                ("WITH CHECK", policy.check_expression(&db).is_some()),
+                (
+                    "USING",
+                    policy
+                        .using_expression(&db)
+                        .expect("literals read")
+                        .is_some(),
+                ),
+                (
+                    "WITH CHECK",
+                    policy
+                        .check_expression(&db)
+                        .expect("literals read")
+                        .is_some(),
+                ),
             ] {
                 if !stored {
                     continue;

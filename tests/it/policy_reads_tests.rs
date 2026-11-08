@@ -167,6 +167,24 @@ CREATE POLICY d ON docs USING (allowed(owner_id));
     );
 }
 
+/// What a clause reads does not depend on its literals, so one whose literal's stored
+/// value is unknown still names every table it reads.
+#[test]
+fn a_clause_whose_literal_cannot_be_read_still_counts_what_it_reads() {
+    let translation = translate(
+        "
+CREATE TABLE docs (id uuid PRIMARY KEY, expires TIMESTAMPTZ);
+CREATE TABLE members (doc_id uuid, user_id uuid);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY d ON docs USING (expires > '2026-01-01 09:00' AND EXISTS (
+  SELECT 1 FROM members WHERE members.doc_id = docs.id));
+",
+    );
+    let entry = entry(&translation, "d");
+    assert_eq!(reads(entry), ["docs", "members"]);
+    assert!(entry.unresolved.is_empty(), "{:?}", entry.unresolved);
+}
+
 /// Confidence decides what the model enforces, never what the database reads.
 #[test]
 fn a_clause_the_translation_dropped_still_counts() {
