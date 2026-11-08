@@ -476,7 +476,7 @@ CREATE POLICY docs_bare ON docs FOR SELECT;
 
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the working policy still grants reads:\n{}",
         model.model()
     );
@@ -557,7 +557,7 @@ CREATE POLICY docs_bare ON "docs" FOR SELECT;
 
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the policy that stores a clause still grants reads:\n{}",
         model.model()
     );
@@ -584,12 +584,12 @@ fn a_blanket_update_answers_through_its_own_relation() {
 
     assert_eq!(
         relation_definition(&dsl, "notes", "can_update").as_deref(),
-        Some("writer and can_select"),
+        Some("writer and acting_app_user from request_gate and can_select"),
         "a per-row update still reads the row it names:\n{dsl}"
     );
     assert_eq!(
         relation_definition(&dsl, "notes", "can_update_without_reading").as_deref(),
-        Some("writer"),
+        Some("writer and acting_app_user from request_gate"),
         "a blanket update reads nothing, so the read gate must not apply:\n{dsl}"
     );
 }
@@ -749,6 +749,33 @@ fn a_permissive_policy_whose_literal_cannot_be_read_is_refused() {
             TranslationNote::PolicyClauseAbsent { policy, .. } if policy == "p"
         )),
         "the clause is stored, only its value is unknown, got: {:#?}",
+        outputs.notes()
+    );
+}
+
+/// A permissive policy of unknown value grants nothing, and the readable permissive policy
+/// beside it still grants what it grants.
+#[test]
+fn an_unreadable_permissive_policy_leaves_the_others_granting() {
+    let db = db_of(&format!(
+        "{UNREADABLE_LITERAL_TABLE}\
+         CREATE POLICY owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+         CREATE POLICY p ON docs FOR SELECT USING (expires > '2026-01-01 09:00');"
+    ));
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = outputs.model();
+
+    assert_eq!(
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("owner and acting_app_user from request_gate"),
+        "the owner policy still grants:\n{dsl}"
+    );
+    assert!(
+        refuses_the_unreadable_literal(&db, outputs.notes()),
+        "the refusal must name the literal, got: {:#?}",
         outputs.notes()
     );
 }

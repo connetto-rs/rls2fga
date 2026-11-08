@@ -1,6 +1,6 @@
 ---
 source: tests/it/generator_tests.rs
-expression: "tuple_generator::format_tuples(tuples)"
+expression: "tuple_generator::format_tuples(model.tuple_queries())"
 ---
 SET TIME ZONE 'UTC';
 SET DateStyle = 'ISO, MDY';
@@ -13,3 +13,11 @@ WHERE "id" IS NOT NULL;
 
 -- Scope scope_member_authenticated_f25743be admits PostgreSQL role 'authenticated', which the policy decides rather than any row
 SELECT 'pg_role_scope:scope_member_authenticated_f25743be' AS object, 'roles' AS relation, 'pg_role:authenticated' AS subject;
+
+-- docs admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:docs' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every public.docs row is judged by the scope docs
+SELECT 'docs:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:docs' AS subject
+FROM "public"."docs"
+WHERE "id" IS NOT NULL;

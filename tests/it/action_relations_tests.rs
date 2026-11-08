@@ -470,12 +470,12 @@ fn the_unread_update_relation_carries_only_the_using_half() {
     let model = dsl(DIFFERING_CLAUSES);
     assert_eq!(
         relation_definition(&model, "notes", "can_update_without_reading").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the check half must not be answered against the existing row:\n{model}"
     );
     assert_eq!(
         relation_definition(&model, "notes", "can_update_without_reading_check").as_deref(),
-        Some("editor"),
+        Some("editor and acting_app_user from request_gate"),
         "the unread check is the check half alone, without the read it never performs:\n{model}"
     );
     assert_eq!(

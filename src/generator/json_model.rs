@@ -105,6 +105,9 @@ pub struct RelationReference {
     /// Type identifier.
     #[serde(rename = "type")]
     pub type_name: TypeName,
+    /// The relation a userset reference names (`type#relation`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub relation: Option<RelationName>,
     /// If `Some`, this reference represents the public wildcard (`type:*`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wildcard: Option<EmptyObject>,
@@ -253,11 +256,13 @@ fn type_plan_to_definition(plan: &TypePlan) -> TypeDefinition {
             .map(|subject| match subject {
                 DirectSubject::Type(t) => RelationReference {
                     type_name: t.clone(),
+                    relation: None,
                     wildcard: None,
                     condition: None,
                 },
                 DirectSubject::Wildcard(t) => RelationReference {
                     type_name: t.clone(),
+                    relation: None,
                     wildcard: Some(EmptyObject {}),
                     condition: None,
                 },
@@ -266,6 +271,7 @@ fn type_plan_to_definition(plan: &TypePlan) -> TypeDefinition {
                     condition,
                 } => RelationReference {
                     type_name: type_name.clone(),
+                    relation: None,
                     wildcard: Some(EmptyObject {}),
                     condition: Some(condition.clone()),
                 },
@@ -274,8 +280,18 @@ fn type_plan_to_definition(plan: &TypePlan) -> TypeDefinition {
                     condition,
                 } => RelationReference {
                     type_name: type_name.clone(),
+                    relation: None,
                     wildcard: None,
                     condition: Some(condition.clone()),
+                },
+                DirectSubject::Userset {
+                    type_name,
+                    relation,
+                } => RelationReference {
+                    type_name: type_name.clone(),
+                    relation: Some(relation.clone()),
+                    wildcard: None,
+                    condition: None,
                 },
             })
             .collect::<Vec<_>>();

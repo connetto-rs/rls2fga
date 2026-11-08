@@ -331,7 +331,7 @@ AS 'SELECT 0';";
         "role_levels": {"viewer": 2, "editor": 3},
         "grant_table": "owner_grants", "grant_grantee_col": "grantee_owner_id",
         "grant_resource_col": "granted_owner_id", "grant_role_col": "role_id"}}"#;
-    let cases: [(&str, &str, &str, Option<&str>); 12] = [
+    let cases: [(&str, &str, &str, Option<&str>); 11] = [
         ("ownership", "", "USING (viewer = current_setting('app.user_id'))", None),
         (
             "array membership",
@@ -348,12 +348,6 @@ AS 'SELECT 0';";
         ("public-flag", "", "USING (is_public)", None),
         ("constant-TRUE", "", "USING (true)", None),
         ("attribute-gate", "", "USING (status = 'open')", None),
-        (
-            "policy scope",
-            "CREATE ROLE auditor;",
-            "TO auditor USING (viewer = current_setting('app.user_id'))",
-            None,
-        ),
         (
             "bridge tuples to 'link'",
             "CREATE TABLE links(link_id UUID, user_id TEXT);",

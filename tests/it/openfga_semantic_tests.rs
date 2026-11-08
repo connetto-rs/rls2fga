@@ -1,5 +1,7 @@
 #![cfg(not(target_os = "windows"))]
 
+use std::collections::BTreeSet;
+
 use openfga_client::client::{OpenFgaClient, TupleKey};
 use openfga_client::tonic::transport::Channel;
 
@@ -319,6 +321,11 @@ async fn run_scenario(grpc_port: u16, scenario: &Scenario) -> Vec<String> {
         .iter()
         .map(|(obj, rel, user)| support::openfga::make_tuple(obj, rel, user))
         .collect();
+    let mut rows_named: BTreeSet<String> = scenario
+        .tuples
+        .iter()
+        .map(|(obj, _, _)| obj.to_string())
+        .collect();
     for (table, row) in &scenario.rows {
         for description in outputs
             .tuple_queries()
@@ -337,11 +344,45 @@ async fn run_scenario(grpc_port: u16, scenario: &Scenario) -> Vec<String> {
                     record.relation.as_str(),
                     &record.subject,
                 ));
+                rows_named.insert(record.object);
             }
         }
     }
+    // Every guarded row the facts name also needs its structural gate tuples, the link
+    // to its type's gate object and the constant admitting the acting role on that
+    // gate, which the row-derived facts above cannot carry.
+    let gate_relation = rls2fga::generator::well_known::request_gate_link_relation();
+    let guarded_types: BTreeSet<&str> = model
+        .type_definitions
+        .iter()
+        .filter(|definition| {
+            definition.relations.as_ref().is_some_and(|relations| {
+                relations.keys().any(|relation| *relation == gate_relation)
+            })
+        })
+        .map(|definition| definition.type_name.as_str())
+        .collect();
+    let gated: Vec<&str> = rows_named
+        .iter()
+        .filter(|row| {
+            row.split_once(':')
+                .is_some_and(|(type_name, _)| guarded_types.contains(type_name))
+        })
+        .map(String::as_str)
+        .collect();
+    if !gated.is_empty() {
+        tuples.extend(support::openfga::gate_tuples(gated));
+    }
+    // Two sources can name the same fact, the row records and the gate tuples, so the
+    // write carries each one once.
+    let mut unique: Vec<TupleKey> = Vec::with_capacity(tuples.len());
+    for tuple in tuples {
+        if !unique.contains(&tuple) {
+            unique.push(tuple);
+        }
+    }
 
-    support::openfga::write_tuples(&client, tuples).await;
+    support::openfga::write_tuples(&client, unique).await;
 
     // 6. Run checks and collect failures
     let mut failures = Vec::new();

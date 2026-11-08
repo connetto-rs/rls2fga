@@ -3,6 +3,7 @@ use rls2fga::generator::tuple_generator;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
+use crate::support::footgun::relation_definition;
 
 #[test]
 fn p4_membership_uses_actual_fk_column_from_subquery() {
@@ -185,18 +186,29 @@ CREATE POLICY tasks_inherit_project ON tasks FOR SELECT TO PUBLIC USING (
     );
 
     let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::D);
+    let dsl = model.model();
     assert!(
-        model.model().contains("type tasks"),
-        "expected tasks type in model, got:\n{}",
-        model.model()
+        dsl.contains("type tasks"),
+        "expected tasks type in model, got:\n{dsl}"
     );
-    // The policy names ownership of the project, so that is what the task requires.
+    // The task read walks the parent, and the rule it reaches there is the parent's own,
+    // which the policy names as the parent's ownership.
+    let tasks_select =
+        relation_definition(&dsl, "tasks", "can_select").expect("tasks must define can_select");
     assert!(
-        model
-            .model()
-            .contains("define can_select: owner from projects"),
-        "expected task select permission to require project ownership, got:\n{}",
-        model.model()
+        tasks_select.contains(" from projects"),
+        "expected the task read to walk the parent type, got:\n{dsl}"
+    );
+    let walked = tasks_select
+        .split(" from ")
+        .next()
+        .expect("the read walks a relation")
+        .trim();
+    let parent_rule = relation_definition(&dsl, "projects", walked)
+        .unwrap_or_else(|| panic!("the walked rule must be defined on projects:\n{dsl}"));
+    assert!(
+        parent_rule.contains("owner"),
+        "expected task select permission to require project ownership, got:\n{dsl}"
     );
 
     let tuples = tuple_generator::format_tuples(

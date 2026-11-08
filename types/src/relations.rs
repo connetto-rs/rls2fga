@@ -111,6 +111,12 @@ pub enum RequestComparison {
 pub enum RequestPredicate {
     /// One test of a request value against a constant the policy names.
     Holds(RequestAtom),
+    /// The request acts as this `PostgreSQL` role, which a check states with the
+    /// contextual tuple `(user:<subject>, usage, pg_role:<role>)`.
+    ActsAs {
+        /// The role's name as the deployment spells it.
+        role: String,
+    },
     /// Any child holds.
     Any(Vec<RequestPredicate>),
     /// Every child holds.

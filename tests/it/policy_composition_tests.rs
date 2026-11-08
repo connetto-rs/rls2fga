@@ -12,12 +12,9 @@ fn multi_policy_table_combines_patterns_for_select() {
     // against a literal constant, which the row decides, so it contributes the same
     // wildcard a boolean flag would rather than `no_access`.
     assert!(
-        model
-            .model()
-            .contains("define can_select: author or public_where_status_131bc6df")
-            || model
-                .model()
-                .contains("define can_select: public_where_status_131bc6df or author"),
+        model.model().contains(
+            "define can_select: (author or public_where_status_131bc6df) and acting_app_user from request_gate"
+        ),
         "expected composed select permission, got:\n{}",
         model.model()
     );
@@ -225,7 +222,7 @@ CREATE POLICY p_off ON docs AS RESTRICTIVE FOR SELECT TO PUBLIC
     let select = support::footgun::relation_definition(&dsl, "docs", "can_select")
         .expect("docs defines can_select");
     assert!(
-        select == "owner and no_access" || select == "no_access and owner",
+        select == "owner and no_access and acting_app_user from request_gate",
         "'on' = 'off' settles to false, so the read denies beside the grant, got \
          'define can_select: {select}':\n{dsl}"
     );

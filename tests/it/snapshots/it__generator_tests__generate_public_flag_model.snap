@@ -11,11 +11,20 @@ type articles
   relations
     define no_access: [nobody]
     define public_when_is_public: [user:*]
+    define request_gate: [request_gate]
     define can_delete: no_access
     define can_insert: no_access
-    define can_select: public_when_is_public
+    define can_select: public_when_is_public and acting_app_user from request_gate
     define can_select_for_update: can_update
     define can_update: no_access
     define can_update_without_reading: can_update
 
 type nobody
+
+type pg_role
+  relations
+    define usage: [user]
+
+type request_gate
+  relations
+    define acting_app_user: [pg_role#usage]

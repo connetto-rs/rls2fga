@@ -267,10 +267,12 @@ fn row_context(
         named: named.map(ToString::to_string),
     };
     let Some(condition) = row.condition else {
-        return if subjects
-            .iter()
-            .any(|subject| matches!(subject, DirectSubject::Type(_) | DirectSubject::Wildcard(_)))
-        {
+        return if subjects.iter().any(|subject| {
+            matches!(
+                subject,
+                DirectSubject::Type(_) | DirectSubject::Wildcard(_) | DirectSubject::Userset { .. }
+            )
+        }) {
             Ok(None)
         } else {
             Err(mismatch(None))
@@ -283,7 +285,7 @@ fn row_context(
         | DirectSubject::ConditionalType {
             condition: named, ..
         } => (named == condition.name).then_some(named),
-        DirectSubject::Type(_) | DirectSubject::Wildcard(_) => None,
+        DirectSubject::Type(_) | DirectSubject::Wildcard(_) | DirectSubject::Userset { .. } => None,
     }) else {
         return Err(mismatch(Some(condition.name)));
     };
@@ -1756,6 +1758,32 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
+        // No `FROM`: which role a kind stands for follows from the deployment, so the query
+        // yields its one row whatever any table holds.
+        TupleSource::ActingKind {
+            gate_type,
+            gate_object,
+            relation,
+            pg_role,
+        } => {
+            let object_sql = typed_name_literal(gate_type, gate_object);
+            let subject_sql = typed_name_literal(&well_known.pg_role, pg_role);
+            Some(TupleQuery {
+                comment: format!(
+                    "-- {gate_object} admits requests acting as PostgreSQL role '{pg_role}', \
+                     which the deployment decides rather than any row"
+                ),
+                sql: format!(
+                    "SELECT {object_sql} AS object, \
+                     '{relation}' AS relation, \
+                     {subject_sql} || '#usage' AS subject;"
+                ),
+                description: None,
+                condition: None,
+                skipped: None,
+            })
+        }
+
         TupleSource::Skipped { reason } => Some(skipped_query(reason)),
     }
 }
@@ -1924,24 +1952,29 @@ mod tests {
         BooleanFlag, ClassifiedPolicy, ConfidenceLevel, DirectOwnership,
     };
     use crate::generator::model_generator::GeneratorSettings;
-    use crate::parser::names::role_scope_name;
 
     fn table(name: &str) -> TableId {
         TableId::from_stored(None, name.to_string())
     }
-    use crate::parser::sql_parser::{parse_schema, DatabaseLike};
+    use crate::parser::sql_parser::{DatabaseLike, ParserDB, SchemaError};
     use crate::translator::Translation;
 
+    /// `sql` parsed after the roles the suite's deployment acts as.
+    fn parse_schema(sql: &str) -> Result<ParserDB, SchemaError> {
+        crate::parser::sql_parser::parse_schema(&format!("{}{sql}", crate::test_support::ROLES_SQL))
+    }
+
     fn plan_queries<DB: DatabaseLike>(db: &DB, registry: &FunctionRegistry) -> Vec<TupleQuery> {
-        let classified = crate::classifier::policy_classifier::classify_policies(
-            db,
-            registry,
-            &crate::test_support::caller_deployment(),
-        );
+        let (classified, registry) =
+            crate::classifier::policy_classifier::classify_policies_with_effective_registry(
+                db,
+                registry,
+                &crate::test_support::caller_deployment(),
+            );
         Translation::plan(
             classified,
             db,
-            registry,
+            &registry,
             ConfidenceLevel::D,
             &GeneratorSettings::default(),
         )
@@ -2233,33 +2266,6 @@ CREATE POLICY docs_update ON docs FOR ALL
         assert!(queries
             .iter()
             .any(|q| q.comment.contains("Public access flag (is_public)")));
-    }
-
-    #[test]
-    fn generate_tuple_queries_emit_policy_scope_tuples_for_non_public_roles() {
-        let db = parse_schema(
-            r"
-CREATE TABLE public.docs(id uuid primary key, owner_id uuid);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_select ON docs FOR SELECT TO app_user, auditors
-  USING (owner_id = current_user);
-",
-        )
-        .expect("schema should parse");
-
-        let queries = plan_queries(&db, &FunctionRegistry::new());
-        let scope_relation =
-            role_scope_name("usage", &["app_user".to_string(), "auditors".to_string()]);
-
-        assert!(queries
-            .iter()
-            .any(|q| q.sql.contains(&format!("'{scope_relation}' AS relation"))));
-        assert!(queries
-            .iter()
-            .any(|q| q.sql.contains("'pg_role:app_user' AS subject")));
-        assert!(queries
-            .iter()
-            .any(|q| q.sql.contains("'pg_role:auditors' AS subject")));
     }
 
     #[test]

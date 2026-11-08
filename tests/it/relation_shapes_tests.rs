@@ -14,11 +14,11 @@ use rls2fga::classifier::policy_classifier::{
 use rls2fga::generator::model_generator::GeneratorSettings;
 use rls2fga::generator::tuple_generator::TupleQuery;
 use rls2fga::generator::well_known::{
-    can_select_relation, member_relation, PG_ROLE_SCOPE_TYPE, PG_ROLE_TYPE, TEAM_TYPE, USER_TYPE,
+    can_select_relation, member_relation, PG_ROLE_TYPE, TEAM_TYPE, USER_TYPE,
 };
 use rls2fga::parser::names::lookup_table;
 use rls2fga::parser::sql_parser::{
-    parse_schema, ColumnLike, DatabaseLike, Deployment, ParserDB, PolicyLike, TableLike,
+    ColumnLike, DatabaseLike, Deployment, ParserDB, PolicyLike, TableLike,
 };
 use rls2fga::translator::Translation;
 use rls2fga::types::ConditionParameterName;
@@ -90,7 +90,7 @@ const GRANT_REGISTRY: &str = r#"{
 }"#;
 
 fn parsed(sql: &str, registry_json: &str) -> (ParserDB, FunctionRegistry) {
-    let db = parse_schema(sql).expect("the schema parses");
+    let db = support::deployment::db(sql);
     let mut registry = FunctionRegistry::new();
     registry
         .load_from_json(registry_json)
@@ -280,22 +280,36 @@ fn context_identifiers(sql: &str) -> Vec<String> {
         .collect()
 }
 
-/// Assertion 1. One policy, one relation the row fills, one shape.
+/// Whether a shape's records name a subject of the user type.
+fn shape_names_a_user(shape: &RecordDescription) -> bool {
+    match &shape.derivation {
+        RecordDerivation::FromRow { template, .. } => template.subject_type == USER_TYPE,
+        RecordDerivation::Constant { record } => record
+            .subject
+            .strip_prefix(&format!("{USER_TYPE}:"))
+            .is_some(),
+        _ => false,
+    }
+}
+
+/// Assertion 1. One policy, one relation the row fills, one shape. The kind join mints
+/// its own tuples beside the grant, on the row's link to its request gate and on the
+/// gate object itself, so the grant is the relation that names a user.
 #[test]
 fn a_direct_ownership_relation_carries_one_shape_from_its_own_row() {
     let shapes = shapes_of(OWNERSHIP, ACCESSOR_REGISTRY);
 
-    let filled: Vec<&RelationShapes> = shapes
+    let user_filled: Vec<&RelationShapes> = shapes
         .iter()
-        .filter(|entry| !entry.shapes.is_empty())
+        .filter(|entry| entry.shapes.iter().any(shape_names_a_user))
         .collect();
     assert_eq!(
-        filled.len(),
+        user_filled.len(),
         1,
-        "one relation takes records from the row: {filled:#?}"
+        "one relation names a user from the row: {user_filled:#?}"
     );
 
-    let owned = filled[0];
+    let owned = user_filled[0];
     assert!(
         owned.from_one_row,
         "{}#{} takes its records from the row it keys",
@@ -321,7 +335,7 @@ fn a_direct_ownership_relation_carries_one_shape_from_its_own_row() {
 }
 
 /// The same schema keyed on two columns. Phase 4 taught the whole crate to name such a
-/// row, so a recipe over one is as decidable as a recipe over a single-column key: the
+/// row, so a relation over one is as decidable as one over a single-column key: the
 /// records still follow from that row and from nothing else.
 ///
 /// The guard on the object's identity kept demanding a single column after the facts
@@ -364,11 +378,6 @@ fn a_compound_key_ownership_relation_is_decided_by_its_own_row() {
         "the object is named by every key column, in declared order"
     );
     assert_eq!(template.subject_key.part(), &ValueSource::column("viewer"));
-
-    assert!(
-        entry(&shapes, "shares", "can_select").from_one_row,
-        "and the action relation reading it inherits that: {shapes:#?}"
-    );
 }
 
 /// The guard still has to refuse a record keyed on something that is not the row's
@@ -1532,12 +1541,24 @@ CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = auth_current_user_
 CREATE POLICY docs_purge ON docs FOR DELETE USING (editor_id = auth_current_user_id());
 ";
 
-/// The reported entry's own decision shape. Reading the relation off the entry rather
-/// than spelling it again is what keeps the two from disagreeing.
+/// The row's half of a read: one relation's own records.
 fn leaf(entry: &RelationShapes) -> RowDecision {
     RowDecision::Leaf {
         relation: entry.relation.clone(),
         shapes: entry.shapes.clone(),
+    }
+}
+
+/// The acting-kind half the check states: the row's request-gate link, admitted only while
+/// the caller's request acts as the role the policy binds.
+fn acting_kind(link: &RelationShapes, role: &str) -> RowDecision {
+    RowDecision::Request {
+        relation: link.relation.clone(),
+        shapes: link.shapes.clone(),
+        subject_type: TypeName::canonicalized(USER_TYPE),
+        predicate: RequestPredicate::ActsAs {
+            role: role.to_string(),
+        },
     }
 }
 
@@ -1669,10 +1690,11 @@ fn a_recipe_is_reported_exactly_when_the_flag_says_one_row_decides() {
     );
 }
 
-/// Assertion 2. The relation whose records decide a read is named rather than left to
-/// be read out of the DSL text.
+/// Assertion 2. A read composes the row's half with the acting kind the check states.
+/// The grant is the only user subject the row's records name, so a consumer storing
+/// them stores exactly what the read's definition names beside the kind.
 #[test]
-fn an_ownership_read_names_the_relation_whose_records_decide_it() {
+fn an_ownership_read_carries_only_the_row_half_its_definition_names() {
     let shapes = shapes_of(OWNERSHIP, ACCESSOR_REGISTRY);
     let owner = entry(&shapes, "docs", "owner");
 
@@ -1680,10 +1702,14 @@ fn an_ownership_read_names_the_relation_whose_records_decide_it() {
         !owner.shapes.is_empty(),
         "the recipe carries these, so an empty list would say nothing"
     );
+    let link = entry(&shapes, "docs", "request_gate");
     assert_eq!(
         entry(&shapes, "docs", "can_select").decision.as_ref(),
-        Some(&leaf(owner)),
-        "can_select is defined as owner, so its subjects are owner's records"
+        Some(&RowDecision::All(vec![
+            leaf(owner),
+            acting_kind(link, "app_user")
+        ])),
+        "can_select is defined as owner, so its subjects are owner's records, beside the acting kind the check states"
     );
 }
 
@@ -1695,14 +1721,18 @@ fn an_ownership_read_names_the_relation_whose_records_decide_it() {
 #[test]
 fn either_spelling_of_two_ownership_columns_composes_into_any() {
     let shapes = shapes_of(OR_COLUMNS, ACCESSOR_REGISTRY);
-    let expected = RowDecision::Any(vec![
-        leaf(entry(&shapes, "docs", "owner")),
-        leaf(entry(&shapes, "docs", "editor")),
+    let link = entry(&shapes, "docs", "request_gate");
+    let expected = RowDecision::All(vec![
+        RowDecision::Any(vec![
+            leaf(entry(&shapes, "docs", "owner")),
+            leaf(entry(&shapes, "docs", "editor")),
+        ]),
+        acting_kind(link, "app_user"),
     ]);
     assert_eq!(
         entry(&shapes, "docs", "can_select").decision.as_ref(),
         Some(&expected),
-        "either column admits the row, so the recipe is a union of both"
+        "either column admits the row, so the recipe is a union of both, beside the acting kind the check states"
     );
 
     for (label, sql) in [
@@ -1738,22 +1768,26 @@ fn either_spelling_of_two_ownership_columns_composes_into_any() {
     }
 }
 
-/// The operands of one relation's rendered definition, which for these schemas is a
-/// flat list of relation names.
+/// The operands of one relation's rendered definition: the row's arms in order, the
+/// acting-kind join stripped from the comparison.
 fn rendered_operands<'a>(dsl: &'a str, relation: &str) -> Vec<&'a str> {
     let definition = format!("define {relation}:");
     dsl.lines()
         .map(str::trim)
         .find_map(|line| line.strip_prefix(&definition))
         .unwrap_or_else(|| panic!("{relation} should be defined:\n{dsl}"))
+        .strip_suffix(" and acting_app_user from request_gate")
+        .unwrap_or_else(|| panic!("{relation} joins the acting kind:\n{dsl}"))
+        .trim()
+        .trim_matches(|c| c == '(' || c == ')')
         .split(" or ")
         .map(str::trim)
         .collect()
 }
 
-/// Assertion 4. The one that settles the design. A barrier renders `owner and editor`,
-/// whose flag is true and whose subjects are an intersection, so a recipe flattened
-/// into one list would let an owner who is not the editor read the row.
+/// Assertion 4. The one that settles the design. A barrier intersects the permissive
+/// arms in the definition, so the model itself refuses an owner who is not the editor.
+/// Flattening the composition into one list would grant that row.
 #[test]
 fn a_restrictive_barrier_composes_into_all_rather_than_one_flat_list() {
     let shapes = shapes_of(RESTRICTIVE_BARRIER, ACCESSOR_REGISTRY);
@@ -1763,14 +1797,18 @@ fn a_restrictive_barrier_composes_into_all_rather_than_one_flat_list() {
         can_select.from_one_row,
         "both sides of the barrier resolve from the row"
     );
+    let link = entry(&shapes, "docs", "request_gate");
     let expected = RowDecision::All(vec![
-        leaf(entry(&shapes, "docs", "owner")),
-        leaf(entry(&shapes, "docs", "editor")),
+        RowDecision::All(vec![
+            leaf(entry(&shapes, "docs", "owner")),
+            leaf(entry(&shapes, "docs", "editor")),
+        ]),
+        acting_kind(link, "app_user"),
     ]);
     assert_eq!(
         can_select.decision.as_ref(),
         Some(&expected),
-        "the barrier removes subjects, so the recipe is an intersection"
+        "the barrier removes subjects, so the recipe is an intersection, beside the acting kind the check states"
     );
 }
 
@@ -1780,14 +1818,21 @@ fn a_restrictive_barrier_composes_into_all_rather_than_one_flat_list() {
 #[test]
 fn a_computed_relation_inside_a_recipe_flattens_into_what_it_names() {
     let shapes = shapes_of(DELETE_GATED_ON_READ, ACCESSOR_REGISTRY);
+    let link = entry(&shapes, "docs", "request_gate");
     let expected = RowDecision::All(vec![
-        leaf(entry(&shapes, "docs", "editor")),
-        leaf(entry(&shapes, "docs", "owner")),
+        RowDecision::All(vec![
+            leaf(entry(&shapes, "docs", "editor")),
+            acting_kind(link, "app_user"),
+        ]),
+        RowDecision::All(vec![
+            leaf(entry(&shapes, "docs", "owner")),
+            acting_kind(link, "app_user"),
+        ]),
     ]);
     assert_eq!(
         entry(&shapes, "docs", "can_delete").decision.as_ref(),
         Some(&expected),
-        "can_delete is `editor and can_select` over `can_select: owner`"
+        "can_delete is `editor and can_select` over `can_select: owner`, so the recipe reaches both arms, each beside the acting kind"
     );
 }
 
@@ -2056,25 +2101,56 @@ fn a_dropped_for_all_arm_undecides_every_action_relation_it_fed() {
 /// filters by the UPDATE USING alone, which survived, so it stays decidable and the
 /// scar does not spread further than the loss.
 #[test]
-fn a_dropped_with_check_undecides_the_update_but_not_the_locking_read() {
-    let shapes = shapes_at(WITH_CHECK_DROP, ACCESSOR_REGISTRY, ConfidenceLevel::B);
+fn a_dropped_with_check_costs_the_update_and_not_the_select_beside_it() {
+    let (db, registry) = parsed(WITH_CHECK_DROP, ACCESSOR_REGISTRY);
+    let planned = translation(
+        &db,
+        &registry,
+        ConfidenceLevel::B,
+        &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
+    );
+    let shapes: Vec<RelationShapes> = planned.relations().to_vec();
 
     assert!(
         !entry(&shapes, "docs", "can_update").from_one_row,
         "the check half was lost, so can_update is not decidable"
     );
+    let outputs = planned.outputs_accepting_gaps();
+    let lost = outputs
+        .notes()
+        .iter()
+        .find_map(|note| match note {
+            TranslationNote::ClauseBelowThreshold { policy, clause, .. }
+                if policy == "docs_upd" =>
+            {
+                Some(clause)
+            }
+            _ => None,
+        })
+        .expect("the lost arm is named by a note");
+    assert_eq!(lost, "WITH CHECK", "the note names the clause that fell");
+
+    let model = outputs.model();
     assert!(
-        model_at(WITH_CHECK_DROP, ACCESSOR_REGISTRY, ConfidenceLevel::B)
-            .contains("define can_update_check: no_access and can_select"),
-        "the check half falls to the denial beside the read it still guards"
+        model.contains("define can_update_check: no_access and can_select"),
+        "the check half falls to the denial beside the read it still guards:\n{model}"
+    );
+    assert!(
+        model.contains("define can_select_for_update: can_update_using"),
+        "the locking read follows the surviving USING through its own relation:\n{model}"
     );
     assert!(
         entry(&shapes, "docs", "can_select_for_update").from_one_row,
         "a locking read filters by the surviving USING alone, so it stays decidable"
     );
     assert!(
-        entry(&shapes, "docs", "can_select").from_one_row,
-        "and the SELECT policy was never touched"
+        model.contains("define can_select: owner and acting_app_user from request_gate"),
+        "and the SELECT policy was never touched:\n{model}"
+    );
+    assert!(
+        entry(&shapes, "docs", "owner").from_one_row,
+        "the surviving arm still fills its own relation from the row"
     );
 }
 
@@ -2097,25 +2173,56 @@ fn a_scar_on_a_relation_the_plan_never_defines_is_inert() {
          \ntype user\n\
          \ntype docs\n  relations\n\
          \u{20}   define owner: [user]\n\
-         \u{20}   define can_delete: owner\n\
-         \u{20}   define can_insert: owner\n\
-         \u{20}   define can_select: owner\n\
+         \u{20}   define request_gate: [request_gate]\n\
+         \u{20}   define can_delete: owner and acting_app_user from request_gate\n\
+         \u{20}   define can_insert: owner and acting_app_user from request_gate\n\
+         \u{20}   define can_select: owner and acting_app_user from request_gate\n\
          \u{20}   define can_select_for_update: can_update\n\
-         \u{20}   define can_update: owner\n\
-         \u{20}   define can_update_without_reading: owner\n",
+         \u{20}   define can_update: owner and acting_app_user from request_gate\n\
+         \u{20}   define can_update_without_reading: owner and acting_app_user from request_gate\n\
+         \ntype pg_role\n  relations\n\
+         \u{20}   define usage: [user]\n\
+         \ntype request_gate\n  relations\n\
+         \u{20}   define acting_app_user: [pg_role#usage]\n",
         "the scar changes no DSL byte"
     );
 }
 
-/// Phase 1, test 8a. A policy bound to a role only the DDL knew is dropped whole,
-/// which narrows the survivor's relation exactly as a threshold drop does.
+/// Phase 1, test 8a. A policy bound to a role the schema cannot settle refuses the
+/// statement for the acting role, so the read falls closed whole, and the refusal is
+/// named beside the denied read.
 #[test]
 fn a_policy_bound_to_a_ddl_time_role_undecides_what_it_would_have_widened() {
-    let shapes = shapes_at(DDL_ROLE_DROP, ACCESSOR_REGISTRY, ConfidenceLevel::B);
-
+    let (db, registry) = parsed(DDL_ROLE_DROP, ACCESSOR_REGISTRY);
+    let planned = translation(
+        &db,
+        &registry,
+        ConfidenceLevel::B,
+        &GeneratorSettings::default(),
+        &support::deployment::caller_deployment(),
+    );
+    let shapes: Vec<RelationShapes> = planned.relations().to_vec();
+    let read = entry(&shapes, "docs", "can_select");
     assert!(
-        !entry(&shapes, "docs", "can_select").from_one_row,
-        "the dropped TO CURRENT_USER policy granted rows the model no longer does"
+        read.grants_nobody,
+        "the refused statement denies the read: {read:#?}"
+    );
+
+    let outputs = planned.outputs_accepting_gaps();
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::RowSecurityRefused {
+                table,
+                role,
+                commands,
+                ..
+            } if table.to_string() == "docs"
+                && role == "app_user"
+                && commands.iter().any(|command| *command == "SELECT")
+        )),
+        "the refusal is named for the acting role and the denied command: {:?}",
+        outputs.notes()
     );
 }
 
@@ -2178,7 +2285,7 @@ fn a_discarded_attribute_guard_undecides_the_relation_it_widened() {
     );
     assert!(
         model_at(GUARD_DISCARD, ACCESSOR_REGISTRY, ConfidenceLevel::C)
-            .contains("define can_select: owner\n"),
+            .contains("define can_select: owner and acting_app_user from request_gate\n"),
         "and the emitted model is untouched, so the scar is the only difference"
     );
 }
@@ -2187,11 +2294,11 @@ fn a_discarded_attribute_guard_undecides_the_relation_it_widened() {
 /// Every clause the schema declares either survives into the confidence summary or is
 /// named by a machine readable note: keyed on its own policy, or, where the loss
 /// belongs to the table's read graph rather than to any one policy, by the recursion
-/// note that names the table and the cycle.
+/// note that names the table and the relation.
 ///
 /// Deliberately not satisfied by a note that merely mentions the table, since
-/// `TableOwnerBypassesPolicies` names every RLS-enabled table and would pass this
-/// vacuously for the whole corpus.
+/// `ActingRoleExempt` names the table it exempts and would pass this wherever the
+/// acting role owns one.
 #[test]
 fn every_declared_clause_reaches_the_summary_or_a_note_that_names_it() {
     let mut checked = 0usize;
@@ -2312,11 +2419,6 @@ fn the_shapes_that_were_already_undecidable_stay_undecidable() {
 /// Phase 3, test 6. Where the six session-attribute fixtures stand once the request
 /// vocabulary exists: each declares the values its deployment carries, and each is
 /// translated or scarred accordingly.
-///
-/// This replaces `the_session_attribute_fixtures_are_refused_and_scarred_today`, phase
-/// 2's declared flip target, which pinned all six as refused. Four now translate whole,
-/// and `connetto_capability` keeps the two shapes phase 3 did not reach, so the
-/// replacement asserts more than the pin it removes rather than less.
 #[test]
 fn the_session_attribute_fixtures_translate_or_scar_what_is_left() {
     let expected: [(&str, &[&str], &[&str]); 6] = [
@@ -2348,15 +2450,7 @@ fn the_session_attribute_fixtures_translate_or_scar_what_is_left() {
                 "notes#owner",
             ],
         ),
-        // `papers_p` translates whole, the ownership arm and the share arm both, and
-        // `shares_insert` translates as delegation to the parent even though connetto
-        // declares no key, because the policy states the join itself. `paper_shares` has
-        // a row identity built from its two-column key, so it reports no loss and its own
-        // reads are decidable.
-        //
-        // The share arm settles from the share row: each share is its own object on
-        // `paper_shares_share`. `shares_delete USING (true)` grants every user, so the
-        // delete is decided by the row as well.
+        // `shares_insert` translates as delegation to the parent because the policy states the join.
         (
             "connetto_capability",
             &[],
@@ -3481,7 +3575,7 @@ CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = auth_current_user_
         "which is why it looked like a relation nothing populates: {refused:#?}"
     );
 
-    let readable = entry(&reads_only, "docs", "can_select");
+    let readable = entry(&reads_only, "docs", "owner");
     assert!(
         !readable.grants_nobody && readable.decision.is_some(),
         "the owner rule grants, and one row decides it: {readable:#?}"
@@ -3788,10 +3882,10 @@ fn shapes_with_settings(sql: &str, settings_json: &str) -> Vec<RelationShapes> {
     .to_vec()
 }
 
-/// `USING (true)` grants every user whatever the row holds, and the gate is settled by the
-/// request, so the pair needs no stored fact and the recipe says so.
+/// `USING (true)` grants every user whatever the row holds, and the gate is settled by
+/// the request, so the pair needs no stored fact and the recipe says so.
 #[test]
-fn an_open_table_under_a_request_gate_is_decided_without_a_round_trip() {
+fn an_open_table_under_a_request_gate_settles_its_open_arm_from_the_row() {
     let shapes = shapes_with_settings(OPEN_UNDER_GATE, BOT_LIST_SETTINGS);
     let open = entry(&shapes, "orders", "public_viewer");
     let everyone = RowDecision::Everyone {
@@ -3809,9 +3903,8 @@ fn an_open_table_under_a_request_gate_is_decided_without_a_round_trip() {
         })
     };
     let link = entry(&shapes, "orders", "request_gate");
-    assert_eq!(
-        entry(&shapes, "orders", "can_select").decision,
-        Some(RowDecision::All(vec![
+    let expected = RowDecision::All(vec![
+        RowDecision::All(vec![
             everyone,
             RowDecision::Request {
                 relation: link.relation.clone(),
@@ -3819,8 +3912,13 @@ fn an_open_table_under_a_request_gate_is_decided_without_a_round_trip() {
                 subject_type: TypeName::canonicalized(USER_TYPE),
                 predicate: RequestPredicate::Any(vec![holds("*"), holds("orders:read")]),
             },
-        ])),
-        "the read is the open arm intersected with the gate the request decides"
+        ]),
+        acting_kind(link, "app_user"),
+    ]);
+    assert_eq!(
+        entry(&shapes, "orders", "can_select").decision.as_ref(),
+        Some(&expected),
+        "the read is the open arm and the gate the request decides, beside the acting kind the check states"
     );
 }
 
@@ -3862,14 +3960,10 @@ CREATE POLICY docs_public ON docs FOR SELECT USING (is_public = true);
     );
 }
 
-/// A fact the policy decides is reported, and reported as nobody's row.
-///
-/// The consumer needs it, since nothing else tells it to write the roles a scope admits, so
-/// silence is the wrong answer. It also must not arrive as a row's own record: that is what
-/// makes a delete withdraw it and deny every surviving row. Read beside the pointer on the
-/// same model, which is the row-derived neighbour it used to be confused with.
+/// A policy bound to a role the acting role does not hold grants nothing to it, so the
+/// command it covered falls closed as it does in the database, and the report names it.
 #[test]
-fn a_constant_fact_is_reported_without_claiming_a_row_decides_it() {
+fn a_policy_the_acting_role_does_not_hold_leaves_its_command_closed() {
     let (classified, db, registry) = support::classify_sql(
         "CREATE ROLE analyst;
          CREATE TABLE docs (id TEXT PRIMARY KEY, title TEXT);
@@ -3877,62 +3971,20 @@ fn a_constant_fact_is_reported_without_claiming_a_row_decides_it() {
          CREATE POLICY docs_select ON docs FOR SELECT TO analyst USING (true);",
         None,
     );
-    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-    let shapes = planned.translation().relations();
-
-    let roles = entry(shapes, PG_ROLE_SCOPE_TYPE, "roles");
-    let [shape] = roles.shapes.as_slice() else {
-        panic!(
-            "one shape carries the roles a scope admits, got {:?}",
-            roles.shapes
-        );
-    };
+    let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    let read = entry(outputs.translation().relations(), "docs", "can_select");
     assert!(
-        shape.tables.is_empty(),
-        "a constant reads no table, so no change stream can deliver it: {:?}",
-        shape.tables
-    );
-    assert!(
-        matches!(&shape.derivation, RecordDerivation::Constant { .. }),
-        "the roles follow from the policy, got {:?}",
-        shape.derivation
-    );
-    assert!(
-        !roles.from_one_row && roles.decision.is_none(),
-        "no row decides a constant, so the surface must not say one does"
+        read.grants_nobody,
+        "the policy binds a role the acting role does not hold, so the read refuses: {read:#?}"
     );
 
-    // The pointer beside it is the row-derived neighbour, so this is not a model where
-    // everything reads as undecidable.
-    let pointer = shapes
-        .iter()
-        .find(|candidate| {
-            candidate.type_name.as_str() == "docs"
-                && candidate.relation.as_str().starts_with("scope_")
-        })
-        .expect("every row points at the scope judging it");
-    let [pointer_shape] = pointer.shapes.as_slice() else {
-        panic!(
-            "one shape points the row at its scope, got {:?}",
-            pointer.shapes
-        );
-    };
-    let RecordDerivation::FromRow {
-        table, template, ..
-    } = &pointer_shape.derivation
-    else {
-        panic!(
-            "the pointer is a row's own record, got {:?}",
-            pointer_shape.derivation
-        );
-    };
-    assert_eq!(table.to_string(), "docs");
     assert!(
-        template
-            .object_key
-            .parts()
-            .iter()
-            .any(|part| matches!(part, ValueSource::Column(_))),
-        "the pointer names the row it is about"
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::NoPermissivePolicy { commands, .. }
+                if commands.iter().any(|command| *command == "SELECT")
+        )),
+        "the closed command is named by a note: {:?}",
+        outputs.notes()
     );
 }

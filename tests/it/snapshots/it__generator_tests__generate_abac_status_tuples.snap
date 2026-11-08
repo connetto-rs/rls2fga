@@ -1,6 +1,5 @@
 ---
 source: tests/it/generator_tests.rs
-assertion_line: 28
 expression: "tuple_generator::format_tuples(outputs.tuple_queries())"
 ---
 SET TIME ZONE 'UTC';
@@ -24,6 +23,14 @@ SELECT 'ownables:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::tex
 FROM "public"."ownables"
 WHERE "id" IS NOT NULL
 AND "status" = 'active';
+
+-- ownables admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:ownables' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every ownables row is judged by the scope ownables
+SELECT 'ownables:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:ownables' AS subject
+FROM "public"."ownables"
+WHERE "id" IS NOT NULL;
 
 -- Owner identities that are rows of users
 SELECT 'owner_grants_owner:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_user' AS relation, 'user:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject

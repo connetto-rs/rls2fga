@@ -21,33 +21,6 @@ pub(crate) struct ModeBuckets {
     pub(crate) permissive: Vec<UsersetExpr>,
     pub(crate) restrictive: Vec<UsersetExpr>,
     pub(crate) subtractions: Vec<UsersetExpr>,
-    /// Barriers that bind only the members of a role.
-    pub(crate) role_limited: Vec<RoleLimitedRule>,
-}
-
-/// A RESTRICTIVE rule and the relation holding the roles it binds.
-#[derive(Debug, Clone)]
-pub(crate) struct RoleLimitedRule {
-    pub(crate) policy: String,
-    pub(crate) rule: UsersetExpr,
-    pub(crate) scope_relation: RelationName,
-}
-
-/// The walk from a `TO`-clause scope to the users it admits.
-///
-/// `PostgreSQL` applies a `TO` clause with `has_privs_of_role` semantics, which is the
-/// `usage` kind: an inheriting member is admitted, a `NOINHERIT` member or a
-/// `WITH INHERIT FALSE` grant is not, while all three hold plain `MEMBER`. Probed on
-/// 18.4 for the permissive scope and the restrictive barrier alike.
-pub(crate) fn to_clause_scope_walk(scope_relation: &RelationName) -> UsersetExpr {
-    UsersetExpr::TupleToUserset {
-        tupleset: scope_relation.clone(),
-        computed: RolePrivilege::Usage.relation_name(),
-    }
-}
-
-pub(crate) fn scoped_policy_expr(expr: UsersetExpr, scope_relation: &RelationName) -> UsersetExpr {
-    UsersetExpr::Intersection(vec![expr, to_clause_scope_walk(scope_relation)])
 }
 
 pub(crate) fn using_targets(command: PolicyCommand) -> Vec<ActionTarget> {
@@ -247,34 +220,6 @@ where
     }
 }
 
-/// Route one translated clause into its bucket.
-///
-/// A role scope narrows a PERMISSIVE grant, since the other permissive policies
-/// still stand for everyone else. A RESTRICTIVE barrier instead binds only the
-/// roles it names, which `compose_action` can express only once the base is known.
-pub(crate) fn push_action_expr(
-    action_buckets: &mut BTreeMap<ActionTarget, ModeBuckets>,
-    target: ActionTarget,
-    policy_name: &str,
-    mode: PolicyMode,
-    expr: UsersetExpr,
-    scope_relation: Option<&RelationName>,
-) {
-    let bucket = action_buckets.entry(target).or_default();
-    match (mode, scope_relation) {
-        (PolicyMode::Permissive, Some(scope)) => {
-            bucket.permissive.push(scoped_policy_expr(expr, scope));
-        }
-        (PolicyMode::Permissive, None) => bucket.permissive.push(expr),
-        (PolicyMode::Restrictive, Some(scope)) => bucket.role_limited.push(RoleLimitedRule {
-            policy: policy_name.to_string(),
-            rule: expr,
-            scope_relation: scope.clone(),
-        }),
-        (PolicyMode::Restrictive, None) => bucket.restrictive.push(expr),
-    }
-}
-
 pub(crate) fn compose_action(
     table_plan: &mut TypePlan,
     bucket: Option<&ModeBuckets>,
@@ -285,11 +230,9 @@ pub(crate) fn compose_action(
     let restrictive = combine_intersection(bucket.restrictive.clone());
 
     let Some(permissive) = permissive else {
-        // Barriers alone grant nobody anything, whichever roles they bind.
-        return (restrictive.is_some()
-            || !bucket.subtractions.is_empty()
-            || !bucket.role_limited.is_empty())
-        .then(|| deny_expr(table_plan));
+        // Barriers alone grant nobody anything.
+        return (restrictive.is_some() || !bucket.subtractions.is_empty())
+            .then(|| deny_expr(table_plan));
     };
 
     let mut expr = match restrictive {
@@ -301,22 +244,6 @@ pub(crate) fn compose_action(
             base: Box::new(expr),
             subtract: Box::new(subtract),
         };
-    }
-
-    // Members of the bound roles have to satisfy the barrier, everyone else is
-    // untouched by it. Each barrier wraps the previous result, so a second one costs
-    // one more relation rather than doubling the tree.
-    for limited in &bucket.role_limited {
-        let bound = UsersetExpr::Intersection(vec![expr.clone(), limited.rule.clone()]);
-        let unbound = UsersetExpr::Exclusion {
-            base: Box::new(expr),
-            subtract: Box::new(to_clause_scope_walk(&limited.scope_relation)),
-        };
-        let name = table_plan.ensure_computed(
-            role_limited_relation_name(&limited.policy),
-            UsersetExpr::Union(vec![bound, unbound]),
-        );
-        expr = UsersetExpr::Computed(name);
     }
 
     Some(expr)
@@ -363,44 +290,26 @@ pub(crate) fn derived_action_relations() -> [RelationName; 6] {
 }
 
 /// Action targets a policy's stored clauses reach, which is the routing
-/// `for_each_policy_target_expr` performs once those clauses are classified.
+/// `for_each_policy_target_expr` performs once those clauses are classified. A command
+/// whose `WITH CHECK` is absent is checked by the `USING` expression, so that clause
+/// reaches those targets too.
 pub(crate) fn policy_clause_targets<P: PolicyLike>(
     policy: &P,
     db: &P::DB,
 ) -> BTreeSet<ActionTarget> {
-    recursion::declared_clause_targets(policy, db)
-        .into_iter()
-        .filter(|(clause, _)| clause.is_some())
-        .flat_map(|(_, targets)| targets)
-        .collect()
-}
-
-/// Whether barriers alone reached this target. A RESTRICTIVE policy narrows a grant and
-/// there is none to narrow, so `compose_action` synthesizes a denial and the relation
-/// exists without granting anybody.
-fn barriers_alone(bucket: Option<&ModeBuckets>) -> bool {
-    bucket.is_some_and(|bucket| {
-        bucket.permissive.is_empty()
-            && (!bucket.restrictive.is_empty()
-                || !bucket.subtractions.is_empty()
-                || !bucket.role_limited.is_empty())
-    })
-}
-
-/// Commands a barrier refuses outright, so coverage is read off what grants rather than
-/// off which relation exists. A command denies as soon as one of its targets does.
-pub(crate) fn commands_denied_by_barriers_alone(
-    action_buckets: &BTreeMap<ActionTarget, ModeBuckets>,
-) -> Vec<&'static str> {
-    action_relation_commands()
-        .into_iter()
-        .filter(|(_, _, targets)| {
-            targets
-                .iter()
-                .any(|target| barriers_alone(action_buckets.get(target)))
-        })
-        .map(|(_, command, _)| command)
-        .collect()
+    let command = policy_command(policy.command());
+    let has_check = check_shape(policy, db).is_some();
+    let mut targets = BTreeSet::new();
+    if using_shape(policy, db).is_some() {
+        targets.extend(using_targets(command));
+        if !has_check && policy_uses_using_for_missing_with_check(command) {
+            targets.extend(with_check_targets(command));
+        }
+    }
+    if has_check {
+        targets.extend(with_check_targets(command));
+    }
+    targets
 }
 
 /// Commands the schema's permissive policies on one table cover, whatever their
@@ -524,10 +433,10 @@ pub(crate) fn define_locking_read_relations(all_types: &mut BTreeMap<TypeName, T
 /// `can_update`, which is already the denial.
 pub(crate) fn define_blanket_update_relations(all_types: &mut BTreeMap<TypeName, TypePlan>) {
     for plan in all_types.values_mut() {
-        if plan
-            .computed_relations
-            .contains_key(&can_update_without_reading_relation())
-            || !plan.computed_relations.contains_key(&can_update_relation())
+        if !plan.computed_relations.contains_key(&can_update_relation())
+            || plan
+                .computed_relations
+                .contains_key(&can_update_without_reading_relation())
         {
             continue;
         }

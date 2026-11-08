@@ -156,7 +156,7 @@ fn a_weak_arm_does_not_drag_the_strong_one_out_of_the_model() {
     );
     assert_eq!(
         can_select_of(OR_WITH_UNKNOWN_ARM, ConfidenceLevel::B),
-        "define can_select: owner_a",
+        "define can_select: owner_a and acting_app_user from request_gate",
         "the arm the caller's bar admits stays in the model"
     );
 }
@@ -172,7 +172,7 @@ fn two_strong_arms_survive_the_strictest_bar() {
     );
     assert_eq!(
         can_select_of(OR_INSIDE, ConfidenceLevel::A),
-        "define can_select: owner_a or owner_b",
+        "define can_select: (owner_a or owner_b) and acting_app_user from request_gate",
         "nothing here is below the bar, so nothing may be dropped"
     );
 }
@@ -208,7 +208,7 @@ fn one_surviving_arm_keeps_its_own_grade() {
     );
     assert_eq!(
         can_select_of(OR_WITH_UNKNOWN_ARM, ConfidenceLevel::A),
-        "define can_select: owner_a",
+        "define can_select: owner_a and acting_app_user from request_gate",
         "the surviving arm is what the model carries"
     );
     // The grade is the observable that separates the two: a union of one is capped at

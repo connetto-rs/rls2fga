@@ -46,8 +46,6 @@ pub(crate) struct Principal {
     pub(crate) session: Vec<(String, String)>,
     /// Request context every check carries.
     pub(crate) context: serde_json::Value,
-    /// `pg_role` memberships the caller holds, which no tuple query can know.
-    pub(crate) pg_roles: Vec<String>,
     /// Whether every check carries the database's clock as `request_time`.
     pub(crate) carries_request_time: bool,
     /// Whether a policy raises on a setting this caller never set.
@@ -66,7 +64,6 @@ impl Principal {
             login_role: login_role.to_string(),
             session: vec![(key.to_string(), value.to_string())],
             context: serde_json::json!({}),
-            pg_roles: Vec::new(),
             carries_request_time: false,
             reads_an_unset_setting: false,
         }
@@ -92,7 +89,6 @@ impl Principal {
             login_role: login_role.to_string(),
             session: Vec::new(),
             context: serde_json::json!({}),
-            pg_roles: Vec::new(),
             carries_request_time: false,
             reads_an_unset_setting: false,
         }
@@ -116,12 +112,6 @@ impl Principal {
         self
     }
 
-    /// The same caller, holding `roles`.
-    pub(crate) fn holding(mut self, roles: &[&str]) -> Self {
-        self.pg_roles = roles.iter().map(|role| (*role).to_string()).collect();
-        self
-    }
-
     /// The same caller, whose read raises because a policy reads a setting it never set.
     pub(crate) fn reading_an_unset_setting(mut self) -> Self {
         self.reads_an_unset_setting = true;
@@ -129,10 +119,12 @@ impl Principal {
     }
 }
 
-/// Whether the caller's `context` satisfies a predicate the request alone decides.
+/// Whether a caller acting as `acting_role` with `context` satisfies a predicate the request
+/// alone decides.
 pub(crate) fn request_predicate_holds(
     predicate: &RequestPredicate,
     context: &serde_json::Value,
+    acting_role: &str,
 ) -> bool {
     match predicate {
         RequestPredicate::Holds(atom) => {
@@ -144,12 +136,13 @@ pub(crate) fn request_predicate_holds(
                 RequestComparison::CallerValueEquals => supplied == atom.value.as_str(),
             }
         }
+        RequestPredicate::ActsAs { role } => role == acting_role,
         RequestPredicate::Any(children) => children
             .iter()
-            .any(|child| request_predicate_holds(child, context)),
+            .any(|child| request_predicate_holds(child, context, acting_role)),
         RequestPredicate::All(children) => children
             .iter()
-            .all(|child| request_predicate_holds(child, context)),
+            .all(|child| request_predicate_holds(child, context, acting_role)),
     }
 }
 
@@ -193,9 +186,6 @@ pub(crate) struct ParityCase {
     /// Settings the deployment declares beside the suite's callers, as a fixture's
     /// `deployment.json` holds them.
     pub(crate) settings: Vec<SessionSetting>,
-    /// The one role the deployment acts as, where the case names its own in place of the
-    /// suite's.
-    pub(crate) acting_role: Option<String>,
     /// Tables whose rows are not read through the table itself.
     ///
     /// A partition with row-level security off is unfiltered when it is queried directly,
@@ -250,7 +240,6 @@ impl ParityCase {
             mutations: BTreeMap::new(),
             registry_json: None,
             settings: Vec::new(),
-            acting_role: None,
             not_read_directly: Vec::new(),
             loading_from_rows: false,
             future: None,
@@ -318,10 +307,16 @@ impl ParityCase {
         self
     }
 
-    /// The same case, its deployment acting as `role` alone.
-    pub(crate) fn acting_as(mut self, role: &str) -> Self {
-        self.acting_role = Some(role.to_string());
-        self
+    /// The roles the deployment acts as, each role a caller runs as, in the order the
+    /// callers are listed.
+    pub(crate) fn acting_roles(&self) -> Vec<&str> {
+        let mut roles: Vec<&str> = Vec::new();
+        for principal in &self.principals {
+            if !roles.contains(&principal.login_role.as_str()) {
+                roles.push(&principal.login_role);
+            }
+        }
+        roles
     }
 
     /// The same case, reading the named tables only through the table that types them.
@@ -796,8 +791,9 @@ async fn openfga_allows(
                 if judgement.version == RowVersion::Resulting && !settled {
                     return None;
                 }
-                let granted = openfga::check_allowed_with_context(
+                let granted = openfga::check_as(
                     client,
+                    &principal.login_role,
                     &format!("user:{}", principal.subject),
                     judgement.relation.as_str(),
                     &object.name,
@@ -1053,19 +1049,28 @@ fn plan_case(
     case: &ParityCase,
     expectation: Class,
 ) -> (rls2fga::translator::Outputs, Vec<Disclosure>) {
+    // The roles a case runs its callers as are created by its prelude and seed, and the
+    // deployment resolves them in the schema it reads, so all three are read together.
+    let mut source = format!(
+        "CREATE ROLE {} LOGIN NOINHERIT;\n",
+        super::deployment::LOGIN_ROLE
+    );
+    for sql in case.prelude.iter().chain([&case.schema]).chain(&case.seed) {
+        if !is_do_block(sql) {
+            source.push_str(sql.trim().trim_end_matches(';'));
+            source.push_str(";\n");
+        }
+    }
     let db = match &case.session_time_zone {
-        Some(zone) => rls2fga::parser::sql_parser::parse_schema_in_time_zone(&case.schema, zone),
-        None => rls2fga::parser::sql_parser::parse_schema(&case.schema),
+        Some(zone) => rls2fga::parser::sql_parser::parse_schema_in_time_zone(&source, zone),
+        None => rls2fga::parser::sql_parser::parse_schema(&source),
     }
     .expect("schema should parse");
     let (classified, db, registry) = super::classify_db(
         db,
         case.registry_json.as_deref(),
         &super::deployment::caller_deployment_acting_as(
-            &[case
-                .acting_role
-                .as_deref()
-                .unwrap_or(super::deployment::ACTING_ROLE)],
+            &case.acting_roles(),
             case.settings.iter().cloned(),
         ),
     );
@@ -1078,6 +1083,16 @@ fn plan_case(
         .collect();
     hold_to_class(case, expectation, &disclosed);
     (planned, disclosed)
+}
+
+/// Whether `sql` is one anonymous `DO` block, which sets up the database and declares no
+/// object the translation reads.
+fn is_do_block(sql: &str) -> bool {
+    matches!(
+        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
+            .as_deref(),
+        Ok([sqlparser::ast::Statement::Do(_)])
+    )
 }
 
 /// Refuse a case belonging to the other property.
@@ -1118,7 +1133,7 @@ async fn provision(
     let model_id = openfga::write_authorization_model(&mut service, &store_id, model).await;
     let client = service.into_client(&store_id, &model_id);
 
-    let mut writes: Vec<_> = tuples
+    let writes: Vec<_> = tuples
         .iter()
         .map(|tuple| match &tuple.condition {
             Some((condition, context)) => openfga::make_conditional_tuple(
@@ -1131,17 +1146,6 @@ async fn provision(
             None => openfga::make_tuple(&tuple.object, &tuple.relation, &tuple.subject),
         })
         .collect();
-    // Role membership lives outside the policy tables, so no generated query can produce it
-    // and the case says which roles a caller holds.
-    for principal in &case.principals {
-        for role in &principal.pg_roles {
-            writes.push(openfga::make_tuple(
-                &format!("pg_role:{role}"),
-                "usage",
-                &format!("user:{}", principal.subject),
-            ));
-        }
-    }
     openfga::write_tuples(&client, writes).await;
     client
 }

@@ -31,10 +31,14 @@ async fn openfga_accepts_generated_model_and_checks_pass() {
     // 4. Create scoped client and write tuples
     let client = service_client.into_client(&store_id, &model_id);
 
-    let tuples: Vec<_> = support::openfga::EARTH_METABOLOME_TUPLES
+    let mut tuples: Vec<_> = support::openfga::EARTH_METABOLOME_TUPLES
         .iter()
         .map(|(obj, rel, user)| support::openfga::make_tuple(obj, rel, user))
         .collect();
+    tuples.extend(support::openfga::gate_tuples([
+        "ownables:doc1",
+        "ownables:doc2",
+    ]));
 
     support::openfga::write_tuples(&client, tuples).await;
 

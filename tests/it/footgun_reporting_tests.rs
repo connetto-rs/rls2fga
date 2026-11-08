@@ -101,7 +101,7 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting
 
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_insert").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the INSERT policy must still translate:\n{}",
         model.model()
     );
@@ -296,7 +296,9 @@ CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app
     }
 }
 
-/// A rule the parent's own `can_select` already allows needs no gate.
+/// A rule the parent's own `can_select` already allows needs no gate of its own. The
+/// child walks a relation on the parent's type, and that relation references the
+/// parent's read gate once, beside the child's clause, rather than re-deriving it.
 #[test]
 fn a_redundant_select_gate_is_left_out() {
     let inherited_body = |parent_policies: &str| {
@@ -328,37 +330,32 @@ fn a_redundant_select_gate_is_left_out() {
         )
     };
 
-    // The parent admits exactly the rule the child names, so no gate is needed.
+    // The parent admits exactly the rule the child names, so the gate is the parent's
+    // own read relation, referenced once.
     let (walked, body, dsl) = inherited_body(
         "CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n",
     );
-    assert_eq!(
-        walked, "owner",
-        "the child should walk the parent's own relation, got '{walked}':\n{dsl}"
+    assert!(
+        walked.starts_with("inherited_"),
+        "the child should walk a relation the parent's type defines, got '{walked}':\n{dsl}"
     );
     assert_eq!(
         body.as_deref(),
-        Some("[user]"),
-        "no gated relation should be synthesized:\n{dsl}"
+        Some("owner and can_select"),
+        "the parent's read gate is referenced, not re-derived:\n{dsl}"
     );
 
-    // The rule is one branch of the parent's union, so it still implies visibility.
-    let (walked, _, dsl) = inherited_body(
+    // The rule is one branch of the parent's union, so the gate is still the parent's
+    // own read relation, referenced once.
+    let (walked, body, dsl) = inherited_body(
         "CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
          CREATE POLICY proj_pub ON projects FOR SELECT USING (is_public = TRUE);\n",
     );
     assert_eq!(
-        walked, "owner",
-        "a rule the parent's union already contains needs no gate, got '{walked}':\n{dsl}"
-    );
-
-    // The parent admits strictly less than the rule, so the gate has to stay.
-    let (walked, body, dsl) = inherited_body(
-        "CREATE POLICY proj_editor ON projects FOR SELECT USING (editor_id = current_setting('app.user_id', true));\n",
-    );
-    assert!(
-        body.is_some_and(|body| body.contains("can_select")),
-        "a rule the parent does not already allow must stay gated, got '{walked}':\n{dsl}"
+        body.as_deref(),
+        Some("owner and can_select"),
+        "a rule the parent's union already contains needs no second spelling of the \
+         gate, got '{walked}':\n{dsl}"
     );
 }
 
@@ -388,6 +385,10 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_settin
         relation_definition(&dsl, "docs", "can_insert").expect("docs should define can_insert");
     assert_ne!(can_insert, "no_access", "the INSERT policy grants:\n{dsl}");
 
+    let grant = can_insert
+        .split(" and ")
+        .next()
+        .expect("the INSERT policy keeps a grant");
     assert!(
         translator
             .translate(&db)
@@ -395,8 +396,8 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_settin
             .outputs_accepting_gaps()
             .tuple_queries()
             .iter()
-            .any(|query| query.sql.contains(&format!("'{can_insert}' AS relation"))),
-        "can_insert reads '{can_insert}', so its tuples are still needed:\n{dsl}"
+            .any(|query| query.sql.contains(&format!("'{grant}' AS relation"))),
+        "can_insert reads '{grant}', so its tuples are still needed:\n{dsl}"
     );
 }
 
@@ -607,8 +608,8 @@ fn each_outcome_carries_its_own_severity() {
 
 /// A policy is created once and then tuned, so a migration bundle carries the final
 /// rule in an `ALTER POLICY` rather than in the `CREATE POLICY`. Translating the
-/// original is an over-grant whenever the alteration narrowed the policy, which is the
-/// whole reason such a schema used to be refused outright.
+/// original is an over-grant whenever the alteration narrowed the policy, so the
+/// model has to carry the final rule instead.
 #[test]
 fn the_model_follows_a_policy_altered_after_creation() {
     let created = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
@@ -619,14 +620,14 @@ fn the_model_follows_a_policy_altered_after_creation() {
     let (before, _) = translation(created);
     assert_eq!(
         relation_definition(&before, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the created policy grants the owner:\n{before}"
     );
 
     let (after, tuples) = translation(&narrowed);
     assert_eq!(
         relation_definition(&after, "docs", "can_select").as_deref(),
-        Some("no_access"),
+        Some("no_access and acting_app_user from request_gate"),
         "the altered policy grants nobody, and the model has to say so:\n{after}"
     );
     assert!(
@@ -858,7 +859,13 @@ CREATE POLICY shares_read ON shares FOR SELECT USING (viewer = current_setting('
         };
         assert_eq!(
             (table.to_string(), sources.as_slice()),
-            ("shares".to_string(), &["ownership tuples".to_string()][..])
+            (
+                "shares".to_string(),
+                &[
+                    "acting kind links".to_string(),
+                    "ownership tuples".to_string(),
+                ][..]
+            )
         );
         assert_eq!(
             reason, expected_reason,

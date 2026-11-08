@@ -53,8 +53,13 @@ fn disambiguated_type_receives_tuples_under_its_own_type_name() {
         .expect("translation should plan")
         .outputs_accepting_gaps();
     let tuples = outputs.tuple_queries();
+    let ownership: Vec<&str> = tuples
+        .iter()
+        .filter(|query| query.sql.contains("'owner' AS relation"))
+        .map(|query| query.sql.as_str())
+        .collect();
     assert_eq!(
-        tuples.len(),
+        ownership.len(),
         2,
         "each colliding table needs its own ownership query, got: {tuples:#?}"
     );
@@ -63,9 +68,14 @@ fn disambiguated_type_receives_tuples_under_its_own_type_name() {
         (r#"FROM "app"."docs""#, "docs"),
         (r#"FROM "public"."docs""#, renamed.as_str()),
     ] {
-        let matching = tuples_reading_from(tuples, from_clause);
+        let matching = ownership
+            .iter()
+            .filter(|sql| sql.contains(from_clause))
+            .collect::<Vec<_>>();
         let [sql] = matching.as_slice() else {
-            panic!("expected exactly one query reading {from_clause}, got: {matching:#?}");
+            panic!(
+                "expected exactly one ownership query reading {from_clause}, got: {matching:#?}"
+            );
         };
         assert!(
             sql.contains(&format!("'{expected_type}:'")),
@@ -92,7 +102,13 @@ fn disambiguated_type_is_not_left_without_tuples() {
     let rendered = format_tuples(tuples);
 
     for type_name in type_names(&dsl) {
-        if is_structural_type(&type_name) {
+        // `pg_role` holds the usage link of the request gate, which a request decides,
+        // so it loads no row-derived tuple, and `request_gate` names its objects as one
+        // literal per table rather than a prefix over a key.
+        if is_structural_type(&type_name)
+            || type_name == PG_ROLE_TYPE
+            || type_name == REQUEST_GATE_TYPE
+        {
             continue;
         }
         assert!(
@@ -208,12 +224,12 @@ fn policies_compose_however_each_one_spells_the_table() {
 
     assert_eq!(
         read_of("docs").as_deref(),
-        Some("owner and reviewer"),
+        Some("owner and reviewer and acting_app_user from request_gate"),
         "the bare spelling must keep the barrier, or this comparison proves nothing"
     );
     assert_eq!(
         read_of("\"docs\"").as_deref(),
-        Some("owner and reviewer"),
+        Some("owner and reviewer and acting_app_user from request_gate"),
         "quoting the table in the RESTRICTIVE policy must not drop it"
     );
 }
@@ -241,7 +257,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the policy names the table the search path resolves:\n{dsl}"
     );
     assert!(
@@ -292,7 +308,9 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
     assert_eq!(
         reads
             .iter()
-            .filter(|(_, definition)| definition.as_deref() == Some("owner"))
+            .filter(|(_, definition)| {
+                definition.as_deref() == Some("owner and acting_app_user from request_gate")
+            })
             .count(),
         1,
         "exactly one of the two tables carries the policy:\n{dsl}"
@@ -310,7 +328,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
     // canonical type name, so the untouched `public.docs` is the renamed one.
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the first path entry holding the name wins:\n{dsl}"
     );
 }
@@ -377,7 +395,7 @@ CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('
 
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the table with policies keeps the canonical name:\n{dsl}"
     );
     let renamed = type_names(&dsl)
@@ -391,10 +409,11 @@ CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('
     );
 }
 
-/// Canonicalizing a quoted role can map it onto a different existing role, which
-/// changes who the policy admits.
+/// A policy whose `TO` clause names a role the schema cannot settle settles for no
+/// acting role, so its branch is refused, the refusal says why, and the read it guarded
+/// denies.
 #[test]
-fn pg_role_identifier_rewrite_is_reported() {
+fn a_policy_naming_a_role_the_schema_cannot_settle_is_reported_refused() {
     let db = db_of(
         r#"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
@@ -412,9 +431,15 @@ CREATE POLICY docs_sel ON docs FOR SELECT TO "billing admin" USING (owner_id = c
             .notes()
             .iter()
             .any(|note| note.message().contains("billing admin")
-                && note.message().contains("billing_admin")),
-        "the role-name rewrite must name both the original and the OpenFGA identifier, got: {:#?}",
+                && note.message().contains("cannot be settled")),
+        "the refusal must name the role the TO clause cannot settle, got: {:#?}",
         model.notes()
+    );
+    assert_eq!(
+        relation_definition(&model.model(), "docs", "can_select").as_deref(),
+        Some("no_access"),
+        "the refused read denies:\n{}",
+        model.model()
     );
 }
 
@@ -577,7 +602,8 @@ fn two_schemas_holding_one_table_name_get_two_types() {
     let guarded: Vec<String> = type_names(&dsl)
         .into_iter()
         .filter(|name| {
-            relation_definition(&dsl, name, "can_select").as_deref() == Some("owner_login")
+            relation_definition(&dsl, name, "can_select").as_deref()
+                == Some("owner_login and acting_app_user from request_gate")
         })
         .collect();
 
@@ -632,17 +658,6 @@ fn the_furniture_of_a_real_schema_does_not_disturb_the_policies() {
             .map(|d| d.contains("owner_login")),
         Some(true),
         "the ownership policy still reads its column:\n{dsl}"
-    );
-
-    // The owner the table was handed is exempt from every policy on it, and saying so is
-    // the only way an operator learns the model is narrower than the database.
-    assert!(
-        outputs
-            .notes()
-            .iter()
-            .any(|note| note.message().contains("auditor") && note.message().contains("exempt")),
-        "the exempt owner must be named, got {:#?}",
-        outputs.notes()
     );
 
     // A key over two columns leaves no single-column object identifier, so the table it
@@ -854,7 +869,6 @@ fn well_known_names_have_a_single_source_of_truth() {
         names.user().as_str(),
         names.team().as_str(),
         names.pg_role().as_str(),
-        names.pg_role_scope().as_str(),
         names.nobody().as_str(),
     ] {
         assert!(
@@ -862,14 +876,7 @@ fn well_known_names_have_a_single_source_of_truth() {
             "custom type name {expected} should reach every output:\n{rendered}"
         );
     }
-    for default in [
-        "user",
-        "team",
-        "pg_role",
-        "pg_role_scope",
-        "request_gate",
-        "nobody",
-    ] {
+    for default in ["user", "team", "pg_role", "request_gate", "nobody"] {
         assert!(
             !rendered.contains(&format!("type {default}\n"))
                 && !rendered.contains(&format!("'{default}:")),

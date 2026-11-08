@@ -4,12 +4,12 @@ use alloc::collections::BTreeSet;
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use sql_traits::errors::LookupError;
-use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr, Owner};
+use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr};
 
 use crate::classifier::function_registry::DeclaredSource;
 use crate::clock::ClockThreshold;
 use crate::parser::column_type_casts::without_column_type_casts;
-use crate::parser::names::{stored_ident_name, table_identity};
+use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
 pub(crate) use crate::types::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ColumnName,
@@ -718,14 +718,6 @@ pub fn derive_policy_mode<P: PolicyLike>(policy: &P) -> PolicyMode {
     PolicyMode::from(policy.policy_type())
 }
 
-/// Whether a policy's command covers reads, as a `SELECT` or `ALL` policy does.
-pub(crate) fn policy_covers_reads<P: PolicyLike>(policy: &P) -> bool {
-    matches!(
-        policy_command(policy.command()),
-        PolicyCommand::Select | PolicyCommand::All
-    )
-}
-
 /// The stored `USING` clause for a walk of its relations, subqueries and calls, read or not.
 pub(crate) fn using_shape<'p, P: PolicyLike>(policy: &'p P, db: &'p P::DB) -> Option<&'p Expr> {
     policy
@@ -742,52 +734,6 @@ pub(crate) fn check_shape<'p, P: PolicyLike>(policy: &'p P, db: &'p P::DB) -> Op
         .ok()
         .flatten()
         .map(|clause| clause.expression())
-}
-
-/// Roles in `TO (...)` that constrain policy applicability, named and resolvable.
-///
-/// Empty when the policy applies to every role, which `PostgreSQL` spells both as
-/// `TO PUBLIC` and as no `TO` clause at all. A spelling `PostgreSQL` resolves when the
-/// DDL runs is not a name and is answered by [`derive_ddl_time_scoped_roles`].
-pub fn derive_scoped_roles<P: PolicyLike>(policy: &P, db: &P::DB) -> Vec<String> {
-    split_scoped_roles(policy, db).0
-}
-
-/// The `TO (...)` spellings `PostgreSQL` resolves to the executing role when the
-/// policy is created (`CURRENT_USER`, `CURRENT_ROLE`, `SESSION_USER`).
-///
-/// `pg_policy` stores the resolved role, so a dump never carries these and a schema
-/// file holding one cannot say who the policy binds.
-pub fn derive_ddl_time_scoped_roles<P: PolicyLike>(policy: &P, db: &P::DB) -> Vec<String> {
-    split_scoped_roles(policy, db).1
-}
-
-/// One walk of the owners: `(named roles, ddl-time spellings)`.
-fn split_scoped_roles<P: PolicyLike>(policy: &P, db: &P::DB) -> (Vec<String>, Vec<String>) {
-    if policy.applies_to_public() {
-        return (Vec::new(), Vec::new());
-    }
-
-    let mut named = Vec::new();
-    let mut ddl_time = Vec::new();
-    for owner in policy.roles(db) {
-        if let Owner::Ident(ident) = owner {
-            let stored = stored_ident_name(ident);
-            if !stored.is_empty() {
-                named.push(stored.into_owned());
-            }
-        } else {
-            let spelling = owner.to_string().trim().to_string();
-            if !spelling.is_empty() {
-                ddl_time.push(spelling);
-            }
-        }
-    }
-    named.sort();
-    named.dedup();
-    ddl_time.sort();
-    ddl_time.dedup();
-    (named, ddl_time)
 }
 
 /// A clause a policy stores, as the catalog reads it.
@@ -877,8 +823,7 @@ pub fn clause_illegal_for_command(
 ///     table: "docs".to_string(),
 ///     command: PolicyCommand::Select,
 ///     mode: PolicyMode::Permissive,
-///     scoped_roles: Vec::new(),
-///     ddl_time_roles: Vec::new(),
+///     acting_role: None,
 ///     using: None,
 ///     with_check: None,
 ///     using_classification: None,
@@ -902,8 +847,9 @@ pub struct ClassifiedPolicy {
     pub(crate) resolved_table: Option<TableId>,
     pub(crate) command: PolicyCommand,
     pub(crate) mode: PolicyMode,
-    pub(crate) scoped_roles: Vec<String>,
-    pub(crate) ddl_time_roles: Vec<String>,
+    /// The role a request acts as when it meets this policy, which `current_user` in its
+    /// clauses names. `None` for a policy classified for no deployment.
+    pub(crate) acting_role: Option<String>,
     pub(crate) using: Option<StoredClause>,
     pub(crate) with_check: Option<StoredClause>,
     pub(crate) using_classification: Option<ClassifiedExpr>,
@@ -924,7 +870,6 @@ impl ClassifiedPolicy {
     /// downstream has to know what the catalog stores. The table is resolved here, where
     /// the catalog is in hand, so no later stage re-reads the spelling as text.
     pub fn from_policy<P: PolicyLike>(policy: &P, db: &P::DB) -> Self {
-        let (scoped_roles, ddl_time_roles) = split_scoped_roles(policy, db);
         let target = policy.target_table_name();
         let table = db
             .resolve_target_table(target, IdentifierCase::AsWritten)
@@ -936,8 +881,7 @@ impl ClassifiedPolicy {
             resolved_table: table.map(table_identity),
             command: policy_command(policy.command()),
             mode: derive_policy_mode(policy),
-            scoped_roles,
-            ddl_time_roles,
+            acting_role: None,
             using: StoredClause::of(policy.using_expression(db), table, db),
             with_check: StoredClause::of(policy.check_expression(db), table, db),
             using_classification: None,
@@ -983,6 +927,11 @@ impl ClassifiedPolicy {
     /// Policy mode (`PERMISSIVE` by default when omitted).
     pub fn mode(&self) -> PolicyMode {
         self.mode
+    }
+
+    /// The role this policy was classified for, which `current_user` in its clauses names.
+    pub fn acting_role(&self) -> Option<&str> {
+        self.acting_role.as_deref()
     }
 
     /// The `USING` expression the policy stores, if any and if its value is known.
@@ -1033,16 +982,6 @@ impl ClassifiedPolicy {
         ]
         .into_iter()
         .flatten()
-    }
-
-    /// Roles in `TO (...)` that constrain policy applicability.
-    pub fn scoped_roles(&self) -> &[String] {
-        &self.scoped_roles
-    }
-
-    /// `TO (...)` spellings resolved only when the DDL runs.
-    pub fn ddl_time_roles(&self) -> &[String] {
-        &self.ddl_time_roles
     }
 }
 
@@ -1271,30 +1210,6 @@ CREATE POLICY p_explicit ON docs AS RESTRICTIVE FOR DELETE USING (FALSE);
 
         let err = ConfidenceLevel::from_str("z").expect_err("invalid level should fail");
         assert!(err.contains("Invalid confidence level: z"));
-    }
-
-    #[test]
-    fn classified_policy_scoped_roles_excludes_public_and_dedupes() {
-        let scoped = first_classified(
-            r"
-CREATE TABLE docs(id uuid primary key);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_scoped ON docs FOR SELECT TO app_user, app_user, auditors USING (TRUE);
-",
-        );
-        assert_eq!(
-            scoped.scoped_roles(),
-            ["app_user".to_string(), "auditors".to_string()]
-        );
-
-        let public = first_classified(
-            r"
-CREATE TABLE docs(id uuid primary key);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p_public ON docs FOR SELECT TO PUBLIC, app_user USING (TRUE);
-",
-        );
-        assert_eq!(public.scoped_roles(), Vec::<String>::new());
     }
 
     /// `PostgreSQL` compares the privilege case insensitively and ignores surrounding space,

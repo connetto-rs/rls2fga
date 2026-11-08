@@ -13,10 +13,10 @@ use rls2fga::types::{RecordDerivation, ValueSource};
 
 use crate::support::deployment::{caller, delimited_set, deployment};
 use crate::support::footgun::{
-    can_delete_walk, db_of, membership_translation, pg_role_relation, relation_definition,
-    relation_definitions, relation_denies, scope_admits_role, translation, translator,
-    tuples_reading_from, type_names, CORRELATION_SCHEMA, QUOTED_NESTED_MEMBERSHIP_SCHEMA,
-    TWO_MEMBERSHIP_COLUMNS_SCHEMA, TWO_ROLE_THRESHOLD_REGISTRY, TWO_ROLE_THRESHOLD_SCHEMA,
+    can_delete_walk, db_of, membership_translation, relation_definition, relation_definitions,
+    relation_denies, translation, translator, tuples_reading_from, type_names, CORRELATION_SCHEMA,
+    QUOTED_NESTED_MEMBERSHIP_SCHEMA, TWO_MEMBERSHIP_COLUMNS_SCHEMA, TWO_ROLE_THRESHOLD_REGISTRY,
+    TWO_ROLE_THRESHOLD_SCHEMA,
 };
 use crate::support::{classify_sql, plan_at};
 
@@ -84,15 +84,20 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
         !type_names(&dsl).iter().any(|name| name == "id"),
         "a join column must not become a type:\n{dsl}"
     );
+    let projects_select = relation_definition(&dsl, "projects", "can_select")
+        .expect("projects should define can_select");
+    let rule = projects_select
+        .strip_suffix(" from orgs and acting_app_user from request_gate")
+        .expect("the org rule is named before the acting kind");
     assert_eq!(
-        relation_definition(&dsl, "projects", "can_select").as_deref(),
-        Some("owner from orgs"),
+        relation_definition(&dsl, "orgs", rule).as_deref(),
+        Some("owner and can_select"),
         "projects requires ownership of its org:\n{dsl}"
     );
     let tasks_select =
         relation_definition(&dsl, "tasks", "can_select").expect("tasks should define can_select");
     assert!(
-        tasks_select.ends_with(" from projects"),
+        tasks_select.ends_with(" from projects and acting_app_user from request_gate"),
         "and tasks reaches that rule through projects, got '{tasks_select}':\n{dsl}"
     );
 
@@ -145,7 +150,7 @@ CREATE POLICY projects_sel ON projects FOR SELECT USING (
     );
     assert_eq!(
         relation_definition(&model.model(), "projects", "can_select").as_deref(),
-        Some("no_access"),
+        Some("no_access and acting_app_user from request_gate"),
         "an unconfirmable parent link must deny, not guess:\n{}",
         model.model()
     );
@@ -219,7 +224,7 @@ CREATE POLICY orders_sel ON orders FOR SELECT USING (
 
     assert_eq!(
         relation_definition(&model.model(), "orders", "can_select").as_deref(),
-        Some("no_access"),
+        Some("no_access and acting_app_user from request_gate"),
         "a join the model cannot express must deny, not drop the condition:\n{}",
         model.model()
     );
@@ -303,7 +308,7 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
         .outputs_accepting_gaps();
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("no_access"),
+        Some("no_access and acting_app_user from request_gate"),
         "no membership row is readable, so the policy grants nothing:\n{}",
         model.model()
     );
@@ -376,10 +381,11 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
     );
 }
 
-/// A membership table whose only read policy targets a role hides every row from a
-/// user outside that role, so the grant it feeds requires that role too.
+/// A membership table whose only read policy names a role the schema cannot settle
+/// reads nothing for the acting role, so the guarded table grants nothing and the
+/// refusal is named.
 #[test]
-fn membership_readable_only_by_a_role_requires_that_role() {
+fn membership_readable_only_by_a_role_denies_the_guarded_table() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
@@ -390,34 +396,34 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ";
     let db = db_of(sql);
-    let translator = translator(ConfidenceLevel::B);
-    let model = translator
+    let model = translator(ConfidenceLevel::B)
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
-    let scope = pg_role_relation(&model.model(), "docs").unwrap_or_else(|| {
-        panic!(
-            "docs must scope the membership grant by role:\n{}",
-            model.model()
-        )
-    });
-    let can_select = relation_definition(&model.model(), "docs", "can_select")
-        .expect("docs should define can_select");
-    assert!(
-        can_select.contains(&format!("from {scope}")),
-        "reading docs must require the role that can read doc_members, got '{can_select}':\n{}",
+    assert_eq!(
+        relation_definition(&model.model(), "docs", "can_select").as_deref(),
+        Some("no_access"),
+        "the acting role reads no membership row, so the policy grants nothing:\n{}",
         model.model()
     );
-
-    let outputs = translator
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let tuples = outputs.tuple_queries();
     assert!(
-        scope_admits_role(tuples, "docs:", &scope, "auditor"),
-        "the scope relation needs auditor tuples on docs, got: {:#?}",
-        tuples.iter().map(|q| &q.sql).collect::<Vec<_>>()
+        model.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::RowSecurityRefused { table, role, commands, .. }
+                if table.name() == "doc_members" && role == "app_user"
+                    && commands.contains(&"SELECT".to_string())
+        )),
+        "the refusal must name the read the acting role cannot settle, got {:#?}",
+        model.notes()
+    );
+    assert!(
+        model.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
+                if join_table.name() == "doc_members"
+        )),
+        "the operator must be told which table hides the rows, got {:#?}",
+        model.notes()
     );
 }
 
@@ -430,6 +436,7 @@ fn membership_readable_by_public_keeps_the_grant_unscoped() {
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
+CREATE ROLE auditor;
 CREATE POLICY dm_audit ON doc_members FOR SELECT TO auditor USING (true);
 CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_setting('app.user_id', true));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -441,10 +448,9 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
-    assert_eq!(
-        pg_role_relation(&model.model(), "docs"),
-        None,
-        "an unscoped read policy leaves the membership grant open to every role:\n{}",
+    assert!(
+        !relation_denies(&model.model(), "docs", "can_select"),
+        "an unscoped read policy leaves the membership grant open:\n{}",
         model.model()
     );
 }
@@ -723,9 +729,9 @@ CREATE POLICY docs_members ON docs FOR SELECT
     );
 }
 
-/// `docs.can_select` and whether any query loads the membership table, for a schema whose
-/// membership table carries `policies`.
-fn membership_readability(policies: &str) -> (String, bool, Vec<String>) {
+/// `docs.can_select`, whether it denies, and whether any query loads the membership
+/// table, for a schema whose membership table carries `policies`.
+fn membership_readability(policies: &str) -> (String, bool, bool, Vec<String>) {
     let sql = format!(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
@@ -745,6 +751,7 @@ CREATE POLICY pd ON docs FOR SELECT USING (
     let dsl = outputs.model();
     let select = relation_definition(&dsl, "docs", "can_select")
         .unwrap_or_else(|| panic!("docs should define can_select:\n{dsl}"));
+    let denies = relation_denies(&dsl, "docs", "can_select");
     let loads_m = outputs
         .tuple_queries()
         .iter()
@@ -754,7 +761,7 @@ CREATE POLICY pd ON docs FOR SELECT USING (
         .iter()
         .map(|note| note.message().clone())
         .collect();
-    (select, loads_m, notes)
+    (select, denies, loads_m, notes)
 }
 
 /// A membership read policy that cannot admit a row leaves the guarded table's subquery
@@ -786,8 +793,8 @@ fn a_membership_read_policy_that_cannot_admit_a_row_denies_the_guarded_table() {
 fn assert_membership_table_denied(policies: &[&str]) {
     let mut complaints = Vec::new();
     for policy in policies {
-        let (select, loads_m, notes) = membership_readability(policy);
-        if select != "no_access" {
+        let (select, denies, loads_m, notes) = membership_readability(policy);
+        if !denies {
             complaints.push(format!("`{policy}` left can_select as `{select}`"));
         }
         if loads_m {
@@ -845,14 +852,14 @@ fn a_membership_read_policy_that_may_admit_a_row_keeps_its_grant() {
         // A non-read policy says nothing about reads.
         "CREATE POLICY pm ON m FOR SELECT USING (true);\n\
          CREATE POLICY pmd ON m FOR DELETE USING (false);",
-        // A barrier bound to named roles leaves everyone outside them whatever the
-        // permissive policies grant, so closing the table would refuse those readers what
-        // RLS allows. The three-way answer cannot say "closed for these roles only".
-        "CREATE POLICY pm ON m FOR SELECT USING (true);\n\
+        // A barrier bound to a named role binds that role alone, so the readers outside
+        // it keep what the permissive policies grant.
+        "CREATE ROLE contractor;\n\
+         CREATE POLICY pm ON m FOR SELECT USING (true);\n\
          CREATE POLICY pmr ON m AS RESTRICTIVE FOR SELECT TO contractor USING (false);",
     ] {
-        let (select, loads_m, _) = membership_readability(policy);
-        if select == "no_access" {
+        let (_select, denies, loads_m, _) = membership_readability(policy);
+        if denies {
             complaints.push(format!("`{policy}` denied a grant RLS may allow"));
         }
         if !loads_m {
@@ -951,25 +958,46 @@ fn a_request_gate_that_names_no_row_keeps_the_membership_translated() {
     )));
 }
 
+/// A membership read that the caller's own row decides cannot be precomputed from
+/// request values alone, so the translation says the join table guards it.
 #[test]
 fn unsupported_membership_read_rules_stay_guarded() {
     for policies in [
         "CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_setting('app.user_id', true));".to_string(),
-        "CREATE POLICY p ON team_members FOR SELECT TO contractor USING (true);".to_string(),
-        "CREATE POLICY p ON team_members FOR SELECT TO CURRENT_USER USING (true);".to_string(),
-        format!(
-            "{TEAM_MEMBERS_OPEN}
-                 CREATE POLICY p ON team_members FOR SELECT USING (false);"
-        ),
-        format!(
-            "{TEAM_MEMBERS_OPEN}
-                 CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_setting('app.user_id', true));"
-        ),
         format!(
             "{TEAM_MEMBERS_OPEN}
                  CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT
                      USING (user_id = current_setting('app.user_id', true));"
         ),
+        format!(
+            "{TEAM_MEMBERS_OPEN}
+                 CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT
+                     USING ('team_members:read' = ANY(string_to_array(
+                         current_setting('app.undeclared', true), ',')));"
+        ),
+    ] {
+        let outputs = team_readability(&format!(
+            "ALTER TABLE team_members ENABLE ROW LEVEL SECURITY; {policies}"
+        ));
+        assert!(
+            outputs.notes().iter().any(|note| matches!(
+                note,
+                TranslationNote::MembershipTableGuarded { join_table, policy }
+                    if join_table.name() == "team_members" && policy == "docs_read"
+            )),
+            "{policies}\n{:#?}",
+            outputs.notes()
+        );
+    }
+}
+
+/// A `TO` role the schema cannot settle refuses the read for the acting role, so the
+/// membership table grants no reads and the refusal is named.
+#[test]
+fn an_unsettled_to_role_refuses_the_membership_read() {
+    for policies in [
+        "CREATE POLICY p ON team_members FOR SELECT TO contractor USING (true);".to_string(),
+        "CREATE POLICY p ON team_members FOR SELECT TO CURRENT_USER USING (true);".to_string(),
         format!(
             "{TEAM_MEMBERS_OPEN}
                  CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT TO contractor
@@ -981,16 +1009,6 @@ fn unsupported_membership_read_rules_stay_guarded() {
                  CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT TO CURRENT_USER
                      USING (false);"
         ),
-        format!(
-            "{TEAM_MEMBERS_OPEN}
-                 CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT
-                     USING ('team_members:read' = ANY(string_to_array(
-                         current_setting('app.undeclared', true), ',')));"
-        ),
-        format!(
-            "{TEAM_MEMBERS_OPEN}
-                 CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT;"
-        ),
     ] {
         let outputs = team_readability(&format!(
             "ALTER TABLE team_members ENABLE ROW LEVEL SECURITY; {policies}"
@@ -998,8 +1016,18 @@ fn unsupported_membership_read_rules_stay_guarded() {
         assert!(
             outputs.notes().iter().any(|note| matches!(
                 note,
-                TranslationNote::MembershipTableGuarded { join_table, policy }
-                    if join_table.name() == "team_members" && policy == "docs_read"
+                TranslationNote::RowSecurityRefused { table, role, commands, .. }
+                    if table.name() == "team_members" && role == "app_user"
+                        && commands.contains(&"SELECT".to_string())
+            )),
+            "{policies}\n{:#?}",
+            outputs.notes()
+        );
+        assert!(
+            outputs.notes().iter().any(|note| matches!(
+                note,
+                TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
+                    if join_table.name() == "team_members"
             )),
             "{policies}\n{:#?}",
             outputs.notes()
@@ -1285,7 +1313,7 @@ CREATE POLICY items_p ON items FOR SELECT USING (
         "the gate is completed by the request on the share row:\n{model}"
     );
     assert!(
-        reach.ends_with(" from teams"),
+        reach.ends_with(" from teams and acting_app_user from request_gate"),
         "items reaches the share rows through the team the foreign key names:\n{model}"
     );
     assert_eq!(
@@ -1465,7 +1493,7 @@ CREATE POLICY p ON papers FOR SELECT USING (EXISTS (
     let (share_type, _, reach) = share_gate_reach(&model, "papers");
     assert_eq!(share_type, "shares_share");
     assert!(
-        reach.ends_with(" from paper_batch"),
+        reach.ends_with(" from paper_batch and acting_app_user from request_gate"),
         "papers reach their shares through the batch they share:\n{model}"
     );
     assert!(
@@ -1496,7 +1524,9 @@ CREATE POLICY p ON papers FOR SELECT USING (EXISTS (
     let model = outputs.model();
     let (share_type, _, reach) = share_gate_reach(&model, "papers");
     assert!(
-        reach.ends_with(&format!(" from {share_type}")),
+        reach.ends_with(&format!(
+            " from {share_type} and acting_app_user from request_gate"
+        )),
         "the guarded row reaches its share rows directly:\n{model}"
     );
     let bridge = outputs

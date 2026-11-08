@@ -353,6 +353,23 @@ pub(crate) fn grants_nothing(
     }
 }
 
+/// The relations a direct relation's userset subjects name, which a tuple of it reaches.
+fn reach_direct_usersets(
+    plan: &TypePlan,
+    relation: &RelationName,
+    reached: &mut BTreeSet<(TypeName, RelationName)>,
+) {
+    for subject in plan.direct_relations.get(relation).into_iter().flatten() {
+        if let DirectSubject::Userset {
+            type_name,
+            relation,
+        } = subject
+        {
+            reached.insert((type_name.clone(), relation.clone()));
+        }
+    }
+}
+
 pub(crate) fn reach_userset(
     expr: &UsersetExpr,
     plan: &TypePlan,
@@ -364,6 +381,7 @@ pub(crate) fn reach_userset(
             if !reached.insert((plan.type_name.clone(), name.clone())) {
                 return;
             }
+            reach_direct_usersets(plan, name, reached);
             if let Some(inner) = plan.computed_relations.get(name) {
                 reach_userset(inner, plan, by_name, reached);
             }
@@ -382,6 +400,7 @@ pub(crate) fn reach_userset(
                 if !reached.insert((target.type_name.clone(), computed.clone())) {
                     continue;
                 }
+                reach_direct_usersets(target, computed, reached);
                 if let Some(inner) = target.computed_relations.get(computed) {
                     reach_userset(inner, target, by_name, reached);
                 }

@@ -478,9 +478,9 @@ fn arm_sources(schema: &str) -> usize {
 ///
 /// The parity run alone cannot prove the axis: `FORCE` matters only because a role the case
 /// reads as owns the table, and dropping either half leaves a case that still agrees. So the
-/// translation answers both halves here. With `FORCE` there is nothing to report, and with it
-/// removed the report has to name `alice`, which it can only do if the schema handed her the
-/// table.
+/// translation answers both halves here, with the table handed to the role the case acts as,
+/// since only an acting role's exemption a note can name. With `FORCE` there is nothing to
+/// report, and with it removed the report has to name that role.
 #[test]
 fn a_forced_case_hands_its_owner_no_bypass() {
     let owned: Vec<_> = every_case()
@@ -489,31 +489,38 @@ fn a_forced_case_hands_its_owner_no_bypass() {
         .collect();
     assert!(!owned.is_empty(), "no owned case to check");
     for case in owned {
-        let forced = owner_exemptions(&case.schema);
+        let as_acting_owner = |forced: bool| {
+            let mut schema = case.schema.replace(
+                "ALTER TABLE \"guarded\" OWNER TO alice;",
+                "ALTER TABLE \"guarded\" OWNER TO app_user;",
+            );
+            if !forced {
+                schema = schema.replace("ALTER TABLE \"guarded\" FORCE ROW LEVEL SECURITY;\n", "");
+            }
+            schema
+        };
+        let forced = owner_exemptions(&as_acting_owner(true));
         assert!(
             forced.is_empty(),
             "{}: FORCE leaves no owner exempt, got {forced:?}",
             case.name
         );
-        let unforced = case
-            .schema
-            .replace("ALTER TABLE \"guarded\" FORCE ROW LEVEL SECURITY;\n", "");
-        let reported = owner_exemptions(&unforced);
+        let unforced = owner_exemptions(&as_acting_owner(false));
         assert!(
-            reported.iter().any(|note| note.contains("alice")),
-            "{}: unforced, the exempt owner is the role the case reads as, got {reported:?}",
+            unforced.iter().any(|note| note.contains("app_user")),
+            "{}: unforced, the exempt owner is the role the case acts as, got {unforced:?}",
             case.name
         );
     }
 }
 
-/// What a schema reports about owners the policies do not reach.
+/// What a schema reports about the acting roles its tables exempt.
 fn owner_exemptions(schema: &str) -> Vec<String> {
     plan(schema)
         .outputs_accepting_gaps()
         .notes()
         .iter()
-        .filter(|note| note.severity() == NoteSeverity::Exempt && note.message().contains("owner"))
+        .filter(|note| matches!(note, TranslationNote::ActingRoleExempt { .. }))
         .map(TranslationNote::message)
         .collect()
 }

@@ -116,7 +116,8 @@ fn callers() -> Vec<Principal> {
     ]
 }
 
-/// Whether `decision` grants `subject` on `row`, completing request gates from `context`.
+/// Whether `decision` grants `subject` on `row` for a check carrying `context` and
+/// acting as `acting_role`, completing request gates from `context`.
 ///
 /// The consumer's whole evaluation, written from the contract alone.
 fn grants(
@@ -124,6 +125,7 @@ fn grants(
     row: &serde_json::Value,
     subject: &str,
     context: &serde_json::Value,
+    acting_role: &str,
 ) -> bool {
     let records = |shapes: &[rls2fga::types::RecordDescription]| -> Vec<rls2fga::types::Record> {
         shapes
@@ -166,21 +168,21 @@ fn grants(
         } => {
             subject_type.as_str() == "user"
                 && !records(shapes).is_empty()
-                && request_predicate_holds(predicate, context)
+                && request_predicate_holds(predicate, context, acting_role)
         }
         RowDecision::Any(children) => children
             .iter()
-            .any(|child| grants(child, row, subject, context)),
+            .any(|child| grants(child, row, subject, context, acting_role)),
         RowDecision::All(children) => children
             .iter()
-            .all(|child| grants(child, row, subject, context)),
+            .all(|child| grants(child, row, subject, context, acting_role)),
     }
 }
 
 fn recipe<'a>(relations: &'a [RelationShapes], type_name: &str, relation: &str) -> &'a RowDecision {
     relations
         .iter()
-        .find(|entry| entry.type_name.as_str() == type_name && entry.relation == relation)
+        .find(|entry| entry.type_name.as_str() == type_name && entry.relation.as_str() == relation)
         .and_then(|entry| entry.decision.as_ref())
         .unwrap_or_else(|| panic!("{type_name}#{relation} has no recipe, so it costs a round trip"))
 }
@@ -201,16 +203,23 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
     )
     .with_settings([deployment::delimited_set("app.bot_list", ",")]);
 
-    let (classified, db, registry) = support::classify_sql_with_settings(
-        &schema,
-        [deployment::delimited_set("app.bot_list", ",")],
+    // The deployment the harness checks with: acting as the caller's login role, whose
+    // role the seed declares.
+    let sql = format!("CREATE ROLE app_reader LOGIN;\n{schema}");
+    let (classified, db, registry) = support::classify_with(
+        &sql,
+        None,
+        &deployment::caller_deployment_acting_as(
+            &["app_reader"],
+            [deployment::delimited_set("app.bot_list", ",")],
+        ),
     );
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let translation = planned.translation();
     let rows = rows();
-    let contexts: BTreeMap<String, serde_json::Value> = callers()
+    let contexts: BTreeMap<String, (serde_json::Value, String)> = callers()
         .into_iter()
-        .map(|principal| (principal.subject, principal.context))
+        .map(|principal| (principal.subject, (principal.context, principal.login_role)))
         .collect();
 
     let cluster = Cluster::start().await;
@@ -267,11 +276,13 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
             let local = match answer {
                 Some(ActionAnswer::Judged(judges)) if !judges.is_empty() => {
                     judges.iter().all(|judge| {
+                        let (context, acting_role) = &contexts[&observation.subject];
                         grants(
                             recipe(translation.relations(), type_name, judge.relation.as_str()),
                             row,
                             &observation.subject,
-                            &contexts[&observation.subject],
+                            context,
+                            acting_role,
                         )
                     })
                 }

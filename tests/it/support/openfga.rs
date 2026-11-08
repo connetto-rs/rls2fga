@@ -1,3 +1,5 @@
+use std::collections::BTreeSet;
+
 use openfga_client::client::{
     AuthorizationModel, CreateStoreRequest, OpenFgaClient, OpenFgaServiceClient,
     ReadAuthorizationModelRequest, TupleKey, TupleKeyWithoutCondition,
@@ -50,20 +52,20 @@ pub(crate) async fn write_tuples(client: &OpenFgaClient<Channel>, mut tuples: Ve
     }
 }
 
+/// Check as a request acting as the suite's acting role.
 pub(crate) async fn check_allowed(
     client: &OpenFgaClient<Channel>,
     user: &str,
     relation: &str,
     object: &str,
 ) -> bool {
-    client
-        .check_simple(TupleKeyWithoutCondition {
-            user: user.to_string(),
-            relation: relation.to_string(),
-            object: object.to_string(),
-        })
-        .await
-        .expect("check request should succeed")
+    check_allowed_with_context(client, user, relation, object, serde_json::json!({})).await
+}
+
+/// The contextual tuple stating that `user` acts as the role `kind`, which every check
+/// carries.
+pub(crate) fn acting_kind(user: &str, kind: &str) -> TupleKey {
+    make_tuple(&format!("pg_role:{kind}"), "usage", user)
 }
 
 pub(crate) fn make_tuple(object: &str, relation: &str, user: &str) -> TupleKey {
@@ -73,6 +75,52 @@ pub(crate) fn make_tuple(object: &str, relation: &str, user: &str) -> TupleKey {
         object: object.to_string(),
         condition: None,
     }
+}
+
+/// The structural tuples a set of hand-built facts on guarded rows needs, one link
+/// from each row to its type's gate object and one constant per type admitting the
+/// suite's acting role on that gate, which the tuple SQL would write for the rows it
+/// stands in for.
+pub(crate) fn gate_tuples<'a>(objects: impl IntoIterator<Item = &'a str>) -> Vec<TupleKey> {
+    let objects: BTreeSet<&str> = objects.into_iter().collect();
+    let role = super::deployment::ACTING_ROLE;
+    let mut tuples = Vec::new();
+    for object in &objects {
+        let (type_name, _) = object
+            .split_once(':')
+            .expect("a guarded object names its type");
+        tuples.push(make_tuple(
+            object,
+            rls2fga::generator::well_known::request_gate_link_relation().as_str(),
+            &format!(
+                "{}:{type_name}",
+                rls2fga::generator::well_known::REQUEST_GATE_TYPE
+            ),
+        ));
+    }
+    let types: BTreeSet<&str> = objects
+        .iter()
+        .map(|object| {
+            object
+                .split_once(':')
+                .expect("a guarded object names its type")
+                .0
+        })
+        .collect();
+    for type_name in types {
+        tuples.push(make_tuple(
+            &format!(
+                "{}:{type_name}",
+                rls2fga::generator::well_known::REQUEST_GATE_TYPE
+            ),
+            &format!("acting_{role}"),
+            &format!(
+                "{}:{role}#usage",
+                rls2fga::generator::well_known::PG_ROLE_TYPE
+            ),
+        ));
+    }
+    tuples
 }
 
 /// A tuple carrying the condition its relation reference names, plus the context the
@@ -96,7 +144,7 @@ pub(crate) fn make_conditional_tuple(
 }
 
 /// Check with a request context, which is where a condition's remaining parameters
-/// come from.
+/// come from, as a request acting as the suite's acting role.
 pub(crate) async fn check_allowed_with_context(
     client: &OpenFgaClient<Channel>,
     user: &str,
@@ -104,6 +152,30 @@ pub(crate) async fn check_allowed_with_context(
     object: &str,
     context: serde_json::Value,
 ) -> bool {
+    check_as(
+        client,
+        super::deployment::ACTING_ROLE,
+        user,
+        relation,
+        object,
+        context,
+    )
+    .await
+}
+
+/// Check with a request context as a request acting as the role `kind`. Only a subject of
+/// the caller type states a kind, since `pg_role#usage` admits no other.
+pub(crate) async fn check_as(
+    client: &OpenFgaClient<Channel>,
+    kind: &str,
+    user: &str,
+    relation: &str,
+    object: &str,
+    context: serde_json::Value,
+) -> bool {
+    let is_caller = user
+        .split_once(':')
+        .is_some_and(|(type_name, _)| type_name == rls2fga::generator::well_known::USER_TYPE);
     client
         .check(
             TupleKeyWithoutCondition {
@@ -111,7 +183,11 @@ pub(crate) async fn check_allowed_with_context(
                 relation: relation.to_string(),
                 object: object.to_string(),
             },
-            None,
+            if is_caller {
+                vec![acting_kind(user, kind)]
+            } else {
+                Vec::new()
+            },
             to_struct(context),
             false,
         )

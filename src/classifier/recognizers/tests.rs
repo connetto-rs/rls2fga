@@ -1413,14 +1413,16 @@ ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 }
 
 /// The guarded table, an open share table and a second open table.
+/// The papers schema, after the roles the suite's deployment acts as.
 fn papers_schema(extra: &str) -> ParserDB {
     parse_schema(&format!(
-        r"
+        r"{roles}
 CREATE TABLE papers(id UUID PRIMARY KEY);
 CREATE TABLE paper_shares(paper_id UUID, viewer TEXT, weight INT);
 CREATE TABLE tiers(cutoff INT);
 {extra}
-"
+",
+        roles = crate::test_support::ROLES_SQL
     ))
     .expect("schema should parse")
 }

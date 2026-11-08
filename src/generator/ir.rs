@@ -225,6 +225,20 @@ pub(crate) enum TupleSource {
         comparison: RequestComparison,
     },
 
+    /// The acting kind one acting role stands for, held by the object standing for one
+    /// guarded type: `(gate_type:gate_object, relation, pg_role:pg_role#usage)`.
+    ///
+    /// Names no table. Which role each kind is follows from the deployment, so the query is
+    /// a constant `SELECT` yielding one row, and every row of the guarded type reaches it
+    /// through the one link [`Self::PolicyScope`] writes. A check states the kind it runs
+    /// as with the contextual tuple `(user:<subject>, usage, pg_role:<role>)`.
+    ActingKind {
+        gate_type: TypeName,
+        gate_object: String,
+        relation: RelationName,
+        pg_role: String,
+    },
+
     /// One constant a gate reading only the request tests, held by the object standing
     /// for one guarded type. Produces `(gate_type:gate_object, relation, user:*,
     /// condition, context)` with the constant under `row_parameter`.
@@ -568,6 +582,12 @@ pub(crate) enum TupleSourceKey<'a> {
         request_parameter: &'a str,
         comparison: RequestComparison,
     },
+    ActingKind {
+        gate_type: &'a TypeName,
+        gate_object: &'a str,
+        relation: &'a RelationName,
+        pg_role: &'a str,
+    },
     RequestGateEntry {
         gate_type: &'a TypeName,
         gate_object: &'a str,
@@ -683,6 +703,7 @@ impl TupleSource {
             Self::ShareBridge { .. }
             | Self::ClosureBridge { .. }
             | Self::PolicyScopeRoles { .. }
+            | Self::ActingKind { .. }
             | Self::RequestGateEntry { .. }
             | Self::OwnerIdentity { .. }
             | Self::ExplicitGrants { .. }
@@ -774,6 +795,11 @@ impl TupleSource {
                 ..
             } => vec![(scope_type.clone(), relation.clone())],
             Self::RequestGateEntry {
+                gate_type,
+                relation,
+                ..
+            }
+            | Self::ActingKind {
                 gate_type,
                 relation,
                 ..
@@ -963,6 +989,17 @@ impl TupleSource {
                 column,
                 request_parameter,
                 comparison: *comparison,
+            },
+            Self::ActingKind {
+                gate_type,
+                gate_object,
+                relation,
+                pg_role,
+            } => TupleSourceKey::ActingKind {
+                gate_type,
+                gate_object,
+                relation,
+                pg_role,
             },
             Self::RequestGateEntry {
                 gate_type,

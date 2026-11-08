@@ -254,6 +254,16 @@ fn request_predicate(
         Some(UsersetExpr::TupleToUserset { .. } | UsersetExpr::Exclusion { .. }) => None,
         None => {
             let feeding = sources.get(&(gate_type.clone(), relation.clone()))?;
+            // Every guarded type's gate object holds the same kind under this relation.
+            let mut roles = feeding.iter().map(|indexed| match indexed.source {
+                TupleSource::ActingKind { pg_role, .. } => Some(pg_role),
+                _ => None,
+            });
+            if let Some(Some(role)) = roles.next() {
+                return roles
+                    .all(|other| other == Some(role))
+                    .then(|| RequestPredicate::ActsAs { role: role.clone() });
+            }
             let mut atoms = feeding.iter().map(|indexed| match indexed.source {
                 TupleSource::RequestGateEntry { atom, .. } => Some(atom),
                 _ => None,

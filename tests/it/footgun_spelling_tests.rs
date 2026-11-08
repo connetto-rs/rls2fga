@@ -8,7 +8,7 @@ use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
 
 use crate::support;
-use crate::support::deployment::{deployment, settings_from_json};
+use crate::support::deployment::{caller_deployment_acting_as, deployment, settings_from_json};
 
 use crate::support::footgun::{
     db_of, docs_read_definition, relation_definition, translator, type_names,
@@ -54,15 +54,26 @@ fn a_quoted_parent_reference_still_inherits() {
     };
     let read_of = |parent_ref: &str| docs_read_definition(&schema(parent_ref));
 
-    assert_eq!(
-        read_of("parents").as_deref(),
-        Some("owner from parents"),
-        "the bare spelling must inherit, or this comparison proves nothing"
+    let inherits = |read: Option<String>| {
+        read.is_some_and(|read| {
+            read.starts_with("inherited_")
+                && read.contains(" from parents and acting_app_user from request_gate")
+        })
+    };
+
+    assert!(
+        inherits(read_of("parents")),
+        "the bare spelling must inherit the parent's gate, or this comparison proves \
+         nothing"
+    );
+    assert!(
+        inherits(read_of("\"parents\"")),
+        "quoting the parent table in the policy must not lose the inheritance"
     );
     assert_eq!(
-        read_of("\"parents\"").as_deref(),
-        Some("owner from parents"),
-        "quoting the parent table in the policy must not lose the inheritance"
+        read_of("parents"),
+        read_of("\"parents\""),
+        "both spellings must reach the same inherited gate"
     );
 }
 
@@ -180,7 +191,7 @@ CREATE POLICY docs_owner ON docs FOR SELECT USING (Owner_Id = current_setting('a
 
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the relation name follows the stored column, not the policy's spelling:\n{dsl}"
     );
     assert!(
@@ -260,10 +271,12 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
         .outputs_accepting_gaps()
         .model();
 
-    assert_eq!(
-        relation_definition(&dsl, "tasks", "can_select").as_deref(),
-        Some("owner from projects"),
-        "the parent link resolves through the stored column name:\n{dsl}"
+    let read =
+        relation_definition(&dsl, "tasks", "can_select").expect("tasks should define can_select");
+    assert!(
+        read.starts_with("inherited_")
+            && read.contains(" from projects and acting_app_user from request_gate"),
+        "the parent link resolves through the stored column name, got '{read}':\n{dsl}"
     );
     assert!(
         format_tuples(
@@ -290,19 +303,20 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.ID = tasks.Project_Id AND p.Owner_Id = current_setting('app.user_id')));
 ",
     );
-    assert_eq!(
-        relation_definition(
-            &translator
-                .translate(&policy_side)
-                .expect("translation should plan")
-                .outputs_accepting_gaps()
-                .model(),
-            "tasks",
-            "can_select"
-        )
-        .as_deref(),
-        Some("owner from projects"),
-        "the policy's spelling folds to the declared columns"
+    let policy_side_read = relation_definition(
+        &translator
+            .translate(&policy_side)
+            .expect("translation should plan")
+            .outputs_accepting_gaps()
+            .model(),
+        "tasks",
+        "can_select",
+    )
+    .expect("tasks should define can_select");
+    assert!(
+        policy_side_read.starts_with("inherited_")
+            && policy_side_read.contains(" from projects and acting_app_user from request_gate"),
+        "the policy's spelling folds to the declared columns, got '{policy_side_read}'"
     );
 }
 
@@ -330,36 +344,40 @@ CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('a
     );
 }
 
-/// A quoted `"current_user"` names a real role, not the keyword, and the `Owner` enum
-/// tells them apart, so the role keeps its ordinary scope.
+/// A quoted `"current_user"` names a real role, not the keyword, so the `TO` list
+/// reaches exactly the acting role that is the role, and the branch gets the grant.
 #[test]
 fn a_quoted_current_user_role_is_a_role() {
     let db = db_of(
         r#"
-CREATE ROLE "current_user";
+CREATE ROLE "current_user" NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_setting('app.user_id'));
 "#,
     );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let outputs = rls2fga::translator::TranslatorBuilder::new(caller_deployment_acting_as(
+        &["app_user", "current_user"],
+        [],
+    ))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps();
     let dsl = outputs.model();
 
-    let can_select =
-        relation_definition(&dsl, "docs", "can_select").expect("can_select must be defined");
-    assert!(
-        can_select.contains("usage from scope_"),
-        "a quoted role scopes like any other:\n{dsl}"
+    assert_eq!(
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("owner and acting_current_user from request_gate"),
+        "the quoted role's grant reaches its own branch alone:\n{dsl}"
     );
     assert!(
         outputs
             .tuple_queries()
             .iter()
             .any(|q| q.sql.contains("'pg_role:current_user'")),
-        "the real role's scope tuples are wanted, got: {:#?}",
+        "the real role's kind tuples are wanted, got: {:#?}",
         outputs
             .tuple_queries()
             .iter()
@@ -370,7 +388,7 @@ CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_s
         !outputs
             .notes()
             .iter()
-            .any(|note| matches!(note, TranslationNote::PolicyBoundToDdlTimeRole { .. })),
+            .any(|note| matches!(note, TranslationNote::RowSecurityRefused { .. })),
         "a real role is not the keyword, got: {:#?}",
         outputs.notes()
     );
@@ -525,14 +543,15 @@ fn a_cast_claim_set_key_classifies_as_the_plain_one() {
     assert_eq!(plain, dumped, "the cast claim key is the same declared set");
 }
 
-/// A dumped policy spells the membership table schema-qualified. The read
-/// scope relation's name must not change with the spelling, or a dumped
-/// schema asks the operator for tuples under a different name.
+/// `pg_dump` deparses the membership table schema-qualified. The membership
+/// relation's name must not change with the spelling, or a dumped schema asks
+/// the operator for tuples under a different name.
 #[test]
-fn a_qualified_membership_spelling_keeps_the_scope_relation_name() {
+fn a_qualified_membership_spelling_keeps_the_membership_relation_name() {
     let schema = |members_ref: &str| {
         format!(
-            "CREATE TABLE docs(id UUID PRIMARY KEY);\n\
+            "CREATE ROLE auditor NOLOGIN;\n\
+             CREATE TABLE docs(id UUID PRIMARY KEY);\n\
              CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;\n\
@@ -541,21 +560,35 @@ fn a_qualified_membership_spelling_keeps_the_scope_relation_name() {
                SELECT 1 FROM {members_ref} m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id')));\n"
         )
     };
-    let plain = model_with_settings(
-        &schema("doc_members"),
-        None,
-        r#"[{ "setting": "app.user_id", "caller": "text" }]"#,
-    );
-    let qualified = model_with_settings(
-        &schema("public.doc_members"),
-        None,
-        r#"[{ "setting": "app.user_id", "caller": "text" }]"#,
-    );
+    let model_for = |members_ref: &str| -> String {
+        let settings = settings_from_json(r#"[{ "setting": "app.user_id", "caller": "text" }]"#);
+        rls2fga::translator::TranslatorBuilder::new(caller_deployment_acting_as(
+            &["app_user", "auditor"],
+            settings,
+        ))
+        .with_min_confidence(ConfidenceLevel::B)
+        .build()
+        .translate(&db_of(&schema(members_ref)))
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .model()
+    };
+    let plain = model_for("doc_members");
+    let qualified = model_for("public.doc_members");
+
+    let plain_read =
+        relation_definition(&plain, "docs", "can_select").expect("docs should define can_select");
+    let qualified_read = relation_definition(&qualified, "docs", "can_select")
+        .expect("docs should define can_select");
     assert!(
-        plain.contains("read_scope_doc_members_"),
-        "the guarded membership must mint a read scope, or this proves nothing:\n{plain}"
+        plain_read.contains(" and acting_auditor from request_gate"),
+        "the guarded membership must grant through its reading role, or this proves \
+         nothing:\n{plain}"
     );
-    assert_eq!(plain, qualified, "one table, one scope relation name");
+    assert_eq!(
+        plain_read, qualified_read,
+        "one table, one membership relation name:\n{plain}\n---\n{qualified}"
+    );
 }
 
 /// The holder type standing for everyone in an uncorrelated member table must
@@ -720,6 +753,9 @@ fn a_table_written_without_a_schema_loads_its_rows_from_public() {
         "an owned table has facts to load, so it needs a query"
     );
     for query in tuples {
+        if !query.sql.contains("FROM ") {
+            continue;
+        }
         assert!(
             query.sql.contains("FROM \"public\".\"notes\""),
             "the query must read the schema the declaration places the table in:\n{}\n{}",

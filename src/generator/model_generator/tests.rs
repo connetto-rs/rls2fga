@@ -1,4 +1,3 @@
-use super::actions::RoleLimitedRule;
 use super::dsl::*;
 use super::emit_roles::{ensure_exact_roles_relation, ensure_role_threshold_scaffold};
 use super::*;
@@ -154,7 +153,6 @@ fn compose_action_with_only_restrictive_rules_maps_to_no_access() {
         permissive: Vec::new(),
         restrictive: vec![UsersetExpr::Computed(RelationName::canonicalized("owner"))],
         subtractions: Vec::new(),
-        role_limited: Vec::new(),
     };
 
     let expr = compose_action(&mut plan, Some(&bucket)).expect("expected expression");
@@ -165,27 +163,6 @@ fn compose_action_with_only_restrictive_rules_maps_to_no_access() {
     assert!(
         plan.direct_relations.contains_key("no_access"),
         "restrictive-only rules should synthesize no_access"
-    );
-}
-
-#[test]
-fn compose_action_with_only_a_role_limited_barrier_maps_to_no_access() {
-    let mut plan = TypePlan::new(TypeName::canonicalized("docs"));
-    let bucket = ModeBuckets {
-        permissive: Vec::new(),
-        restrictive: Vec::new(),
-        subtractions: Vec::new(),
-        role_limited: vec![RoleLimitedRule {
-            policy: "docs_review".to_string(),
-            rule: UsersetExpr::Computed(RelationName::canonicalized("reviewer")),
-            scope_relation: RelationName::canonicalized("scope_docs_review"),
-        }],
-    };
-
-    let expr = compose_action(&mut plan, Some(&bucket)).expect("expected expression");
-    assert_eq!(
-        expr,
-        UsersetExpr::Computed(RelationName::canonicalized("no_access"))
     );
 }
 
@@ -528,71 +505,6 @@ fn pattern_to_expr_covers_abac_composite_constant_and_unknown_branches() {
     assert!(notes
         .iter()
         .any(|t| t.message().contains("could not be safely translated")));
-}
-
-#[test]
-fn build_schema_plan_adds_notes_for_non_public_to_and_empty_translation() {
-    let db = docs_db_with_policy(
-        "CREATE POLICY docs_select ON docs FOR SELECT TO app_user USING (TRUE);",
-    );
-    let policy = db.policies().next().expect("policy should exist");
-    let classified = classified_from_policy(
-        policy,
-        &db,
-        Some(PatternClass::Unknown(UnclassifiedExpr {
-            sql_text: "TRUE".to_string(),
-            reason: "not supported".to_string(),
-        })),
-        None,
-    );
-    let registry = FunctionRegistry::new();
-    let plan = build_schema_plan(&[classified], &db, &registry, &GeneratorSettings::default())
-        .expect("translation should plan");
-
-    assert!(plan
-        .notes
-        .iter()
-        .any(|t| t.message().contains("is scoped TO")));
-    assert!(plan.notes.iter().any(|t| t
-        .message()
-        .contains("Expression could not be safely translated")));
-    assert!(plan
-        .notes
-        .iter()
-        .any(|t| t.message().contains("not supported")));
-}
-
-#[test]
-fn build_schema_plan_models_non_public_scope_via_pg_role() {
-    let scope_relation = role_scope_name("usage", &["app_user".to_string()]);
-    let (plan, docs) = plan_from_policy_sql(
-        "CREATE POLICY docs_select ON docs FOR SELECT TO app_user USING (owner_id = current_user);",
-        Some(PatternClass::P3DirectOwnership(DirectOwnership {
-            column: ColumnName::from_stored("owner_id"),
-        })),
-        None,
-    );
-    assert!(docs.direct_relations.contains_key(&scope_relation));
-    assert!(matches!(
-        docs.computed_relations.get("can_select"),
-        Some(UsersetExpr::Intersection(children))
-            if children.iter().any(|c| matches!(c, UsersetExpr::Computed(name) if name == "owner"))
-                && children.iter().any(|c| matches!(
-                    c,
-                    UsersetExpr::TupleToUserset { tupleset, computed }
-                        if tupleset == &scope_relation && computed == "usage"
-                ))
-    ));
-
-    let pg_role = plan
-        .types
-        .iter()
-        .find(|t| t.type_name.as_str() == "pg_role")
-        .expect("pg_role type should exist");
-    assert!(matches!(
-        pg_role.direct_relations.get("usage"),
-        Some(subjects) if matches!(subjects.as_slice(), [DirectSubject::Type(t)] if t == "user")
-    ));
 }
 
 #[test]
@@ -1150,11 +1062,23 @@ fn confidence_filter_prevents_with_check_mirror_when_with_check_was_filtered() {
         Some(&UsersetExpr::Computed(RelationName::canonicalized("owner"))),
         "and the update must not be granted by the resurrected USING"
     );
-    // Now verify that when WITH CHECK is genuinely absent (not filtered), the mirror DOES apply.
-    classified.with_check_classification = None; // never present
-    classified.with_check_filtered_at = None;
-    let plan2 = build_schema_plan(&[classified], &db, &registry, &GeneratorSettings::default())
-        .expect("translation should plan");
+    // A policy storing no WITH CHECK at all is checked by its USING, so the mirror applies.
+    let unchecked_db = docs_db_with_policy(
+        "CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_user);",
+    );
+    let unchecked = classified_from_policy(
+        unchecked_db.policies().next().expect("policy should exist"),
+        &unchecked_db,
+        Some(p3),
+        None,
+    );
+    let plan2 = build_schema_plan(
+        &[unchecked],
+        &unchecked_db,
+        &registry,
+        &GeneratorSettings::default(),
+    )
+    .expect("translation should plan");
     let docs2 = plan2
         .types
         .iter()
@@ -2071,6 +1995,19 @@ fn a_cycle_between_relations_implies_nothing() {
         &by_name,
         &mut Vec::new()
     ));
+}
+
+/// A userset subject names objects of its type, so a walk through it resolves to that type.
+#[test]
+fn a_userset_subject_resolves_to_the_type_of_the_objects_it_names() {
+    let subject = DirectSubject::Userset {
+        type_name: TypeName::canonicalized("pg_role"),
+        relation: RelationName::canonicalized("usage"),
+    };
+    assert_eq!(
+        subject.resolved_type_name(),
+        Some(&TypeName::canonicalized("pg_role"))
+    );
 }
 
 /// The walk reaches a target type through a conditional subject exactly as through a

@@ -229,7 +229,6 @@ fn generate_constant_bool_model_and_tuples() {
 #[test]
 fn pg_has_role_is_the_constant_the_memberships_decide() {
     let sql = r"
-CREATE ROLE app_user NOLOGIN;
 CREATE ROLE editor NOLOGIN;
 GRANT editor TO app_user;
 CREATE TABLE docs (id UUID PRIMARY KEY, title TEXT);
@@ -252,7 +251,7 @@ CREATE POLICY docs_select ON docs FOR SELECT
     let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     assert_eq!(
         support::footgun::relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("public_viewer"),
+        Some("public_viewer and acting_app_user from request_gate"),
         "the membership admits every row:\n{}",
         model.model()
     );
@@ -263,7 +262,6 @@ CREATE POLICY docs_select ON docs FOR SELECT
 #[test]
 fn a_pg_has_role_about_a_role_the_schema_never_creates_refuses() {
     let sql = r"
-CREATE ROLE app_user NOLOGIN;
 CREATE TABLE docs (id UUID PRIMARY KEY, title TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT
@@ -311,7 +309,7 @@ CREATE POLICY docs_select ON docs FOR SELECT
         support::footgun::relation_definition(&model.model(), "docs", "can_select").as_deref(),
         Some(
             format!(
-                "member from {}",
+                "member from {} and acting_app_user from request_gate",
                 role_scope_name("member", &["authenticated".to_string()])
             )
             .as_str()
@@ -354,7 +352,6 @@ fn each_pg_has_role_privilege_answers_from_its_own_membership() {
     ] {
         let sql = format!(
             r"
-CREATE ROLE app_user NOLOGIN;
 CREATE ROLE editor NOLOGIN;
 GRANT editor TO app_user{grant_options};
 CREATE TABLE docs (id TEXT PRIMARY KEY);
@@ -391,7 +388,6 @@ CREATE POLICY docs_select ON docs FOR SELECT
 #[test]
 fn two_privileges_of_one_role_each_decide_their_own_constant() {
     let sql = r"
-CREATE ROLE app_user NOLOGIN;
 CREATE ROLE editor NOLOGIN;
 GRANT editor TO app_user;
 CREATE TABLE docs (id TEXT PRIMARY KEY);
@@ -406,12 +402,12 @@ CREATE POLICY docs_admin ON docs FOR DELETE
 
     assert_eq!(
         support::footgun::relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("public_viewer"),
+        Some("public_viewer and acting_app_user from request_gate"),
         "the acting role's membership admits the read:\n{dsl}"
     );
     assert_eq!(
         support::footgun::relation_definition(&dsl, "docs", "can_delete").as_deref(),
-        Some("no_access and can_select"),
+        Some("no_access and acting_app_user from request_gate and can_select"),
         "the acting role holds no admin option on the role:\n{dsl}"
     );
 }
@@ -542,7 +538,7 @@ fn generate_two_owner_columns_model_and_tuples() {
         "each owner value the policy names gets its own pointer:\n{dsl}"
     );
     assert!(
-        dsl.contains("define can_select: role_viewer from owner_id or role_admin from delegate_id"),
+        dsl.contains("define can_select: (role_viewer from owner_id or role_admin from delegate_id) and acting_app_user from request_gate"),
         "the rule is the union, each side at the level its own call required:\n{dsl}"
     );
     insta::assert_snapshot!("generate_two_owner_columns_model", dsl.trim());

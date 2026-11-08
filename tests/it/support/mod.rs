@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::ClassifiedPolicy;
 use rls2fga::classifier::policy_classifier;
-use rls2fga::parser::sql_parser::{self, Deployment, ParserDB, SessionSetting};
+use rls2fga::parser::sql_parser::{Deployment, ParserDB, SessionSetting};
 use rls2fga::types::{ColumnKind, RowCell, RowList, RowValues};
 
 /// `serde_json` view of one row, adapting it to the crate's row interface.
@@ -339,14 +339,14 @@ pub(crate) fn classify_sql(
     classify_with(sql, registry_json, &deployment::caller_deployment())
 }
 
-/// Classify SQL with the accessor metadata and the deployment it is read for.
+/// Classify SQL with the accessor metadata and the deployment it is read for, the schema
+/// parsed after the suite's roles.
 pub(crate) fn classify_with(
     sql: &str,
     registry_json: Option<&str>,
     deployment: &Deployment,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
-    let db = sql_parser::parse_schema(sql).expect("schema should parse");
-    classify_db(db, registry_json, deployment)
+    classify_db(deployment::db(sql), registry_json, deployment)
 }
 
 /// Classify a parsed schema with the accessor metadata and the deployment it is read for.

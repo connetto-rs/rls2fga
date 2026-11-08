@@ -482,10 +482,17 @@ fn refused_teams_policy_complaints(clause: &str, reason_names: &str) -> Vec<Stri
             "`{clause}` must emit no membership tuples, got {membership_tuples:?}"
         ));
     }
-    // A type named after the projected column is the shape the phantom holder takes.
+    // A type named after the projected column is the shape the phantom holder takes. The
+    // deployment's well-known types are declared whether or not a branch reads them.
     let phantom: Vec<String> = type_names(&dsl)
         .into_iter()
-        .filter(|name| name != "teams" && name != "members" && !is_structural_type(name))
+        .filter(|name| {
+            name != "teams"
+                && name != "members"
+                && name != "pg_role"
+                && name != "request_gate"
+                && !is_structural_type(name)
+        })
         .collect();
     if !phantom.is_empty() {
         complaints.push(format!("`{clause}` invented the types {phantom:?}"));

@@ -7,13 +7,12 @@
 use core::fmt::Write;
 use core::time::Duration;
 
-use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::{records_from_row, ActionStatement, ConfidenceLevel, RowDecision};
 
 use crate::support;
 
 use crate::support::deployment;
-use crate::support::footgun::{db_of, gated_tables, OPEN_PLUS_CAP_BOT_LIST_GATES};
+use crate::support::footgun::{gated_tables, OPEN_PLUS_CAP_BOT_LIST_GATES};
 use crate::support::parity::{
     assert_agrees, assert_postgres, request_predicate_holds, Cluster, Mutations, ParityCase,
     Principal,
@@ -85,12 +84,14 @@ fn case(name: &str) -> ParityCase {
     case
 }
 
-/// Whether the recipe grants `subject` on `row` for a check carrying `context`.
+/// Whether the recipe grants `subject` on `row` for a check carrying `context` and
+/// acting as `acting_role`, the role the check's kind names.
 fn recipe_allows(
     decision: &RowDecision,
     row: &serde_json::Value,
     subject: &str,
     context: &serde_json::Value,
+    acting_role: &str,
 ) -> bool {
     match decision {
         RowDecision::Leaf { shapes, .. } => shapes.iter().any(|shape| {
@@ -101,10 +102,10 @@ fn recipe_allows(
         }),
         RowDecision::Any(children) => children
             .iter()
-            .any(|child| recipe_allows(child, row, subject, context)),
+            .any(|child| recipe_allows(child, row, subject, context, acting_role)),
         RowDecision::All(children) => children
             .iter()
-            .all(|child| recipe_allows(child, row, subject, context)),
+            .all(|child| recipe_allows(child, row, subject, context, acting_role)),
         RowDecision::Request {
             shapes,
             subject_type,
@@ -117,24 +118,27 @@ fn recipe_allows(
                         .expect("the link resolves from the row")
                         .is_empty()
                 })
-                && request_predicate_holds(predicate, context)
+                && request_predicate_holds(predicate, context, acting_role)
         }
         other => panic!("a recipe shape this gate does not produce: {other:?}"),
     }
 }
 
-/// The recipe `t0#can_select` reports, read without a round trip.
+/// The recipe `t0#can_select` reports, read without a round trip, for the deployment the
+/// harness checks with: acting as the caller's login role.
 fn select_recipe() -> RowDecision {
-    let outputs = TranslatorBuilder::new(deployment::caller_deployment_with([
-        deployment::delimited_set("app.bot_list", ","),
-    ]))
-    .with_min_confidence(ConfidenceLevel::B)
-    .build()
-    .translate(&db_of(&gated_tables(TABLES)))
-    .expect("translation should plan")
-    .outputs()
-    .expect("every clause translates");
-    outputs
+    // The role the harness creates in its seed, so the deployment resolves against it.
+    let sql = format!("CREATE ROLE app_rw LOGIN;\n{}", gated_tables(TABLES));
+    let (classified, db, registry) = support::classify_with(
+        &sql,
+        None,
+        &deployment::caller_deployment_acting_as(
+            &["app_rw"],
+            [deployment::delimited_set("app.bot_list", ",")],
+        ),
+    );
+    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    planned
         .translation()
         .relations()
         .iter()
@@ -181,7 +185,13 @@ async fn request_gate_parity() {
                     &principal.subject,
                     &format!("t0:{owner}"),
                     ActionStatement::Select,
-                    recipe_allows(&recipe, &row, &principal.subject, &principal.context),
+                    recipe_allows(
+                        &recipe,
+                        &row,
+                        &principal.subject,
+                        &principal.context,
+                        &principal.login_role,
+                    ),
                 );
             }
         }
