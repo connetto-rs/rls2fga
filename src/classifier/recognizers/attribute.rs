@@ -583,11 +583,20 @@ pub fn residual_predicate(expr: &Expr) -> ResidualPredicate {
 /// As [`residual_predicate`], carrying the relations the conjunct was proven to read.
 pub(crate) fn residual_predicate_reading(
     expr: &Expr,
+    zoned: &[String],
     relations: Vec<TableId>,
 ) -> ResidualPredicate {
-    ResidualPredicate {
+    let residual = ResidualPredicate {
         relations,
         ..residual_predicate(expr)
+    };
+    match local_literal_comparison(expr, zoned) {
+        Some(Ok(request)) => ResidualPredicate {
+            guard: None,
+            request: Some(request),
+            ..residual
+        },
+        _ => residual,
     }
 }
 
@@ -761,13 +770,197 @@ fn zoned_literal_value_uses_session(data_type: &DataType, value: &Value) -> bool
         && sql_string_value(value).is_some_and(value_uses_session_zone)
 }
 
+/// Whether a date or time type carries a zone, `None` for any other type.
 fn temporal_zone(data_type: &DataType) -> Option<bool> {
     match data_type {
         DataType::Timestamp(_, zone) | DataType::Time(_, zone) => Some(matches!(
             zone,
             TimezoneInfo::WithTimeZone | TimezoneInfo::Tz
         )),
+        DataType::Date => Some(false),
         _ => None,
+    }
+}
+
+/// Why a local literal compared with a `timestamptz` column becomes no threshold.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum LocalLiteralRefusal {
+    /// A comparison a threshold condition cannot carry, such as `IS DISTINCT FROM`, which
+    /// admits a `NULL` row.
+    #[error(
+        "{comparison} compares {column} with a local time PostgreSQL converts in the session \
+         TimeZone, which only an ordering or an equality carries as a threshold"
+    )]
+    NotAnOrdering {
+        /// The comparison as written.
+        comparison: String,
+        /// The column it compares.
+        column: ColumnName,
+    },
+    /// A literal whose value cannot be computed here.
+    #[error("'{text}' as a {pg_type} has no value rls2fga computes ({source})")]
+    Unreadable {
+        /// The literal's text.
+        text: String,
+        /// The type the literal is cast to.
+        pg_type: sql_values::PgType,
+        /// Why the cast has no value.
+        #[source]
+        source: sql_values::CastError,
+    },
+}
+
+/// `column op literal` where `column` is one of `zoned` and the literal a `date` or
+/// `timestamp`, which `PostgreSQL` converts to an instant in the session `TimeZone` of each
+/// query, as the request predicate comparing the row with that instant, or why there is
+/// none.
+///
+/// `None` where no such literal meets such a column, which every other reading judges.
+pub(crate) fn local_literal_comparison(
+    expr: &Expr,
+    zoned: &[String],
+) -> Option<Result<AttributeRequestPredicate, LocalLiteralRefusal>> {
+    let expr = unparenthesize(expr);
+    let zoned_column = |column: &Expr| {
+        let column = bare_column(column)?;
+        zoned
+            .iter()
+            .any(|name| name == column.as_str())
+            .then_some(column)
+    };
+    match expr {
+        Expr::BinaryOp { left, op, right } => {
+            let operator = attribute_operator(op)?;
+            [
+                (left.as_ref(), right.as_ref(), operator),
+                (right.as_ref(), left.as_ref(), mirrored(operator)),
+            ]
+            .into_iter()
+            .find_map(|(column, value, operator)| {
+                let column = zoned_column(column)?;
+                Some(
+                    local_literal(value)?.map(|local| AttributeRequestPredicate {
+                        column,
+                        operator,
+                        threshold: ClockThreshold {
+                            reading: ClockReading::FixedLocal(local),
+                            offset: ClockOffset::ZERO,
+                        },
+                    }),
+                )
+            })
+        }
+        Expr::IsDistinctFrom(left, right) | Expr::IsNotDistinctFrom(left, right) => [
+            (left.as_ref(), right.as_ref()),
+            (right.as_ref(), left.as_ref()),
+        ]
+        .into_iter()
+        .find_map(|(column, value)| {
+            let column = zoned_column(column)?;
+            let refusal = match local_literal(value)? {
+                Err(unreadable) => unreadable,
+                Ok(_) => LocalLiteralRefusal::NotAnOrdering {
+                    comparison: expr.to_string(),
+                    column,
+                },
+            };
+            Some(Err(refusal))
+        }),
+        _ => None,
+    }
+}
+
+/// `column BETWEEN low AND high` as `column >= low AND column <= high`, and `column IN
+/// (a, b)` as `column = a OR column = b`, where `column` is one of `zoned` and a bound or a
+/// value is a local literal, so each comparison takes its own threshold. `PostgreSQL`
+/// stores such a `BETWEEN` as the two comparisons.
+pub(crate) fn local_literal_comparisons(expr: &Expr, zoned: &[String]) -> Option<Expr> {
+    let compared = |column: &Expr, op: BinaryOperator, value: &Expr| Expr::BinaryOp {
+        left: Box::new(column.clone()),
+        op,
+        right: Box::new(value.clone()),
+    };
+    let zoned_column = |column: &Expr| {
+        bare_column(column).is_some_and(|name| zoned.iter().any(|zoned| zoned == name.as_str()))
+    };
+    match unparenthesize(expr) {
+        Expr::Between {
+            expr: column,
+            negated: false,
+            low,
+            high,
+        } if zoned_column(column)
+            && (local_literal(low).is_some() || local_literal(high).is_some()) =>
+        {
+            Some(Expr::BinaryOp {
+                left: Box::new(compared(column, BinaryOperator::GtEq, low)),
+                op: BinaryOperator::And,
+                right: Box::new(compared(column, BinaryOperator::LtEq, high)),
+            })
+        }
+        Expr::In {
+            expr: column,
+            target: InTarget::List(list),
+            negated: false,
+            ..
+        } if zoned_column(column) && list.iter().any(|value| local_literal(value).is_some()) => {
+            list.iter()
+                .map(|value| compared(column, BinaryOperator::Eq, value))
+                .reduce(|left, right| Expr::BinaryOp {
+                    left: Box::new(left),
+                    op: BinaryOperator::Or,
+                    right: Box::new(right),
+                })
+        }
+        _ => None,
+    }
+}
+
+/// The column `expr` names with nothing around it, since a cast on the column compares
+/// something else.
+fn bare_column(expr: &Expr) -> Option<ColumnName> {
+    match unparenthesize(expr) {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => extract_column_name(expr),
+        _ => None,
+    }
+}
+
+/// The local time a quoted literal cast once to `date` or `timestamp` names, a date as its
+/// midnight, or why it has none. `None` for any other literal, and for an infinity, which
+/// every zone converts alike.
+fn local_literal(expr: &Expr) -> Option<Result<sql_values::PgTimestamp, LocalLiteralRefusal>> {
+    use sql_values::{CastError, CastTarget, CastValue, PgTime, PgTimestamp, PgType};
+    let mut casts = 0_usize;
+    let mut outermost = None;
+    let peeled = peel_noting_casts(expr, |data_type| {
+        casts += 1;
+        outermost.get_or_insert(data_type);
+    });
+    let (text, data_type) = match (peeled, casts, outermost) {
+        (Expr::Value(value), 1, Some(data_type)) => (sql_string_value(&value.value)?, data_type),
+        (Expr::TypedString(typed), 0, None) => {
+            (sql_string_value(&typed.value.value)?, &typed.data_type)
+        }
+        _ => return None,
+    };
+    let (target, pg_type) = match cast_target(data_type)? {
+        target @ CastTarget::Date => (target, PgType::Date),
+        target @ CastTarget::Timestamp(_) => (target, PgType::Timestamp),
+        _ => return None,
+    };
+    let unreadable = |source| LocalLiteralRefusal::Unreadable {
+        text: text.to_string(),
+        pg_type,
+        source,
+    };
+    match sql_values::cast_literal(sql_values::Literal::Quoted(text), target) {
+        Ok(CastValue::Date(date)) if date.is_finite() => Some(
+            PgTimestamp::new(date, PgTime::MIDNIGHT)
+                .ok_or_else(|| unreadable(CastError::DateOutOfRangeForTimestamp)),
+        ),
+        Ok(CastValue::Timestamp(local)) if local.is_finite() => Some(Ok(local)),
+        Ok(_) => None,
+        Err(error) => Some(Err(unreadable(error))),
     }
 }
 

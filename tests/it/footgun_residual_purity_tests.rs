@@ -162,11 +162,36 @@ fn an_offsetless_zoned_literal_never_reaches_the_loader() {
         "m.granted_at < '2030-01-01 00:00:00'::timestamptz",
         "m.granted_at < '2030-01-01 00:00:00'",
         "m.starts_at < '09:00:00'::timetz",
+        "m.granted_at IS DISTINCT FROM '2030-01-01'::date",
     ] {
         let sql = member_query_sql(predicate);
         assert!(
             !sql.contains("2030-01-01") && !sql.contains("09:00:00"),
             "the loader's time zone would interpret {predicate}:\n{sql}"
+        );
+    }
+}
+
+/// A `date` or `timestamp` against a `timestamptz` membership column rides the membership
+/// tuple as a condition, its threshold computed per check in the request's zone.
+#[test]
+fn a_local_literal_on_an_instant_column_rides_the_membership_as_a_threshold() {
+    for predicate in [
+        "m.granted_at < '2030-01-01'::date",
+        "m.granted_at < '2030-01-01 00:00:00'::timestamp",
+    ] {
+        let dsl = translator(ConfidenceLevel::B)
+            .translate(&db_of(&membership_with(predicate)))
+            .expect("translation should plan")
+            .outputs_accepting_gaps()
+            .model();
+        assert!(
+            dsl.contains("granted_at < request_time_at_2030_01_01"),
+            "{predicate} must compare the member row with its threshold:\n{dsl}"
+        );
+        assert!(
+            !dsl.contains("define can_select: no_access"),
+            "{predicate} must translate:\n{dsl}"
         );
     }
 }

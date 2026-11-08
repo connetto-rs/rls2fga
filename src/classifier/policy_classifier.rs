@@ -1,6 +1,6 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
-use crate::parser::names::table_has_column;
+use crate::parser::names::{lookup_table, table_has_column};
 use crate::types::ColumnName;
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator, Value};
 
@@ -123,6 +123,14 @@ fn fold_binary(first: Expr, exprs: impl IntoIterator<Item = Expr>, op: &BinaryOp
             op: op.clone(),
             right: Box::new(next),
         })
+}
+
+/// The columns of the guarded table whose comparison with a literal the session `TimeZone`
+/// decides, none where the schema does not place the table.
+fn zoned_columns<DB: DatabaseLike>(db: &DB, table: &str) -> Vec<String> {
+    lookup_table(db, table)
+        .map(|guarded| recognizers::session_zoned_columns(guarded, db))
+        .unwrap_or_default()
 }
 
 fn unknown_d(expr: &Expr, reason: impl Into<String>) -> ClassifiedExpr {
@@ -395,10 +403,12 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 // literal or request-scoped predicate translates in full, so it keeps
                 // its structure through the ordinary composite below instead of being
                 // flattened to a column name and graded partial.
+                let zoned = zoned_columns(db, table);
                 let untranslatable_attr = |side: &Expr| {
                     recognizers::is_attribute_check(side).filter(|_| {
                         recognizers::attribute_literal_predicate(side).is_none()
                             && recognizers::attribute_request_predicate(side).is_none()
+                            && recognizers::local_literal_comparison(side, &zoned).is_none()
                     })
                 };
                 let left_attr = untranslatable_attr(left);
@@ -462,6 +472,28 @@ fn classify_expr_inner<DB: DatabaseLike>(
 
     if let Expr::IsTrue(inner) = expr {
         return classify_expr_depth(inner, db, registry, table, command, depth + 1, state);
+    }
+
+    // A `date` or `timestamp` literal compared with a `timestamptz` column is converted in
+    // the request's zone, so it is a threshold the request computes, judged before the
+    // cast that spells it is.
+    let zoned = zoned_columns(db, table);
+    if let Some(comparisons) = recognizers::local_literal_comparisons(expr, &zoned) {
+        return classify_expr_depth(&comparisons, db, registry, table, command, depth + 1, state);
+    }
+    if let Some(local) = recognizers::local_literal_comparison(expr, &zoned) {
+        return match local {
+            Ok(request_predicate) => ClassifiedExpr {
+                pattern: PatternClass::P9AttributeCondition(AttributeCondition {
+                    column: request_predicate.column.clone(),
+                    value_description: describe_comparison_value(expr),
+                    predicate: None,
+                    request_predicate: Some(request_predicate),
+                }),
+                confidence: ConfidenceLevel::B,
+            },
+            Err(refusal) => unknown_d(expr, refusal.to_string()),
+        };
     }
 
     let renamings = recognizers::renaming_casts(expr, registry);

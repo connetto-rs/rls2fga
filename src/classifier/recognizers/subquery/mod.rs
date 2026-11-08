@@ -1199,7 +1199,7 @@ fn analyze_membership_select<DB: DatabaseLike>(
 }
 
 /// Columns whose value the evaluating session's time zone decides.
-pub(super) fn session_zoned_columns<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> Vec<String> {
+pub(crate) fn session_zoned_columns<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> Vec<String> {
     table
         .columns(db)
         .into_iter()
@@ -2373,7 +2373,7 @@ fn residual_admitted<DB: DatabaseLike>(
 ) -> Option<ResidualPredicate> {
     // The loader answers once, as itself, so what the row cannot decide must read alike for everybody.
     let relations = residual_relations(expr, db, registry, scope, state)?;
-    let residual = residual_predicate_reading(expr, relations);
+    let residual = residual_predicate_reading(expr, zoned, relations);
     let admit = !residual.relations.is_empty()
         || residual.request.is_some()
         || conjunct_reads_only_the_row(expr, scope.columns, zoned);
