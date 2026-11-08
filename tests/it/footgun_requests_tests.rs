@@ -1401,6 +1401,11 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
             "'ab'::VARCHAR(MAX) is cast to varchar(max)",
         ),
         (
+            "code = 'ab'::bpchar(MAX)",
+            "every row, PostgreSQL refusing the type at MAX",
+            "'ab'::bpchar(MAX) is cast to bpchar(max)",
+        ),
+        (
             "level >= 1::numeric(0,0)",
             "every row, PostgreSQL refusing NUMERIC precision 0",
             "1::NUMERIC(0,0) is cast to numeric(0,0)",
@@ -1459,7 +1464,7 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
     }
 }
 
-/// A literal cast once to a type whose cast `sql-values` computes compares as the value
+/// A literal cast through types whose casts `sql-values` computes compares as the value
 /// `PostgreSQL` 18.6 makes of it, so the tuple SQL carries that value. Each folded guard
 /// answered every row of a sample the same way as the cast one on 18.6.
 #[test]
@@ -1511,6 +1516,9 @@ fn a_literal_cast_folds_into_the_value_postgresql_compares() {
         ("code = 'abc'::character(2)", "ab", "AND \"code\" = 'ab';"),
         ("code = 'ab'::char", "a", "AND \"code\" = 'a';"),
         ("code = $$abc$$::char(2)", "ab", "AND \"code\" = 'ab';"),
+        ("level >= '2.7'::numeric::int", "3", "AND \"level\" >= 3;"),
+        ("level >= '07'::text::smallint", "7", "AND \"level\" >= 7;"),
+        ("code = 'abc'::char(2)::text", "ab", "AND \"code\" = 'ab';"),
     ] {
         let (dsl, tuples) = translation(&format!(
             "{CAST_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"

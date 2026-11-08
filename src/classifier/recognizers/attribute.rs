@@ -1,6 +1,6 @@
 use super::*;
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
-use crate::parser::expr::{element_type, peel_noting_casts};
+use crate::parser::expr::{cast_type_name, element_type, peel_noting_casts};
 use crate::parser::sql_parser::DataTypeLike;
 use crate::types::TemporalKind;
 use sql_traits::utils::scalar_family::ScalarFamily;
@@ -1219,22 +1219,16 @@ pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
     }
 }
 
-/// The value `PostgreSQL` makes of a literal cast once, as the literal that compares like
-/// it, or `None` for any other chain of casts or a cast `sql-values` does not compute.
+/// The value `PostgreSQL` makes of a literal through its chain of casts, applied innermost
+/// first, as the literal that compares like it, or `None` where any cast in the chain is
+/// one `sql-values` does not compute.
 ///
 /// A date or time result is not folded, since how it compares with a zoned column depends
 /// on the session's `TimeZone`, and `char(n)` reads without the blank padding its cast to
 /// `text` drops.
 fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
-    let mut casts = 0_usize;
-    let mut outermost = None;
-    let peeled = peel_noting_casts(expr, |data_type| {
-        casts += 1;
-        outermost.get_or_insert(data_type);
-    });
-    let (1, Some(data_type)) = (casts, outermost) else {
-        return None;
-    };
+    let mut targets = Vec::new();
+    let peeled = peel_noting_casts(expr, |data_type| targets.push(data_type));
     let Expr::Value(ValueWithSpan { value, .. }) = peeled else {
         return None;
     };
@@ -1244,7 +1238,12 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         Value::Number(number, _) => sql_values::Literal::Number(number),
         _ => return None,
     };
-    match sql_values::cast_literal(literal, cast_target(data_type)?).ok()? {
+    let mut targets = targets.into_iter().rev();
+    let first = sql_values::cast_literal(literal, cast_target(targets.next()?)?).ok()?;
+    let folded = targets.try_fold(first, |value, data_type| {
+        sql_values::cast_value(value, cast_target(data_type)?).ok()
+    })?;
+    match folded {
         sql_values::CastValue::Boolean(flag) => Some(AttributeLiteral::Boolean(flag)),
         number @ (sql_values::CastValue::Smallint(_)
         | sql_values::CastValue::Integer(_)
@@ -1297,12 +1296,23 @@ fn cast_target(data_type: &DataType) -> Option<sql_values::CastTarget> {
                 }
             })
         }
+        DataType::Text => CastTarget::Text,
         DataType::Varchar(chars)
         | DataType::CharacterVarying(chars)
         | DataType::CharVarying(chars) => CastTarget::Varchar(length(chars)?),
         DataType::Char(chars) | DataType::Character(chars) => {
             // A bare `char` is `char(1)`.
             CastTarget::Bpchar(Some(length(chars)?.or_else(|| CharLength::new(1))?))
+        }
+        // An unbounded `bpchar` keeps the value's own blanks.
+        DataType::Custom(_, modifiers) if bpchar_name(data_type) => {
+            CastTarget::Bpchar(match modifiers.as_slice() {
+                [] => None,
+                [ast::TypeModifier::Number(length, false)] => {
+                    Some(CharLength::new(length.parse().ok()?)?)
+                }
+                _ => return None,
+            })
         }
         DataType::Date => CastTarget::Date,
         DataType::Timestamp(precision, _) => {
@@ -1316,6 +1326,13 @@ fn cast_target(data_type: &DataType) -> Option<sql_values::CastTarget> {
         }
         _ => return None,
     })
+}
+
+/// Whether `data_type` spells `bpchar`, bare or in `pg_catalog`, the name `PostgreSQL` gives
+/// `char(n)` when it prints a literal compared with such a column.
+fn bpchar_name(data_type: &DataType) -> bool {
+    let name = cast_type_name(data_type);
+    name.split('(').next() == Some("bpchar")
 }
 
 /// The column one operand names when the other is a literal or temporal value, trying
