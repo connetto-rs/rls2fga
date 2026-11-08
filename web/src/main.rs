@@ -19,7 +19,7 @@ use dioxus_free_icons::icons::fa_solid_icons::{
 use dioxus_free_icons::Icon;
 
 use rls2fga::generator::tuple_generator::format_tuples;
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::parser::sql_parser::parse_schema_in_time_zone;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
 
@@ -96,8 +96,11 @@ struct Rendered {
 /// the whole pipeline is cheap enough to run inline on the main thread, so no worker
 /// is needed.
 fn translate(sql: &str, level: ConfidenceLevel) -> Result<Rendered> {
-    let db =
-        parse_schema(&format!("{}{sql}", settings::ROLES)).context("parsing the SQL schema")?;
+    let db = parse_schema_in_time_zone(
+        &format!("{}{sql}", settings::ROLES),
+        settings::SESSION_TIME_ZONE,
+    )
+    .context("parsing the SQL schema")?;
     let translator = settings::translator(level).context("loading the app's function registry")?;
     let translation = translator
         .translate(&db)
