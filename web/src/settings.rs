@@ -22,6 +22,10 @@ CREATE ROLE app_user NOLOGIN;
 GRANT app_user TO app_login WITH INHERIT FALSE, SET TRUE;
 ";
 
+/// The `TimeZone` a pasted schema is read as created in, so a `timestamptz` literal
+/// written without an offset names one instant.
+pub const SESSION_TIME_ZONE: &str = "UTC";
+
 /// What the role-threshold example's `get_owner_role` means, which no schema can say.
 pub const REGISTRY: &str = r#"{
   "get_owner_role": {

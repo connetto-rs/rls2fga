@@ -24,7 +24,27 @@ pub enum SchemaError {
 /// the search path does not reach. Those refusals are what keeps the rest of the
 /// pipeline total, since it resolves references eagerly.
 pub fn parse_schema(sql: &str) -> Result<ParserDB, SchemaError> {
-    Ok(ParseOptions::default()
-        .with_access_resolution(AccessResolution::OpenWorld)
+    Ok(schema_options().parse::<PostgreSqlDialect>(sql)?)
+}
+
+/// [`parse_schema`] for a schema created in a session whose `TimeZone` is `zone`.
+///
+/// `PostgreSQL` stores a policy's `timestamptz` literal as the instant it reads in the
+/// creating session's `TimeZone`, so `'2026-01-01 12:00'` is 11:00 UTC when the
+/// migration ran in `Europe/Rome`. A `SET TIME ZONE` in the script still takes over from
+/// that statement on. [`parse_schema`] knows no zone, so such a literal before any
+/// `SET TIME ZONE` has no value and its policy falls closed.
+///
+/// # Errors
+///
+/// Returns [`SchemaError::Schema`] for everything [`parse_schema`] refuses, and when
+/// `zone` is not a time zone `PostgreSQL` accepts.
+pub fn parse_schema_in_time_zone(sql: &str, zone: &str) -> Result<ParserDB, SchemaError> {
+    Ok(schema_options()
+        .with_session_time_zone(zone)?
         .parse::<PostgreSqlDialect>(sql)?)
+}
+
+fn schema_options() -> ParseOptions {
+    ParseOptions::default().with_access_resolution(AccessResolution::OpenWorld)
 }

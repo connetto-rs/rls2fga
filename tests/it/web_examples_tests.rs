@@ -15,7 +15,7 @@ mod examples;
 #[path = "../../web/src/settings.rs"]
 mod settings;
 
-use rls2fga::parser::sql_parser::parse_schema;
+use rls2fga::parser::sql_parser::parse_schema_in_time_zone;
 use rls2fga::types::ConfidenceLevel;
 
 /// The level every policy of every example classifies at.
@@ -52,8 +52,11 @@ fn every_example_classifies_at_its_documented_level() {
             .iter()
             .find(|example| example.label == *label)
             .unwrap_or_else(|| panic!("the app offers {label}"));
-        let db = parse_schema(&format!("{}{}", settings::ROLES, example.sql))
-            .expect("the example parses");
+        let db = parse_schema_in_time_zone(
+            &format!("{}{}", settings::ROLES, example.sql),
+            settings::SESSION_TIME_ZONE,
+        )
+        .expect("the example parses");
         let outputs = settings::translator(ConfidenceLevel::D)
             .expect("the app's registry loads")
             .translate(&db)

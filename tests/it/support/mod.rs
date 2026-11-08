@@ -345,6 +345,15 @@ pub(crate) fn classify_with(
     deployment: &Deployment,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let db = sql_parser::parse_schema(sql).expect("schema should parse");
+    classify_db(db, registry_json, deployment)
+}
+
+/// Classify a parsed schema with the accessor metadata and the deployment it is read for.
+pub(crate) fn classify_db(
+    db: ParserDB,
+    registry_json: Option<&str>,
+    deployment: &Deployment,
+) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let mut registry = FunctionRegistry::new();
     if let Some(json) = registry_json {
         registry

@@ -209,6 +209,9 @@ pub(crate) struct ParityCase {
     pub(crate) loading_from_rows: bool,
     /// A second instant to compare at, where the case names the oracle.
     pub(crate) future: Option<FutureInstant>,
+    /// The `TimeZone` the schema is created in, which `PostgreSQL` reads the policies'
+    /// date and time literals in. `None` leaves the server's and tells rls2fga no zone.
+    pub(crate) session_time_zone: Option<String>,
 }
 
 /// A moment the database cannot be asked about, and what it would answer there.
@@ -247,6 +250,7 @@ impl ParityCase {
             not_read_directly: Vec::new(),
             loading_from_rows: false,
             future: None,
+            session_time_zone: None,
         }
     }
 
@@ -268,6 +272,12 @@ impl ParityCase {
     /// The same case, with statements applied before the schema.
     pub(crate) fn after(mut self, prelude: &[&str]) -> Self {
         self.prelude = prelude.iter().map(|sql| (*sql).to_string()).collect();
+        self
+    }
+
+    /// The same case, its schema created in a session whose `TimeZone` is `zone`.
+    pub(crate) fn created_in_time_zone(mut self, zone: &str) -> Self {
+        self.session_time_zone = Some(zone.to_string());
         self
     }
 
@@ -1016,6 +1026,10 @@ fn apply_case(conn: &mut PgConnection, case: &ParityCase) {
         conn.batch_execute(sql)
             .unwrap_or_else(|error| panic!("{}: prelude {sql}: {error}", case.name));
     }
+    if let Some(zone) = &case.session_time_zone {
+        conn.batch_execute(&format!("SET TIME ZONE '{zone}'"))
+            .unwrap_or_else(|error| panic!("{}: setting the zone {zone}: {error}", case.name));
+    }
     conn.batch_execute(&case.schema)
         .unwrap_or_else(|error| panic!("{}: schema: {error}", case.name));
     for sql in &case.seed {
@@ -1029,8 +1043,13 @@ fn plan_case(
     case: &ParityCase,
     expectation: Class,
 ) -> (rls2fga::translator::Outputs, Vec<Disclosure>) {
-    let (classified, db, registry) = super::classify_with(
-        &case.schema,
+    let db = match &case.session_time_zone {
+        Some(zone) => rls2fga::parser::sql_parser::parse_schema_in_time_zone(&case.schema, zone),
+        None => rls2fga::parser::sql_parser::parse_schema(&case.schema),
+    }
+    .expect("schema should parse");
+    let (classified, db, registry) = super::classify_db(
+        db,
         case.registry_json.as_deref(),
         &super::deployment::caller_deployment_with(case.settings.iter().cloned()),
     );
