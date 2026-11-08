@@ -189,10 +189,13 @@ mod tests {
             );
         }
         for untouched in [r#"owner = "current_user""#, "owner = d.current_user"] {
+            let input = parse_expr(untouched);
+            let lowered =
+                lower_role_keywords(&input, &registry).expect("no keyword, so nothing refuses");
             assert!(
-                matches!(
-                    lower_role_keywords(&parse_expr(untouched), &registry),
-                    Ok(Cow::Borrowed(_))
+                core::ptr::eq(
+                    core::ptr::from_ref(lowered.as_ref()),
+                    core::ptr::from_ref(&input)
                 ),
                 "{untouched} names no role keyword"
             );

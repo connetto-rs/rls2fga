@@ -673,6 +673,7 @@ mod tests {
             ("SELECT current_setting('app.user_id')", "sql"),
             ("SELECT current_user FROM audit", "sql"),
             ("SELECT current_user", "plpgsql"),
+            ("SELECT 'a' || current_user", "sql"),
             ("SELECT 'current_user'", "sql"),
         ] {
             assert!(

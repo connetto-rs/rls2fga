@@ -1,6 +1,7 @@
 //! `current_user` read as the role a request acts as.
 
 use rls2fga::classifier::patterns::PatternClass;
+use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
 use crate::support::deployment;
@@ -41,6 +42,36 @@ fn two_acting_roles_leave_current_user_refused() {
             refused.reason
         );
     }
+}
+
+/// A restrictive gate on a membership table that reads `current_user` has no one value
+/// under two acting roles, so the membership read stays guarded rather than open.
+#[test]
+fn two_acting_roles_keep_a_current_user_membership_gate_guarded() {
+    let (classified, db, registry) = support::classify_with(
+        "CREATE TABLE docs(id INT PRIMARY KEY);
+         CREATE TABLE members(doc_id INT REFERENCES docs(id), user_id TEXT,
+                              PRIMARY KEY (doc_id, user_id));
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY members_all ON members FOR SELECT USING (true);
+         CREATE POLICY members_gate ON members AS RESTRICTIVE FOR SELECT
+             USING (current_user = 'reader');
+         CREATE POLICY docs_read ON docs FOR SELECT USING (
+             EXISTS (SELECT 1 FROM members m WHERE m.doc_id = docs.id
+                     AND m.user_id = current_setting('app.user_id', true)));",
+        None,
+        &deployment::caller_deployment_acting_as(&["reader", "writer"], []),
+    );
+    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    assert!(
+        planned
+            .notes()
+            .iter()
+            .any(|note| note.message().contains("membership table 'members'")),
+        "the membership read stays guarded, got {:#?}",
+        planned.notes()
+    );
 }
 
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
