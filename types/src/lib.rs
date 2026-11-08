@@ -53,7 +53,7 @@ pub use identifiers::{
 pub use notes::{NoteSeverity, TranslationNote};
 pub use patterns::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ConfidenceLevel,
-    ContextWitness, PolicyCommand, RolePrivilege,
+    ContextWitness, PolicyCommand, RolePrivilege, TemporalKind,
 };
 pub use policy_reads::PolicyReads;
 pub use records::{

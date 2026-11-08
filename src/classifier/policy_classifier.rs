@@ -133,6 +133,13 @@ fn zoned_columns<DB: DatabaseLike>(db: &DB, table: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The date and time columns of the guarded table, none where the schema does not place it.
+fn temporal_columns<DB: DatabaseLike>(db: &DB, table: &str) -> recognizers::TemporalColumns {
+    lookup_table(db, table)
+        .map(|guarded| recognizers::TemporalColumns::of(guarded, db))
+        .unwrap_or_default()
+}
+
 fn unknown_d(expr: &Expr, reason: impl Into<String>) -> ClassifiedExpr {
     ClassifiedExpr {
         pattern: PatternClass::Unknown(UnclassifiedExpr {
@@ -404,11 +411,13 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 // its structure through the ordinary composite below instead of being
                 // flattened to a column name and graded partial.
                 let zoned = zoned_columns(db, table);
+                let temporal = temporal_columns(db, table);
                 let untranslatable_attr = |side: &Expr| {
                     recognizers::is_attribute_check(side).filter(|_| {
                         recognizers::attribute_literal_predicate(side).is_none()
                             && recognizers::attribute_request_predicate(side).is_none()
                             && recognizers::local_literal_comparison(side, &zoned).is_none()
+                            && recognizers::temporal_literal_comparison(side, &temporal).is_none()
                     })
                 };
                 let left_attr = untranslatable_attr(left);
@@ -474,13 +483,12 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classify_expr_depth(inner, db, registry, table, command, depth + 1, state);
     }
 
-    // A `date` or `timestamp` literal compared with a `timestamptz` column is converted in
-    // the request's zone, so it is a threshold the request computes, judged before the
-    // cast that spells it is.
-    let zoned = zoned_columns(db, table);
-    if let Some(comparisons) = recognizers::local_literal_comparisons(expr, &zoned) {
+    // A date or time literal is judged against its column's type before its cast is.
+    let temporal = temporal_columns(db, table);
+    if let Some(comparisons) = recognizers::temporal_literal_comparisons(expr, &temporal) {
         return classify_expr_depth(&comparisons, db, registry, table, command, depth + 1, state);
     }
+    let zoned = zoned_columns(db, table);
     if let Some(local) = recognizers::local_literal_comparison(expr, &zoned) {
         return match local {
             Ok(request_predicate) => ClassifiedExpr {
@@ -489,6 +497,20 @@ fn classify_expr_inner<DB: DatabaseLike>(
                     value_description: describe_comparison_value(expr),
                     predicate: None,
                     request_predicate: Some(request_predicate),
+                }),
+                confidence: ConfidenceLevel::B,
+            },
+            Err(refusal) => unknown_d(expr, refusal.to_string()),
+        };
+    }
+    if let Some(typed) = recognizers::temporal_literal_comparison(expr, &temporal) {
+        return match typed {
+            Ok(predicate) => ClassifiedExpr {
+                pattern: PatternClass::P9AttributeCondition(AttributeCondition {
+                    column: predicate.column.clone(),
+                    value_description: describe_comparison_value(expr),
+                    predicate: Some(predicate),
+                    request_predicate: None,
                 }),
                 confidence: ConfidenceLevel::B,
             },

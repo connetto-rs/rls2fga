@@ -163,6 +163,7 @@ fn an_offsetless_zoned_literal_never_reaches_the_loader() {
         "m.granted_at < '2030-01-01 00:00:00'",
         "m.starts_at < '09:00:00'::timetz",
         "m.granted_at IS DISTINCT FROM '2030-01-01'::date",
+        "m.local_at < '2030-01-01 00:00:00+00'::timestamptz",
     ] {
         let sql = member_query_sql(predicate);
         assert!(

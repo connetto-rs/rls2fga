@@ -89,6 +89,13 @@ fn literal_gate_key(value: &AttributeLiteral) -> Option<String> {
         AttributeLiteral::AsText(text) => format!("x{}:{text}", text.len()),
         AttributeLiteral::Number(number) => format!("n{}:{number}", number.len()),
         AttributeLiteral::Boolean(value) => format!("b:{value}"),
+        AttributeLiteral::Temporal { kind, text } => {
+            format!(
+                "{}{}:{text}",
+                kind.keyword().to_ascii_lowercase(),
+                text.len()
+            )
+        }
         _ => return None,
     })
 }
