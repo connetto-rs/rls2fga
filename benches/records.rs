@@ -9,13 +9,14 @@ use std::collections::BTreeMap;
 use std::hint::black_box;
 
 use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use sqlparser::ast::DataType;
 
-use rls2fga::parser::sql_parser::{parse_schema, Deployment};
+use rls2fga::parser::sql_parser::{parse_schema, Deployment, SessionSetting, SettingValue};
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{
-    records_from_row, ColumnKind, RecordDerivation, RecordDescription, RowCell, RowList, RowValues,
-    ValueSource,
+    records_from_row, ColumnKind, Guard, RecordDerivation, RecordDescription, RowCell, RowList,
+    RowValues, ValueSource,
 };
 
 /// A row held as plain values, which is the cheapest thing a caller can pass.
@@ -59,13 +60,16 @@ impl RowValues for MapRow {
 }
 
 /// Every pure description a schema's tuple queries carry, read for a deployment acting as
-/// one role, which the schema is parsed after.
+/// one role whose caller is the `app.user_id` setting, which the schema is parsed after.
 fn descriptions(schema: &str) -> Vec<RecordDescription> {
     let db = parse_schema(&format!(
         "CREATE ROLE bench_login LOGIN; CREATE ROLE bench_user;\n{schema}"
     ))
     .expect("benchmark schema parses");
-    let deployment = Deployment::new("bench_login", ["bench_user"], []).expect("one acting role");
+    let caller = SessionSetting::value("app.user_id", SettingValue::Caller(DataType::Text))
+        .expect("a custom setting name");
+    let deployment =
+        Deployment::new("bench_login", ["bench_user"], [caller]).expect("one acting role");
     let translator = TranslatorBuilder::new(deployment)
         .with_min_confidence(ConfidenceLevel::C)
         .build();
@@ -79,13 +83,15 @@ fn descriptions(schema: &str) -> Vec<RecordDescription> {
         .collect()
 }
 
-/// The one description whose subject reads `source`, so a bench names the shape it
-/// measures instead of trusting an index.
-fn by_subject(schema: &str, want: &dyn Fn(&ValueSource) -> bool) -> RecordDescription {
+/// The one description whose subject and guards `want` accepts, so a bench names the
+/// shape it measures instead of trusting an index.
+fn by_shape(schema: &str, want: &dyn Fn(&ValueSource, &[Guard]) -> bool) -> RecordDescription {
     let found: Vec<_> = descriptions(schema)
         .into_iter()
         .filter(|d| match &d.derivation {
-            RecordDerivation::FromRow { template, .. } => want(template.subject_key.part()),
+            RecordDerivation::FromRow {
+                template, guards, ..
+            } => want(template.subject_key.part(), guards),
             _ => false,
         })
         .collect();
@@ -100,18 +106,18 @@ fn by_subject(schema: &str, want: &dyn Fn(&ValueSource) -> bool) -> RecordDescri
 
 const OWNERSHIP: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_user);";
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));";
 
 const ARRAY: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, editors TEXT[]);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_sel ON docs FOR SELECT USING (current_user = ANY (editors));";
+CREATE POLICY docs_sel ON docs FOR SELECT USING (current_setting('app.user_id', true) = ANY (editors));";
 
 const GUARDED: &str = "CREATE TABLE docs(id UUID PRIMARY KEY, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (status = 'published');";
 
 fn one_record(c: &mut Criterion) {
-    let description = by_subject(OWNERSHIP, &|s| matches!(s, ValueSource::Column(_)));
+    let description = by_shape(OWNERSHIP, &|s, _| matches!(s, ValueSource::Column(_)));
     let mut row = MapRow::default();
     row.text.insert("id".to_string(), "d1".to_string());
     row.text.insert("owner_id".to_string(), "u1".to_string());
@@ -127,7 +133,7 @@ fn one_record(c: &mut Criterion) {
 }
 
 fn expanding_record(c: &mut Criterion) {
-    let description = by_subject(ARRAY, &|s| matches!(s, ValueSource::ListElements(_)));
+    let description = by_shape(ARRAY, &|s, _| matches!(s, ValueSource::ListElements(_)));
     let mut group = c.benchmark_group("expanding_record");
 
     for editors in [1_u64, 8, 64, 512] {
@@ -152,7 +158,10 @@ fn expanding_record(c: &mut Criterion) {
 /// A guard the row fails costs only the guard, and it is the common case for a
 /// change stream carrying every row of a table.
 fn guard_rejects(c: &mut Criterion) {
-    let description = by_subject(GUARDED, &|s| matches!(s, ValueSource::Literal(_)));
+    let description = by_shape(GUARDED, &|s, guards| {
+        matches!(s, ValueSource::Literal(_))
+            && guards.iter().any(|g| matches!(g, Guard::Compare { .. }))
+    });
     let mut row = MapRow::default();
     row.text.insert("id".to_string(), "d1".to_string());
     row.text.insert("status".to_string(), "draft".to_string());
