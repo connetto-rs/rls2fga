@@ -121,3 +121,44 @@ fn an_array_compares_as_its_own_element_type() {
     );
     assert_eq!(admitted("code = ANY (ARRAY['ab', 'x'])", CELLS), ["ab  "]);
 }
+
+/// `pg_policies` and `pg_dump` print every literal compared with a `char(n)` column cast to
+/// the unbounded `bpchar`, which keeps the literal's own blanks and compares as `char`.
+#[test]
+fn a_literal_printed_as_bpchar_compares_as_char() {
+    assert_eq!(admitted("code = 'ab'::bpchar", CELLS), ["ab  "]);
+    assert_eq!(admitted("code = 'ab   '::bpchar", CELLS), ["ab  "]);
+    assert_eq!(admitted("'ab '::bpchar = code", CELLS), ["ab  "]);
+    assert_eq!(admitted("code = ' ab'::bpchar", CELLS), [" ab "]);
+    assert_eq!(
+        admitted("code <> 'ab '::bpchar", CELLS),
+        [" ab ", "ab\t ", "    "]
+    );
+    assert_eq!(admitted("(code = 'ab'::bpchar)", CELLS), ["ab  "]);
+    assert_eq!(
+        admitted("code = ANY (ARRAY['ab '::bpchar, 'x'::bpchar])", CELLS),
+        ["ab  "]
+    );
+    assert_eq!(
+        admitted("code IN ('ab '::bpchar, 'x'::bpchar)", CELLS),
+        ["ab  "]
+    );
+    assert_eq!(
+        admitted("code = ('ab'::character varying)::bpchar", CELLS),
+        ["ab  "]
+    );
+    assert_eq!(admitted("code = 'ab '::bpchar::text", CELLS), ["ab  "]);
+    assert_eq!(
+        admitted("code = 'ab  x'::bpchar::text", CELLS),
+        Vec::<&str>::new()
+    );
+    assert_eq!(
+        admitted("code = 'ab'::character", CELLS),
+        Vec::<&str>::new()
+    );
+    assert_eq!(admitted("code = 'abcd'::bpchar(2)", CELLS), ["ab  "]);
+    assert_eq!(
+        admitted("code = 'ab '::pg_catalog.bpchar(3)", CELLS),
+        ["ab  "]
+    );
+}

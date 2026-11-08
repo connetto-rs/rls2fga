@@ -3574,6 +3574,23 @@ async fn a_char_column_compares_without_its_padding(cluster: Arc<Cluster>) {
             "code = ANY (ARRAY['ab ', 'x']::text[])",
             &[],
         ),
+        ("bpchar-literal", "code = 'ab   '::bpchar", &["d1"]),
+        (
+            "bpchar-unequal",
+            "code <> 'ab '::bpchar",
+            &["d2", "d3", "d4"],
+        ),
+        (
+            "bpchar-array",
+            "code = ANY (ARRAY['ab '::bpchar, 'x'::bpchar])",
+            &["d1"],
+        ),
+        (
+            "printed-varchar",
+            "code = ('ab'::character varying)::bpchar",
+            &["d1"],
+        ),
+        ("bpchar-as-text", "code = 'ab '::bpchar::text", &["d1"]),
     ] {
         let case = ParityCase::reading(
             &format!("runner-char-padding-{name}"),
