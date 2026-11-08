@@ -101,6 +101,18 @@ pub(crate) fn clauses_lost_to_the_threshold(
     lost
 }
 
+/// Each clause whose literal the catalog cannot read, why, and the targets it feeds.
+pub(crate) fn unreadable_clause_targets(cp: &ClassifiedPolicy) -> Vec<(&str, Vec<ActionTarget>)> {
+    let mut unreadable = Vec::new();
+    if let Some(reason) = cp.using_unreadable() {
+        unreadable.push((reason, using_targets_with_mirror(cp)));
+    }
+    if let Some(reason) = cp.with_check_unreadable() {
+        unreadable.push((reason, with_check_targets(cp.command())));
+    }
+    unreadable
+}
+
 /// Every target this policy's stored clauses feed, for one dropped whole.
 pub(crate) fn targets_a_policy_feeds(cp: &ClassifiedPolicy) -> Vec<ActionTarget> {
     let mut targets = Vec::new();
@@ -199,27 +211,30 @@ where
 {
     let restrictive = cp.mode() == PolicyMode::Restrictive;
 
-    let dropped_using =
-        (restrictive && cp.using_filtered_at.is_some()).then(dropped_restrictive_expr);
+    let dropped_using = (restrictive
+        && (cp.using_filtered_at.is_some() || cp.using_unreadable().is_some()))
+    .then(dropped_restrictive_expr);
     if let Some(using) = cp.using_classification.as_ref().or(dropped_using.as_ref()) {
         for target in using_targets(cp.command()) {
             f(target, using);
         }
     }
 
-    // Mirror USING → WITH CHECK only when the SQL had no WITH CHECK at all. A filtered
-    // one falls closed instead.
-    let dropped_with_check =
-        (restrictive && cp.with_check_filtered_at.is_some()).then(dropped_restrictive_expr);
+    // Mirror USING → WITH CHECK only when the SQL had no WITH CHECK at all, a dropped
+    // barrier included. A filtered or unreadable check falls closed instead.
+    let dropped_with_check = (restrictive
+        && (cp.with_check_filtered_at.is_some() || cp.with_check_unreadable().is_some()))
+    .then(dropped_restrictive_expr);
     let with_check_pattern = cp
         .with_check_classification
         .as_ref()
         .or(dropped_with_check.as_ref())
         .or_else(|| {
-            if cp.with_check_filtered_at.is_none()
+            if cp.with_check.is_none()
+                && cp.with_check_filtered_at.is_none()
                 && policy_uses_using_for_missing_with_check(cp.command())
             {
-                cp.using_classification.as_ref()
+                cp.using_classification.as_ref().or(dropped_using.as_ref())
             } else {
                 None
             }
@@ -420,16 +435,12 @@ pub(crate) fn policies_missing_a_clause<P: PolicyLike>(
         let command = policy_command(policy.command());
         // An illegal clause gets its own note, and an absent-clause line beside it
         // would send the operator hunting for a legal policy that never existed.
-        if clause_illegal_for_command(
-            command,
-            policy.using_expression(db).is_some(),
-            policy.check_expression(db).is_some(),
-        )
-        .is_some()
-        {
+        let has_using = using_shape(*policy, db).is_some();
+        let has_check = check_shape(*policy, db).is_some();
+        if clause_illegal_for_command(command, has_using, has_check).is_some() {
             continue;
         }
-        if policy.using_expression(db).is_some() {
+        if has_using {
             continue;
         }
         let checks: BTreeSet<ActionTarget> = with_check_targets(command).into_iter().collect();
@@ -456,7 +467,7 @@ pub(crate) fn policies_missing_a_clause<P: PolicyLike>(
         if !needs_using.is_empty() {
             missing.push((policy.name().to_string(), needs_using.join(", "), "USING"));
         }
-        if !needs_check.is_empty() && policy.check_expression(db).is_none() {
+        if !needs_check.is_empty() && !has_check {
             missing.push((
                 policy.name().to_string(),
                 needs_check.join(", "),

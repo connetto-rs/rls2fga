@@ -56,9 +56,10 @@ fn classify_policies_with_registry<DB: DatabaseLike>(
             };
 
             // An absent clause is not `TRUE`: PostgreSQL stores no qual for it, and
-            // with no permissive qual the command falls closed.
-            let using = classified.using.as_ref().map(classify);
-            let with_check = classified.with_check.as_ref().map(classify);
+            // with no permissive qual the command falls closed. An unreadable one is the
+            // generator's to refuse.
+            let using = classified.using().map(classify);
+            let with_check = classified.with_check().map(classify);
 
             classified.using_classification = using;
             classified.with_check_classification = with_check;

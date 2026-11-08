@@ -91,6 +91,62 @@ fn plan_from_policy_sql(
     (plan, docs)
 }
 
+/// Each target `for_each_policy_target_expr` routes the policy declared by `policy_sql`
+/// to, with the pattern it routes there, once its readable `USING` is `using`.
+fn routed_targets(
+    policy_sql: &str,
+    using: Option<PatternClass>,
+) -> Vec<(ActionTarget, PatternClass)> {
+    let db = docs_db_with_policy(&format!(
+        "ALTER TABLE docs ADD COLUMN expires TIMESTAMPTZ;\n{policy_sql}"
+    ));
+    let policy = db.policies().next().expect("policy should exist");
+    let classified = classified_from_policy(policy, &db, using, None);
+    let mut routed = Vec::new();
+    for_each_policy_target_expr(&classified, |target, expr| {
+        routed.push((target, expr.pattern.clone()));
+    });
+    routed
+}
+
+#[test]
+fn an_unreadable_barrier_denies_every_target_it_feeds_the_mirror_included() {
+    let routed = routed_targets(
+        "CREATE POLICY p ON docs AS RESTRICTIVE USING (expires > '2026-01-01 09:00');",
+        None,
+    );
+    let deny = PatternClass::P10ConstantBool(ConstantBool { value: false });
+    assert_eq!(
+        routed,
+        [
+            ActionTarget::Select,
+            ActionTarget::UpdateUsing,
+            ActionTarget::Delete,
+            ActionTarget::Insert,
+            ActionTarget::UpdateCheck,
+        ]
+        .map(|target| (target, deny.clone()))
+    );
+}
+
+#[test]
+fn an_unreadable_check_is_never_answered_by_the_using() {
+    let grant = PatternClass::P10ConstantBool(ConstantBool { value: true });
+    let routed = routed_targets(
+        "CREATE POLICY p ON docs USING (TRUE) WITH CHECK (expires > '2026-01-01 09:00');",
+        Some(grant.clone()),
+    );
+    assert_eq!(
+        routed,
+        [
+            ActionTarget::Select,
+            ActionTarget::UpdateUsing,
+            ActionTarget::Delete,
+        ]
+        .map(|target| (target, grant.clone()))
+    );
+}
+
 #[test]
 fn compose_action_with_only_restrictive_rules_maps_to_no_access() {
     let mut plan = TypePlan::new(TypeName::canonicalized("docs"));

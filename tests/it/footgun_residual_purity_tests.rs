@@ -185,16 +185,23 @@ fn a_zone_naive_literal_against_a_zoned_column_never_reaches_the_loader() {
     );
 }
 
-/// An explicit offset makes the instant independent of the evaluating session.
+/// An explicit offset makes the instant independent of the evaluating session, and the
+/// policy stores it as that instant.
 #[test]
 fn explicit_offset_literals_still_load() {
-    for predicate in [
-        "m.granted_at < '2030-01-01 00:00:00+02:00'::timestamptz",
-        "m.starts_at < '09:00:00+02:00'::timetz",
+    for (predicate, stored) in [
+        (
+            "m.granted_at < '2030-01-01 00:00:00+02:00'::timestamptz",
+            "granted_at < '2029-12-31 22:00:00+00'",
+        ),
+        (
+            "m.starts_at < '09:00:00+02:00'::timetz",
+            "starts_at < '09:00:00+02'::TIMETZ",
+        ),
     ] {
         let sql = member_query_sql(predicate);
         assert!(
-            sql.contains("+02:00"),
+            sql.contains(stored),
             "the row and explicit offset decide {predicate}:\n{sql}"
         );
     }
@@ -302,7 +309,7 @@ fn a_folded_literal_cast_replays_against_the_cast_value() {
 fn an_unfolded_cast_keeps_the_conjunct_in_sql() {
     let query = member_query("m.local_at < '2030-01-01 12:00'::date");
     assert!(
-        query.sql.contains("local_at < '2030-01-01 12:00'::DATE"),
+        query.sql.contains("local_at < '2030-01-01'::DATE"),
         "the cast stays for the loader to evaluate:\n{}",
         query.sql
     );

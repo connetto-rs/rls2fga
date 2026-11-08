@@ -64,11 +64,12 @@ fn read_set<'db, DB: DatabaseLike>(
         unresolved: Vec::new(),
     };
     reads.through(guarded);
-    for clause in [policy.using_expression(db), policy.check_expression(db)]
-        .into_iter()
-        .flatten()
-    {
-        reads.subqueries(clause);
+    for clause in [policy.using_clause(db), policy.check_clause(db)] {
+        match clause {
+            Ok(Some(clause)) => reads.subqueries(clause.expression()),
+            Ok(None) => {}
+            Err(error) => reads.unresolved(error.to_string()),
+        }
     }
     let mut called = Vec::new();
     match policy.using_functions(db) {
@@ -194,4 +195,34 @@ fn is_server_function<F: FunctionLike>(function: &F) -> bool {
     declared_in.schema().is_some_and(|schema| {
         stored_identifier(schema, declared_in.schema_is_quoted()) == "pg_catalog"
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::sql_parser::parse_schema;
+
+    /// A clause the catalog cannot answer for this policy is reported unresolved, never read
+    /// as reading nothing beyond the guarded table.
+    #[test]
+    fn a_clause_the_catalog_cannot_answer_leaves_the_policy_unresolved() {
+        let db = parse_schema("CREATE TABLE docs (id INT PRIMARY KEY);").expect("parses");
+        let elsewhere = parse_schema(
+            "CREATE TABLE docs (id INT PRIMARY KEY);
+             CREATE POLICY held_elsewhere ON docs USING (id > 0);",
+        )
+        .expect("parses");
+        let policy = elsewhere.policies().next().expect("the policy");
+        let classified = ClassifiedPolicy::from_policy(policy, &elsewhere);
+        let guarded = db.tables().next().expect("docs");
+        let entry = read_set(&classified, guarded, policy, &db);
+        assert!(
+            entry
+                .unresolved
+                .iter()
+                .any(|reason| reason.contains("held_elsewhere")),
+            "{:?}",
+            entry.unresolved
+        );
+    }
 }

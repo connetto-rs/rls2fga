@@ -3,6 +3,7 @@
 //!
 //! Which clause a command needs, and what an absent one grants.
 
+use rls2fga::parser::sql_parser::{DatabaseLike, ParserDB, PolicyLike};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
 
@@ -658,4 +659,162 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
             outputs.notes()
         );
     }
+}
+
+/// A `timestamptz` literal holds the instant `PostgreSQL` read in the `TimeZone` of the
+/// session that ran `CREATE POLICY`, and a schema that never sets one does not say which.
+const UNREADABLE_LITERAL_TABLE: &str = r"
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, expires TIMESTAMPTZ);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+";
+
+/// Whether `notes` refuse policy `p` with the reason the catalog gives for its `USING`.
+fn refuses_the_unreadable_literal(db: &ParserDB, notes: &[TranslationNote]) -> bool {
+    let policy = db
+        .policies()
+        .find(|policy| policy.name() == "p")
+        .expect("the schema declares p");
+    let expected = policy
+        .using_expression(db)
+        .expect_err("the literal cannot be read")
+        .to_string();
+    notes.iter().any(|note| {
+        matches!(
+            note,
+            TranslationNote::ExpressionRefused { policy, reason }
+                if policy == "p" && *reason == expected
+        )
+    })
+}
+
+/// The clause's value is unknown, so the policy grants nothing and says why, and its
+/// `USING` still answers for the missing `WITH CHECK`, so no command reads as uncovered.
+#[test]
+fn a_permissive_policy_whose_literal_cannot_be_read_is_refused() {
+    let db = db_of(&format!(
+        "{UNREADABLE_LITERAL_TABLE}\
+         CREATE POLICY p ON docs USING (owner_id = current_user AND expires > '2026-01-01 09:00');"
+    ));
+    let outputs = translator(ConfidenceLevel::D)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = outputs.model();
+
+    for action in ["can_select", "can_insert", "can_update", "can_delete"] {
+        assert!(
+            relation_denies(&dsl, "docs", action),
+            "a clause of unknown value grants nothing, {action}:\n{dsl}"
+        );
+    }
+    assert!(
+        outputs.tuple_queries().is_empty(),
+        "a refused policy asks for no tuples, got: {:#?}",
+        outputs.tuple_queries()
+    );
+    assert!(
+        refuses_the_unreadable_literal(&db, outputs.notes()),
+        "the refusal must name the literal, got: {:#?}",
+        outputs.notes()
+    );
+    assert!(
+        !outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::PolicyClauseAbsent { policy, .. } if policy == "p"
+        )),
+        "the clause is stored, only its value is unknown, got: {:#?}",
+        outputs.notes()
+    );
+}
+
+/// A barrier of unknown value may admit nothing, so it denies what it guards rather than
+/// stepping aside for the grant beside it.
+#[test]
+fn a_restrictive_policy_whose_literal_cannot_be_read_denies() {
+    let db = db_of(&format!(
+        "{UNREADABLE_LITERAL_TABLE}\
+         CREATE POLICY owner ON docs FOR SELECT USING (owner_id = current_user);
+         CREATE POLICY p ON docs AS RESTRICTIVE FOR SELECT USING (expires > '2026-01-01 09:00');"
+    ));
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = outputs.model();
+
+    assert!(
+        relation_denies(&dsl, "docs", "can_select"),
+        "the owner grant must not survive a barrier nobody can read:\n{dsl}"
+    );
+    assert!(
+        refuses_the_unreadable_literal(&db, outputs.notes()),
+        "the refusal must name the literal, got: {:#?}",
+        outputs.notes()
+    );
+}
+
+/// A `WITH CHECK` of unknown value refuses the new rows it judges, while the readable `USING`
+/// beside it still grants reads.
+#[test]
+fn a_check_whose_literal_cannot_be_read_closes_only_the_writes_it_judges() {
+    let db = db_of(&format!(
+        "{UNREADABLE_LITERAL_TABLE}\
+         CREATE POLICY p ON docs USING (owner_id = current_user)
+           WITH CHECK (owner_id = current_user AND expires > '2026-01-01 09:00');"
+    ));
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = outputs.model();
+
+    assert!(
+        !relation_denies(&dsl, "docs", "can_select"),
+        "the readable USING still grants reads:\n{dsl}"
+    );
+    for action in ["can_insert", "can_update"] {
+        assert!(
+            relation_denies(&dsl, "docs", action),
+            "a check of unknown value admits no new row, {action}:\n{dsl}"
+        );
+    }
+    let expected = db
+        .policies()
+        .next()
+        .expect("the schema declares p")
+        .check_expression(&db)
+        .expect_err("the literal cannot be read")
+        .to_string();
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::ExpressionRefused { policy, reason }
+                if policy == "p" && *reason == expected
+        )),
+        "the refusal must name the check's literal, got: {:#?}",
+        outputs.notes()
+    );
+}
+
+/// A restrictive `FOR ALL` barrier storing no `WITH CHECK` checks the new row with its
+/// `USING`, so a `USING` the threshold drops still closes inserts.
+#[test]
+fn a_restrictive_using_below_the_threshold_still_checks_inserts() {
+    let db = db_of(
+        r"
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ins ON docs FOR INSERT WITH CHECK (owner_id = current_user);
+CREATE POLICY p ON docs AS RESTRICTIVE USING (unreadable(owner_id));
+",
+    );
+    let dsl = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .model();
+    assert!(
+        relation_denies(&dsl, "docs", "can_insert"),
+        "the dropped barrier must not let inserts through:\n{dsl}"
+    );
 }

@@ -27,7 +27,7 @@ use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     filter_policies_for_output, AbacAnd, ClassifiedExpr, ClassifiedPolicy, Composite,
     ConfidenceLevel, ExpandedFunction, MembershipExclusion, MembershipInCallerSet,
-    ParentInheritance, PatternClass, PolicyCommand, PolicyMode, RowValueInCallerSet,
+    ParentInheritance, PatternClass, PolicyCommand, PolicyMode, RowValueInCallerSet, StoredClause,
     UnclassifiedExpr,
 };
 use crate::classifier::policy_classifier::classify_expr;
@@ -369,7 +369,7 @@ fn synthetic_policy<DB: DatabaseLike>(
         mode: PolicyMode::Permissive,
         scoped_roles: Vec::new(),
         ddl_time_roles: Vec::new(),
-        using: Some(expr.clone()),
+        using: Some(StoredClause::Read(expr.clone())),
         with_check: None,
         using_classification: Some(classified.clone()),
         with_check_classification: None,

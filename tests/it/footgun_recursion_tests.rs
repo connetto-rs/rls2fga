@@ -344,6 +344,44 @@ CREATE POLICY pb ON b FOR SELECT USING (
     }
 }
 
+/// `PostgreSQL` finds a loop while it expands the policies, before any literal is compared,
+/// so a clause whose literal's stored value is unknown here still carries one.
+#[test]
+fn a_read_cycle_through_a_clause_whose_literal_cannot_be_read_denies_both() {
+    let db = db_of(
+        r"
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER, expires TIMESTAMPTZ);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
+ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pa ON a FOR SELECT USING (expires > '2026-01-01 09:00'
+  AND EXISTS (SELECT 1 FROM b WHERE b.id = a.nx AND b.owner_id = current_user));
+CREATE POLICY pb ON b FOR SELECT USING (owner_id = current_user
+  OR EXISTS (SELECT 1 FROM a WHERE a.id = b.nx AND a.owner_id = current_user));
+",
+    );
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let dsl = outputs.model();
+    for table in ["a", "b"] {
+        assert_eq!(
+            relation_definition(&dsl, table, "can_select").as_deref(),
+            Some("no_access"),
+            "every read of '{table}' raises infinite recursion:\n{dsl}"
+        );
+        assert!(
+            outputs.notes().iter().any(
+                |note| note.subject() == table && note.message().contains("infinite recursion")
+            ),
+            "no note walks the loop for '{table}', got {:#?}",
+            outputs.notes()
+        );
+    }
+}
+
 /// A write clause reading a looping table cannot be evaluated either. Probed: the read
 /// of `docs` is fine while its `INSERT` raises, and a plain sibling `INSERT` policy does
 /// not save it, so the command denies rather than the clause dropping.

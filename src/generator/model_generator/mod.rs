@@ -71,7 +71,7 @@ use actions::{
     define_upsert_relations, derived_action_relations, dropped_attribute_guards,
     fill_uncovered_actions_with_deny, for_each_policy_target_expr, mark_narrowed, narrowed_by,
     policies_missing_a_clause, push_action_expr, scoped_policy_expr, targets_a_policy_feeds,
-    ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
+    unreadable_clause_targets, ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
 };
 use dsl::render_dsl;
 use emit_membership::{
@@ -876,7 +876,7 @@ pub(crate) fn build_filtered_schema_plan<DB: DatabaseLike>(
     // Every policy, translated or not, since a clause the translation refused denies too
     // and the reader still learns that the database admits more there.
     for policy in policies {
-        for clause in policy.using.iter().chain(&policy.with_check) {
+        for clause in policy.using().into_iter().chain(policy.with_check()) {
             for (source, expression) in
                 crate::classifier::recognizers::empty_readings(clause, registry)
             {
@@ -1169,6 +1169,22 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                             commands: commands_fed_by(&targets),
                             relations: narrowed_by(&targets).into_iter().collect(),
                         });
+                    }
+                    for (reason, targets) in unreadable_clause_targets(cp) {
+                        notes.push(TranslationNote::ExpressionRefused {
+                            policy: cp.name().to_string(),
+                            reason: reason.to_string(),
+                        });
+                        let targets: Vec<ActionTarget> = targets
+                            .into_iter()
+                            .filter(|target| !recursive_targets.contains_key(target))
+                            .collect();
+                        if cp.mode() == PolicyMode::Permissive
+                            && targets.contains(&ActionTarget::UpdateCheck)
+                        {
+                            update_check_was_filtered = true;
+                        }
+                        mark_narrowed(table_plan, &targets);
                     }
                 }
 

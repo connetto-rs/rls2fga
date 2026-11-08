@@ -691,16 +691,29 @@ fn owner_foreign_keys_must_unambiguously_name_a_primary_key() {
     }
 }
 
+/// The session's `TimeZone` decides the instant an offsetless item names, and a schema
+/// that never sets one does not say which, so the clause is not translated at all.
 #[test]
 fn far_in_list_on_a_zone_column_without_an_offset_is_refused() {
     let schema = format!("{SCHEMA}ALTER TABLE memberships ADD COLUMN expires_at TIMESTAMPTZ;");
-    not_p19(
-        &schema,
-        "EXISTS (SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
+    let sql = format!(
+        "{schema}CREATE POLICY orders_read ON orders FOR SELECT USING (
+        EXISTS (SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id
             AND EXISTS (SELECT 1 FROM memberships m WHERE m.owner_id = a.owner
                 AND m.expires_at IN ('2026-01-01 00:00:00')
-                AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read'))",
-        "an IN list item the session zone reads back differently than the caller",
+                AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read')));"
+    );
+    let db = parse_schema(&sql).unwrap();
+    let classified =
+        TranslatorBuilder::new(deployment::deployment([deployment::caller("app.user_id")]))
+            .build()
+            .classify(&db);
+    assert_eq!(classified.len(), 1);
+    assert!(
+        classified[0].using_classification().is_none()
+            && classified[0].using_unreadable().is_some(),
+        "an IN list item the session zone reads back is never translated: {:?}",
+        classified[0]
     );
 }
 
@@ -749,6 +762,7 @@ fn parsed_predicate(schema: &str, predicate: &str) -> (ParserDB, Expr) {
         .next()
         .expect("the schema declares one policy")
         .using_expression(&db)
+        .expect("the policy's literals read")
         .expect("the policy carries a USING clause")
         .clone();
     (db, expr)
