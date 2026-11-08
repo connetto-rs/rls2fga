@@ -637,6 +637,25 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             },
         }),
 
+        // Which role a kind stands for follows from the deployment, so the fact is the whole
+        // description, exactly as for the roles a scope admits.
+        TupleSource::ActingKind {
+            gate_type,
+            gate_object,
+            relation,
+            pg_role,
+        } => Some(RecordDescription {
+            tables: Vec::new(),
+            derivation: RecordDerivation::Constant {
+                record: Record {
+                    object: format!("{gate_type}:{}", encode_part(gate_object)),
+                    relation: relation.clone(),
+                    subject: format!("{}:{}#usage", well_known.pg_role, encode_part(pg_role)),
+                    context: None,
+                },
+            },
+        }),
+
         // The constant a gate tests follows from the policy, so the fact is the whole
         // description, exactly as for the roles a scope admits.
         TupleSource::RequestGateEntry {

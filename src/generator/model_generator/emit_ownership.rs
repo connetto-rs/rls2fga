@@ -241,27 +241,33 @@ pub(crate) fn emit_constant_bool<DB: DatabaseLike>(
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
 ) -> UsersetExpr {
-    let ConstantBool { value } = constant_bool;
-    let db = ctx.db;
-    let source_table = ctx.source_table;
-    if *value {
-        let Some(identity_cols) = resolve_row_identity(source_table, db) else {
-            skip_source_without_row_identity(table_plan, source_table, "constant-TRUE tuples", db);
-            return deny_expr(table_plan);
-        };
-        let relation = table_plan.ensure_direct(
-            public_relation(),
-            vec![DirectSubject::Wildcard(table_plan.well_known.user.clone())],
-        );
-        table_plan.add_source(TupleSource::ConstantTrue {
-            table: source_table.clone(),
-            identity_cols,
-            relation: relation.clone(),
-        });
-        UsersetExpr::Computed(relation)
+    if constant_bool.value {
+        emit_all_rows(table_plan, ctx.source_table, ctx.db)
     } else {
         deny_expr(table_plan)
     }
+}
+
+/// Every row of `source_table`, granted to everyone.
+pub(crate) fn emit_all_rows<DB: DatabaseLike>(
+    table_plan: &mut TypePlan,
+    source_table: &TableId,
+    db: &DB,
+) -> UsersetExpr {
+    let Some(identity_cols) = resolve_row_identity(source_table, db) else {
+        skip_source_without_row_identity(table_plan, source_table, "constant-TRUE tuples", db);
+        return deny_expr(table_plan);
+    };
+    let relation = table_plan.ensure_direct(
+        public_relation(),
+        vec![DirectSubject::Wildcard(table_plan.well_known.user.clone())],
+    );
+    table_plan.add_source(TupleSource::ConstantTrue {
+        table: source_table.clone(),
+        identity_cols,
+        relation: relation.clone(),
+    });
+    UsersetExpr::Computed(relation)
 }
 
 /// A refusal: the clause is reported and the command falls closed.

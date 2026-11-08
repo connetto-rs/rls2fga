@@ -156,38 +156,6 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
     assert_eq!(count, 1, "SELECT-only policy should yield 1 classification");
 }
 
-// ── scoped_roles() ───────────────────────────────────────────────────────────
-
-#[test]
-fn scoped_roles_returns_empty_for_public() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO PUBLIC USING (owner_id = current_setting('app.user_id'));
-";
-    let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
-    assert_eq!(classified.len(), 1);
-    assert!(
-        classified[0].scoped_roles().is_empty(),
-        "TO PUBLIC should return empty scoped_roles"
-    );
-}
-
-#[test]
-fn scoped_roles_returns_role_names() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT TO app_user, admin_role USING (owner_id = current_setting('app.user_id'));
-";
-    let (classified, _db, _registry) = support::classify_sql_no_registry(sql);
-    assert_eq!(classified.len(), 1);
-    let roles = classified[0].scoped_roles();
-    assert_eq!(roles.len(), 2);
-    assert!(roles.contains(&"admin_role".to_string()));
-    assert!(roles.contains(&"app_user".to_string()));
-}
-
 #[test]
 fn an_equality_between_two_guarded_row_columns_refuses_the_membership() {
     // PostgreSQL filters every membership hit through the guarded row's own
@@ -540,7 +508,6 @@ CREATE POLICY p ON docs FOR SELECT USING (auth.role() IN ('authenticated', 'admi
 #[test]
 fn pg_has_role_two_arg_is_a_constant_the_schema_decides() {
     let sql = r"
-CREATE ROLE app_user;
 CREATE ROLE admin;
 GRANT admin TO app_user;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
@@ -565,7 +532,6 @@ CREATE POLICY p ON docs FOR SELECT USING (pg_has_role('admin', 'MEMBER'));
 #[test]
 fn pg_has_role_three_arg_is_a_constant_the_schema_decides() {
     let sql = r"
-CREATE ROLE app_user;
 CREATE ROLE editor;
 GRANT editor TO app_user;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);

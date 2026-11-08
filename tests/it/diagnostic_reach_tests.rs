@@ -19,6 +19,8 @@ use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
 
 use crate::support;
+use crate::support::deployment::{caller, caller_deployment_acting_as};
+use crate::support::footgun::relation_definition;
 
 /// The notes and the skipped-tuple comments one schema produces at one threshold.
 fn reported(
@@ -88,42 +90,41 @@ fn assert_reports(label: &str, haystack: &[String], fragment: &str) {
     );
 }
 
-/// A role that bypasses row level security is named, since no model can express it.
+/// The notes and the model one schema produces at one threshold, for a deployment acting
+/// as `acting`.
+fn reported_acting_as(sql: &str, acting: &[&str], level: ConfidenceLevel) -> (Vec<String>, String) {
+    let (classified, db, reg) = support::classify_with(
+        sql,
+        None,
+        &caller_deployment_acting_as(acting, [caller("app.user_id")]),
+    );
+    let planned = support::plan_at(classified, &db, &reg, level);
+    let notes = planned
+        .notes()
+        .iter()
+        .map(TranslationNote::message)
+        .collect::<Vec<_>>();
+    (notes, planned.model())
+}
+
+/// An acting role with `BYPASSRLS` skips every policy on the table, and no model can
+/// express the exemption, so the note names it and the read answers every row.
 #[test]
-fn a_bypassing_role_is_reported() {
-    let (notes, _) = reported(
-        "CREATE ROLE auditor BYPASSRLS;
+fn a_bypassing_acting_role_is_reported() {
+    let (notes, model) = reported_acting_as(
+        "CREATE ROLE auditor NOLOGIN BYPASSRLS;
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));",
-        None,
+        &["auditor"],
         ConfidenceLevel::B,
     );
     assert_reports("bypassing role", &notes, "'auditor'");
-    assert_reports(
-        "bypassing role",
-        &notes,
-        "has BYPASSRLS, so every policy is skipped",
-    );
-}
-
-/// A RESTRICTIVE barrier scoped to a role cannot bind that role alone when no tuple can
-/// name the row, so it binds everyone and the widening is reported.
-#[test]
-fn a_barrier_that_cannot_be_scoped_is_reported() {
-    let (notes, _) = reported(
-        "CREATE ROLE auditor;
-CREATE TABLE docs(owner_id TEXT, tenant TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
-CREATE POLICY bar ON docs AS RESTRICTIVE FOR SELECT TO auditor USING (tenant = 'x');",
-        None,
-        ConfidenceLevel::B,
-    );
-    assert_reports(
-        "unscopable barrier",
-        &notes,
-        "the barrier is applied to everyone",
+    assert_reports("bypassing role", &notes, "BYPASSRLS");
+    assert_eq!(
+        relation_definition(&model, "docs", "can_select").as_deref(),
+        Some("acting_auditor from request_gate"),
+        "the exempt role reads every row:\n{model}"
     );
 }
 

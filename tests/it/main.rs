@@ -71,6 +71,7 @@ mod request_gate_recipe_parity_tests;
 mod request_gate_tests;
 mod role_keyword_tests;
 mod row_naming_tests;
+mod row_security_tests;
 mod security_definer_tests;
 mod session_time_zone_tests;
 mod translation_object_tests;

@@ -511,19 +511,6 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
     let Some(read_scope) = noted_membership_read_scope(join_table, ctx, readability, notes) else {
         return deny_expr(table_plan);
     };
-    if let TableReadability::Guarded { roles } = read_scope {
-        if !roles.is_empty() {
-            notes.push(TranslationNote::ExpressionRefused {
-                policy: policy_name.to_string(),
-                reason: format!(
-                    "only {} may read {join_table}, and a request-scoped gate cannot \
-                         yet be narrowed to a role scope",
-                    roles.join(", ")
-                ),
-            });
-            return deny_expr(table_plan);
-        }
-    }
     let Some(parent) = MembershipParent::resolve(pairs, join_table, ctx, table_plan, notes) else {
         return deny_expr(table_plan);
     };

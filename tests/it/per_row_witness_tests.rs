@@ -170,7 +170,7 @@ CREATE POLICY p ON tasks FOR SELECT USING (EXISTS (
         relation_definition(&dsl, "tasks", "can_select").expect("tasks defines can_select");
     assert_eq!(
         can_select,
-        format!("{access_relation} from projects"),
+        format!("{access_relation} from projects and acting_app_user from request_gate"),
         "tasks must reach the grant through the exact parent indirection:\n{dsl}"
     );
     // One witness query and one link query name the share objects.
@@ -307,7 +307,7 @@ CREATE POLICY p ON memos FOR SELECT USING (EXISTS (
     let can_select =
         relation_definition(&dsl, "memos", "can_select").expect("memos defines can_select");
     assert_eq!(
-        can_select, "no_access",
+        can_select, "no_access and acting_app_user from request_gate",
         "no sound compression exists, so the command denies:\n{dsl}"
     );
 }

@@ -67,7 +67,7 @@ The model compares the caller as sent, while `PostgreSQL` compares whatever a ca
 
 ## Output
 
-The example above yields this model. Only `SELECT` has a policy, so every other command denies through `no_access`, whose only allowed subject is the `nobody` type no tuple ever names. Apply it with `fga model write --store-id "$FGA_STORE_ID" --file model.fga`.
+The example above yields this model. Only `SELECT` has a policy, so every other command denies through `no_access`, whose only allowed subject is the `nobody` type no tuple ever names. `acting_web_user from request_gate` admits only checks that send `(user:<subject>, usage, pg_role:web_user)`, the role the deployment acts as. Apply it with `fga model write --store-id "$FGA_STORE_ID" --file model.fga`.
 
 ```fga
 model
@@ -79,14 +79,23 @@ type documents
   relations
     define no_access: [nobody]
     define owner: [user]
+    define request_gate: [request_gate]
     define can_delete: no_access
     define can_insert: no_access
-    define can_select: owner
+    define can_select: owner and acting_web_user from request_gate
     define can_select_for_update: can_update
     define can_update: no_access
     define can_update_without_reading: can_update
 
 type nobody
+
+type pg_role
+  relations
+    define usage: [user]
+
+type request_gate
+  relations
+    define acting_web_user: [pg_role#usage]
 ```
 
 Beside it comes one query per relation a permission can reach, so a table that denies everything yields nothing to load. The prelude pins the session's text rendering, and the `CASE` hex-escapes any key value the target would refuse, so every row becomes one `OpenFGA` id.
@@ -101,6 +110,14 @@ SELECT 'documents:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::te
 FROM "public"."documents"
 WHERE "owner_id" IS NOT NULL
 AND "id" IS NOT NULL;
+
+-- documents admits requests acting as PostgreSQL role 'web_user', which the deployment decides rather than any row
+SELECT 'request_gate:documents' AS object, 'acting_web_user' AS relation, 'pg_role:web_user' || '#usage' AS subject;
+
+-- Every documents row is judged by the scope documents
+SELECT 'documents:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:documents' AS subject
+FROM "public"."documents"
+WHERE "id" IS NOT NULL;
 ```
 
 Every query projects `object`, `relation` and `subject`. One whose `TupleQuery::condition` is `Some` adds `condition` and `context`, a `jsonb` object holding the condition's row-supplied parameters. `Outputs::record_from_tuple_row` reads a row back as a `Record`, refusing one the model holds no such fact for, and `generator::records::records_from_row` produces the same records from a row's values with no database at all.
@@ -144,7 +161,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 
 Blocklist subqueries must be correlated caller-identity memberships over tables with no own or inherited row-level security. `NOT IN` and `<> ALL` require a provably non-null projected column. A negative-only `RESTRICTIVE` clause subtracts from the action's existing grants, while standalone permissive negation and caller-set blocklists are refused.
 
-`current_user`, `current_role` and `user` name the role a request acts as, and `session_user` the role it logs in as, so each reads as the name the deployment gives that role and never as the caller. A deployment acting as several roles has no one name for the first three, so a policy reading them is refused. `pg_has_role` is decided by the roles and grants the schema declares, before any row is read.
+`current_user`, `current_role` and `user` name the role a request acts as, and `session_user` the role it logs in as, so each reads as the name the deployment gives that role and never as the caller. Policies are read once per acting role, so a comparison such as `current_user = 'reader'` holds for that role and fails for every other. `pg_has_role` is decided by the roles and grants the schema declares, before any row is read.
 
 ## Gates that read only the request
 
@@ -166,7 +183,7 @@ A column with no foreign key, such as an `owner` that may name a team or a proje
 
 Naming a row to change means reading it, so `can_update` and `can_delete` intersect `can_select`, while an `UPDATE` naming no row is `can_update_without_reading`. Plain `INSERT` reads nothing, but `RETURNING` a column and naming an `ON CONFLICT` target both read the new row back, which is `can_insert_returning`. An `UPDATE` also applies the `SELECT` policies to the row it writes, so `can_update_check` intersects `can_select` too, and an `UPDATE` naming no row judges the row it writes with `can_update_without_reading_check` where that differs. `INSERT ... ON CONFLICT DO UPDATE` is judged by `can_insert_returning`, `can_update_using` and `can_update_check` together. A locking read (`FOR UPDATE` and friends) also applies the `UPDATE` policies, so check `can_select_for_update` rather than `can_select`. A policy expression reads every table it names, so an inherited parent rule intersects the parent's `can_select` and a membership table granting no reads denies outright.
 
-Membership tables whose permissive read policies all use `USING (true)` and apply to `PUBLIC` need no caveat when their restrictive read policies are absent or constant `true`. Supported restrictive gates using only literals and settings the deployment declares are `AND`ed onto the membership arm and require those settings in each check context. Row-dependent or role-scoped membership rules retain `MembershipTableGuarded`.
+Membership tables whose permissive read policies all use `USING (true)` and apply to `PUBLIC` need no caveat when their restrictive read policies are absent or constant `true`. Supported restrictive gates using only literals and settings the deployment declares are `AND`ed onto the membership arm and require those settings in each check context. A membership table whose read policies reach only some acting roles grants through it to those roles alone. Row-dependent membership rules retain `MembershipTableGuarded`.
 
 A residual such as `s.weight > (SELECT avg(weight) FROM paper_shares)` may read a table gated that way too. When the gate holds the caller sees what the loader saw, and when it fails the table reads empty, so the residual is accepted only where an empty table makes it false (`avg` of nothing is `NULL`, `count` of nothing fails `> 0`), and the grant is `AND`ed with the gate. `count(*) = 0` and `NOT EXISTS` stay refused.
 
@@ -174,7 +191,7 @@ Membership tuple relations are isolated by table, correlation, user column, pred
 
 ## Runtime data you have to supply
 
-A policy scoped `TO analyst` keeps that scope through a `pg_role` type, so load `usage` tuples mapping users to `pg_role` objects or those policies match nobody.
+Every check states the role the request acts as with the contextual tuple `(user:<subject>, usage, pg_role:<role>)`. Which policies reach that role, their `TO` lists, an owner or `BYPASSRLS` exemption and a recursion `PostgreSQL` raises on are answered per acting role by `sql_traits`' `row_security`, and every action relation is a union of one branch per acting role, joined as `acting_<role> from request_gate` through the table's `request_gate` object. The tuple queries write that object's constant `(request_gate:<table>, acting_<role>, pg_role:<role>#usage)`, so no role fact is loaded by hand. The relation report states that join as `RequestPredicate::ActsAs`, which the check's kind decides without any record.
 
 Every value a policy reads from a setting other than the caller reaches the model as a condition parameter named after the setting and field, `app.tenant_id` as `app_tenant_id`, which every check carries. A request that leaves a setting the deployment says may be unset sends no subject for it and omits its parameters, never `''` or an empty list. `PostgreSQL` reads such a setting as `NULL` on a fresh connection and as `''` once a transaction-local value has ended, and the model answers as `NULL` does, which admits least. Where `''` would admit rows, an `UnsetSettingReadAsEmpty` note names the comparison.
 

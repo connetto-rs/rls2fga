@@ -1,6 +1,5 @@
 ---
 source: tests/it/generator_tests.rs
-assertion_line: 28
 expression: "tuple_generator::format_tuples(outputs.tuple_queries())"
 ---
 SET TIME ZONE 'UTC';
@@ -26,6 +25,14 @@ SELECT 'items:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text E
 FROM "public"."items"
 WHERE "id" IS NOT NULL
 AND "team_id" IS NOT NULL;
+
+-- items admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:items' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every items row is judged by the scope items
+SELECT 'items:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:items' AS subject
+FROM "public"."items"
+WHERE "id" IS NOT NULL;
 
 -- teams to team_members_share bridge for tuple-to-userset
 SELECT 'teams:' || CASE WHEN "team_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "team_id"::text ELSE '~' || encode(convert_to("team_id"::text, 'UTF8'), 'hex') END AS object, 'team_members_share' AS relation, 'team_members_share:' || CASE WHEN "team_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "team_id"::text ELSE '~' || encode(convert_to("team_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "member"::text ~ '^[A-Za-z0-9._@-]+$' THEN "member"::text ELSE '~' || encode(convert_to("member"::text, 'UTF8'), 'hex') END AS subject

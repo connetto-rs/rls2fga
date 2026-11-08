@@ -632,11 +632,25 @@ fn action_relations_and_their_commands_are_paired_once() {
         "mapping a relation to a command by match duplicates that table, found {strays}"
     );
 
-    let update_needs = count_all("ActionTarget::UpdateUsing, ActionTarget::UpdateCheck");
+    // The action table and the statement table each spell the pair once, and no third
+    // site may.
+    let update_needs = "ActionTarget::UpdateUsing, ActionTarget::UpdateCheck";
+    let sanctioned = [
+        "src/generator/model_generator/actions.rs",
+        "src/generator/model_generator/branches.rs",
+    ];
     assert_eq!(
-        update_needs, 1,
-        "one place says which clause targets a command needs, found {update_needs}"
+        count_excluding(&sanctioned, update_needs),
+        0,
+        "the clause targets a command needs are spelled outside the action table and the statement table"
     );
+    for module in &sanctioned {
+        assert_eq!(
+            read_module(module).matches(update_needs).count(),
+            1,
+            "the clause-target pair must be spelled once in {module}"
+        );
+    }
 }
 
 #[test]
@@ -961,7 +975,7 @@ fn parenthesis_peeling_has_a_single_source_of_truth() {
 
 /// Every plain cast peel goes through the shared peeler.
 ///
-/// Two readers inspect the cast type before recursing or in place of it.
+/// Three readers inspect the cast type before recursing or in place of it.
 #[test]
 fn every_cast_peel_routes_through_the_shared_peeler() {
     let own_peels = fns_whose_body(|body| {
@@ -994,7 +1008,7 @@ fn every_cast_peel_routes_through_the_shared_peeler() {
     }
     assert!(
         unexpected.is_empty(),
-        "a cast is peeled outside the three readers: {unexpected:#?}"
+        "a cast is peeled outside the four readers: {unexpected:#?}"
     );
 }
 

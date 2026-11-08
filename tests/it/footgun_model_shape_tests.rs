@@ -7,12 +7,11 @@ use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
-use crate::support::deployment::{caller_deployment, fixture_deployment};
+use crate::support::deployment::{caller_deployment, fixture_deployment, ROLES};
 
 use crate::support::footgun::{
-    assert_model_is_internally_consistent, db_of, feeds, overlength_name_schema,
-    relation_definition, relation_definitions, subtracted_relations_on_the_object, translator,
-    type_names,
+    assert_model_is_internally_consistent, db_of, overlength_name_schema, relation_definition,
+    relation_definitions, translator, type_names,
 };
 
 /// The DSL and the JSON model are rendered from one plan, so they must describe
@@ -229,138 +228,9 @@ CREATE POLICY t1_tree ON t1 FOR SELECT USING (
     }
 }
 
-/// Walk every `Difference` in the model, yielding `(type, subtracted relation)`.
-fn subtractions(
-    json: &rls2fga::generator::json_model::AuthorizationModel,
-) -> Vec<(String, String)> {
-    use rls2fga::generator::json_model::Userset;
-
-    fn walk(userset: &Userset, type_name: &str, out: &mut Vec<(String, String)>) {
-        match userset {
-            Userset::Difference { difference } => {
-                let mut subtracted = std::collections::BTreeSet::new();
-                subtracted_relations_on_the_object(&difference.subtract, &mut subtracted);
-                out.extend(
-                    subtracted
-                        .into_iter()
-                        .map(|relation| (type_name.to_string(), relation)),
-                );
-                walk(&difference.base, type_name, out);
-                walk(&difference.subtract, type_name, out);
-            }
-            Userset::Union { union } => {
-                for child in &union.child {
-                    walk(child, type_name, out);
-                }
-            }
-            Userset::Intersection { intersection } => {
-                for child in &intersection.child {
-                    walk(child, type_name, out);
-                }
-            }
-            Userset::This { .. }
-            | Userset::ComputedUserset { .. }
-            | Userset::TupleToUserset { .. } => {}
-        }
-    }
-
-    let mut out = Vec::new();
-    for definition in &json.type_definitions {
-        for (name, userset) in definition.relations.iter().flatten() {
-            let _ = name;
-            walk(userset, definition.type_name.as_str(), &mut out);
-        }
-    }
-    out
-}
-
-/// On reconnect the consumer replays from an earlier point and reconstructs what a
-/// row used to imply by supplying the previous version's records as extra context.
-/// That is exact only while adding a record cannot revoke access. Union and
-/// intersection preserve it, exclusion does not, so nothing an exclusion subtracts
-/// may depend on the object's own column values.
-///
-/// Holds today: the one exclusion the generator emits subtracts `member` reached
-/// through a role scope, whose tuple names a literal role and exists for every row
-/// of the table regardless of its values.
-#[test]
-fn no_exclusion_subtracts_anything_derived_from_the_object_row() {
-    use rls2fga::types::{Guard, RecordDerivation, ValueSource};
-
-    let mut checked = 0;
-    for schema in exclusion_emitting_schemas() {
-        let db = db_of(&schema);
-        let translator = translator(ConfidenceLevel::B);
-        let json = translator
-            .translate(&db)
-            .expect("translation should plan")
-            .outputs_accepting_gaps()
-            .json_model();
-        let outputs = translator
-            .translate(&db)
-            .expect("translation should plan")
-            .outputs_accepting_gaps();
-        let queries = outputs.tuple_queries();
-
-        for (type_name, relation) in subtractions(&json) {
-            checked += 1;
-            for query in queries {
-                let Some(description) = &query.description else {
-                    continue;
-                };
-                let RecordDerivation::FromRow {
-                    template, guards, ..
-                } = &description.derivation
-                else {
-                    // A joining source reads a second table, so a change there could
-                    // withdraw the subtraction without the row changing at all.
-                    assert!(
-                        !feeds(description, &type_name, &relation),
-                        "{type_name}#{relation} is subtracted yet fed by a joining source: {}",
-                        query.comment
-                    );
-                    continue;
-                };
-                if template.object_type != type_name || template.relation != relation {
-                    continue;
-                }
-
-                assert!(
-                    matches!(template.subject_key.part(), &ValueSource::Literal(_)),
-                    "{type_name}#{relation} is subtracted, so its subject may not come \
-                 from the row: {:?} in {}",
-                    template.subject_key,
-                    query.comment
-                );
-                let identity = match template.object_key.parts() {
-                    [ValueSource::Column(column)] => column.clone(),
-                    other => panic!("an object key is one column, got {other:?}"),
-                };
-                for guard in guards {
-                    assert!(
-                        matches!(guard, Guard::NotNull(column) if column == &identity),
-                        "{type_name}#{relation} is subtracted, so no row value may decide \
-                     whether its tuple exists: {guard:?} in {}",
-                        query.comment
-                    );
-                }
-            }
-        }
-    }
-
-    assert!(
-        checked >= 2,
-        "the corpus must actually emit exclusions, checked {checked}"
-    );
-}
-
-/// Schemas whose emitted model contains an exclusion. A RESTRICTIVE policy bound to
-/// a role is the only shape that produces one today.
-///
-/// The fixture corpus emits none at the default threshold: `role_scoped_restrictive`
-/// carries a RESTRICTIVE policy that falls below it and so falls closed instead,
-/// which is why these are written here rather than read from a fixture.
-fn exclusion_emitting_schemas() -> Vec<String> {
+/// `docs` tables with RESTRICTIVE barriers bound to a role the acting role does not
+/// hold, for the decidability corpus.
+fn role_scoped_barrier_schemas() -> Vec<String> {
     vec![
         "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN NOT NULL DEFAULT FALSE);
@@ -371,8 +241,7 @@ CREATE POLICY docs_barrier ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (owner_id = current_setting('app.user_id'));
 "
         .to_string(),
-        // Two barriers, so the outer exclusion subtracts a scope while its base
-        // already contains one.
+        // Two barriers, so the read the acting role faces carries both refusals.
         "
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN NOT NULL DEFAULT FALSE);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -570,7 +439,8 @@ fn support_classify(
 }
 
 /// Schemas covering both answers: ownership and list membership resolve from the row
-/// to a user, while a flag, a membership table, a parent link and a role scope do not.
+/// to a user, while a flag, a membership table, a parent link and a role-bound
+/// barrier do not.
 ///
 /// The last two matter for the direction that counts. In the first schema every
 /// action relation also unions the wildcard, which makes it undecidable whatever the
@@ -633,7 +503,7 @@ CREATE POLICY tasks_inherit ON tasks FOR SELECT USING (EXISTS (
 "
         .to_string(),
     ];
-    schemas.extend(exclusion_emitting_schemas());
+    schemas.extend(role_scoped_barrier_schemas());
     schemas
 }
 
@@ -794,7 +664,10 @@ fn every_fixture_stays_consistent_without_one_row_security_flag() {
                 variant.push_str(line);
                 variant.push('\n');
             }
-            let Ok(db) = rls2fga::parser::sql_parser::parse_schema(&variant) else {
+            // The deployment resolves against the variant, so the variant carries the
+            // deployment's roles.
+            let Ok(db) = rls2fga::parser::sql_parser::parse_schema(&format!("{ROLES}{variant}"))
+            else {
                 continue;
             };
             let registry = support::try_load_fixture_classified(&fixture).2;

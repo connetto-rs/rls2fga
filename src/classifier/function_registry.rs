@@ -341,6 +341,8 @@ pub struct FunctionRegistry {
     /// Request-scoped sources the deployment declares, keyed on the setting and the field
     /// path taken out of it.
     sources: DeclaredSources,
+    /// The acting role clauses are classified for, which `current_user` names.
+    acting_role: Option<String>,
 }
 
 impl FunctionRegistry {
@@ -355,6 +357,7 @@ impl FunctionRegistry {
             renamed_accessors: BTreeMap::new(),
             deployment: None,
             sources: DeclaredSources::default(),
+            acting_role: None,
         }
     }
 
@@ -426,6 +429,27 @@ impl FunctionRegistry {
     /// returns. `None` until [`FunctionRegistry::enrich_from_schema`] has run.
     pub(crate) fn deployment(&self) -> Option<&Deployment> {
         self.deployment.as_ref()
+    }
+
+    /// Classify for the acting role `role` from here on, or for none.
+    pub(crate) fn set_acting_role(&mut self, role: Option<&str>) {
+        self.acting_role = role.map(str::to_string);
+    }
+
+    /// The acting role a clause is read for: the one this registry classifies for, or the
+    /// deployment's only acting role where it names none. `None` where neither settles one.
+    pub(crate) fn classified_acting_role(&self) -> Option<&str> {
+        if let Some(role) = self.acting_role.as_deref() {
+            return Some(role);
+        }
+        let mut roles = self.deployment.as_ref()?.acting_roles();
+        let only = roles.next()?;
+        roles.next().is_none().then_some(only)
+    }
+
+    /// The acting role clauses are classified for, where one was chosen.
+    pub(crate) fn acting_role(&self) -> Option<&str> {
+        self.acting_role.as_deref()
     }
 
     /// The source at `key` and `path`, if the deployment declares one.

@@ -3,10 +3,9 @@
 //!
 //! A request logs in as the deployment's login role and acts as one of its acting roles,
 //! so `session_user` is the login role's name and the other three are the acting role's.
-//! Where the deployment acts as one role, each keyword is a string literal the rest of
-//! the classifier reads like any other. Where it acts as several, the acting role's name
-//! differs by request and the model cannot tell them apart yet, so a read of it is
-//! refused.
+//! A clause is classified once per acting role, and in each pass every keyword is the
+//! string literal of the role that pass is for, which the rest of the classifier reads
+//! like any other.
 
 use alloc::borrow::Cow;
 use alloc::string::{String, ToString};
@@ -109,14 +108,14 @@ struct Lower<'r> {
     refused: Option<RoleKeywordError>,
 }
 
-/// The name of the role `keyword`, written as `spelled`, reads for the deployment
-/// `registry` was read for.
+/// The name of the role `keyword`, written as `spelled`, reads for the acting role
+/// `registry` classifies for, or the deployment's only acting role where it names none.
 ///
 /// # Errors
 ///
 /// [`RoleKeywordError::NoDeployment`] when the registry was read for none, and
 /// [`RoleKeywordError::SeveralActingRoles`] for the acting role of a deployment acting as
-/// more than one.
+/// more than one when no pass chose one of them.
 pub(crate) fn role_name(
     registry: &FunctionRegistry,
     keyword: RoleKeyword,
@@ -129,16 +128,13 @@ pub(crate) fn role_name(
     };
     match keyword {
         RoleKeyword::Login => Ok(deployment.login_role().to_string()),
-        RoleKeyword::Acting => {
-            let roles: Vec<String> = deployment.acting_roles().map(str::to_string).collect();
-            match <[String; 1]>::try_from(roles) {
-                Ok([role]) => Ok(role),
-                Err(roles) => Err(RoleKeywordError::SeveralActingRoles {
-                    keyword: spelled.to_string(),
-                    roles,
-                }),
-            }
-        }
+        RoleKeyword::Acting => registry
+            .classified_acting_role()
+            .map(str::to_string)
+            .ok_or_else(|| RoleKeywordError::SeveralActingRoles {
+                keyword: spelled.to_string(),
+                roles: deployment.acting_roles().map(str::to_string).collect(),
+            }),
     }
 }
 

@@ -9,7 +9,6 @@ use rls2fga::generator::well_known::{NOBODY_TYPE, USER_TYPE};
 use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::translator::Translator;
 use rls2fga::types::ConfidenceLevel;
-use rls2fga::types::RecordDerivation;
 use rls2fga::types::RelationName;
 use rls2fga::types::TranslationNote;
 
@@ -201,32 +200,6 @@ pub(crate) fn pg_role_relation(dsl: &str, type_name: &str) -> Option<String> {
         .into_iter()
         .find(|(_, body)| *body == "[pg_role_scope]")
         .map(|(name, _)| name.to_string())
-}
-
-/// Whether the scope `scope_relation` reaches admits `role`, in both halves: a row of
-/// `object_prefix` points at the scope, and the scope holds that role.
-///
-/// The roles a scope admits are a fact about the policy, so they are stored on the scope
-/// object rather than on every row, and the two facts live in different queries.
-pub(crate) fn scope_admits_role(
-    tuples: &[TupleQuery],
-    object_prefix: &str,
-    scope_relation: &str,
-    role: &str,
-) -> bool {
-    let scope_object = format!("'pg_role_scope:{scope_relation}'");
-    let points_at_scope = tuples.iter().any(|query| {
-        query.sql.contains(&format!("'{object_prefix}'"))
-            && query
-                .sql
-                .contains(&format!("'{scope_relation}' AS relation"))
-            && query.sql.contains(&format!("{scope_object} AS subject"))
-    });
-    let holds_role = tuples.iter().any(|query| {
-        query.sql.contains(&format!("{scope_object} AS object"))
-            && query.sql.contains(&format!("'pg_role:{role}' AS subject"))
-    });
-    points_at_scope && holds_role
 }
 
 pub(crate) fn type_names(dsl: &str) -> Vec<String> {
@@ -617,56 +590,6 @@ pub(crate) fn translation(sql: &str) -> (String, String) {
                 .tuple_queries(),
         ),
     )
-}
-
-/// Relations an exclusion subtracts, on the object's own type.
-///
-/// A `TupleToUserset` contributes its tupleset, which is a relation on the object,
-/// and not its computed side, which resolves on whatever type the tupleset reaches.
-pub(crate) fn subtracted_relations_on_the_object(
-    userset: &rls2fga::generator::json_model::Userset,
-    out: &mut std::collections::BTreeSet<String>,
-) {
-    use rls2fga::generator::json_model::Userset;
-    match userset {
-        Userset::This { .. } => {}
-        Userset::ComputedUserset { computed_userset } => {
-            out.insert(computed_userset.relation.clone().to_string());
-        }
-        Userset::TupleToUserset { tuple_to_userset } => {
-            out.insert(tuple_to_userset.tupleset.relation.clone().to_string());
-        }
-        Userset::Union { union } => {
-            for child in &union.child {
-                subtracted_relations_on_the_object(child, out);
-            }
-        }
-        Userset::Intersection { intersection } => {
-            for child in &intersection.child {
-                subtracted_relations_on_the_object(child, out);
-            }
-        }
-        Userset::Difference { difference } => {
-            subtracted_relations_on_the_object(&difference.base, out);
-            subtracted_relations_on_the_object(&difference.subtract, out);
-        }
-    }
-}
-
-/// True when `description` populates `relation` on `type_name`.
-pub(crate) fn feeds(
-    description: &rls2fga::types::RecordDescription,
-    type_name: &str,
-    relation: &str,
-) -> bool {
-    match &description.derivation {
-        RecordDerivation::FromRow { template, .. } => {
-            template.object_type == type_name && template.relation == relation
-        }
-        // A joining description names no template, so it cannot be attributed to a
-        // relation from here and is reported as not feeding it.
-        _ => false,
-    }
 }
 
 /// Whether the generator declares this type for structure rather than for a table's rows.

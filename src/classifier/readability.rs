@@ -2,18 +2,18 @@
 //!
 //! The classifier asks this to know which relations a precomputed residual may read, and the
 //! generator asks it to intersect a membership with the table's read constraints. One walk,
-//! one answer, so the two cannot drift apart.
+//! one answer, so the two cannot drift apart. The answer is for the acting role the registry
+//! classifies for, since which policies reach a read is decided per role.
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
-use alloc::collections::BTreeSet;
+
+use sql_traits::structs::{GateTerm, PolicyExpression, RowSecurity, RowStatement};
+use sqlparser::ast::Expr;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::FunctionRegistry;
-use crate::classifier::patterns::{
-    derive_policy_mode, derive_scoped_roles, policy_covers_reads, PatternClass, PolicyCommand,
-    PolicyMode,
-};
+use crate::classifier::patterns::{PatternClass, PolicyCommand};
 use crate::classifier::policy_classifier::classify_expr_in_state;
 use crate::classifier::recognizers::{constant_bool_value, is_constantly_false};
 use crate::parser::names::{lookup_table_id, table_identity};
@@ -32,12 +32,12 @@ pub(crate) struct ReadGate {
 /// How much of a table's rows a querying caller may read.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum TableReadability {
-    /// Row security is off, or every read is open.
+    /// Row security is off for the role, or every read is open.
     Open,
     /// Every read is gated by request values only.
     RequestGated { gates: Vec<ReadGate> },
-    /// Reads depend on the caller's role.
-    Guarded { roles: Vec<String> },
+    /// Which rows the role reads depends on the rows themselves.
+    Guarded,
     /// No row is visible.
     Unreadable,
 }
@@ -57,99 +57,106 @@ pub(crate) fn table_readability<DB: DatabaseLike>(
     let Some(table) = lookup_table_id(db, table) else {
         return TableReadability::Open;
     };
-    let rls = table.has_row_level_security(db);
-    if rls == Ok(false) {
+    if table.has_row_level_security(db) == Ok(false) {
         return TableReadability::Open;
     }
     let identity = table_identity(table);
     state
         .deciding_readability(&identity, || {
-            walk_policies(table, &identity, rls == Ok(true), db, registry, state)
+            walk_policies(table, &identity, db, registry, state)
         })
-        .unwrap_or(TableReadability::Guarded { roles: Vec::new() })
+        .unwrap_or(TableReadability::Guarded)
 }
 
+/// The read `PostgreSQL` applies to the acting role `registry` classifies for.
+///
+/// A role no policy reaches reads nothing, a role row security exempts reads everything, and
+/// a read that raises or that sql-traits cannot settle for the role shows nothing.
 fn walk_policies<DB: DatabaseLike>(
     table: &DB::Table,
     identity: &TableId,
-    rls_on: bool,
     db: &DB,
     registry: &FunctionRegistry,
     state: &ExpansionState,
 ) -> TableReadability {
-    let mut roles = BTreeSet::new();
-    let mut grants_read = false;
-    let mut grants_read_unscoped = false;
-    let mut row_independent = rls_on;
-    let mut gates = Vec::new();
-    for policy in table.policies(db).into_iter().flatten() {
-        if !policy_covers_reads(policy) {
-            continue;
-        }
-        // A clause whose literal cannot be read proves nothing either way, like an absent one.
-        let Ok(Some(using)) = policy.using_expression(db) else {
-            row_independent = false;
-            continue;
+    let Some(role) = registry
+        .classified_acting_role()
+        .and_then(|name| db.role(name))
+    else {
+        return TableReadability::Guarded;
+    };
+    let gates = match table.row_security(RowStatement::Select, role, db) {
+        Ok(RowSecurity::Exempt(_)) => return TableReadability::Open,
+        Ok(RowSecurity::Gated(gates)) => gates,
+        // A read PostgreSQL raises on, or one sql-traits cannot settle, shows no row.
+        Ok(RowSecurity::InfiniteRecursion { .. }) | Err(_) => return TableReadability::Unreadable,
+    };
+    let mut readability = TableReadability::Open;
+    for gate in &gates {
+        // A permissive clause of unknown value grants nothing.
+        let permissive: Vec<&Expr> = gate.permissive().iter().filter_map(stored_clause).collect();
+        // A barrier of unknown value may admit nothing, so it hides every row.
+        let Some(restrictive) = gate
+            .restrictive()
+            .iter()
+            .map(|term| stored_clause(term).map(|using| (term, using)))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return TableReadability::Unreadable;
         };
-        let admits_nothing = is_constantly_false(using);
-
-        if derive_policy_mode(policy) == PolicyMode::Restrictive {
-            if admits_nothing && policy.applies_to_public() {
-                return TableReadability::Unreadable;
+        if permissive.iter().all(|using| is_constantly_false(using))
+            || restrictive
+                .iter()
+                .any(|(_, using)| is_constantly_false(using))
+        {
+            return TableReadability::Unreadable;
+        }
+        if !permissive
+            .iter()
+            .any(|using| constant_bool_value(using) == Some(true))
+        {
+            readability = TableReadability::Guarded;
+            continue;
+        }
+        for (term, using) in restrictive {
+            if constant_bool_value(using) == Some(true) {
+                continue;
             }
-            if !policy.applies_to_public() {
-                row_independent = false;
-            } else if row_independent && constant_bool_value(using) != Some(true) {
-                let pattern = classify_expr_in_state(
-                    using,
-                    db,
-                    registry,
-                    &identity.to_string(),
-                    PolicyCommand::Select,
-                    state,
-                )
-                .pattern;
-                if is_request_only_gate(&pattern) {
-                    gates.push(ReadGate {
-                        policy_name: format!("{identity}_{}", policy.name()),
-                        pattern,
-                    });
-                } else {
-                    row_independent = false;
+            let pattern = classify_expr_in_state(
+                using,
+                db,
+                registry,
+                &identity.to_string(),
+                PolicyCommand::Select,
+                state,
+            )
+            .pattern;
+            if !is_request_only_gate(&pattern) {
+                readability = TableReadability::Guarded;
+                continue;
+            }
+            let gate = ReadGate {
+                policy_name: format!("{identity}_{}", term.policy().name()),
+                pattern,
+            };
+            match &mut readability {
+                TableReadability::Open => {
+                    readability = TableReadability::RequestGated { gates: vec![gate] };
                 }
+                TableReadability::RequestGated { gates } => gates.push(gate),
+                TableReadability::Guarded | TableReadability::Unreadable => {}
             }
-            continue;
-        }
-        row_independent &= policy.applies_to_public() && constant_bool_value(using) == Some(true);
-        if admits_nothing {
-            continue;
-        }
-
-        grants_read = true;
-        let scoped = derive_scoped_roles(policy, db);
-        if scoped.is_empty() {
-            grants_read_unscoped = true;
-        } else {
-            roles.extend(scoped);
         }
     }
+    readability
+}
 
-    if !grants_read {
-        TableReadability::Unreadable
-    } else if row_independent {
-        if gates.is_empty() {
-            TableReadability::Open
-        } else {
-            TableReadability::RequestGated { gates }
-        }
-    } else {
-        TableReadability::Guarded {
-            roles: if grants_read_unscoped {
-                Vec::new()
-            } else {
-                roles.into_iter().collect()
-            },
-        }
+/// The clause of `term` with the values `PostgreSQL` stored, or `None` when one of its
+/// literals cannot be read here.
+fn stored_clause<'db, P>(term: &GateTerm<'db, P>) -> Option<&'db Expr> {
+    match term.expression() {
+        PolicyExpression::Stored(expression) => Some(expression),
+        PolicyExpression::Written { .. } => None,
     }
 }
 

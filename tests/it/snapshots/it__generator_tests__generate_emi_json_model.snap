@@ -1,6 +1,5 @@
 ---
 source: tests/it/generator_tests.rs
-assertion_line: 56
 expression: model
 ---
 {
@@ -13,33 +12,81 @@ expression: model
       "type": "ownables",
       "relations": {
         "can_delete": {
-          "tupleToUserset": {
-            "tupleset": {
-              "relation": "owner_id"
-            },
-            "computedUserset": {
-              "relation": "role_admin"
-            }
+          "intersection": {
+            "child": [
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "owner_id"
+                  },
+                  "computedUserset": {
+                    "relation": "role_admin"
+                  }
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "request_gate"
+                  },
+                  "computedUserset": {
+                    "relation": "acting_app_user"
+                  }
+                }
+              }
+            ]
           }
         },
         "can_insert": {
-          "tupleToUserset": {
-            "tupleset": {
-              "relation": "owner_id"
-            },
-            "computedUserset": {
-              "relation": "role_editor"
-            }
+          "intersection": {
+            "child": [
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "owner_id"
+                  },
+                  "computedUserset": {
+                    "relation": "role_editor"
+                  }
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "request_gate"
+                  },
+                  "computedUserset": {
+                    "relation": "acting_app_user"
+                  }
+                }
+              }
+            ]
           }
         },
         "can_select": {
-          "tupleToUserset": {
-            "tupleset": {
-              "relation": "owner_id"
-            },
-            "computedUserset": {
-              "relation": "role_viewer"
-            }
+          "intersection": {
+            "child": [
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "owner_id"
+                  },
+                  "computedUserset": {
+                    "relation": "role_viewer"
+                  }
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "request_gate"
+                  },
+                  "computedUserset": {
+                    "relation": "acting_app_user"
+                  }
+                }
+              }
+            ]
           }
         },
         "can_select_for_update": {
@@ -48,26 +95,61 @@ expression: model
           }
         },
         "can_update": {
-          "tupleToUserset": {
-            "tupleset": {
-              "relation": "owner_id"
-            },
-            "computedUserset": {
-              "relation": "role_editor"
-            }
+          "intersection": {
+            "child": [
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "owner_id"
+                  },
+                  "computedUserset": {
+                    "relation": "role_editor"
+                  }
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "request_gate"
+                  },
+                  "computedUserset": {
+                    "relation": "acting_app_user"
+                  }
+                }
+              }
+            ]
           }
         },
         "can_update_without_reading": {
-          "tupleToUserset": {
-            "tupleset": {
-              "relation": "owner_id"
-            },
-            "computedUserset": {
-              "relation": "role_editor"
-            }
+          "intersection": {
+            "child": [
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "owner_id"
+                  },
+                  "computedUserset": {
+                    "relation": "role_editor"
+                  }
+                }
+              },
+              {
+                "tupleToUserset": {
+                  "tupleset": {
+                    "relation": "request_gate"
+                  },
+                  "computedUserset": {
+                    "relation": "acting_app_user"
+                  }
+                }
+              }
+            ]
           }
         },
         "owner_id": {
+          "this": {}
+        },
+        "request_gate": {
           "this": {}
         }
       },
@@ -77,6 +159,13 @@ expression: model
             "directly_related_user_types": [
               {
                 "type": "owner_grants_owner"
+              }
+            ]
+          },
+          "request_gate": {
+            "directly_related_user_types": [
+              {
+                "type": "request_gate"
               }
             ]
           }
@@ -233,6 +322,45 @@ expression: model
             "directly_related_user_types": [
               {
                 "type": "user"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "pg_role",
+      "relations": {
+        "usage": {
+          "this": {}
+        }
+      },
+      "metadata": {
+        "relations": {
+          "usage": {
+            "directly_related_user_types": [
+              {
+                "type": "user"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "request_gate",
+      "relations": {
+        "acting_app_user": {
+          "this": {}
+        }
+      },
+      "metadata": {
+        "relations": {
+          "acting_app_user": {
+            "directly_related_user_types": [
+              {
+                "type": "pg_role",
+                "relation": "usage"
               }
             ]
           }

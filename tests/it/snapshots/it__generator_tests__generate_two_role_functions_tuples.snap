@@ -12,6 +12,14 @@ FROM "public"."ledgers"
 WHERE "id" IS NOT NULL
 AND "owner_id" IS NOT NULL;
 
+-- ledgers admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:ledgers' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every ledgers row is judged by the scope ledgers
+SELECT 'ledgers:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:ledgers' AS subject
+FROM "public"."ledgers"
+WHERE "id" IS NOT NULL;
+
 -- Owner identities that are rows of users
 SELECT 'owner_grants_owner_23f04e74:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_user' AS relation, 'user:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."users"
@@ -50,3 +58,11 @@ SELECT 'projects:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::tex
 FROM "public"."projects"
 WHERE "id" IS NOT NULL
 AND "owner_id" IS NOT NULL;
+
+-- projects admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:projects' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every projects row is judged by the scope projects
+SELECT 'projects:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:projects' AS subject
+FROM "public"."projects"
+WHERE "id" IS NOT NULL;

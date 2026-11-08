@@ -324,8 +324,7 @@ CREATE POLICY notes_reviewed ON notes AS RESTRICTIVE FOR SELECT TO contractor
         ],
         vec![
             Principal::with_setting("alice", "alice", "app.user_id", "alice"),
-            Principal::with_setting("carol", "carol", "app.user_id", "carol")
-                .holding(&["contractor"]),
+            Principal::with_setting("carol", "carol", "app.user_id", "carol"),
         ],
     )
     .after(&["CREATE ROLE contractor"]);
@@ -1593,7 +1592,7 @@ CREATE POLICY p ON memos FOR SELECT TO "Admin" USING (TRUE);
              GRANT SELECT ON docs, memos TO alice;
              GRANT admin TO alice",
         ],
-        vec![Principal::as_role("alice", "alice").holding(&["admin"])],
+        vec![Principal::as_role("alice", "alice")],
     )
     .after(&[r#"CREATE ROLE admin; CREATE ROLE "Admin""#]);
     let run = support::parity::run(&cluster, &case).await;
@@ -2017,7 +2016,8 @@ async fn a_failed_case_leaves_no_role_behind(cluster: Arc<Cluster>) {
 /// Ported from `role_scoped_membership_parity_postgres18_and_openfga`.
 ///
 /// Only `auditor` may read the membership table, so a caller outside that role sees no
-/// membership row and the parent policy grants nothing.
+/// membership row and the parent policy grants nothing. Each caller's login role is an
+/// acting role, so the membership read is decided per role and nothing diverges.
 async fn a_role_scoped_membership_read_gates_the_parent(cluster: Arc<Cluster>) {
     let case = ParityCase::from_fixture(
         "runner-role-scoped-membership",
@@ -2034,25 +2034,29 @@ async fn a_role_scoped_membership_read_gates_the_parent(cluster: Arc<Cluster>) {
              GRANT SELECT ON docs, doc_members TO app_bob",
         ],
         vec![
-            setting_reader("alice", "app_alice").holding(&["auditor"]),
+            setting_reader("alice", "app_alice"),
             setting_reader("bob", "app_bob"),
         ],
     )
     // The policy names the role, so it exists before the schema.
     .after(&["CREATE ROLE auditor"]);
-    // The membership table's own row security is disclosed, and the answers still agree:
-    // the tuple loader reads only the rows the auditor scope exposes.
-    support::parity::run_disclosing_and_check(
-        &cluster,
-        &case,
-        &[
-            ("alice", "docs:d1", true),
-            ("alice", "docs:d2", false),
-            // Bob's membership row exists and he cannot see it, so the parent denies.
-            ("bob", "docs:d1", false),
-        ],
-    )
-    .await;
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, visible) in [
+        ("alice", "docs:d1", true),
+        ("alice", "docs:d2", false),
+        // Bob's membership row exists and he cannot see it, so the parent denies.
+        ("bob", "docs:d1", false),
+    ] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            subject,
+            object,
+            ActionStatement::Select,
+            visible,
+        );
+    }
+    assert_agrees(&case, &run);
 }
 
 /// Ported from `noinherit_member_parity_postgres18_and_openfga`.
@@ -2074,7 +2078,7 @@ async fn a_noinherit_member_of_a_scoped_role_reads_nothing(cluster: Arc<Cluster>
              GRANT SELECT ON docs TO app_bob",
         ],
         vec![
-            Principal::as_role("alice", "app_alice").holding(&["editors"]),
+            Principal::as_role("alice", "app_alice"),
             Principal::as_role("bob", "app_bob"),
         ],
     )
@@ -3182,7 +3186,7 @@ async fn a_restrictive_policy_binds_only_its_role(cluster: Arc<Cluster>) {
              GRANT SELECT ON users, notes TO app_bob",
         ],
         vec![
-            setting_reader("alice", "app_alice").holding(&["contractor"]),
+            setting_reader("alice", "app_alice"),
             setting_reader("bob", "app_bob"),
         ],
     )

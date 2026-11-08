@@ -1,6 +1,7 @@
 #![cfg(not(target_os = "windows"))]
 //! `pg_dump` preserves model and tuple semantics under consistent source-relation renaming.
 
+use core::fmt::Write;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -133,6 +134,21 @@ fn strip_meta_commands(dump: &str) -> String {
         .join("\n")
 }
 
+/// The role declarations the fixture side reads, matching the cluster a dump carries,
+/// the deployment's roles plus the fixture roles the fixture does not create itself.
+fn role_declarations(fixture: &str) -> String {
+    let mut declarations = support::deployment::ROLES.to_string();
+    for role in FIXTURE_ROLES {
+        let owned_by_fixture = CREATES_ROLES
+            .iter()
+            .any(|(name, owned)| *name == fixture && *owned == role);
+        if !owned_by_fixture {
+            let _ = writeln!(declarations, "CREATE ROLE {role};");
+        }
+    }
+    declarations
+}
+
 #[tokio::test]
 #[ignore = "requires Docker and the postgres:18 container"]
 async fn every_fixture_round_trips_through_pg_dump() {
@@ -206,7 +222,12 @@ async fn every_fixture_round_trips_through_pg_dump() {
             match parsed {
                 Err(error) => Some(format!("{fixture}: its dump does not parse: {error}")),
                 Ok(dumped_db) => {
-                    let fixture_db = support::deployment::db(&support::read_fixture_sql(fixture));
+                    let fixture_db = parse_schema(&format!(
+                        "{}{}",
+                        role_declarations(fixture),
+                        support::read_fixture_sql(fixture),
+                    ))
+                    .expect("the fixture schema should parse");
                     let (fixture_model, fixture_tuples) = artifacts(&fixture_db, fixture);
                     let (dump_model, dump_tuples) = artifacts(&dumped_db, fixture);
                     let fixture_rows = executed_rows(&mut conn, &fixture_tuples);

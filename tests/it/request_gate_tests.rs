@@ -8,7 +8,8 @@ use core::fmt::Write as _;
 use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{
-    ConfidenceLevel, RecordDerivation, RequestComparison, RequestPredicate, RowDecision,
+    ConfidenceLevel, RecordDerivation, RecordDescription, RequestComparison, RequestPredicate,
+    RowDecision,
 };
 
 use crate::support::deployment;
@@ -62,7 +63,8 @@ fn a_gated_row_carries_one_link_whatever_the_number_of_gates() {
 }
 
 /// What a gate admits is a fact about the policy, loaded once per table and per
-/// distinct entry: `t0:read`, `t0:insert`, `t0:update`, `t0:delete` and `*`.
+/// distinct entry (`t0:read`, `t0:insert`, `t0:update`, `t0:delete` and `*`),
+/// beside the kind tuple every table's gate object names.
 #[test]
 fn gate_entries_are_loaded_once_per_table() {
     let outputs = outputs_of(&gated_tables(2));
@@ -72,7 +74,7 @@ fn gate_entries_are_loaded_once_per_table() {
         .filter(|query| !query.sql.contains("FROM"))
         .map(|query| query.sql.as_str())
         .collect();
-    assert_eq!(constant.len(), 10, "{constant:#?}");
+    assert_eq!(constant.len(), 12, "{constant:#?}");
 }
 
 /// A gate is reduced to one canonical formula, so reordered and repeated arms are the
@@ -145,7 +147,7 @@ CREATE POLICY own ON docs FOR ALL USING (owner = current_setting('app.user_id', 
 #[test]
 fn gates_on_constants_that_spell_alike_stay_apart() {
     let dsl = outputs_of(&docs_gated_on(&[("a_b", "c"), ("a", "b_c")])).model();
-    assert_eq!(defines_in_type(&dsl, "request_gate").len(), 2, "{dsl}");
+    assert_eq!(defines_in_type(&dsl, "request_gate").len(), 3, "{dsl}");
 }
 
 /// These two constants fold to one readable name and share its 32-bit suffix, yet each
@@ -157,11 +159,27 @@ fn atoms_whose_names_collide_stay_apart() {
         ("lower", "AbCDEfghijkLmnoPqrst"),
     ]);
     let dsl = outputs_of(&sql).model();
-    assert_eq!(defines_in_type(&dsl, "request_gate").len(), 2, "{dsl}");
+    assert_eq!(defines_in_type(&dsl, "request_gate").len(), 3, "{dsl}");
+}
+
+/// Every request predicate a decision states, at whatever depth the rule nests it.
+fn request_predicates(decision: &RowDecision) -> Vec<&RequestPredicate> {
+    let mut out = Vec::new();
+    match decision {
+        RowDecision::Request { predicate, .. } => out.push(predicate),
+        RowDecision::Any(children) | RowDecision::All(children) => {
+            for child in children {
+                out.extend(request_predicates(child));
+            }
+        }
+        _ => {}
+    }
+    out
 }
 
 /// The gate's truth comes from the request alone, so the recipe states it as a
-/// predicate over the caller's list, beside the owner the row decides.
+/// predicate over the caller's list, beside the owner the row decides and the kind the
+/// request acts as.
 #[test]
 fn a_request_gate_is_decided_by_the_request_alone() {
     let outputs = outputs_of(&gated_tables(1));
@@ -174,17 +192,22 @@ fn a_request_gate_is_decided_by_the_request_alone() {
     let Some(RowDecision::All(children)) = &select.decision else {
         panic!("can_select is decided by the row and the request: {select:#?}");
     };
-    let predicates: Vec<&RequestPredicate> = children
-        .iter()
-        .filter_map(|child| match child {
-            RowDecision::Request { predicate, .. } => Some(predicate),
+    assert!(
+        children.iter().any(|child| matches!(
+            child,
+            RowDecision::Request { predicate, .. }
+                if matches!(predicate, RequestPredicate::ActsAs { role } if role.as_str() == "app_user")
+        )),
+        "the acting kind joins the read: {children:#?}"
+    );
+    let gate = request_predicates(select.decision.as_ref().unwrap())
+        .into_iter()
+        .find_map(|predicate| match predicate {
+            RequestPredicate::Any(atoms) => Some(atoms),
             _ => None,
         })
-        .collect();
-    let [RequestPredicate::Any(atoms)] = predicates.as_slice() else {
-        panic!("one gate, an OR of two entries: {children:#?}");
-    };
-    let mut values: Vec<&str> = atoms
+        .expect("one gate, an OR of the entries: {children:#?}");
+    let mut values: Vec<&str> = gate
         .iter()
         .map(|atom| match atom {
             RequestPredicate::Holds(atom) => {
@@ -197,6 +220,34 @@ fn a_request_gate_is_decided_by_the_request_alone() {
         .collect();
     values.sort_unstable();
     assert_eq!(values, ["*", "t0:read"]);
+}
+
+/// Every request child a decision states, at whatever depth the rule nests it: the link
+/// relation it rides, the shapes that fill it, the type it admits, and its predicate.
+fn request_children<'a>(
+    decision: &'a RowDecision,
+    out: &mut Vec<(
+        &'a str,
+        &'a Vec<RecordDescription>,
+        &'a str,
+        &'a RequestPredicate,
+    )>,
+) {
+    match decision {
+        RowDecision::Request {
+            relation,
+            shapes,
+            subject_type,
+            predicate,
+            ..
+        } => out.push((relation.as_str(), shapes, subject_type.as_str(), predicate)),
+        RowDecision::Any(children) | RowDecision::All(children) => {
+            for child in children {
+                request_children(child, out);
+            }
+        }
+        _ => {}
+    }
 }
 
 /// The recipe names the link a row reaches its gates through, so a consumer keys it to the
@@ -230,50 +281,55 @@ fn a_request_gate_names_its_link_and_the_type_it_admits() {
             .find(|entry| entry.type_name.as_str() == type_name && entry.relation == relation)
             .unwrap_or_else(|| panic!("{type_name} defines {relation}"))
     };
-    let Some(RowDecision::All(children)) = &entry("t0", "can_select").decision else {
+    let Some(decision) = &entry("t0", "can_select").decision else {
         panic!("can_select is decided by the row and the request");
     };
-    let [(relation, shapes, subject_type)] = children
-        .iter()
-        .filter_map(|child| match child {
-            RowDecision::Request {
-                relation,
-                shapes,
-                subject_type,
-                ..
-            } => Some((relation, shapes, subject_type)),
-            _ => None,
-        })
-        .collect::<Vec<_>>()[..]
-    else {
-        panic!("one gate decides the read: {children:#?}");
-    };
-
-    assert!(!shapes.is_empty(), "the link is filled from the row");
+    let mut children = Vec::new();
+    request_children(decision, &mut children);
     assert_eq!(
-        *shapes,
-        entry("t0", relation.as_str()).shapes,
-        "the shapes are the link relation's own"
+        children.len(),
+        2,
+        "the gate and the acting kind decide the read: {decision:#?}"
     );
-
+    for (relation, shapes, _, _) in &children {
+        assert!(!shapes.is_empty(), "the link is filled from the row");
+        assert_eq!(
+            **shapes,
+            entry("t0", relation).shapes,
+            "the shapes are the link relation's own"
+        );
+    }
+    let gate = children
+        .iter()
+        .find(|(_, _, subject_type, _)| *subject_type == "principal")
+        .expect("the gate admits the caller type");
+    // The gate entries grant the typed wildcard of the caller type; the kind tuple
+    // grants a userset of another type, so only the wildcard subjects are gate admissions.
     let entry_subjects: Vec<&str> = relations
         .iter()
         .filter(|entry| entry.type_name.as_str() == "request_gate")
         .flat_map(|entry| &entry.shapes)
         .filter_map(|shape| match &shape.derivation {
-            RecordDerivation::Constant { record } => record.subject.split_once(':'),
+            RecordDerivation::Constant { record } if record.subject.ends_with(":*") => record
+                .subject
+                .split_once(':')
+                .map(|(subject_type, _)| subject_type),
             _ => None,
         })
-        .map(|(subject_type, _)| subject_type)
         .collect();
     assert!(!entry_subjects.is_empty(), "the gate entries are reported");
     assert!(
-        entry_subjects
-            .iter()
-            .all(|entry| *entry == subject_type.as_str()),
-        "the recipe admits {subject_type}, the entries grant {entry_subjects:?}"
+        entry_subjects.iter().all(|entry| *entry == gate.2),
+        "the gate admits {}, the entries grant {entry_subjects:?}",
+        gate.2
     );
-    assert_eq!(subject_type.as_str(), "principal");
+    assert!(
+        children.iter().any(|(_, _, _, predicate)| matches!(
+            predicate,
+            RequestPredicate::ActsAs { role } if role.as_str() == "app_user"
+        )),
+        "the acting kind joins the read: {decision:#?}"
+    );
 }
 
 /// A membership whose residual reads a request-gated table beside its own join table,

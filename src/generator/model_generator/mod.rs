@@ -30,21 +30,25 @@ use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
     attribute_gate_relation_name, canonical_fga_type_name, clamp_relation_name,
     conditional_gate_relation_name, is_owner_like_column_name, lookup_table, lookup_table_id,
-    membership_read_scope_relation_name, parent_type_from_fk_column, public_flag_relation_name,
-    request_gate_relation_name, resolve_table_id, role_limited_relation_name, role_scope_name,
-    row_presence_relation_name, stored_relation_name, table_id_has_column, table_identity,
-    yielded_relation_name, MAX_RELATION_NAME_LEN, MAX_RELATION_RENAME_ATTEMPTS,
+    parent_type_from_fk_column, public_flag_relation_name, request_gate_relation_name,
+    resolve_table_id, role_scope_name, row_presence_relation_name, stored_relation_name,
+    table_id_has_column, table_identity, yielded_relation_name, MAX_RELATION_NAME_LEN,
+    MAX_RELATION_RENAME_ATTEMPTS,
 };
 use crate::parser::sql_parser::{
-    ColumnLike, DatabaseLike, ForeignKeyLike, IdentifierCase, PolicyLike, RoleLike, TableLike,
+    ColumnLike, DatabaseLike, ForeignKeyLike, IdentifierCase, PolicyLike, TableLike,
 };
 use crate::types::{
     stable_hex_suffix, ColumnKind, ColumnName, ConditionName, ConditionParameterName,
     ContextWitness, RelationName, RequestComparison, TableId, TranslationNote, TypeName,
 };
 
+/// The kind a request acts as, joined to every row.
+mod acting_kinds;
 /// Which relation a command reads, and how a policy's clauses reach it.
 mod actions;
+/// One branch of every action relation per role a request may act as.
+mod branches;
 /// `OpenFGA` DSL text rendering from the schema plan.
 mod dsl;
 /// Emission for the patterns that reach through another row.
@@ -55,8 +59,6 @@ mod emit_ownership;
 mod emit_requests;
 /// Emission for the patterns a role decides.
 mod emit_roles;
-/// Which statements `PostgreSQL` refuses to plan because the policies loop.
-mod recursion;
 /// A gate that reads only the request, reduced to one normal form.
 mod request_formula;
 /// Role-threshold resource-column inference and tuple-source population.
@@ -64,14 +66,17 @@ mod role_threshold;
 /// Whole-plan passes that run once every table is translated.
 mod simplify;
 
+use acting_kinds::acting_kind_walk;
 use actions::{
     action_relation_commands, action_relations, clauses_lost_to_the_threshold,
-    commands_a_permissive_policy_covers, commands_denied_by_barriers_alone, commands_fed_by,
-    compose_action, define_blanket_update_relations, define_locking_read_relations,
-    derived_action_relations, dropped_attribute_guards, fill_uncovered_actions_with_deny,
-    for_each_policy_target_expr, mark_narrowed, narrowed_by, policies_missing_a_clause,
-    push_action_expr, scoped_policy_expr, targets_a_policy_feeds, unreadable_clause_targets,
-    ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
+    commands_a_permissive_policy_covers, commands_fed_by, compose_action,
+    define_blanket_update_relations, define_locking_read_relations, derived_action_relations,
+    dropped_attribute_guards, fill_uncovered_actions_with_deny, for_each_policy_target_expr,
+    mark_narrowed, narrowed_by, policies_missing_a_clause, targets_a_policy_feeds,
+    unreadable_clause_targets, ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
+};
+use branches::{
+    answer_supplied_policies, answer_targets, branch_expr, ActingBranch, PolicyPart, TargetAnswer,
 };
 use dsl::render_dsl;
 use emit_membership::{
@@ -80,18 +85,14 @@ use emit_membership::{
     emit_uncorrelated_membership,
 };
 use emit_ownership::{
-    emit_attribute_condition, emit_boolean_flag, emit_constant_bool, emit_direct_ownership,
-    emit_row_ownership, emit_row_presence_gate, emit_unclassified,
+    emit_all_rows, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
+    emit_direct_ownership, emit_row_ownership, emit_row_presence_gate, emit_unclassified,
 };
 use emit_requests::{
     conditional_gate_expr, declare_temporal_condition, emit_membership_in_caller_set,
     emit_request_formula, emit_request_gate, RequestSide,
 };
-use emit_roles::{
-    emit_numeric_threshold, emit_role_name_in_list, register_pg_role_scope, OwnerScope,
-    RoleScopeSpec,
-};
-use recursion::PolicyReadRecursion;
+use emit_roles::{emit_numeric_threshold, emit_role_name_in_list, OwnerScope};
 pub(crate) use request_formula::GateAtom;
 use request_formula::RequestFormula;
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
@@ -122,6 +123,11 @@ pub(crate) enum DirectSubject {
         type_name: TypeName,
         condition: ConditionName,
     },
+    /// The holders of `relation` on an object of `type_name`, `type#relation` in the DSL.
+    Userset {
+        type_name: TypeName,
+        relation: RelationName,
+    },
 }
 
 impl DirectSubject {
@@ -138,6 +144,10 @@ impl DirectSubject {
                 type_name,
                 condition,
             } => format!("tc:{type_name}:{condition}"),
+            Self::Userset {
+                type_name,
+                relation,
+            } => format!("u:{type_name}#{relation}"),
         }
     }
 
@@ -150,7 +160,7 @@ impl DirectSubject {
             | Self::ConditionalType {
                 type_name: name, ..
             } => Some(name),
-            Self::Wildcard(_) | Self::ConditionalWildcard { .. } => None,
+            Self::Wildcard(_) | Self::ConditionalWildcard { .. } | Self::Userset { .. } => None,
         }
     }
 
@@ -167,6 +177,10 @@ impl DirectSubject {
                 type_name,
                 condition,
             } => format!("{type_name} with {condition}"),
+            Self::Userset {
+                type_name,
+                relation,
+            } => format!("{type_name}#{relation}"),
         }
     }
 }
@@ -1038,18 +1052,20 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 function: function.to_string(),
             });
         }
-        report_row_level_security_bypasses(db, &mut notes);
+        report_unfiltered_partitions(db, &mut notes);
     }
 
     let by_table = group_policies_by_table(policies, db, scope);
     let declared_permissive = catalog_policies.then(|| declared_permissive_policies(db));
 
     let table_types = TableTypes::assign(db, scope, &settings.well_known, &mut notes)?;
-    // Read terms refuse related-table RLS through classification, membership readability, and the caller-side check.
-    let recursion = catalog_policies.then(|| PolicyReadRecursion::detect(db, &table_types));
-    // Answered once per membership table rather than once per clause naming it.
-    let mut readability: BTreeMap<TableId, TableReadability> = BTreeMap::new();
-    let readability = &mut readability;
+    // One branch per role a request may act as, each reading its own classifications and
+    // answering which membership tables it reads once per table.
+    let mut branches = if catalog_policies {
+        ActingBranch::every(registry, db)?
+    } else {
+        vec![ActingBranch::anonymous(registry)]
+    };
 
     let inheritance_children = inheritance_children(db);
 
@@ -1108,17 +1124,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     });
                 }
 
-                // A clause reading a table whose policies loop cannot be planned, so PostgreSQL
-                // raises rather than filtering and every command that clause feeds must deny.
-                let recursive_targets =
-                    recursion.as_ref().map_or_else(BTreeMap::new, |recursion| {
-                        recursion.blocked_targets(canonical_table_name.as_str())
-                    });
-
-                // Whether a row of this table can be named at all, which decides whether any tuple
-                // source can be emitted for it. Resolved once here rather than per policy.
-                let object_identifier = resolve_row_identity(&source_table, db);
-
+                let table_notes_before = notes.len();
                 // UPDATE and DELETE name the row they change, so a denied read closes them.
                 // INSERT does not name a row, and the read is the gate itself.
                 let write_targets: BTreeSet<ActionTarget> = table_policies
@@ -1139,28 +1145,12 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
 
                 // Every clause PostgreSQL evaluates that the model does not carry leaves the
                 // relations it fed diverged from the database. Collected before anything is
-                // translated, so a partial drop scars exactly like a total one rather than
-                // resting on `no_access` happening to have no feeding sources. The note and
-                // the scar are built from the same targets, so the two cannot disagree.
-                let mut update_check_was_filtered = false;
+                // translated, so a partial drop scars exactly like a total one. Each policy is
+                // classified once per acting role, and says so once.
                 for cp in &table_policies {
                     for (clause, confidence, targets) in clauses_lost_to_the_threshold(cp) {
-                        // A target the read loop already blocks is denied by PostgreSQL too, so
-                        // the model is not narrower there and nothing may claim a divergence.
-                        let targets: Vec<ActionTarget> = targets
-                            .into_iter()
-                            .filter(|target| !recursive_targets.contains_key(target))
-                            .collect();
-                        if targets.is_empty() {
-                            continue;
-                        }
-                        if cp.mode() == PolicyMode::Permissive
-                            && targets.contains(&ActionTarget::UpdateCheck)
-                        {
-                            update_check_was_filtered = true;
-                        }
                         mark_narrowed(table_plan, &targets);
-                        notes.push(TranslationNote::ClauseBelowThreshold {
+                        let note = TranslationNote::ClauseBelowThreshold {
                             table: source_table.clone(),
                             policy: cp.name().to_string(),
                             mode: cp.mode().to_string(),
@@ -1168,63 +1158,138 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                             confidence,
                             commands: commands_fed_by(&targets),
                             relations: narrowed_by(&targets).into_iter().collect(),
-                        });
+                        };
+                        if !notes.contains(&note) {
+                            notes.push(note);
+                        }
                     }
                     for (reason, targets) in unreadable_clause_targets(cp) {
-                        notes.push(TranslationNote::ExpressionRefused {
+                        let note = TranslationNote::ExpressionRefused {
                             policy: cp.name().to_string(),
                             reason: reason.to_string(),
-                        });
-                        let targets: Vec<ActionTarget> = targets
-                            .into_iter()
-                            .filter(|target| !recursive_targets.contains_key(target))
-                            .collect();
-                        if cp.mode() == PolicyMode::Permissive
-                            && targets.contains(&ActionTarget::UpdateCheck)
-                        {
-                            update_check_was_filtered = true;
+                        };
+                        if !notes.contains(&note) {
+                            notes.push(note);
                         }
                         mark_narrowed(table_plan, &targets);
                     }
                 }
 
-                let mut build = TableBuild {
-                    source_table: &source_table,
-                    plan: table_plan,
-                    other_types,
-                    notes: &mut notes,
-                    readability,
-                    confidence_summary: &mut confidence_summary,
-                    db,
-                    registry,
-                    settings,
-                    table_types: &table_types,
-                    condition_parameters: &condition_parameters,
-                };
-                let action_buckets = build.translate_policies(
-                    table_policies,
-                    &recursive_targets,
-                    object_identifier.as_ref(),
-                );
+                let catalog_table = catalog_policies
+                    .then(|| lookup_table_id(db, &source_table))
+                    .flatten();
+                let mut per_target: BTreeMap<ActionTarget, Vec<UsersetExpr>> = BTreeMap::new();
+                let mut barrier_denied: BTreeSet<ActionTarget> = BTreeSet::new();
+                let mut refused_everywhere: BTreeMap<ActionTarget, bool> = BTreeMap::new();
+                // Only a catalog table is answered per role, so only there can a policy
+                // reach no acting role.
+                let mut reached: Option<BTreeSet<&str>> = catalog_table.map(|_| BTreeSet::new());
+                for branch in &mut branches {
+                    let mut parts: BTreeMap<String, BTreeMap<ActionTarget, PolicyPart>> =
+                        BTreeMap::new();
+                    {
+                        let mine: Vec<&ClassifiedPolicy> = table_policies
+                            .iter()
+                            .copied()
+                            .filter(|cp| branch.classified(cp))
+                            .collect();
+                        let mut build = TableBuild {
+                            source_table: &source_table,
+                            plan: &mut *table_plan,
+                            other_types: &mut *other_types,
+                            notes: &mut notes,
+                            readability: &mut branch.readability,
+                            confidence_summary: &mut confidence_summary,
+                            db,
+                            registry: &branch.registry,
+                            settings,
+                            table_types: &table_types,
+                            condition_parameters: &condition_parameters,
+                        };
+                        for cp in mine {
+                            let translated = build.translate_one_policy(cp);
+                            parts.insert(cp.name().to_string(), translated);
+                        }
+                    }
+                    let answers = match (catalog_table, reached.as_mut()) {
+                        (Some(table), Some(reached)) => answer_targets(
+                            table,
+                            &source_table,
+                            branch,
+                            &mut parts,
+                            db,
+                            &mut notes,
+                            reached,
+                        ),
+                        _ => answer_supplied_policies(&table_policies, branch, parts),
+                    };
+                    let walk = match branch.role {
+                        Some((name, _)) => {
+                            match acting_kind_walk(name, &source_table, db, table_plan, other_types)
+                            {
+                                Some(walk) => Some(walk),
+                                None => continue,
+                            }
+                        }
+                        None => None,
+                    };
+                    for (target, answer) in &answers {
+                        let refused = matches!(answer, TargetAnswer::Refused);
+                        *refused_everywhere.entry(*target).or_insert(true) &= refused;
+                        if let TargetAnswer::Gated(bucket) = answer {
+                            if bucket.permissive.is_empty()
+                                && (!bucket.restrictive.is_empty()
+                                    || !bucket.subtractions.is_empty())
+                            {
+                                barrier_denied.insert(*target);
+                            }
+                        }
+                        if let Some(expr) = branch_expr(answer, walk.clone(), table_plan, |plan| {
+                            emit_all_rows(plan, &source_table, db)
+                        }) {
+                            per_target.entry(*target).or_default().push(expr);
+                        }
+                    }
+                }
+                dedup_notes_added_since(&mut notes, table_notes_before);
+
+                let blocked_commands: BTreeSet<&'static str> = action_relation_commands()
+                    .into_iter()
+                    .filter(|(_, _, targets)| {
+                        targets
+                            .iter()
+                            .any(|target| refused_everywhere.get(target) == Some(&true))
+                    })
+                    .map(|(_, command, _)| command)
+                    .collect();
+                let barrier_denied_commands: Vec<&'static str> = action_relation_commands()
+                    .into_iter()
+                    .filter(|(_, _, targets)| {
+                        targets.iter().any(|target| {
+                            barrier_denied.contains(target) && !per_target.contains_key(target)
+                        })
+                    })
+                    .map(|(_, command, _)| command)
+                    .collect();
+                let composed: BTreeMap<ActionTarget, UsersetExpr> = per_target
+                    .into_iter()
+                    .filter_map(|(target, branches)| {
+                        combine_union(branches).map(|expr| (target, expr))
+                    })
+                    .collect();
 
                 // A grant whose facts cannot be written is a permission nothing can satisfy, so
-                // each one above fell closed. Read the losses back off the skips they recorded,
-                // rather than collecting them a second time, so the note and the loader's script
+                // each one above fell closed. Read the losses back off the skips they recorded.
                 scar_unfillable_grants(
-                    build.plan,
-                    build.notes,
+                    table_plan,
+                    &mut notes,
                     &source_table,
                     &canonical_table_name,
                     bounds,
                     db,
                 );
-                note_request_contracts(build.plan, build.notes);
-
-                let blocked_commands = build.set_action_relations(
-                    &action_buckets,
-                    &recursive_targets,
-                    update_check_was_filtered,
-                );
+                note_request_contracts(table_plan, &mut notes);
+                set_action_relations(table_plan, composed);
 
                 if let Some(declared_permissive) = &declared_permissive {
                     // Undefined policy actions must deny rather than leave access to the consumer.
@@ -1232,13 +1297,14 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                         .get(&source_table_name)
                         .map_or(&[], Vec::as_slice);
                     fill_and_report_coverage(
-                        build.plan,
-                        build.notes,
+                        table_plan,
+                        &mut notes,
                         &source_table,
                         declared_here,
+                        reached.as_ref(),
                         &SettledCommands {
                             blocked: &blocked_commands,
-                            barrier_denied: &commands_denied_by_barriers_alone(&action_buckets),
+                            barrier_denied: &barrier_denied_commands,
                             row_scoped_writes: &row_scoped_write_commands,
                         },
                         db,
@@ -1270,6 +1336,15 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     prune_plain_subjects_fed_only_by_gated_sources(&mut all_types, &settings.well_known);
     prune_unreferenced_relations(&mut all_types);
     narrow_grant_sources_to_declared(&mut all_types);
+    // Every check states the kind it acts as, so the type it names is declared whether or
+    // not a branch reads it.
+    if branches.iter().any(|branch| branch.role.is_some()) {
+        ensure_pg_role_relation(
+            &mut all_types,
+            &RolePrivilege::Usage.relation_name(),
+            &settings.well_known,
+        );
+    }
 
     // After pruning, so a model with nothing to deny carries no such type, and only then,
     // since a denial that survives has to name a type the model declares.
@@ -1344,164 +1419,59 @@ struct TableBuild<'a, DB: DatabaseLike> {
 }
 
 impl<DB: DatabaseLike> TableBuild<'_, DB> {
-    /// Translate every clause of this table's policies into the buckets each action collects.
+    /// Translate one policy's clauses into the part each target receives from it.
     ///
-    /// The widest stage of the build, and the reason this is a value rather than a function: as
-    /// free arguments it would take fifteen.
-    fn translate_policies(
-        &mut self,
-        table_policies: Vec<&ClassifiedPolicy>,
-        recursive_targets: &BTreeMap<ActionTarget, &[String]>,
-        object_identifier: Option<&Vec<ColumnName>>,
-    ) -> BTreeMap<ActionTarget, ModeBuckets> {
-        let mut action_buckets: BTreeMap<ActionTarget, ModeBuckets> = BTreeMap::new();
-
-        for cp in table_policies {
-            self.translate_one_policy(
-                cp,
-                recursive_targets,
-                object_identifier,
-                &mut action_buckets,
-            );
-        }
-        action_buckets
-    }
-
-    /// Translate one policy's clauses into the buckets its targets collect.
-    ///
-    /// One policy at a time, because a policy is the unit `PostgreSQL` combines: its mode decides
-    /// whether a role scope narrows the grant or merely binds it, and its clauses are reported once
-    /// per policy however many phases they cover.
+    /// One policy at a time, because a policy is the unit `PostgreSQL` combines: its clauses
+    /// are reported once per policy however many phases they cover. Which roles the policy
+    /// reaches, and so which gates collect its parts, is `row_security`'s to say.
     fn translate_one_policy(
         &mut self,
         cp: &ClassifiedPolicy,
-        recursive_targets: &BTreeMap<ActionTarget, &[String]>,
-        object_identifier: Option<&Vec<ColumnName>>,
-        action_buckets: &mut BTreeMap<ActionTarget, ModeBuckets>,
-    ) {
-        // A policy the schema gives no clause constrains nothing, so it must not
-        // mint a scope relation or ask for tuples either.
+    ) -> BTreeMap<ActionTarget, PolicyPart> {
+        let mut parts = BTreeMap::new();
+        // A policy the schema gives no clause constrains nothing.
         if cp.using.is_none() && cp.with_check.is_none() {
-            return;
+            return parts;
         }
-        // The threshold emptied this one, so it contributes no expression and must
-        // not mint a scope relation, a note or a summary entry either. What it cost
-        // is already recorded above.
+        // The threshold emptied this one, so it contributes no expression, note or summary
+        // entry. What it cost is already recorded.
         if cp.mode() == PolicyMode::Permissive
             && cp.using_classification.is_none()
             && cp.with_check_classification.is_none()
         {
-            return;
+            return parts;
         }
-        // A clause PostgreSQL refuses to store never came out of a database, so
-        // nothing downstream may read it as one. The INSERT spelling would
-        // otherwise mint a grant through the USING-to-check mirror.
+        // A clause PostgreSQL refuses to store never came out of a database, so nothing
+        // downstream may read it as one. The INSERT spelling would otherwise mint a grant
+        // through the USING-to-check mirror.
         if let Some(rule) =
             clause_illegal_for_command(cp.command(), cp.using.is_some(), cp.with_check.is_some())
         {
-            self.notes.push(TranslationNote::PolicyClauseIllegal {
+            let note = TranslationNote::PolicyClauseIllegal {
                 policy: cp.name().to_string(),
                 rule: rule.to_string(),
-            });
-            return;
-        }
-        // Nor may a policy every target of which is blocked: the loop denies each of
-        // them, so a scope relation minted here would ask for tuples nothing reads.
-        let mut reached = BTreeSet::new();
-        for_each_policy_target_expr(cp, |target, _| {
-            reached.insert(target);
-        });
-        if !reached.is_empty()
-            && reached
-                .iter()
-                .all(|target| recursive_targets.contains_key(target))
-        {
-            return;
-        }
-        // PostgreSQL resolves these spellings to the DDL-running role when the
-        // policy is created, so a schema file cannot know who they bind. Fall
-        // closed per mode: a permissive grant is dropped, and a barrier binds
-        // everyone by keeping its scope empty, named roles beside the spelling
-        // included, since a barrier that also binds the DDL runner cannot be
-        // narrowed to the names alone.
-        let scope_unknowable = !cp.ddl_time_roles().is_empty();
-        if scope_unknowable {
-            self.notes.push(TranslationNote::PolicyBoundToDdlTimeRole {
-                policy: cp.name().to_string(),
-                spellings: cp.ddl_time_roles().to_vec(),
-            });
-            if cp.mode() == PolicyMode::Permissive {
-                mark_narrowed(self.plan, &targets_a_policy_feeds(cp));
-                return;
+            };
+            if !self.notes.contains(&note) {
+                self.notes.push(note);
             }
+            return parts;
         }
+        let mut summarize = |entry: (String, ConfidenceLevel)| {
+            if !self.confidence_summary.contains(&entry) {
+                self.confidence_summary.push(entry);
+            }
+        };
         if let Some(ref c) = cp.using_classification {
-            self.confidence_summary
-                .push((cp.name().to_string(), c.confidence));
+            summarize((cp.name().to_string(), c.confidence));
         }
         if let Some(ref c) = cp.with_check_classification {
-            self.confidence_summary
-                .push((format!("{} (WITH CHECK)", cp.name()), c.confidence));
+            summarize((format!("{} (WITH CHECK)", cp.name()), c.confidence));
         }
 
-        let scoped_roles: &[String] = if scope_unknowable {
-            &[]
-        } else {
-            cp.scoped_roles()
-        };
-        // A barrier is folded as `(base and rule) or (base but not member from scope)`, so
-        // an unfillable scope excuses everyone from it. Binding everyone instead denies
-        // more than RLS does, which is the direction a missing input has to take. The
-        // permissive side needs no such case: it intersects with the scope, so an empty
-        // one already falls closed.
-        let barrier_cannot_bind = !scoped_roles.is_empty()
-            && cp.mode() == PolicyMode::Restrictive
-            && object_identifier.is_none();
-        if barrier_cannot_bind {
-            self.notes
-                .push(TranslationNote::RestrictiveBarrierBindsEveryone {
-                    policy: cp.name().to_string(),
-                    roles: scoped_roles.to_vec(),
-                });
-        }
-        let scope_relation = if scoped_roles.is_empty() || barrier_cannot_bind {
-            None
-        } else {
-            let relation =
-                role_scope_name(RolePrivilege::Usage.relation_name().as_str(), scoped_roles);
-            // An unfillable scope mints nothing, and the rule it would have narrowed
-            // denies for want of the same row identity, so there is no grant left to
-            // narrow. Naming it anyway would ask the operator to load memberships
-            // nothing reads.
-            let filled = register_pg_role_scope(
-                self.plan,
-                &mut *self.other_types,
-                self.notes,
-                self.source_table,
-                self.db,
-                RoleScopeSpec {
-                    scope_relation: &relation,
-                    walked: &RolePrivilege::Usage.relation_name(),
-                    role_names: scoped_roles,
-                    scope_note: TranslationNote::PolicyRoleScope {
-                        policy: cp.name().to_string(),
-                        roles: scoped_roles.to_vec(),
-                        relation: relation.clone(),
-                    },
-                    missing_object_what: "policy scope tuples",
-                },
-            );
-            filled.then_some(relation)
-        };
-
-        // A policy covering several phases is translated once per phase, so the
-        // same clause reports the same item repeatedly. Keep one per policy.
+        // A policy covering several phases is translated once per phase, so the same clause
+        // reports the same item repeatedly. Keep one per policy.
         let notes_before = self.notes.len();
         for_each_policy_target_expr(cp, |target, classified| {
-            if recursive_targets.contains_key(&target) {
-                // Nothing here can be planned, so translating it leaves dead relations.
-                return;
-            }
             let ctx = PatternCtx {
                 policy_name: cp.name(),
                 registry: self.registry,
@@ -1526,15 +1496,7 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                         self.notes,
                         self.readability,
                     ) {
-                        let set = match &scope_relation {
-                            Some(scope) => scoped_policy_expr(set, scope),
-                            None => set,
-                        };
-                        action_buckets
-                            .entry(target)
-                            .or_default()
-                            .subtractions
-                            .push(set);
+                        parts.insert(target, PolicyPart::Subtract(set));
                         return;
                     }
                 }
@@ -1564,147 +1526,63 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                     });
                 UsersetExpr::Intersection(vec![expr, deny_expr(self.plan)])
             } else {
-                // A permissive conjunct handed to the application is enforced
-                // nowhere in this model, so the rule grants rows the database
-                // refuses. The one drift that widens rather than narrows.
+                // A permissive conjunct handed to the application is enforced nowhere in
+                // this model, so the rule grants rows the database refuses. The one drift
+                // that widens rather than narrows.
                 if !guards.is_empty() {
                     mark_narrowed(self.plan, &[target]);
                 }
                 expr
             };
-            push_action_expr(
-                action_buckets,
-                target,
-                cp.name(),
-                cp.mode(),
-                expr,
-                scope_relation.as_ref(),
-            );
+            parts.insert(target, PolicyPart::Grant(expr));
         });
         dedup_notes_added_since(self.notes, notes_before);
+        parts
     }
+}
 
-    /// Compose each action's rule from its buckets and assign the relations it answers for.
-    ///
-    /// A per-row `UPDATE` or `DELETE` names the row it changes, so `PostgreSQL` applies the
-    /// `SELECT` policies too and these relations intersect the read. An `INSERT` reading the row
-    /// back and an `UPDATE` writing one apply them to the new row. A blanket `UPDATE` names no
-    /// row and reads nothing, so it gets its own pair instead. A command whose targets a policy
-    /// loop blocks is denied here rather than deny-filled, and a dropped permissive check must
-    /// not come back as the `USING` it was refused beside.
-    ///
-    /// Returns the commands a loop denied, which the coverage report must not blame on a missing
-    /// policy.
-    fn set_action_relations(
-        &mut self,
-        action_buckets: &BTreeMap<ActionTarget, ModeBuckets>,
-        recursive_targets: &BTreeMap<ActionTarget, &[String]>,
-        update_check_was_filtered: bool,
-    ) -> BTreeSet<&'static str> {
-        let mut select_expr = compose_action(self.plan, action_buckets.get(&ActionTarget::Select));
-        let mut insert_expr = compose_action(self.plan, action_buckets.get(&ActionTarget::Insert));
-        let mut update_using_expr =
-            compose_action(self.plan, action_buckets.get(&ActionTarget::UpdateUsing));
-        // Composed only where an existing row can pass, since a WITH CHECK admits
-        // the new row alone and never stands in for the missing USING.
-        let mut update_check_expr = update_using_expr
-            .is_some()
-            .then(|| compose_action(self.plan, action_buckets.get(&ActionTarget::UpdateCheck)));
-        let mut delete_expr = compose_action(self.plan, action_buckets.get(&ActionTarget::Delete));
-
-        // Skipping the blocked targets above left their buckets empty, so the deny fill
-        // below already answers for them. The UPDATE pair is the exception: a check the
-        // fill never sees would fall back to mirroring the USING, which grants.
-        if recursive_targets.contains_key(&ActionTarget::UpdateUsing)
-            || recursive_targets.contains_key(&ActionTarget::UpdateCheck)
-        {
-            update_using_expr = None;
-            update_check_expr = None;
-        }
-
-        // One note per loop, naming the commands it denies. A command denies as soon as
-        // one of its targets is blocked, and its own coverage gap is then the loop rather
-        // than a missing or dropped policy.
-        let mut denied_by_loop: BTreeMap<&[String], Vec<&'static str>> = BTreeMap::new();
-        for (_, command, targets) in action_relation_commands() {
-            if let Some(cycle) = targets
-                .iter()
-                .find_map(|target| recursive_targets.get(target))
-            {
-                denied_by_loop.entry(cycle).or_default().push(command);
-            }
-        }
-        let blocked_commands: BTreeSet<&'static str> =
-            denied_by_loop.values().flatten().copied().collect();
-        for (cycle, commands) in denied_by_loop {
-            self.notes.push(TranslationNote::PolicyReadRecursion {
-                table: self.source_table.clone(),
-                commands: commands.into_iter().map(ToString::to_string).collect(),
-                cycle: cycle.to_vec(),
-            });
-        }
-
-        if let Some(expr) = select_expr.take() {
-            self.plan.set_computed(can_select_relation(), expr);
-        }
-        if let Some(expr) = insert_expr.take() {
-            self.plan.set_computed(
-                can_insert_returning_relation(),
-                requires_read_access(expr.clone()),
-            );
-            self.plan.set_computed(can_insert_relation(), expr);
-        }
-        // PostgreSQL applies the SELECT policies to any row a statement reads, and
-        // naming the row to change reads it.
-        if let Some(expr) = delete_expr.take() {
-            self.plan
-                .set_computed(can_delete_relation(), requires_read_access(expr));
-        }
-
-        if let Some(using_expr) = update_using_expr.take() {
-            // A permissive check the threshold dropped must not come back as the USING.
-            // `for_each_policy_target_expr` suppresses the mirror per policy, but this
-            // fallback would resurrect exactly the clause that was refused. With no
-            // surviving check arm the check half denies, while `can_update_using` keeps
-            // the surviving USING so a locking read stays precise.
-            let check_expr = update_check_expr.take().flatten().unwrap_or_else(|| {
-                if update_check_was_filtered {
-                    deny_expr(self.plan)
-                } else {
-                    using_expr.clone()
-                }
-            });
-            // Fusing the check in would answer it against the existing row, which grants
-            // a change the clause was written to refuse.
-            self.plan
-                .set_computed(can_update_without_reading_relation(), using_expr.clone());
-            if using_expr == check_expr {
-                self.plan
-                    .set_computed(can_update_relation(), requires_read_access(using_expr));
-            } else {
-                self.plan.set_computed(
-                    can_update_using_relation(),
-                    requires_read_access(using_expr),
-                );
-                self.plan.set_computed(
-                    can_update_without_reading_check_relation(),
-                    check_expr.clone(),
-                );
-                self.plan.set_computed(
-                    can_update_check_relation(),
-                    requires_read_access(check_expr),
-                );
-                self.plan.set_computed(
-                    can_update_relation(),
-                    UsersetExpr::Intersection(vec![
-                        UsersetExpr::Computed(can_update_using_relation()),
-                        UsersetExpr::Computed(can_update_check_relation()),
-                    ]),
-                );
-            }
-        }
-        blocked_commands
+/// The rule each target answers, assigned to the relations that answer for it.
+///
+/// A per-row `UPDATE` or `DELETE` names the row it changes, so `PostgreSQL` applies the
+/// `SELECT` policies too and these relations intersect the read. An `INSERT` reading the row
+/// back and an `UPDATE` writing one apply them to the new row. A blanket `UPDATE` names no
+/// row and reads nothing, so it gets its own pair instead.
+fn set_action_relations(plan: &mut TypePlan, mut targets: BTreeMap<ActionTarget, UsersetExpr>) {
+    if let Some(expr) = targets.remove(&ActionTarget::Select) {
+        plan.set_computed(can_select_relation(), expr);
     }
+    if let Some(expr) = targets.remove(&ActionTarget::Insert) {
+        plan.set_computed(
+            can_insert_returning_relation(),
+            requires_read_access(expr.clone()),
+        );
+        plan.set_computed(can_insert_relation(), expr);
+    }
+    if let Some(expr) = targets.remove(&ActionTarget::Delete) {
+        plan.set_computed(can_delete_relation(), requires_read_access(expr));
+    }
+    let Some(using) = targets.remove(&ActionTarget::UpdateUsing) else {
+        return;
+    };
+    let check = targets
+        .remove(&ActionTarget::UpdateCheck)
+        .unwrap_or_else(|| deny_expr(plan));
+    if using == check {
+        plan.set_computed(can_update_without_reading_relation(), using.clone());
+        plan.set_computed(can_update_relation(), requires_read_access(using));
+        return;
+    }
+    plan.set_computed(can_update_without_reading_relation(), using.clone());
+    plan.set_computed(can_update_without_reading_check_relation(), check.clone());
+    plan.set_computed(can_update_using_relation(), requires_read_access(using));
+    plan.set_computed(can_update_check_relation(), requires_read_access(check));
+    plan.set_computed(
+        can_update_relation(),
+        UsersetExpr::Intersection(vec![
+            UsersetExpr::Computed(can_update_using_relation()),
+            UsersetExpr::Computed(can_update_check_relation()),
+        ]),
+    );
 }
 
 /// What the policy loop already settled about each SQL command, so coverage reporting reads
@@ -1723,7 +1601,8 @@ struct SettledCommands<'a> {
 /// A command denied because every policy covering it fell below the bar gets a different line
 /// from one no policy covers at all: the first says the model came out narrower than the database,
 /// the second says the database denies it too. The schema is asked, since the filtered set cannot
-/// tell them apart.
+/// tell them apart, and where `reached` holds the policies some acting role is subject to, a
+/// policy outside it covers nothing.
 ///
 /// Coverage is read off which commands grant, not off which relations exist. A barrier with
 /// nothing permissive to narrow leaves the relation defined and granting nobody, which the
@@ -1733,6 +1612,7 @@ fn fill_and_report_coverage<DB: DatabaseLike>(
     notes: &mut Vec<TranslationNote>,
     source_table: &TableId,
     declared_here: &[&DB::Policy],
+    reached: Option<&BTreeSet<&str>>,
     settled: &SettledCommands<'_>,
     db: &DB,
 ) {
@@ -1744,7 +1624,12 @@ fn fill_and_report_coverage<DB: DatabaseLike>(
         .filter(|command| !settled.blocked.contains(command))
         .collect();
     if !uncovered.is_empty() {
-        let covered_by_schema = commands_a_permissive_policy_covers(declared_here, db);
+        let reaching: Vec<&DB::Policy> = declared_here
+            .iter()
+            .copied()
+            .filter(|policy| reached.is_none_or(|reached| reached.contains(policy.name())))
+            .collect();
+        let covered_by_schema = commands_a_permissive_policy_covers(&reaching, db);
         let (dropped, unpolicied): (Vec<&str>, Vec<&str>) = uncovered
             .into_iter()
             .partition(|command| covered_by_schema.contains(command));
@@ -1940,7 +1825,9 @@ fn surviving_conditions(
         .filter_map(|subject| match subject {
             DirectSubject::ConditionalWildcard { condition, .. }
             | DirectSubject::ConditionalType { condition, .. } => Some(condition),
-            DirectSubject::Type(_) | DirectSubject::Wildcard(_) => None,
+            DirectSubject::Type(_) | DirectSubject::Wildcard(_) | DirectSubject::Userset { .. } => {
+                None
+            }
         })
         .collect();
     let mut conditions = BTreeMap::new();
@@ -2054,38 +1941,14 @@ fn prune_plain_subjects_fed_only_by_gated_sources(
     }
 }
 
-/// Report the principals row level security does not reach.
+/// Report the partitions a read naming them leaves unfiltered.
 ///
-/// The model keeps describing the rules that do apply. Modelling a bypass as a
-/// permission would be the largest widening available here, and it misfires the moment
-/// a service account stops running as the exempt principal.
-///
-/// The table's owner is the third mechanism, named where the schema assigns one and
-/// generic where it does not, since an unreadable answer must not invent a role.
-fn report_row_level_security_bypasses<DB: DatabaseLike>(db: &DB, notes: &mut Vec<TranslationNote>) {
-    for role in db.roles() {
-        if role.can_bypass_rls() {
-            notes.push(TranslationNote::RoleBypassesPolicies {
-                role: role.name().to_string(),
-            });
-        }
-    }
+/// A read naming the partition applies the partition's policies, which a partition of a
+/// protected root has none of. Reported rather than folded into the unrestricted tables:
+/// those show every row by every route, and these rows are filtered through the root,
+/// which is the route the model answers for.
+fn report_unfiltered_partitions<DB: DatabaseLike>(db: &DB, notes: &mut Vec<TranslationNote>) {
     for table in db.tables() {
-        // Fail closed on an unreadable answer in the direction that reports rather than
-        // hides: only a definite yes means the owner is subject to the policies.
-        if table.has_row_level_security(db) == Ok(true)
-            && table.has_forced_row_level_security(db) != Ok(true)
-        {
-            notes.push(TranslationNote::TableOwnerBypassesPolicies {
-                table: table_identity(table),
-                // An unreadable answer is not a name, so the note stays generic.
-                owner: table.owner(db).ok().flatten().map(str::to_string),
-            });
-        }
-        // A read naming the partition applies the partition's policies, which a partition
-        // of a protected root has none of. Reported rather than folded into the
-        // unrestricted tables: those show every row by every route, and these rows are
-        // filtered through the root, which is the route the model answers for.
         if table.has_row_level_security(db) == Ok(false) {
             if let Some(root) = protecting_partition_root(table, db) {
                 notes.push(TranslationNote::PartitionReadDirectlyIsUnfiltered {
@@ -2243,7 +2106,7 @@ fn noted_membership_read_scope<'a, DB: DatabaseLike>(
             });
             None
         }
-        TableReadability::Guarded { .. } => {
+        TableReadability::Guarded => {
             notes.push(TranslationNote::MembershipTableGuarded {
                 policy: ctx.policy_name.to_string(),
                 join_table: join_table.clone(),
@@ -2287,20 +2150,6 @@ impl TableTypes {
     /// Whether a table or reserved generator type already holds this type name.
     fn claims(&self, type_name: &TypeName) -> bool {
         self.owners.contains_key(type_name) || self.reserved.contains_key(type_name)
-    }
-
-    /// The schema identity of the table holding this type, found by its rendered name.
-    ///
-    /// By name rather than by `TypeName`, because the read graph carries the names the
-    /// model declares.
-    fn spelling_of(&self, type_name: &str) -> String {
-        self.owners
-            .iter()
-            .find(|(name, _)| name.as_str() == type_name)
-            .map_or_else(
-                || type_name.to_string(),
-                |(_, owner)| owner.identity.to_string(),
-            )
     }
 }
 

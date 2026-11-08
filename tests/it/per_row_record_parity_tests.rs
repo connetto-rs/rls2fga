@@ -21,10 +21,9 @@ use rls2fga::generator::json_model::AuthorizationModel;
 use rls2fga::generator::tuple_generator::{TupleCondition, TupleQuery, TupleRow};
 use rls2fga::translator::Outputs;
 use rls2fga::types::ConfidenceLevel;
-use rls2fga::types::RowDecision;
 use rls2fga::types::{
-    records_from_row, BoundQuery, ColumnKind, Record, RecordDerivation, RecordDescription,
-    ReplayScope, RowCell, RowList, RowValues, ValueSource,
+    records_from_row, BoundQuery, Record, RecordDerivation, RecordDescription, ReplayScope,
+    RequestPredicate, RowDecision, ValueSource,
 };
 use rls2fga::types::{ActionAnswer, ActionStatement};
 use rls2fga::types::{ColumnName, TableId};
@@ -87,6 +86,44 @@ async fn start_postgres() -> (testcontainers::ContainerAsync<GenericImage>, PgCo
     let url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{port}/{PG_DB}");
     let conn = support::containers::connect_postgres_with_retry(&url);
     (container, conn)
+}
+
+/// A standalone service holding the model and its tuples, beside the container that
+/// outlives the client.
+async fn provisioned_client(
+    store: &str,
+    model: &AuthorizationModel,
+    tuples: &BTreeSet<Record>,
+) -> (
+    testcontainers::ContainerAsync<GenericImage>,
+    OpenFgaClient<Channel>,
+) {
+    let container = support::containers::start_openfga().await;
+    let port = container.get_host_port_ipv4(8081).await.unwrap();
+    let mut service = support::openfga::connect(port).await;
+    let store_id = support::openfga::create_store(&mut service, store).await;
+    let model_id =
+        support::openfga::write_authorization_model(&mut service, &store_id, model).await;
+    let client = service.into_client(&store_id, &model_id);
+    let writes: Vec<_> = tuples
+        .iter()
+        .map(|record| match record.context.as_ref() {
+            Some(context) => support::openfga::make_conditional_tuple(
+                &record.object,
+                record.relation.as_str(),
+                &record.subject,
+                context.condition.as_str(),
+                serde_json::to_value(&context.values).expect("row values serialize"),
+            ),
+            None => support::openfga::make_tuple(
+                &record.object,
+                record.relation.as_str(),
+                &record.subject,
+            ),
+        })
+        .collect();
+    support::openfga::write_tuples(&client, writes).await;
+    (container, client)
 }
 
 /// What a fixture needs in place before `PostgreSQL` will accept its schema, for the few
@@ -701,7 +738,9 @@ CREATE POLICY notes_priority ON notes FOR SELECT USING (priority >= 3);
 CREATE POLICY notes_listed ON notes FOR SELECT USING (status IN ('draft', 'archived'));
 -- P10 constant TRUE.
 CREATE POLICY announcements_all ON announcements FOR SELECT USING (TRUE);
--- A role-scoped policy, which mints the pg_role scope.
+-- A role-scoped policy: the acting role holds the role, so the grant resolves.
+CREATE ROLE auditor;
+GRANT auditor TO app_user;
 CREATE POLICY audits_auditor ON audits FOR SELECT TO auditor USING (TRUE);
 ";
 
@@ -755,8 +794,8 @@ const ACCESSOR: &str =
 async fn every_row_shape_description_matches_its_own_sql() {
     let (_container, mut conn) = start_postgres().await;
 
-    conn.batch_execute("CREATE ROLE auditor;")
-        .expect("failed to create the scoped role");
+    conn.batch_execute("CREATE ROLE app_user NOLOGIN;")
+        .expect("failed to create the acting role");
     conn.batch_execute(ROW_SHAPES_SCHEMA)
         .expect("failed to apply the row-shapes schema");
     conn.batch_execute(ROW_SHAPES_SEED)
@@ -842,16 +881,17 @@ async fn a_cross_row_residual_description_matches_its_own_sql() {
     let (pure, joined, records) =
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "cross-row residual");
     assert_eq!(
-        pure, 1,
-        "each paper names itself from its own row, and nothing else is row-decided, saw {pure}"
+        pure, 2,
+        "each paper names itself and links its gate from its own row, saw {pure}"
     );
     assert_eq!(
         joined, 1,
         "the membership is read by querying, since no row decides an average, saw {joined}"
     );
     assert_eq!(
-        records, 5,
-        "three papers name themselves and the two shares above the average grant, saw {records}"
+        records, 9,
+        "three papers name themselves and link their gate, the two shares above the average \
+         grant, and the kind names the request gate, saw {records}"
     );
 }
 
@@ -909,12 +949,13 @@ async fn a_request_gated_description_matches_its_own_sql() {
             "{fixture}: a request gate is decided by the row alone"
         );
         assert_eq!(
-            pure, 2,
-            "{fixture}: one description per spelling, got {pure}"
+            pure, 4,
+            "{fixture}: one grant query and one gate link query per table, got {pure}"
         );
         assert_eq!(
-            records, 6,
-            "{fixture}: three named teams per table and none for the NULL, got {records}"
+            records, 16,
+            "{fixture}: three rows per table with a team grant, four rows per table link their \
+             gate, and one kind constant per table names the acting role, got {records}"
         );
     }
 }
@@ -972,7 +1013,10 @@ async fn a_clock_gated_record_is_decoded_from_its_own_row() {
 
     let (pure, joined, _) =
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "clock gate");
-    assert_eq!(pure, 1, "the clock guard settles from the row");
+    assert_eq!(
+        pure, 2,
+        "the clock guard settles from the row, and the row links its gate"
+    );
     assert_eq!(joined, 0, "nothing here is left to replay, got {joined}");
 
     // Non-vacuous: the comparison above passes on two empty sets when the seed produces
@@ -1311,7 +1355,7 @@ async fn holder_shapes_match_their_own_sql() {
     // Three bridges and the two member lists the row decides, with the residual
     // travelling as a guard, and the clock-gated list left to its query.
     assert_eq!(
-        pure, 5,
+        pure, 8,
         "the bridges and the row-decided member lists follow from one row, saw {pure}"
     );
     assert_eq!(
@@ -1379,8 +1423,9 @@ INSERT INTO doc_members (doc_id, user_id, member_id, role) VALUES
     // empty result and a replay that answers the same for every key. What is left to count
     // here is the pointer each guarded row writes on its own.
     assert_eq!(
-        records, 2,
-        "one pointer per seeded doc row reaches the evaluator, saw {records}"
+        records, 5,
+        "one pointer per seeded doc row reaches the evaluator, beside the two gate links and \
+         the kind tuple, saw {records}"
     );
 }
 
@@ -1490,60 +1535,6 @@ async fn a_composite_key_membership_matches_its_own_sql() {
     );
 }
 
-/// A scope naming two roles over three rows stores five facts, not eight.
-///
-/// The roles a policy admits are a fact about the policy, so they belong on the scope object.
-/// Storing them per row multiplies the whole table by the roles the clause names, which is
-/// the shape this counts: three pointers and one fact per role, whatever the table holds.
-#[tokio::test]
-#[ignore = "requires Docker: starts a PostgreSQL 18 container"]
-async fn a_role_scope_stores_its_roles_once_not_once_per_row() {
-    let (_container, mut conn) = start_postgres().await;
-
-    let schema = "
-CREATE TABLE docs (id UUID PRIMARY KEY, title TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_read ON docs FOR SELECT TO auditor, support USING (TRUE);
-";
-    conn.batch_execute("CREATE ROLE auditor; CREATE ROLE support;")
-        .expect("failed to create the roles the clause names");
-    conn.batch_execute(schema)
-        .expect("failed to apply the role-scoped schema");
-    conn.batch_execute(
-        "
-INSERT INTO docs (id, title) VALUES
-    ('00000000-0000-0000-0000-0000000000d1', 'one'),
-    ('00000000-0000-0000-0000-0000000000d2', 'two'),
-    ('00000000-0000-0000-0000-0000000000d3', 'three');
-",
-    )
-    .expect("failed to seed the rows the scope judges");
-
-    let (classified, db, registry) = support::classify_sql(schema, None);
-    let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-
-    let mut pointers = 0usize;
-    let mut role_facts = 0usize;
-    for query in outputs.tuple_queries() {
-        if query.skipped.is_some() {
-            continue;
-        }
-        let rows = rows_returned(&mut conn, &query.sql);
-        if query.comment.contains("admits PostgreSQL role") {
-            assert_eq!(
-                rows, 1,
-                "a role the scope admits is one fact however many rows it judges: {}",
-                query.sql
-            );
-            role_facts += 1;
-        } else if query.comment.contains("judged by the scope") {
-            pointers += rows;
-        }
-    }
-    assert_eq!(role_facts, 2, "both roles the clause names reach the scope");
-    assert_eq!(pointers, 3, "every row points at the scope that judges it");
-}
-
 /// How many rows the generated query returns.
 ///
 /// Raw SQL because the argument is generated text this counts around, which no typed query
@@ -1641,14 +1632,15 @@ async fn a_compound_identity_matches_between_the_sql_and_the_evaluator() {
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "compound identity");
 
     assert_eq!(
-        pure, 1,
-        "the ownership shape follows from one row of the share table, saw {pure}"
+        pure, 2,
+        "the ownership shape and the gate link follow from one row of the share table, saw \
+         {pure}"
     );
     assert_eq!(joined, 0, "nothing here reads a second table, saw {joined}");
     assert_eq!(
-        records, 10,
-        "every seeded row must be named, including the ones the target refuses \
-         verbatim, saw {records}"
+        records, 21,
+        "every seeded share must be named and link its gate, beside the kind tuple, including \
+         the ones the target refuses verbatim, saw {records}"
     );
 }
 
@@ -1670,9 +1662,16 @@ async fn a_timestamptz_identity_matches_between_the_sql_and_the_evaluator() {
     let (pure, joined, records) =
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "timestamp identity");
 
-    assert_eq!(pure, 1, "the ownership shape follows from one row");
+    assert_eq!(
+        pure, 2,
+        "the ownership shape and the gate link follow from one row"
+    );
     assert_eq!(joined, 0, "nothing here reads a second table");
-    assert_eq!(records, 2, "both seeded rows must be named");
+    assert_eq!(
+        records, 5,
+        "both seeded rows are named and link their gate, beside the kind \
+                            tuple, saw {records}"
+    );
 }
 
 /// A schema whose reads compose all three ways a recipe can: one relation's records
@@ -1729,8 +1728,8 @@ fn recipe_kind(decision: &RowDecision) -> &'static str {
         RowDecision::Leaf { .. } => "leaf",
         RowDecision::Any(_) => "any",
         RowDecision::All(_) => "all",
-        RowDecision::RequestGated { .. } => "request-gated",
-        other => panic!("a recipe shape this test cannot read: {other:?}"),
+        RowDecision::RequestGated { .. } | RowDecision::Request { .. } => "request-gated",
+        RowDecision::Everyone { .. } => "everyone",
     }
 }
 
@@ -1739,7 +1738,11 @@ fn recipe_kind(decision: &RowDecision) -> &'static str {
 fn first_shape(decision: &RowDecision) -> &RecordDescription {
     match decision {
         RowDecision::Leaf { relation, shapes }
+        | RowDecision::Everyone { relation, shapes }
         | RowDecision::RequestGated {
+            relation, shapes, ..
+        }
+        | RowDecision::Request {
             relation, shapes, ..
         } => shapes
             .first()
@@ -1748,7 +1751,6 @@ fn first_shape(decision: &RowDecision) -> &RecordDescription {
             .first()
             .map(first_shape)
             .expect("a recipe reaches at least one leaf"),
-        other => panic!("a recipe shape this test cannot read: {other:?}"),
     }
 }
 
@@ -1764,9 +1766,20 @@ fn recipe_object(decision: &RowDecision, row: &serde_json::Value) -> Option<Stri
     Some(format!("{}:{key}", template.object_type))
 }
 
+/// Whether a request child of a recipe holds for the role the harness checks as. The
+/// acting kind names the role the request acts as; every check here carries it.
+fn request_child_holds(predicate: &RequestPredicate) -> bool {
+    support::parity::request_predicate_holds(
+        predicate,
+        &serde_json::json!({}),
+        support::deployment::ACTING_ROLE,
+    )
+}
+
 /// Evaluate a recipe: a leaf is the union of the subjects its shapes produce for this
 /// row, [`RowDecision::Any`] the union of its children and [`RowDecision::All`] their
-/// intersection. Nothing else, which is the whole contract a consumer implements.
+/// intersection, each request child holding for the acting role. Nothing else, which is
+/// the whole contract a consumer implements.
 fn recipe_subjects(
     decision: &RowDecision,
     row: &serde_json::Value,
@@ -1792,17 +1805,27 @@ fn recipe_subjects(
             .iter()
             .flat_map(|child| recipe_subjects(child, row, object))
             .collect(),
-        RowDecision::All(children) => children
-            .iter()
-            .map(|child| recipe_subjects(child, row, object))
-            .reduce(|left, right| left.intersection(&right).cloned().collect())
-            .expect("a recipe reaches at least one leaf"),
+        RowDecision::All(children) => {
+            if !children.iter().all(|child| match child {
+                RowDecision::Request { predicate, .. } => request_child_holds(predicate),
+                _ => true,
+            }) {
+                return BTreeSet::new();
+            }
+            children
+                .iter()
+                .filter(|child| !matches!(child, RowDecision::Request { .. }))
+                .map(|child| recipe_subjects(child, row, object))
+                .reduce(|left, right| left.intersection(&right).cloned().collect())
+                .expect("a recipe reaches at least one leaf")
+        }
         other => panic!("a recipe shape this test cannot evaluate: {other:?}"),
     }
 }
 
-/// Subjects a recipe would grant if its composition were thrown away and every leaf
-/// unioned into one list, which is the shape the intersection has to differ from.
+/// The recipe with every intersection dropped, the list a reader who flattens it into
+/// one would build. A request child holds a condition, not a subject list, so it
+/// contributes nothing.
 fn flattened_subjects(
     decision: &RowDecision,
     row: &serde_json::Value,
@@ -1812,42 +1835,11 @@ fn flattened_subjects(
         RowDecision::Leaf { .. } => recipe_subjects(decision, row, object),
         RowDecision::Any(children) | RowDecision::All(children) => children
             .iter()
+            .filter(|child| !matches!(child, RowDecision::Request { .. }))
             .flat_map(|child| flattened_subjects(child, row, object))
             .collect(),
         other => panic!("a recipe shape this test cannot evaluate: {other:?}"),
     }
-}
-
-async fn start_openfga(
-    model: &AuthorizationModel,
-    tuples: &BTreeSet<Record>,
-) -> (
-    testcontainers::ContainerAsync<GenericImage>,
-    OpenFgaClient<Channel>,
-) {
-    let container = support::containers::start_openfga().await;
-    let grpc_port = container.get_host_port_ipv4(8081).await.unwrap();
-
-    let mut service = support::openfga::connect(grpc_port).await;
-    let store_id = support::openfga::create_store(&mut service, "recipe-parity").await;
-    let model_id =
-        support::openfga::write_authorization_model(&mut service, &store_id, model).await;
-    let client = service.into_client(&store_id, &model_id);
-    support::openfga::write_tuples(
-        &client,
-        tuples
-            .iter()
-            .map(|record| {
-                support::openfga::make_tuple(
-                    &record.object,
-                    record.relation.as_str(),
-                    &record.subject,
-                )
-            })
-            .collect(),
-    )
-    .await;
-    (container, client)
 }
 
 /// The recipe is the whole answer, so the subjects it yields for a row have to be the
@@ -1876,7 +1868,8 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
         "the loader must produce tuples, otherwise every check answers no"
     );
 
-    let (_openfga, client) = start_openfga(&planned.json_model(), &tuples).await;
+    let (_openfga, client) =
+        provisioned_client("recipe-parity", &planned.json_model(), &tuples).await;
 
     // Every user any tuple names, which bounds the comparison: a subject outside it
     // could only reach the relation through a tuple, and every tuple is in here.
@@ -1944,12 +1937,10 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
         "the recipe and the model disagree:\n{}",
         failures.join("\n")
     );
-
-    // Non-vacuous on every axis the comparison could be blind on.
     assert_eq!(
         kinds,
-        BTreeSet::from(["all", "any", "leaf"]),
-        "the schema has to exercise every composition, saw {kinds:?}"
+        BTreeSet::from(["all", "leaf"]),
+        "the schema has to exercise the kind's intersection over a union, saw {kinds:?}"
     );
     assert!(
         granting_rows > 0,
@@ -1996,12 +1987,14 @@ async fn a_compound_identity_loads_and_answers_against_the_service() {
     }
     assert_eq!(
         tuples.len(),
-        10,
-        "every seeded share must produce a fact, or the encoding lost a row: {tuples:#?}"
+        21,
+        "every seeded share must produce its fact and its gate link, beside the kind tuple, or \
+         the encoding lost a row: {tuples:#?}"
     );
 
     // The write is where an unspellable name fails, and it fails the whole batch.
-    let (_openfga, client) = start_openfga(&outputs.json_model(), &tuples).await;
+    let (_openfga, client) =
+        provisioned_client("compound-identity", &outputs.json_model(), &tuples).await;
 
     let mut allowed = 0usize;
     let mut denied = 0usize;
@@ -2018,9 +2011,11 @@ async fn a_compound_identity_loads_and_answers_against_the_service() {
         );
         allowed += 1;
 
-        // A stranger must not, or the encoding has collapsed two names into one. The
-        // wildcard spelling is the one that would: an owner of `*` renders `user:*`
-        // verbatim and grants everybody.
+        // The kind constant admits whoever a check says acts as the role, strangers included.
+        if record.subject.contains('#') {
+            continue;
+        }
+        // A stranger reaching a row fact means two names collapsed, `user:*` the likeliest.
         assert!(
             !support::openfga::check_allowed(
                 &client,
@@ -2278,7 +2273,8 @@ async fn every_judgement_together_answers_as_the_action_relation_does() {
     for query in planned.tuple_queries() {
         tuples.extend(records_from_sql(&planned, &mut conn, query));
     }
-    let (_openfga, client) = start_openfga(&planned.json_model(), &tuples).await;
+    let (_openfga, client) =
+        provisioned_client("replacement", &planned.json_model(), &tuples).await;
 
     let update = reported
         .iter()
@@ -2343,111 +2339,6 @@ async fn every_judgement_together_answers_as_the_action_relation_does() {
         split_by_a_half > 0,
         "no row is admitted by one half alone, so requiring either half would pass"
     );
-}
-
-/// Deleting a row does not withdraw the roles its scope admits.
-///
-/// The roles a policy admits are decided by the policy, so the fact survives the table
-/// emptying. Described as following from a row instead, every row implied the same fact and
-/// a consumer withdrawing what a deleted row implied removed the one thing every surviving
-/// row still needs, which denies the whole table. That is invisible to a union oracle: the
-/// union over the rows equals the query's result either way, and only the withdrawal
-/// direction tells them apart.
-#[tokio::test]
-#[ignore = "requires Docker: starts a PostgreSQL 18 container"]
-async fn a_role_scope_keeps_its_roles_when_a_row_is_deleted() {
-    let (_container, mut conn) = start_postgres().await;
-
-    let schema = "
-CREATE TABLE docs (id UUID PRIMARY KEY, title TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_read ON docs FOR SELECT TO auditor USING (TRUE);
-";
-    conn.batch_execute("CREATE ROLE auditor;")
-        .expect("failed to create the role the clause names");
-    conn.batch_execute(schema)
-        .expect("failed to apply the role-scoped schema");
-    conn.batch_execute(
-        "
-INSERT INTO docs (id, title) VALUES
-    ('00000000-0000-0000-0000-0000000000d1', 'one'),
-    ('00000000-0000-0000-0000-0000000000d2', 'two');
-",
-    )
-    .expect("failed to seed the rows the scope judges");
-
-    let (classified, db, registry) = support::classify_sql(schema, None);
-    let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-    let queries = outputs.tuple_queries();
-
-    let role_fact = queries
-        .iter()
-        .find(|query| query.comment.contains("admits PostgreSQL role"))
-        .expect("the scope admits a role, so a query carries it");
-    let pointer = queries
-        .iter()
-        .find(|query| query.comment.contains("judged by the scope"))
-        .expect("every row points at the scope that judges it");
-
-    // The description says the fact is nobody's row, so no consumer can attribute it to
-    // one: it names no table to arrive on, and asking for a row's records refuses.
-    let description = role_fact
-        .description
-        .as_ref()
-        .expect("the role fact is described");
-    assert!(
-        description.tables.is_empty(),
-        "a constant reads no table, got {:?}",
-        description.tables
-    );
-    assert!(
-        matches!(&description.derivation, RecordDerivation::Constant { .. }),
-        "the roles a policy admits follow from the policy, got {:?}",
-        description.derivation
-    );
-    assert!(
-        records_from_row(description, &EmptyRow).is_err(),
-        "a row must not be able to claim the fact as its own"
-    );
-
-    assert_eq!(rows_returned(&mut conn, &role_fact.sql), 1);
-    assert_eq!(rows_returned(&mut conn, &pointer.sql), 2);
-
-    conn.batch_execute("DELETE FROM docs WHERE title = 'one';")
-        .expect("failed to delete one of the judged rows");
-    assert_eq!(
-        rows_returned(&mut conn, &role_fact.sql),
-        1,
-        "the surviving row still needs the roles its scope admits"
-    );
-    assert_eq!(rows_returned(&mut conn, &pointer.sql), 1);
-
-    conn.batch_execute("DELETE FROM docs;")
-        .expect("failed to empty the guarded table");
-    assert_eq!(
-        rows_returned(&mut conn, &role_fact.sql),
-        1,
-        "the policy still admits the role with no row to judge, and the next insert needs \
-         the fact already there"
-    );
-    assert_eq!(rows_returned(&mut conn, &pointer.sql), 0);
-}
-
-/// A row that answers nothing, for asking whether a description reads one at all.
-struct EmptyRow;
-
-impl RowValues for EmptyRow {
-    fn cell(&self, _column: &str, _kind: ColumnKind) -> RowCell<'_> {
-        RowCell::Absent
-    }
-
-    fn list(&self, _column: &str, _kind: ColumnKind) -> RowList<'_> {
-        RowList::Absent
-    }
-
-    fn json_text(&self, _column: &str, _path: &[String]) -> RowCell<'_> {
-        RowCell::Absent
-    }
 }
 
 /// Row security filters a read by the policies of the relation the query names alone,

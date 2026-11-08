@@ -407,15 +407,11 @@ pub(super) fn apply_membership_read_scope<DB: DatabaseLike>(
             .flatten()
             .collect()
     };
-    let roles = match scope {
-        TableReadability::Open => &[][..],
+    match scope {
+        TableReadability::Open | TableReadability::Guarded => {}
         TableReadability::Unreadable => return deny_expr(table_plan),
-        TableReadability::RequestGated { gates: own } => {
-            gates.extend(own.iter().cloned());
-            &[][..]
-        }
-        TableReadability::Guarded { roles } => roles.as_slice(),
-    };
+        TableReadability::RequestGated { gates: own } => gates.extend(own.iter().cloned()),
+    }
     let mut expressions = Vec::with_capacity(gates.len() + 1);
     expressions.push(membership);
     // Request-only patterns never consult membership readability.
@@ -432,32 +428,7 @@ pub(super) fn apply_membership_read_scope<DB: DatabaseLike>(
             &mut BTreeMap::new(),
         ));
     }
-    let membership = combine_intersection(expressions).unwrap_or_else(|| deny_expr(table_plan));
-    if roles.is_empty() {
-        return membership;
-    }
-    let scope_relation =
-        membership_read_scope_relation_name(ctx.table_types.resolve(join_table).as_str());
-    register_pg_role_scope(
-        table_plan,
-        all_types,
-        notes,
-        ctx.source_table,
-        ctx.db,
-        RoleScopeSpec {
-            scope_relation: &scope_relation,
-            walked: &RolePrivilege::Usage.relation_name(),
-            role_names: roles,
-            scope_note: TranslationNote::MembershipReadScope {
-                policy: ctx.policy_name.to_string(),
-                join_table: join_table.clone(),
-                roles: roles.to_vec(),
-                relation: scope_relation.clone(),
-            },
-            missing_object_what: "membership read scope tuples",
-        },
-    );
-    scoped_policy_expr(membership, &scope_relation)
+    combine_intersection(expressions).unwrap_or_else(|| deny_expr(table_plan))
 }
 
 /// The parent a membership bridges the guarded row to, decided once for every spelling
@@ -923,7 +894,7 @@ fn indirect_read_scope<'a, DB: DatabaseLike>(
     let scope = join_table_readability(table, ctx.db, ctx.registry, memo);
     match scope {
         TableReadability::Open | TableReadability::RequestGated { .. } => Some(scope),
-        TableReadability::Guarded { .. } => {
+        TableReadability::Guarded => {
             notes.push(TranslationNote::MembershipTableGuarded {
                 policy: ctx.policy_name.to_string(),
                 join_table: table.clone(),

@@ -7,8 +7,8 @@
 //! what the database says.
 
 use crate::prelude::*;
+use crate::ConfidenceLevel;
 use crate::{ColumnName, RelationName, TableId, TypeName};
-use crate::{ConfidenceLevel, RolePrivilege};
 use alloc::borrow::Cow;
 use core::fmt;
 use serde::{Deserialize, Serialize};
@@ -253,23 +253,41 @@ pub enum TranslationNote {
         /// Policy carrying the clause.
         policy: String,
     },
-    /// A barrier bound to roles binds everyone, since nothing can say who is bound.
-    RestrictiveBarrierBindsEveryone {
-        /// Policy carrying the barrier.
-        policy: String,
-        /// Roles it named.
-        roles: Vec<String>,
-    },
     /// Reading a table expands its policies, and a loop there raises `infinite
     /// recursion` rather than filtering.
     PolicyReadRecursion {
         /// Table whose commands the loop denies.
         #[serde(with = "table_id_as_str")]
         table: TableId,
+        /// The acting role the loop denies them to.
+        role: String,
         /// Commands it denies.
         commands: Vec<String>,
-        /// Tables the loop runs through, in order.
-        cycle: Vec<String>,
+        /// The relation `PostgreSQL`'s error names.
+        relation: String,
+    },
+    /// Row security cannot be settled for an acting role, so the commands deny to it.
+    RowSecurityRefused {
+        /// Table whose commands deny.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// The acting role.
+        role: String,
+        /// Commands that deny.
+        commands: Vec<String>,
+        /// Why the answer cannot be settled.
+        reason: String,
+    },
+    /// An acting role row security exempts from a table's policies, so it reads and
+    /// writes every row.
+    ActingRoleExempt {
+        /// Table whose policies skip the role.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// The acting role.
+        role: String,
+        /// Why it is exempt.
+        reason: String,
     },
     /// No permissive policy covers these commands, so the database denies them too.
     NoPermissivePolicy {
@@ -317,13 +335,6 @@ pub enum TranslationNote {
         /// Clause it does not store.
         clause: String,
     },
-    /// The `TO` clause names a spelling `PostgreSQL` resolves when the policy is created.
-    PolicyBoundToDdlTimeRole {
-        /// Policy carrying the clause.
-        policy: String,
-        /// The spellings, as written.
-        spellings: Vec<String>,
-    },
     /// The policy stores a clause `PostgreSQL` refuses for its command.
     PolicyClauseIllegal {
         /// Policy carrying the clause.
@@ -339,15 +350,6 @@ pub enum TranslationNote {
         /// Commands a policy covers that the read gate closes anyway.
         commands: Vec<String>,
     },
-    /// A policy's `TO` clause became a role scope relation.
-    PolicyRoleScope {
-        /// Policy carrying the clause.
-        policy: String,
-        /// Roles it names.
-        roles: Vec<String>,
-        /// Relation the scope became.
-        relation: RelationName,
-    },
     /// A role test in the expression became a role scope relation.
     RoleGateScope {
         /// Policy carrying the test.
@@ -358,18 +360,6 @@ pub enum TranslationNote {
         relation: RelationName,
         /// Relation on `pg_role` holding the kind of membership the policy asked about.
         held_by: String,
-    },
-    /// Reading the membership table needs a role, so the grant is scoped to it.
-    MembershipReadScope {
-        /// Policy holding the membership check.
-        policy: String,
-        /// Membership table only those roles may read.
-        #[serde(with = "table_id_as_str")]
-        join_table: TableId,
-        /// Roles that may read it.
-        roles: Vec<String>,
-        /// Relation the scope became.
-        relation: RelationName,
     },
     /// Two table spellings canonicalize to one type name.
     TypeNameCollision {
@@ -539,11 +529,6 @@ pub enum TranslationNote {
         /// Function called.
         function: String,
     },
-    /// A role the database exempts from row level security everywhere.
-    RoleBypassesPolicies {
-        /// Role carrying `BYPASSRLS`.
-        role: String,
-    },
     /// A partition whose rows a direct read leaves unfiltered.
     ///
     /// `PostgreSQL` applies a parent's policies to rows reached through the parent, so a
@@ -558,15 +543,6 @@ pub enum TranslationNote {
         #[serde(with = "table_id_as_str")]
         root: TableId,
     },
-    /// A table whose owner is exempt from its own policies, which is the default.
-    TableOwnerBypassesPolicies {
-        /// Table that does not force row level security on its owner.
-        #[serde(with = "table_id_as_str")]
-        table: TableId,
-        /// Role that owns it, where the schema says so. A schema that never assigns
-        /// ownership records none, and the note then cannot name the exempt principal.
-        owner: Option<String>,
-    },
 }
 
 impl TranslationNote {
@@ -577,17 +553,14 @@ impl TranslationNote {
             Self::OwnerBoundFunction { .. }
             | Self::UnresolvedPolicyTable { .. }
             | Self::RestrictiveAttributeRefused { .. }
-            | Self::RestrictiveBarrierBindsEveryone { .. }
             | Self::ParentRuleUntranslated { .. }
             | Self::StandaloneAttributePolicy { .. }
             | Self::ExpressionRefused { .. }
             | Self::FunctionMissingMetadata { .. }
             | Self::RowsCannotBeNamed { .. }
             | Self::BridgeColumnMissing { .. }
-            | Self::PolicyBoundToDdlTimeRole { .. } => NoteSeverity::Unhandled,
-            Self::RoleBypassesPolicies { .. }
-            | Self::TableOwnerBypassesPolicies { .. }
-            | Self::PartitionReadDirectlyIsUnfiltered { .. } => NoteSeverity::Exempt,
+            | Self::RowSecurityRefused { .. } => NoteSeverity::Unhandled,
+            Self::PartitionReadDirectlyIsUnfiltered { .. } => NoteSeverity::Exempt,
             Self::CoveringPoliciesBelowThreshold { .. } | Self::ClauseBelowThreshold { .. } => {
                 NoteSeverity::BelowThreshold
             }
@@ -597,14 +570,13 @@ impl TranslationNote {
             | Self::AttributeNeedsRuntimeEnforcement { .. }
             | Self::InheritanceParentReadsOwnRowsOnly { .. } => NoteSeverity::Partial,
             Self::ReadsDeniedSoWritesCannotName { .. }
-            | Self::PolicyRoleScope { .. }
             | Self::RoleGateScope { .. }
             | Self::CallerSuppliesConditionParameter { .. }
             | Self::RowIdentifierBudget { .. }
-            | Self::MembershipReadScope { .. }
             | Self::TypeNameCollision { .. }
             | Self::PolicyClauseIllegal { .. } => NoteSeverity::ActionRequired,
             Self::PolicyReadRecursion { .. }
+            | Self::ActingRoleExempt { .. }
             | Self::NoPermissivePolicy { .. }
             | Self::PolicyClauseAbsent { .. }
             | Self::MembershipTableGrantsNoReads { .. }
@@ -630,7 +602,10 @@ impl TranslationNote {
             | Self::CoveringPoliciesBelowThreshold {
                 table: spelling, ..
             }
-            | Self::TableOwnerBypassesPolicies {
+            | Self::RowSecurityRefused {
+                table: spelling, ..
+            }
+            | Self::ActingRoleExempt {
                 table: spelling, ..
             }
             | Self::PartitionReadDirectlyIsUnfiltered {
@@ -651,17 +626,12 @@ impl TranslationNote {
             | Self::ReadsDeniedSoWritesCannotName {
                 table: spelling, ..
             } => Cow::Owned(spelling.to_string()),
-            Self::RoleBypassesPolicies { role } => Cow::Borrowed(role),
             Self::ClauseBelowThreshold { policy, .. }
             | Self::UnresolvedPolicyTable { policy, .. }
             | Self::RestrictiveAttributeRefused { policy }
-            | Self::RestrictiveBarrierBindsEveryone { policy, .. }
             | Self::PolicyClauseAbsent { policy, .. }
-            | Self::PolicyBoundToDdlTimeRole { policy, .. }
             | Self::PolicyClauseIllegal { policy, .. }
-            | Self::PolicyRoleScope { policy, .. }
             | Self::RoleGateScope { policy, .. }
-            | Self::MembershipReadScope { policy, .. }
             | Self::MembershipTableGrantsNoReads { policy, .. }
             | Self::FunctionExpanded { policy, .. }
             | Self::MembershipTableGuarded { policy, .. }
@@ -724,13 +694,6 @@ impl fmt::Display for TranslationNote {
                 "Policy '{policy}' names '{named}', which does not resolve to one table in the \
                  schema, so qualify it with a schema to have the policy translated"
             ),
-            Self::RestrictiveBarrierBindsEveryone { policy, roles } => write!(
-                f,
-                "RESTRICTIVE policy '{policy}' binds only {}, but no tuple can name a row of \
-                 this table, so nothing can say who is bound and the barrier is applied to \
-                 everyone. That denies more than RLS does",
-                roles.join(", ")
-            ),
             Self::RestrictiveAttributeRefused { policy } => write!(
                 f,
                 "RESTRICTIVE policy '{policy}' guards on an attribute the model cannot express, \
@@ -738,14 +701,35 @@ impl fmt::Display for TranslationNote {
             ),
             Self::PolicyReadRecursion {
                 table,
+                role,
                 commands,
-                cycle,
+                relation,
             } => write!(
                 f,
-                "PostgreSQL raises infinite recursion on {} of '{table}', since the policies it \
-                 expands loop ({}), so the model denies to match",
+                "PostgreSQL raises infinite recursion detected in policy for relation \
+                 '{relation}' on {} of '{table}' acting as '{role}', since the policies it \
+                 expands loop, so the model denies to match",
                 commands.join(", "),
-                render_read_loop(cycle)
+            ),
+            Self::RowSecurityRefused {
+                table,
+                role,
+                commands,
+                reason,
+            } => write!(
+                f,
+                "Row security on '{table}' acting as '{role}' cannot be settled ({reason}), so \
+                 the model denies {} to that role",
+                commands.join(", "),
+            ),
+            Self::ActingRoleExempt {
+                table,
+                role,
+                reason,
+            } => write!(
+                f,
+                "Acting role '{role}' {reason}, so row security on '{table}' skips it and the \
+                 model grants it every row"
             ),
             Self::NoPermissivePolicy { table, commands } => write!(
                 f,
@@ -785,14 +769,6 @@ impl fmt::Display for TranslationNote {
                 "Policy '{policy}' names {commands} without a {clause} clause, so PostgreSQL \
                  admits no row through it"
             ),
-            Self::PolicyBoundToDdlTimeRole { spellings, .. } => write!(
-                f,
-                "The TO clause names ({}), which PostgreSQL resolves to whoever runs the \
-                 CREATE POLICY, so a schema file cannot know the role. A permissive policy \
-                 grants nobody here and a restrictive one binds everyone. Name the role \
-                 explicitly.",
-                spellings.join(", ")
-            ),
             Self::PolicyClauseIllegal { rule, .. } => write!(
                 f,
                 "PostgreSQL refuses this policy outright ({rule}), so no database can hold \
@@ -803,17 +779,6 @@ impl fmt::Display for TranslationNote {
                 "Reads of '{table}' are denied, so {} cannot name a row either. \
                  Add a SELECT policy the model can translate.",
                 commands.join(", ")
-            ),
-            Self::PolicyRoleScope {
-                policy,
-                roles,
-                relation,
-            } => write!(
-                f,
-                "Policy '{policy}' is scoped TO ({}) through relation '{relation}', which reads \
-                 pg_role '{}', so load that pg_role relation with each role's inheriting members",
-                roles.join(", "),
-                RolePrivilege::Usage.relation_name()
             ),
             Self::RoleGateScope {
                 policy,
@@ -826,19 +791,6 @@ impl fmt::Display for TranslationNote {
                  pg_role '{held_by}', so load that pg_role relation with the roles' holders of \
                  that kind",
                 roles.join(", ")
-            ),
-            Self::MembershipReadScope {
-                join_table,
-                roles,
-                relation,
-                ..
-            } => write!(
-                f,
-                "Reading membership table '{join_table}' needs PostgreSQL role ({}), mapped to \
-                 relation '{relation}', which reads pg_role '{}', so load that relation with \
-                 each role's inheriting members",
-                roles.join(", "),
-                RolePrivilege::Usage.relation_name()
             ),
             Self::TypeNameCollision {
                 spelling,
@@ -970,11 +922,6 @@ impl fmt::Display for TranslationNote {
                 f,
                 "{function_kind} function '{function}' missing semantic metadata"
             ),
-            Self::RoleBypassesPolicies { role } => write!(
-                f,
-                "Role '{role}' has BYPASSRLS, so every policy is skipped for it and the \
-                 model answers for nobody connecting as that role"
-            ),
             Self::PartitionReadDirectlyIsUnfiltered { table, root } => write!(
                 f,
                 "'{table}' is a partition of '{root}', which carries the policies, so a read \
@@ -982,32 +929,6 @@ impl fmt::Display for TranslationNote {
                  through '{root}'. ALTER TABLE '{table}' ENABLE ROW LEVEL SECURITY and give \
                  it the same policies, or revoke access to it"
             ),
-            Self::TableOwnerBypassesPolicies { table, owner } => {
-                let who = owner.as_ref().map_or_else(
-                    || "the table's owner is".to_string(),
-                    |owner| format!("its owner '{owner}' is"),
-                );
-                write!(
-                    f,
-                    "Row level security on '{table}' is not FORCEd, so {who} exempt from \
-                     every policy on it. ALTER TABLE '{table}' FORCE ROW LEVEL SECURITY \
-                     subjects them to it"
-                )
-            }
         }
     }
-}
-
-/// A loop in the policy read graph as `a reads b, b reads a`. A table reading itself is
-/// a one-element loop.
-fn render_read_loop(cycle: &[String]) -> String {
-    let hops: Vec<String> = cycle
-        .iter()
-        .enumerate()
-        .filter_map(|(index, table)| {
-            let next = cycle.get(index + 1).or_else(|| cycle.first())?;
-            Some(format!("{table} reads {next}"))
-        })
-        .collect();
-    hops.join(", ")
 }

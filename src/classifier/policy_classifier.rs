@@ -26,6 +26,9 @@ pub fn classify_policies<DB: DatabaseLike>(
 
 /// Classify every policy in `db`, read for `deployment`, returning the enriched function
 /// registry the classifier used.
+///
+/// A clause reading `current_user` names a different role for each role a request may act
+/// as, so every policy is classified once per acting role of `deployment`, in its order.
 pub fn classify_policies_with_effective_registry<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
@@ -33,11 +36,17 @@ pub fn classify_policies_with_effective_registry<DB: DatabaseLike>(
 ) -> (Vec<ClassifiedPolicy>, FunctionRegistry) {
     let mut effective_registry = registry.clone();
     effective_registry.enrich_from_schema(db, deployment);
-    let classified = classify_policies_with_registry(db, &effective_registry);
+    let mut classified = Vec::new();
+    for role in deployment.acting_roles() {
+        effective_registry.set_acting_role(Some(role));
+        classified.extend(classify_policies_with_registry(db, &effective_registry));
+    }
+    effective_registry.set_acting_role(None);
     (classified, effective_registry)
 }
 
-/// Classify all policies using the provided (already prepared) function registry.
+/// Classify all policies for the acting role `registry` names, using the provided
+/// (already prepared) function registry.
 fn classify_policies_with_registry<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
@@ -45,6 +54,7 @@ fn classify_policies_with_registry<DB: DatabaseLike>(
     db.policies()
         .map(|policy| {
             let mut classified = ClassifiedPolicy::from_policy(policy, db);
+            classified.acting_role = registry.acting_role().map(str::to_string);
             let classify = |expr: &Expr| {
                 classify_clause(
                     expr,

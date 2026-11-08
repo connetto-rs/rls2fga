@@ -139,14 +139,14 @@ fn a_cross_command_true_does_not_widen_the_flag_gated_select() {
     let (everyone, flagged) = one_ungated_and_one_gated(&queries);
     assert_eq!(
         can_select.as_str(),
-        flagged.as_str(),
+        format!("{flagged} and acting_app_user from request_gate"),
         "SELECT must grant only through the flag-gated relation"
     );
     // DELETE keeps its unconditional grant, intersected with the read the crate's
     // read-gating contract requires (naming a row to change means reading it).
     assert_eq!(
         can_delete,
-        format!("{everyone} and can_select"),
+        format!("{everyone} and acting_app_user from request_gate and can_select"),
         "DELETE grants through the unconditional relation intersected with the read"
     );
 }
@@ -329,7 +329,7 @@ CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = app_uid());
 
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "a declared accessor stays one:\n{}",
         model.model()
     );
@@ -389,7 +389,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (uid(id));
 
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("public_viewer")
+        Some("public_viewer and acting_app_user from request_gate")
     );
 }
 
@@ -437,7 +437,7 @@ CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = app_uid());
         .outputs_accepting_gaps();
     assert_eq!(
         relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "a session setting is per-caller regardless of the security mode:\n{}",
         model.model()
     );
@@ -483,7 +483,12 @@ fn caller_listed_in_an_array_column_is_a_relationship_not_a_refusal() {
             "`{clause}`: RLS grants three rows, so the model must not deny:\n{dsl}"
         );
 
-        let relation = can_select.trim().to_string();
+        let relation = can_select
+            .split(" and ")
+            .next()
+            .unwrap_or(can_select.as_str())
+            .trim()
+            .to_string();
         let body = relation_definition(&dsl, "docs", &relation).unwrap_or_else(|| {
             panic!("`{clause}`: can_select points at '{relation}' which is undefined:\n{dsl}")
         });
@@ -665,7 +670,7 @@ fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
             "can_select",
         )
         .as_deref(),
-        Some("owner and public_where_status_131bc6df"),
+        Some("owner and public_where_status_131bc6df and acting_app_user from request_gate"),
         "a plain column literal is row data the tuples carry"
     );
 
@@ -689,7 +694,7 @@ fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
         let can_select = relation_definition(&dsl, "docs", "can_select")
             .unwrap_or_else(|| panic!("`{guard}`: docs must define can_select:\n{dsl}"));
         assert_eq!(
-            can_select, "owner",
+            can_select, "owner and acting_app_user from request_gate",
             "`{guard}`: the relationship half survives the guard the tuples cannot carry:\n{dsl}"
         );
         assert!(
@@ -747,7 +752,7 @@ fn an_attribute_guard_over_a_literal_grants_the_rows_it_admits() {
     let (flag_dsl, flag_tuples) = translation(&schema("is_public = TRUE"));
     assert_eq!(
         relation_definition(&flag_dsl, "articles", "can_select").as_deref(),
-        Some("public_when_is_public"),
+        Some("public_when_is_public and acting_app_user from request_gate"),
         "guard precondition: the boolean flag must grant the wildcard through its own gate:\n{flag_dsl}"
     );
     let mut minted: Vec<(&str, String)> = Vec::new();

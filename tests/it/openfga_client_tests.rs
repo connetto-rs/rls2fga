@@ -72,15 +72,13 @@ async fn a_written_model_is_the_model_the_server_answers_from() {
     );
 
     let client = service.into_client(&store_id, &model_id);
-    support::openfga::write_tuples(
-        &client,
-        vec![support::openfga::make_tuple(
-            "docs:d1",
-            "owner",
-            "user:alice",
-        )],
-    )
-    .await;
+    let mut tuples = vec![support::openfga::make_tuple(
+        "docs:d1",
+        "owner",
+        "user:alice",
+    )];
+    tuples.extend(support::openfga::gate_tuples(["docs:d1"]));
+    support::openfga::write_tuples(&client, tuples).await;
 
     assert!(
         support::openfga::check_allowed(&client, "user:alice", "can_select", "docs:d1").await,

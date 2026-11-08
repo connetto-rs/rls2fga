@@ -1,14 +1,18 @@
 //! Regression tests for inputs where the generated model or tuple SQL diverged
 //! from `PostgreSQL` RLS semantics.
 //!
-//! Role scopes, restrictive barriers, and the principals a policy binds.
+//! The acting roles a `TO` list reaches, the barriers that bind them, and the
+//! exemptions the notes report.
 
+use rls2fga::parser::sql_parser::ParserDB;
+use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
 
+use crate::support::deployment::caller_deployment_acting_as;
 use crate::support::footgun::{
     assert_model_is_internally_consistent, db_of, pg_role_relation, relation_definition,
-    relation_definitions, relation_denies, scope_admits_role, translator, type_names,
+    relation_denies, translator,
 };
 
 /// RLS is `(permissive OR ...) AND restrictive AND ...`, so dropping a
@@ -46,8 +50,19 @@ CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
     );
 }
 
+/// `sql` translated for a deployment acting as `acting_roles`.
+fn translate_for(acting_roles: &[&str], db: &ParserDB) -> Outputs {
+    TranslatorBuilder::new(caller_deployment_acting_as(acting_roles, []))
+        .with_min_confidence(ConfidenceLevel::B)
+        .build()
+        .translate(db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+}
+
 /// One permissive read plus a barrier only `contractor` is subject to.
 const ROLE_SCOPED_BARRIER: &str = r"
+CREATE ROLE contractor NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
@@ -55,98 +70,52 @@ CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
 ";
 
-/// A RESTRICTIVE policy binds only the roles it names, so a user outside them keeps
-/// whatever the permissive policies grant.
+/// A RESTRICTIVE policy reaches only the acting roles its `TO` list names, so a
+/// deployment acting as a role outside the list keeps whatever the permissive
+/// policies grant.
 #[test]
 fn a_role_scoped_restrictive_policy_leaves_other_roles_unconstrained() {
-    let db = db_of(
-        r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
-CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
-  USING (reviewer_id = current_setting('app.user_id', true));
-",
-    );
-    let model = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let scope = pg_role_relation(&model.model(), "docs").unwrap_or_else(|| {
-        panic!(
-            "the contractor scope must reach the model:\n{}",
-            model.model()
-        )
-    });
-    let limited = relation_definition(&model.model(), "docs", "can_select")
-        .and_then(|can_select| {
-            relation_definition(&model.model(), "docs", can_select.trim()).or(Some(can_select))
-        })
-        .expect("docs should define can_select");
-    assert!(
-        limited.contains(&format!("but not usage from {scope}")),
-        "a user outside the role's inherited privileges must keep the grant, got \
-         '{limited}':\n{}",
-        model.model()
+    let model = translate_for(&["app_user", "contractor"], &db_of(ROLE_SCOPED_BARRIER)).model();
+    let can_select =
+        relation_definition(&model, "docs", "can_select").expect("docs should define can_select");
+    assert_eq!(
+        can_select,
+        "(owner and acting_app_user from request_gate) \
+         or (owner and reviewer and acting_contractor from request_gate)",
+        "the barrier reaches the contractor branch alone, and the app_user branch \
+         keeps the permissive grant:\n{model}"
     );
 }
 
-/// The subtracted side of a barrier is consulted like any other, so its tuples must
-/// survive the reachability filter. Without them the barrier subtracts nobody and the
-/// bound role keeps the access it forbids.
-#[test]
-fn a_role_scoped_barrier_keeps_the_tuples_it_subtracts() {
-    let sql = ROLE_SCOPED_BARRIER;
-    let db = db_of(sql);
-    let translator = translator(ConfidenceLevel::B);
-    let model = translator
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let scope = pg_role_relation(&model.model(), "docs").unwrap_or_else(|| {
-        panic!(
-            "the contractor scope must reach the model:\n{}",
-            model.model()
-        )
-    });
-
-    let outputs = translator
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let tuples = outputs.tuple_queries();
-    assert!(
-        scope_admits_role(tuples, "docs:", &scope, "contractor"),
-        "the subtracted role needs its tuples, got: {:#?}",
-        tuples.iter().map(|query| &query.sql).collect::<Vec<_>>()
-    );
-}
-
-/// A barrier reaches the JSON model as a `difference` node, which `OpenFGA` validates
-/// like any other userset.
+/// A barrier reaches the JSON model as a conjunct of the branch its `TO` list names,
+/// which `OpenFGA` validates like any other userset.
 #[test]
 fn a_role_scoped_barrier_emits_a_consistent_json_model() {
-    let db = db_of(ROLE_SCOPED_BARRIER);
-    let json = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .json_model();
+    let outputs = translate_for(&["app_user", "contractor"], &db_of(ROLE_SCOPED_BARRIER));
+    let json = outputs.json_model();
 
     assert_model_is_internally_consistent(&json);
+    assert_eq!(
+        relation_definition(&outputs.model(), "docs", "reviewer").as_deref(),
+        Some("[user]"),
+        "the barrier's clause must survive as a relation of the table:\n{}",
+        outputs.model()
+    );
     let serialized = serde_json::to_string(&json).expect("model should serialize");
     assert!(
-        serialized.contains(r#""difference""#),
-        "the barrier must survive into the JSON model, got:\n{serialized}"
+        serialized.contains("acting_contractor"),
+        "the barrier's branch must survive into the JSON model, got:\n{serialized}"
     );
 }
 
-/// Two barriers bind two roles, so each wraps the result of the one before it rather
-/// than replacing it.
+/// Two barriers name two roles, so each binds the branch its `TO` list names and
+/// neither crosses into the other's branch.
 #[test]
 fn two_role_scoped_barriers_each_bind_their_own_role() {
     let db = db_of(
         r"
+CREATE ROLE contractor NOLOGIN;
+CREATE ROLE auditor NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID, approver_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
@@ -156,45 +125,14 @@ CREATE POLICY docs_approve ON docs AS RESTRICTIVE FOR SELECT TO auditor
   USING (approver_id = current_setting('app.user_id', true));
 ",
     );
-    let model = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-
-    let limits: Vec<String> = model
-        .model()
-        .lines()
-        .filter_map(|line| line.trim().strip_prefix("define limit_"))
-        .filter_map(|rest| rest.split_once(':'))
-        .map(|(name, _)| format!("limit_{name}"))
-        .collect();
-    let [first, second] = limits.as_slice() else {
-        panic!(
-            "each barrier needs its own relation, got {limits:?}:\n{}",
-            model.model()
-        );
-    };
-
-    let outer = relation_definition(&model.model(), "docs", "can_select")
-        .expect("docs should define can_select");
-    let (outer, inner) = if outer.trim() == *second {
-        (second, first)
-    } else {
-        (first, second)
-    };
-    let outer_body = relation_definition(&model.model(), "docs", outer)
-        .unwrap_or_else(|| panic!("{outer} should be defined:\n{}", model.model()));
+    let model = translate_for(&["contractor", "auditor"], &db).model();
+    let can_select =
+        relation_definition(&model, "docs", "can_select").expect("docs should define can_select");
     assert_eq!(
-        outer_body.matches(inner.as_str()).count(),
-        2,
-        "the outer barrier applies to both sides of the inner one, got '{outer_body}':\n{}",
-        model.model()
-    );
-    assert_eq!(
-        model.model().matches("but not").count(),
-        2,
-        "each barrier subtracts its own role:\n{}",
-        model.model()
+        can_select,
+        "(owner and reviewer and acting_contractor from request_gate) \
+         or (owner and approver and acting_auditor from request_gate)",
+        "each barrier binds its own branch:\n{model}"
     );
 }
 
@@ -204,6 +142,7 @@ CREATE POLICY docs_approve ON docs AS RESTRICTIVE FOR SELECT TO auditor
 fn a_write_behind_a_barrier_keeps_its_read_gate() {
     let db = db_of(
         r"
+CREATE ROLE contractor NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID, reviewer_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
@@ -212,18 +151,18 @@ CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR ALL TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
-    let model = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let dsl = translate_for(&["contractor"], &db).model();
 
-    let can_update_using = relation_definition(&model.model(), "docs", "can_update_using")
-        .or_else(|| relation_definition(&model.model(), "docs", "can_update"))
-        .expect("docs should define the update phase");
+    assert_eq!(
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("owner and reviewer and acting_contractor from request_gate"),
+        "the barrier narrows the read the update depends on:\n{dsl}"
+    );
+    let can_update =
+        relation_definition(&dsl, "docs", "can_update").expect("docs should define can_update");
     assert!(
-        can_update_using.contains("can_select"),
-        "an editor who cannot read the row cannot change it, got '{can_update_using}':\n{}",
-        model.model()
+        can_update.contains("can_select"),
+        "an editor who cannot read the row cannot change it, got '{can_update}':\n{dsl}"
     );
 }
 
@@ -233,6 +172,7 @@ CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR ALL TO contractor
 fn a_barrier_over_an_inherited_rule_keeps_its_references() {
     let db = db_of(
         r"
+CREATE ROLE contractor NOLOGIN;
 CREATE TABLE parents(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE parents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY parents_own ON parents FOR SELECT USING (owner_id = current_setting('app.user_id', true));
@@ -244,13 +184,14 @@ CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
 ",
     );
-    let json = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps()
-        .json_model();
-
-    assert_model_is_internally_consistent(&json);
+    let outputs = translate_for(&["app_user", "contractor"], &db);
+    assert_eq!(
+        relation_definition(&outputs.model(), "docs", "reviewer").as_deref(),
+        Some("[user]"),
+        "the barrier branch keeps its clause beside the inherited grant:\n{}",
+        outputs.model()
+    );
+    assert_model_is_internally_consistent(&outputs.json_model());
 }
 
 /// An unscoped RESTRICTIVE policy binds everyone, so nothing is subtracted.
@@ -283,10 +224,14 @@ CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT
     );
 }
 
-/// Permissive read policies are an OR, so being in either role is enough.
+/// Permissive read policies are an OR per acting role, so a deployment whose acting
+/// roles each read the membership table through their own policy gets the grant in
+/// every branch.
 #[test]
 fn membership_readable_by_two_roles_admits_either_role() {
     let sql = r"
+CREATE ROLE auditor NOLOGIN;
+CREATE ROLE support NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
@@ -296,70 +241,67 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
 ";
-    let db = db_of(sql);
-    let translator = translator(ConfidenceLevel::B);
-    let model = translator
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let scope = pg_role_relation(&model.model(), "docs").unwrap_or_else(|| {
-        panic!(
-            "docs must scope the membership grant by role:\n{}",
-            model.model()
-        )
-    });
-    let outputs = translator
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let tuples = outputs.tuple_queries();
+    let model = translate_for(&["auditor", "support"], &db_of(sql)).model();
+    let can_select =
+        relation_definition(&model, "docs", "can_select").expect("docs should define can_select");
     for role in ["auditor", "support"] {
         assert!(
-            scope_admits_role(tuples, "docs:", &scope, role),
-            "either role can read the membership rows, so {role} needs scope tuples, got: {:#?}",
-            tuples.iter().map(|q| &q.sql).collect::<Vec<_>>()
+            can_select.contains(&format!("and acting_{role} from request_gate")),
+            "either role can read the membership rows, so {role} needs its own branch: \
+             '{can_select}':\n{model}"
         );
     }
+    assert_eq!(
+        can_select.matches(" from docs").count(),
+        2,
+        "both branches walk the same membership relation, got '{can_select}':\n{model}"
+    );
 }
 
-/// A policy the schema gives no clause constrains nothing, so it must not mint a
-/// role scope relation, a `pg_role` type, or a note asking for memberships that
-/// nothing consults.
+/// A policy the schema gives no clause constrains nothing, so it must not leave a
+/// relation nothing can read, or a tuple loading a role fact nothing consults.
 #[test]
 fn a_clauseless_policy_mints_no_role_scope() {
     let db = db_of(
         r"
+CREATE ROLE auditor NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR ALL TO auditor;
 ",
     );
-    let model = translator(ConfidenceLevel::B)
+    let outputs = translator(ConfidenceLevel::B)
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
+    let model = outputs.model();
 
     assert_eq!(
-        pg_role_relation(&model.model(), "docs"),
-        None,
-        "the barrier stores no clause, so it binds nothing:\n{}",
-        model.model()
+        relation_definition(&model, "docs", "can_select").as_deref(),
+        Some("owner and acting_app_user from request_gate"),
+        "the clauseless barrier reaches no acting role, and it would subtract \
+         nothing anyway:\n{model}"
     );
     assert!(
-        !type_names(&model.model())
+        !outputs
+            .tuple_queries()
             .iter()
-            .any(|name| name == "pg_role"),
-        "no relation reads a role here:\n{}",
-        model.model()
+            .any(|query| query.sql.contains("pg_role:auditor")),
+        "no tuple may load a role fact nothing reads, got: {:#?}",
+        outputs
+            .tuple_queries()
+            .iter()
+            .map(|query| &query.sql)
+            .collect::<Vec<_>>()
     );
     assert!(
-        !model
+        !outputs
             .notes()
             .iter()
             .any(|note| note.message().contains("inheriting members")),
-        "asking for tuples nothing consults is noise: {:#?}",
-        model.notes()
+        "asking for facts nothing consults is noise: {:#?}",
+        outputs.notes()
     );
 }
 
@@ -399,68 +341,71 @@ CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE USING (reviewer_id = cu
     );
 }
 
-/// A role the database exempts from row level security holds more than the model says,
-/// and the model cannot say otherwise: it describes the rules, and the bypass is the
-/// absence of them. Reporting it is the only honest option, and staying silent is what
-/// makes an exempt service account look constrained.
+/// An acting role the database exempts from row level security holds more than the
+/// model's policies say, and the note is the only channel that says so. Staying
+/// silent is what makes an exempt service account look constrained.
 #[test]
 fn a_role_that_bypasses_row_level_security_is_reported() {
     let schema = "CREATE ROLE reporting BYPASSRLS;\n\
-                  CREATE ROLE plain_user LOGIN;\n\
+                  CREATE ROLE plain_user NOLOGIN;\n\
                   CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   ALTER TABLE docs FORCE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
-    let db = db_of(schema);
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let outputs = translate_for(&["reporting", "plain_user"], &db_of(schema));
 
-    let exempt: Vec<String> = outputs
+    let exempt: Vec<&TranslationNote> = outputs
         .notes()
         .iter()
-        .filter(|note| note.severity() == NoteSeverity::Exempt)
-        .map(TranslationNote::message)
+        .filter(|note| matches!(note, TranslationNote::ActingRoleExempt { reason, .. } if reason == "has BYPASSRLS"))
         .collect();
-    assert_eq!(exempt.len(), 1, "one role bypasses, got {exempt:?}");
-    assert!(
-        exempt[0].contains("reporting"),
-        "the report has to name the role: {exempt:?}"
+    assert_eq!(
+        exempt.len(),
+        1,
+        "one role bypasses, got {:#?}",
+        outputs.notes()
     );
-    assert!(
-        !exempt[0].contains("plain_user"),
-        "a plain role is not exempt: {exempt:?}"
+    let TranslationNote::ActingRoleExempt { role, .. } = exempt[0] else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(
+        role.as_str(),
+        "reporting",
+        "the report has to name the role: {:#?}",
+        outputs.notes()
     );
-    // The model still describes only the rules that do apply.
+    // The model still describes the rules the bypassed policies give up.
     assert!(
-        outputs.model().contains("define can_select: owner"),
-        "the policy still translates:\n{}",
+        outputs
+            .model()
+            .contains("owner and acting_plain_user from request_gate"),
+        "the policy still translates for the role that meets it:\n{}",
         outputs.model()
     );
 }
 
 /// The messages of the exemption notes translating `sql` produces.
 fn exempt_notes(sql: &str) -> Vec<String> {
-    let db = db_of(sql);
     translator(ConfidenceLevel::B)
-        .translate(&db)
+        .translate(&db_of(sql))
         .expect("translation should plan")
         .outputs_accepting_gaps()
         .notes()
         .iter()
-        .filter(|note| note.severity() == NoteSeverity::Exempt)
+        .filter(|note| matches!(note, TranslationNote::ActingRoleExempt { .. }))
         .map(TranslationNote::message)
         .collect()
 }
 
-/// Without `FORCE ROW LEVEL SECURITY` the table's owner is exempt from every policy on
-/// it, so the model is stricter than the database for them. With it, nobody is.
+/// An acting role that owns a table without `FORCE ROW LEVEL SECURITY` is exempt from
+/// every policy on it, so the model is wider than the database for them. With it, the
+/// policies hold.
 #[test]
 fn a_table_that_does_not_force_row_level_security_is_reported() {
     let schema = |force: &str| {
         format!(
             "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
+             ALTER TABLE docs OWNER TO app_user;\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              {force}\
              CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n"
@@ -473,8 +418,8 @@ fn a_table_that_does_not_force_row_level_security_is_reported() {
         "the owner bypass is a finding: {unforced:?}"
     );
     assert!(
-        unforced[0].contains("docs"),
-        "and it names the table: {unforced:?}"
+        unforced[0].contains("app_user") && unforced[0].contains("docs"),
+        "and it names the role and the table: {unforced:?}"
     );
 
     let forced = exempt_notes(&schema("ALTER TABLE docs FORCE ROW LEVEL SECURITY;\n"));
@@ -484,115 +429,127 @@ fn a_table_that_does_not_force_row_level_security_is_reported() {
     );
 }
 
-/// Saying "the table's owner" sends the reader back to their schema to find out whether
-/// the exempt principal is the account their application connects as. Now that
-/// `sql-traits` keeps `ALTER TABLE ... OWNER TO`, the note can just say who.
+/// The exempt role is the acting role itself, so the note names the account the
+/// application connects as, when the schema says who owns the table.
 #[test]
 fn the_exempt_table_owner_is_named_when_the_schema_says_who_it_is() {
-    let owned = "CREATE ROLE app_owner;\n\
+    let owned = "CREATE ROLE app_owner NOLOGIN;\n\
                  CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                  ALTER TABLE docs OWNER TO app_owner;\n\
                  ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                  CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
+    let outputs = translate_for(&["app_owner"], &db_of(owned));
+    let named: Vec<&TranslationNote> = outputs
+        .notes()
+        .iter()
+        .filter(|note| matches!(note, TranslationNote::ActingRoleExempt { .. }))
+        .collect();
+    let [note] = named.as_slice() else {
+        panic!("one table, one owner bypass: {:#?}", outputs.notes())
+    };
+    let TranslationNote::ActingRoleExempt { role, .. } = note else {
+        unreachable!("filtered above")
+    };
+    assert_eq!(
+        role.as_str(),
+        "app_owner",
+        "the exempt role has a name, so the note uses it: {:#?}",
+        outputs.notes()
+    );
+
+    // A schema that never says who owns the table exempts no acting role, so there is
+    // nothing to report.
     let unowned = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                    ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                    CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
-    let named = exempt_notes(owned);
-    assert_eq!(named.len(), 1, "one table, one owner bypass: {named:?}");
-    assert!(
-        named[0].contains("app_owner"),
-        "the exempt role has a name, so the note uses it: {named:?}"
-    );
-
-    // A schema that never says who owns the table still has the bypass, and the note
-    // still has to report it without inventing a role.
     let anonymous = exempt_notes(unowned);
-    assert_eq!(
-        anonymous.len(),
-        1,
-        "the bypass is there either way: {anonymous:?}"
-    );
     assert!(
-        anonymous[0].contains("owner") && !anonymous[0].contains("app_owner"),
-        "with no owner recorded it stays generic: {anonymous:?}"
+        anonymous.is_empty(),
+        "with no owner recorded, no acting role is exempt: {anonymous:?}"
     );
 }
 
-/// The model and the notes for a table whose primary key is `key`.
-fn barrier_outputs(key: &str) -> (String, Vec<String>) {
-    let db = db_of(&format!(
+/// A barrier naming a role the schema never creates cannot be settled, so it binds
+/// everyone by refusing the statement rather than excusing anyone. Denying more than
+/// RLS is safe, granting more is not.
+#[test]
+fn a_barrier_role_the_schema_never_creates_binds_everyone() {
+    let db = db_of(
         r"
-CREATE TABLE docs ({key}, owner_id UUID, secret BOOLEAN);
+CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id UUID, secret BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT TO contractor
     USING (secret = false);
-"
-    ));
+",
+    );
     let outputs = translator(ConfidenceLevel::B)
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
-    let notes = outputs
-        .notes()
-        .iter()
-        .map(|note| note.message().clone())
-        .collect();
-    (outputs.model(), notes)
-}
-
-/// A barrier bound to roles is folded as `(base and rule) or (base but not member from
-/// scope)`, so the roles it binds are whoever the scope relation holds. Without a
-/// single-column key no scope tuples can be emitted, and subtracting an empty set leaves the
-/// barrier binding nobody, which is the one direction a missing input must never take. It has
-/// to bind everyone instead: denying more than RLS is safe, granting more is not.
-#[test]
-fn a_role_limited_barrier_with_no_scope_tuples_binds_everyone() {
-    let (dsl, notes) = barrier_outputs("tenant TEXT, id TEXT");
+    let dsl = outputs.model();
 
     assert!(
-        !dsl.contains("but not"),
-        "no scope tuples can say who is bound, so nothing may be excused from the barrier:\n{dsl}"
+        relation_denies(&dsl, "docs", "can_select"),
+        "nothing may be excused from a barrier whose role cannot be settled:\n{dsl}"
     );
+    let note = outputs.notes().iter().find(|note| {
+        matches!(
+            note,
+            TranslationNote::RowSecurityRefused { reason, .. }
+                if reason.contains("contractor")
+        )
+    });
     assert!(
-        !dsl.contains("[pg_role]"),
-        "a scope relation nothing can fill must not be published:\n{dsl}"
+        note.is_some(),
+        "the refusal must name the role the schema cannot settle: {:#?}",
+        outputs.notes()
     );
+    let note = note.expect("checked above");
     assert!(
-        !dsl.contains("type pg_role"),
-        "and neither must the type it would need:\n{dsl}"
+        note.to_string().contains("docs_bar"),
+        "and the barrier that caused it: {note}"
     );
-    assert!(
-        notes
-            .iter()
-            .any(|note| note.contains("docs_bar") && note.contains("everyone")),
-        "the operator must be told the barrier now binds more than RLS does, got {notes:#?}"
-    );
-    assert!(
-        !notes.iter().any(|note| note.contains("inheriting members")),
-        "nothing may ask for memberships no relation reads, got {notes:#?}"
+    assert_eq!(
+        note.severity(),
+        NoteSeverity::Unhandled,
+        "the model denies what the created policy would grant, which has to block \
+         the outputs"
     );
 }
 
-/// The guard must not over-fire: with a key the scope tuples can name, the barrier binds the
-/// roles it names and leaves everyone else alone, which is what `PostgreSQL` does.
+/// A barrier naming a role the schema creates binds exactly the acting roles the role
+/// reaches, and leaves the other branches alone, which is what `PostgreSQL` does.
 #[test]
-fn a_role_limited_barrier_with_scope_tuples_still_binds_only_its_roles() {
-    let (dsl, notes) = barrier_outputs("id TEXT PRIMARY KEY");
-
-    assert!(
-        dsl.contains("but not"),
-        "a fillable scope excuses everyone outside the bound roles:\n{dsl}"
+fn a_created_barrier_role_binds_only_its_own_branch() {
+    let db = db_of(
+        r"
+CREATE ROLE contractor NOLOGIN;
+CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id UUID, secret BOOLEAN);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT TO contractor
+    USING (secret = false);
+",
     );
+    let model = translate_for(&["app_user", "contractor"], &db).model();
+    let can_select =
+        relation_definition(&model, "docs", "can_select").expect("docs should define can_select");
     assert!(
-        dsl.contains("[pg_role]"),
-        "the scope relation the exclusion reads has to be declared:\n{dsl}"
+        can_select.contains("acting_app_user from request_gate"),
+        "the other branch keeps the grant the barrier never saw:\n{model}"
     );
+    let contractor_branch = can_select
+        .split(" or ")
+        .find(|branch| branch.contains("acting_contractor from request_gate"))
+        .expect("the contractor branch is missing:\n{model}");
     assert!(
-        notes
-            .iter()
-            .any(|note| note.contains("docs_bar") && note.contains("pg_role")),
-        "and the operator is asked to fill it, got {notes:#?}"
+        contractor_branch.contains("owner and ")
+            && contractor_branch
+                .replace("owner and ", "")
+                .contains(" and acting_contractor from request_gate"),
+        "the barrier joins its own clause into the contractor branch, got \
+         '{contractor_branch}':\n{model}"
     );
 }
 
@@ -600,98 +557,78 @@ fn a_role_limited_barrier_with_scope_tuples_still_binds_only_its_roles() {
 /// inheriting member of the role is admitted, a `NOINHERIT` member and a
 /// `GRANT ... WITH INHERIT FALSE` grantee are not, while `pg_has_role(.., 'MEMBER')`
 /// holds for all three. Probed on 18.4: `USING (true) TO editors` over three rows
-/// answers 3 to the inheriting member and 0 to the other two. So a `TO` scope walks
-/// `usage`, the kind the crate already defines as "every grant in the chain
-/// inherits", never plain membership.
+/// answers 3 to the inheriting member and 0 to the other two. So a `TO` list reaches
+/// exactly the acting roles that inherit the role, and never the plain members.
 #[test]
 fn a_to_scoped_policy_walks_usage_not_member() {
     let db = db_of(
         r"
-CREATE ROLE editors;
+CREATE ROLE editors NOLOGIN;
+CREATE ROLE member NOLOGIN;
+CREATE ROLE nomember NOLOGIN;
+GRANT editors TO member;
+GRANT editors TO nomember WITH INHERIT FALSE;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO editors USING (owner_id = current_setting('app.user_id', true));
 ",
     );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let dsl = outputs.model();
+    let dsl = translate_for(&["member", "nomember"], &db).model();
 
-    let can_select =
-        relation_definition(&dsl, "docs", "can_select").expect("can_select must be defined");
-    assert!(
-        can_select.contains("usage from scope_"),
-        "a TO scope admits inheriting members, which is the usage kind:\n{dsl}"
-    );
-    assert!(
-        !can_select.contains("member from scope_"),
-        "membership admits NOINHERIT members PostgreSQL refuses:\n{dsl}"
-    );
     assert_eq!(
-        relation_definition(&dsl, "pg_role", "usage").as_deref(),
-        Some("[user]"),
-        "the walked relation must be declared for the operator to load:\n{dsl}"
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("owner and acting_member from request_gate"),
+        "the TO list reaches the inheriting member alone, which is the usage kind: \
+         {dsl}"
     );
     assert!(
-        relation_definition(&dsl, "pg_role", "member").is_none(),
-        "nothing reads plain membership here, so declaring it would mislead:\n{dsl}"
-    );
-    assert!(
-        outputs
-            .notes()
-            .iter()
-            .any(|note| note.to_string().contains("reads pg_role 'usage'")),
-        "the note must name the kind the operator loads, got: {:#?}",
-        outputs.notes()
+        !dsl.contains("acting_nomember"),
+        "a non-inheriting member admits nothing the grant can name:\n{dsl}"
     );
 }
 
 /// The RESTRICTIVE fold excuses everyone outside the bound roles, and `PostgreSQL`
 /// draws that line with `has_privs_of_role` too. Probed on 18.4: a barrier
 /// `TO editors` binds the inheriting member (1 of 3 rows) and leaves the `NOINHERIT`
-/// member alone (3 of 3). Excusing by `member` would bind users `PostgreSQL` excuses.
+/// member alone (3 of 3). So a barrier reaches exactly the acting roles that
+/// inherit its `TO` roles.
 #[test]
 fn a_to_scoped_barrier_excuses_by_usage_not_membership() {
     let db = db_of(
         r"
-CREATE ROLE editors;
+CREATE ROLE editors NOLOGIN;
+CREATE ROLE member NOLOGIN;
+CREATE ROLE nomember NOLOGIN;
+GRANT editors TO member;
+GRANT editors TO nomember WITH INHERIT FALSE;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (true);
 CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO editors USING (owner_id = current_setting('app.user_id', true));
 ",
     );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let dsl = outputs.model();
+    let dsl = translate_for(&["member", "nomember"], &db).model();
 
-    let limit = relation_definitions(&dsl, "docs")
-        .into_iter()
-        .find(|(name, _)| name.starts_with("limit_"))
-        .map(|(_, body)| body)
-        .expect("the barrier must fold into a limit_ relation");
-    assert!(
-        limit.contains("but not usage from scope_"),
-        "the excused set is who lacks the role's inherited privileges:\n{dsl}"
-    );
-    assert!(
-        !limit.contains("but not member from scope_"),
-        "excusing non-members binds NOINHERIT members PostgreSQL excuses:\n{dsl}"
+    assert_eq!(
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some(
+            "(public_viewer and owner and acting_member from request_gate) \
+              or (public_viewer and acting_nomember from request_gate)"
+        ),
+        "the barrier binds the inheriting member's branch alone, and excusing by \
+         plain membership would bind the branch PostgreSQL leaves open:\n{dsl}"
     );
 }
 
-/// A membership table readable only by named roles scopes the parent grant, and the
-/// reader `PostgreSQL` admits is again the inheriting member, so the read scope walks
-/// `usage` like every other `TO` consumer.
+/// A membership table readable only by named roles grants through it to exactly the
+/// acting roles that read it, and a branch whose role cannot read the table gets no
+/// grant at all, the way `PostgreSQL` leaves the subquery empty for it.
 #[test]
 fn a_membership_read_scope_walks_usage() {
     let db = db_of(
         r"
-CREATE ROLE auditor;
+CREATE ROLE auditor NOLOGIN;
+CREATE ROLE plain NOLOGIN;
 CREATE TABLE users(id TEXT PRIMARY KEY);
 CREATE TABLE docs(id TEXT PRIMARY KEY);
 CREATE TABLE doc_members(
@@ -707,21 +644,27 @@ CREATE POLICY p ON docs FOR SELECT USING (
 );
 ",
     );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let outputs = translate_for(&["auditor", "plain"], &db);
     let dsl = outputs.model();
 
     let can_select =
         relation_definition(&dsl, "docs", "can_select").expect("can_select must be defined");
     assert!(
-        can_select.contains("usage from read_scope_"),
+        can_select.contains("and acting_auditor from request_gate"),
         "only the roles that may read memberships inherit the grant:\n{dsl}"
     );
     assert!(
-        !can_select.contains("member from read_scope_"),
-        "membership admits readers PostgreSQL refuses:\n{dsl}"
+        can_select.contains("no_access and acting_plain from request_gate"),
+        "a role that cannot read the membership table gets no grant through it: \
+         {dsl}"
+    );
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::MembershipTableGrantsNoReads { policy, .. } if policy == "p"
+        )),
+        "the unreadable branch is disclosed: {:#?}",
+        outputs.notes()
     );
 }
 
@@ -772,8 +715,8 @@ CREATE POLICY p ON docs FOR SELECT TO {spelling} USING (owner_id = current_setti
         let note = outputs.notes().iter().find(|note| {
             matches!(
                 note,
-                TranslationNote::PolicyBoundToDdlTimeRole { policy, spellings }
-                    if policy == "p" && spellings == &[spelling.to_string()]
+                TranslationNote::RowSecurityRefused { reason, .. }
+                    if reason.contains(spelling)
             )
         });
         assert!(
@@ -792,10 +735,9 @@ CREATE POLICY p ON docs FOR SELECT TO {spelling} USING (owner_id = current_setti
 
 /// The restrictive direction is the over-grant: probed on 18.4, a `LOGIN` owner under
 /// `FORCE ROW LEVEL SECURITY` creating `AS RESTRICTIVE ... TO CURRENT_USER` sees 1 of
-/// 2 rows while the old model excused everyone from the unfillable scope and granted
-/// both. An unknowable scope has to bind everyone instead, named roles beside it
-/// included, since a barrier that also binds the DDL runner cannot be narrowed to the
-/// names alone.
+/// 2 rows. An unknowable scope cannot be narrowed to anyone, so the statement is
+/// refused for the acting role it would decide, named roles beside it included,
+/// since a barrier that also binds the DDL runner cannot be split into the names.
 #[test]
 fn a_pseudo_role_barrier_binds_everyone() {
     for to_clause in ["CURRENT_USER", "editors, CURRENT_USER"] {
@@ -814,15 +756,12 @@ CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO {to_clause} USING (owner_id
         let dsl = outputs.model();
 
         assert!(
-            !dsl.contains("but not"),
+            relation_denies(&dsl, "docs", "can_select"),
             "an unfillable scope must not excuse anyone (`TO {to_clause}`):\n{dsl}"
         );
-        let can_select =
-            relation_definition(&dsl, "docs", "can_select").expect("can_select must be defined");
         assert!(
-            can_select.contains("public_viewer and owner"),
-            "the barrier binds everyone, so the rule intersects the grant \
-             (`TO {to_clause}`):\n{dsl}"
+            !dsl.contains("but not"),
+            "a refused statement subtracts nothing (`TO {to_clause}`):\n{dsl}"
         );
         assert!(
             !outputs
@@ -836,22 +775,38 @@ CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO {to_clause} USING (owner_id
                 .map(|q| &q.sql)
                 .collect::<Vec<_>>()
         );
-        assert!(
-            outputs.notes().iter().any(|note| matches!(
+        // The schema settles the list left to right, so the refusal names the first
+        // spelling it cannot: the pseudo-role alone, or the created role beside it.
+        let named = to_clause
+            .split(',')
+            .next()
+            .expect("the clause names at least one role")
+            .trim();
+        let note = outputs.notes().iter().find(|note| {
+            matches!(
                 note,
-                TranslationNote::PolicyBoundToDdlTimeRole { policy, .. } if policy == "r"
-            )),
-            "the widening must be disclosed (`TO {to_clause}`), got: {:#?}",
+                TranslationNote::RowSecurityRefused { reason, .. } if reason.contains(named)
+            )
+        });
+        assert!(
+            note.is_some(),
+            "the refusal must name the spelling it settles on (`TO {to_clause}`), got: \
+             {:#?}",
             outputs.notes()
+        );
+        assert_eq!(
+            note.map(TranslationNote::severity),
+            Some(NoteSeverity::Unhandled),
+            "the model denies what the created policy would grant, which has to block \
+             the outputs (`TO {to_clause}`)"
         );
     }
 }
 
-/// A permissive policy the threshold empties is now retained through the filter, so
+/// A permissive policy the threshold empties is retained through the filter, so
 /// the generator can say what was lost. Retaining it must not resurrect its side
 /// effects: registration runs before translation, so a policy contributing no
-/// expression would otherwise still mint a role scope relation and ask the operator
-/// to load `pg_role` memberships that nothing consults.
+/// expression would otherwise still ask for `pg_role` facts that nothing consults.
 #[test]
 fn a_policy_the_threshold_emptied_mints_no_scope_relation() {
     let db = db_of(
@@ -874,14 +829,23 @@ CREATE POLICY docs_scoped ON docs FOR SELECT TO auditor USING (opaque_gate(id));
          scope relation for it:\n{dsl}"
     );
     assert!(
-        !dsl.contains("type pg_role"),
-        "and no role type is minted for it:\n{dsl}"
+        !outputs
+            .tuple_queries()
+            .iter()
+            .any(|query| query.sql.contains("pg_role:auditor")),
+        "and no tuple may load a role fact the emptied policy leaves unread, got: \
+         {:#?}",
+        outputs
+            .tuple_queries()
+            .iter()
+            .map(|query| &query.sql)
+            .collect::<Vec<_>>()
     );
     assert!(
         !outputs
             .notes()
             .iter()
-            .any(|note| matches!(note, TranslationNote::PolicyRoleScope { .. })),
+            .any(|note| matches!(note, TranslationNote::RoleGateScope { .. })),
         "nor a note asking for memberships nothing reads: {:?}",
         outputs.notes()
     );
@@ -895,14 +859,9 @@ CREATE POLICY docs_scoped ON docs FOR SELECT TO auditor USING (opaque_gate(id));
     );
 }
 
-/// A `PostgreSQL` policy name is unique per table, so a scope **object** keyed on the
-/// name alone pools two tables' roles.
-///
-/// The scope relation may stay keyed on the policy, since relations are scoped to a
-/// type. The object id may not: it lives in the shared `pg_role_scope` type, so two
-/// tables whose policies happen to share a name land on one object and each one's roles
-/// are written onto it. Every row of both tables then admits the union, which grants
-/// each table the other's roles.
+/// A `PostgreSQL` policy name is unique per table, so two tables may share a policy
+/// name with different rules. The `TO` lists decide per acting role, so each table
+/// reaches exactly the branch of its own role and no other.
 #[test]
 fn two_tables_with_a_same_named_policy_do_not_pool_their_role_scopes() {
     let db = db_of(
@@ -917,42 +876,18 @@ CREATE POLICY p ON docs FOR SELECT TO auditor USING (TRUE);
 CREATE POLICY p ON memos FOR SELECT TO support USING (TRUE);
 ",
     );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-    let dsl = outputs.model();
-    let tuples = outputs.tuple_queries();
+    let model = translate_for(&["auditor", "support"], &db).model();
 
-    let scope_of = |type_name: &str| -> String {
-        let found = relation_definitions(&dsl, type_name)
-            .into_iter()
-            .find(|(_, body)| body == "[pg_role_scope]");
-        match found {
-            Some((name, _)) => name,
-            None => panic!("{type_name} should point at a role scope:\n{dsl}"),
-        }
-    };
-    let docs_scope = scope_of("docs");
-    let memos_scope = scope_of("memos");
-
-    // The companion halves, so pooling cannot be hidden by admitting nothing at all.
-    assert!(
-        scope_admits_role(tuples, "docs:", &docs_scope, "auditor"),
-        "docs is scoped TO auditor:\n{dsl}"
+    assert_eq!(
+        relation_definition(&model, "docs", "can_select").as_deref(),
+        Some("public_viewer and acting_auditor from request_gate"),
+        "docs is scoped TO auditor alone:\n{model}"
     );
-    assert!(
-        scope_admits_role(tuples, "memos:", &memos_scope, "support"),
-        "memos is scoped TO support:\n{dsl}"
-    );
-
-    assert!(
-        !scope_admits_role(tuples, "docs:", &docs_scope, "support"),
-        "docs is scoped TO auditor alone, so support must not reach its rows"
-    );
-    assert!(
-        !scope_admits_role(tuples, "memos:", &memos_scope, "auditor"),
-        "memos is scoped TO support alone, so auditor must not reach its rows"
+    assert_eq!(
+        relation_definition(&model, "memos", "can_select").as_deref(),
+        Some("public_viewer and acting_support from request_gate"),
+        "memos is scoped TO support alone, so support must not reach its rows and \
+         auditor must not reach docs':\n{model}"
     );
 }
 
@@ -970,38 +905,43 @@ CREATE POLICY p ON docs FOR SELECT TO admin USING (TRUE);
 CREATE POLICY p ON memos FOR SELECT TO "Admin" USING (TRUE);
 "#,
     );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+    let outputs = translate_for(&["admin", "Admin"], &db);
     let dsl = outputs.model();
-    let tuples = outputs.tuple_queries();
-    let docs_scope = pg_role_relation(&dsl, "docs").expect("docs should have a role scope");
-    let memos_scope = pg_role_relation(&dsl, "memos").expect("memos should have a role scope");
 
-    assert_ne!(docs_scope, memos_scope);
-    assert!(scope_admits_role(tuples, "docs:", &docs_scope, "admin"));
-    assert!(scope_admits_role(tuples, "memos:", &memos_scope, "Admin"));
-    assert!(!scope_admits_role(tuples, "docs:", &docs_scope, "Admin"));
-    assert!(!scope_admits_role(tuples, "memos:", &memos_scope, "admin"));
+    let docs_read =
+        relation_definition(&dsl, "docs", "can_select").expect("docs should define can_select");
+    let memos_read =
+        relation_definition(&dsl, "memos", "can_select").expect("memos should define can_select");
+    assert_eq!(
+        docs_read, "public_viewer and acting_admin from request_gate",
+        "docs is scoped TO admin alone:\n{dsl}"
+    );
+    assert_ne!(
+        memos_read, docs_read,
+        "memos is scoped TO \"Admin\", a distinct identity from admin:\n{dsl}"
+    );
+    assert!(
+        outputs
+            .tuple_queries()
+            .iter()
+            .any(|q| q.sql.contains("'pg_role:Admin'")),
+        "the quoted role keeps its own kind tuples, got: {:#?}",
+        outputs
+            .tuple_queries()
+            .iter()
+            .map(|q| &q.sql)
+            .collect::<Vec<_>>()
+    );
     assert!(outputs
         .notes()
         .iter()
         .all(|note| !note.message().contains("role") || !note.message().contains("rewritten")));
 }
 
-/// Every scope relation a type declares, in declaration order.
-fn scope_relations(dsl: &str, type_name: &str) -> Vec<String> {
-    relation_definitions(dsl, type_name)
-        .into_iter()
-        .filter(|(_, body)| body == "[pg_role_scope]")
-        .map(|(name, _)| name)
-        .collect()
-}
-
-/// A `pg_has_role` gate asks about roles the schema creates, so the schema's memberships
-/// answer it for every request and every row. One that answers yes is a true constant,
-/// and the `TO` clause alone carries the grant.
+/// A `pg_has_role` gate asks about roles the schema creates, so the schema's
+/// memberships answer it per acting role. One that answers yes is a constant the
+/// classifier folds away, and the `TO` clause alone decides which branch the grant
+/// reaches.
 #[test]
 fn a_role_gate_the_schema_answers_yes_keeps_only_the_to_scope() {
     let db = db_of(
@@ -1018,34 +958,44 @@ CREATE POLICY p ON docs FOR SELECT TO editor USING (pg_has_role('editor', 'MEMBE
         .expect("translation should plan")
         .outputs_accepting_gaps();
     let dsl = outputs.model();
-    let tuples = outputs.tuple_queries();
-    let scopes = scope_relations(&dsl, "docs");
 
     assert_eq!(
-        scopes.len(),
-        1,
-        "the gate is a constant the schema answers, so only the TO clause scopes:\n{dsl}"
-    );
-    let [scope] = scopes.as_slice() else {
-        unreachable!("checked above")
-    };
-    let can_select =
-        relation_definition(&dsl, "docs", "can_select").expect("docs should define can_select");
-    assert!(
-        can_select.contains(scope.as_str()),
-        "the surviving scope has to be read: 'define can_select: {can_select}'"
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("public_viewer and acting_app_user from request_gate"),
+        "the gate is a constant the schema answers, so the TO clause alone decides:\n{dsl}"
     );
     assert!(
-        can_select.contains("public_viewer"),
-        "the gate answered yes, so the grant itself survives: 'define can_select: {can_select}'"
+        !outputs
+            .tuple_queries()
+            .iter()
+            .any(|query| query.sql.contains("pg_role:editor")),
+        "nothing may load a role fact the gate folded away, got: {:#?}",
+        outputs
+            .tuple_queries()
+            .iter()
+            .map(|query| &query.sql)
+            .collect::<Vec<_>>()
     );
-    assert!(
-        can_select.contains("usage from") && !can_select.contains("member from"),
-        "the TO scope walks usage like every other TO consumer:\n{dsl}"
+
+    // The same gate answered no keeps the no.
+    let denied = db_of(
+        r"
+CREATE ROLE editor;
+GRANT editor TO app_user;
+CREATE ROLE outsider;
+CREATE TABLE public.docs(id TEXT PRIMARY KEY);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs FOR SELECT TO editor USING (pg_has_role('outsider', 'MEMBER'));
+",
     );
+    let denied_dsl = translator(ConfidenceLevel::B)
+        .translate(&denied)
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+        .model();
     assert!(
-        scope_admits_role(tuples, "docs:", scope, "editor"),
-        "the scope object still carries the role: {tuples:#?}"
+        relation_denies(&denied_dsl, "docs", "can_select"),
+        "a grant the gate denies has to stay a denial:\n{denied_dsl}"
     );
 }
 

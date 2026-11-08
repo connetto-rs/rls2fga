@@ -309,6 +309,7 @@ mod tests {
                     directly_related_user_types: vec![RelationReference {
                         type_name: TypeName::try_from(name.clone())
                             .expect("the name is otherwise valid"),
+                        relation: None,
                         wildcard: None,
                         condition: None,
                     }],

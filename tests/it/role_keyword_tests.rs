@@ -1,10 +1,14 @@
 //! `current_user` read as the role a request acts as.
 
-use rls2fga::classifier::patterns::PatternClass;
+use rls2fga::classifier::patterns::{AttributeCondition, ConstantBool, PatternClass};
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
 use crate::support::deployment;
+use crate::support::footgun::relation_definition;
+
+/// The two acting roles the cases below run as.
+const ACTING_ROLES: &str = "CREATE ROLE reader; CREATE ROLE writer;";
 
 /// One owner column compared with the acting role, rows owned by either acting role and
 /// by a name no request acts as.
@@ -22,55 +26,92 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owns(owner));
 ";
 
-/// Under two acting roles `current_user` holds one name per request, so no one literal
-/// stands for it and the clause is refused naming both roles, whether the policy spells
-/// the keyword or a function body it inlines does.
+/// Each acting role reads `current_user` as its own name, so a policy is classified once
+/// per role and each copy compares the column with that role's name, whether the policy
+/// spells the keyword or a function body it inlines does.
 #[test]
-fn two_acting_roles_leave_current_user_refused() {
+fn each_acting_role_reads_current_user_as_its_own_name() {
     let deployment = deployment::caller_deployment_acting_as(&["reader", "writer"], []);
     for schema in [DOCS, DOCS_THROUGH_A_FUNCTION] {
-        let (classified, _, _) = support::classify_with(schema, None, &deployment);
-        let using = classified[0]
-            .using_classification()
-            .expect("the policy has a USING clause");
-        let PatternClass::Unknown(refused) = &using.pattern else {
-            panic!("current_user has no one value, got {:?}", using.pattern);
-        };
-        assert!(
-            refused.reason.contains("acts as 2 roles (reader, writer)"),
-            "the refusal names both acting roles, got {:?}",
-            refused.reason
+        let (classified, _, _) =
+            support::classify_with(&format!("{ACTING_ROLES}{schema}"), None, &deployment);
+        let compared: Vec<(Option<&str>, &str)> = classified
+            .iter()
+            .map(|policy| {
+                let using = policy
+                    .using_classification()
+                    .expect("the policy has a USING clause");
+                let value = match &using.pattern {
+                    PatternClass::P9AttributeCondition(AttributeCondition {
+                        value_description,
+                        ..
+                    }) => value_description.as_str(),
+                    PatternClass::ExpandedFunction(expanded) => match &expanded.inner.pattern {
+                        PatternClass::P9AttributeCondition(AttributeCondition {
+                            value_description,
+                            ..
+                        }) => value_description.as_str(),
+                        other => panic!("the inlined body compares a literal, got {other:?}"),
+                    },
+                    other => panic!("the policy compares a literal, got {other:?}"),
+                };
+                (policy.acting_role(), value)
+            })
+            .collect();
+        assert_eq!(
+            compared,
+            [(Some("reader"), "'reader'"), (Some("writer"), "'writer'"),]
         );
     }
 }
 
-/// A restrictive gate on a membership table that reads `current_user` has no one value
-/// under two acting roles, so the membership read stays guarded rather than open.
+/// A comparison of `current_user` with a role's name is a constant for each acting role,
+/// true for the role it names and false for every other.
 #[test]
-fn two_acting_roles_keep_a_current_user_membership_gate_guarded() {
-    let (classified, db, registry) = support::classify_with(
-        "CREATE TABLE docs(id INT PRIMARY KEY);
-         CREATE TABLE members(doc_id INT REFERENCES docs(id), user_id TEXT,
-                              PRIMARY KEY (doc_id, user_id));
-         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-         ALTER TABLE members ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY members_all ON members FOR SELECT USING (true);
-         CREATE POLICY members_gate ON members AS RESTRICTIVE FOR SELECT
-             USING (current_user = 'reader');
-         CREATE POLICY docs_read ON docs FOR SELECT USING (
-             EXISTS (SELECT 1 FROM members m WHERE m.doc_id = docs.id
-                     AND m.user_id = current_setting('app.user_id', true)));",
+fn a_role_name_comparison_is_a_constant_per_acting_role() {
+    let (classified, _, _) = support::classify_with(
+        &format!(
+            "{ACTING_ROLES}
+             CREATE TABLE docs(id INT PRIMARY KEY);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY readers ON docs FOR SELECT USING (current_user = 'reader');"
+        ),
         None,
         &deployment::caller_deployment_acting_as(&["reader", "writer"], []),
     );
-    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    let constants: Vec<(Option<&str>, bool)> = classified
+        .iter()
+        .map(|policy| {
+            let using = policy
+                .using_classification()
+                .expect("the policy has a USING clause");
+            let PatternClass::P10ConstantBool(ConstantBool { value }) = using.pattern else {
+                panic!(
+                    "the comparison folds to a constant, got {:?}",
+                    using.pattern
+                );
+            };
+            (policy.acting_role(), value)
+        })
+        .collect();
+    assert_eq!(constants, [(Some("reader"), true), (Some("writer"), false)]);
+}
+
+/// The model joins each role's branch to the kind a check states, so the rows a request
+/// sees follow the role it acts as.
+#[test]
+fn each_acting_role_gets_its_own_branch() {
+    let (classified, db, registry) = support::classify_with(
+        &format!("{ACTING_ROLES}{DOCS}"),
+        None,
+        &deployment::caller_deployment_acting_as(&["reader", "writer"], []),
+    );
+    let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B).model();
+    let can_select = relation_definition(&model, "docs", "can_select").expect("docs answers reads");
     assert!(
-        planned
-            .notes()
-            .iter()
-            .any(|note| note.message().contains("membership table 'members'")),
-        "the membership read stays guarded, got {:#?}",
-        planned.notes()
+        can_select.contains("acting_reader from request_gate")
+            && can_select.contains("acting_writer from request_gate"),
+        "each acting role reads through its own branch:\n{model}"
     );
 }
 
@@ -78,46 +119,84 @@ fn two_acting_roles_keep_a_current_user_membership_gate_guarded() {
 mod parity {
     use rls2fga::types::ActionStatement;
 
-    use super::DOCS;
+    use super::{ACTING_ROLES, DOCS};
     use crate::support;
     use crate::support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
 
-    /// A deployment acting as one role reads `current_user` as that role's name, so a
-    /// request acting as `reader` sees the rows `reader` owns and one acting as `writer`
-    /// those `writer` owns, in `PostgreSQL` and in the model alike.
+    /// A deployment acting as two roles reads `current_user` as the role each request runs
+    /// as, so `reader` sees the rows `reader` owns and `writer` those `writer` owns, in
+    /// `PostgreSQL` and in the model alike.
     #[tokio::test]
     #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
     async fn current_user_names_each_acting_role() {
         let cluster = Cluster::start().await;
-        for role in ["reader", "writer"] {
-            let case = ParityCase::reading(
-                &format!("current-user-{role}"),
-                DOCS,
-                &[
-                    "INSERT INTO docs VALUES (1, 'reader'), (2, 'writer'), (3, 'someone')",
-                    "CREATE ROLE reader; CREATE ROLE writer;
-                     GRANT SELECT ON docs TO reader, writer",
-                ],
-                vec![Principal::as_role("alice", role)],
-            )
-            .acting_as(role);
-            let run = support::parity::run(&cluster, &case).await;
-            for (object, owner) in [("docs:1", "reader"), ("docs:2", "writer"), ("docs:3", "")] {
-                assert_postgres(
-                    &case,
-                    &run,
-                    "alice",
-                    object,
-                    ActionStatement::Select,
-                    owner == role,
-                );
-            }
-            assert_agrees(&case, &run);
+        let case = ParityCase::reading(
+            "current-user-per-acting-role",
+            DOCS,
+            &[
+                "INSERT INTO docs VALUES (1, 'reader'), (2, 'writer'), (3, 'someone')",
+                &format!("{ACTING_ROLES} GRANT SELECT ON docs TO reader, writer"),
+            ],
+            vec![
+                Principal::as_role("alice", "reader"),
+                Principal::as_role("bob", "writer"),
+            ],
+        );
+        let run = support::parity::run(&cluster, &case).await;
+        for (subject, object, visible) in [
+            ("alice", "docs:1", true),
+            ("alice", "docs:2", false),
+            ("bob", "docs:2", true),
+            ("bob", "docs:1", false),
+            ("alice", "docs:3", false),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                visible,
+            );
         }
+        assert_agrees(&case, &run);
     }
 
-    /// A column's name decides nothing once `current_user` is a role literal, so literal,
-    /// null, list and clock tests on columns named like owners guard rows as any column's do.
+    /// A comparison of `current_user` with a role's name admits every row to that role and
+    /// none to the other, and a gate a membership table reads that way does the same.
+    #[tokio::test]
+    #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+    async fn a_role_name_comparison_admits_only_that_role() {
+        let cluster = Cluster::start().await;
+        let case = ParityCase::reading(
+            "role-name-comparison",
+            "CREATE TABLE docs(id INT PRIMARY KEY);
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY readers ON docs FOR SELECT USING (current_user = 'reader');",
+            &[
+                "INSERT INTO docs VALUES (1), (2)",
+                &format!("{ACTING_ROLES} GRANT SELECT ON docs TO reader, writer"),
+            ],
+            vec![
+                Principal::as_role("alice", "reader"),
+                Principal::as_role("bob", "writer"),
+            ],
+        );
+        let run = support::parity::run(&cluster, &case).await;
+        assert_postgres(
+            &case,
+            &run,
+            "alice",
+            "docs:1",
+            ActionStatement::Select,
+            true,
+        );
+        assert_postgres(&case, &run, "bob", "docs:1", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
+    }
+
+    /// Literal, null, list and clock tests on columns named like owners guard rows as any
+    /// column's do, since a column's name decides nothing once `current_user` is a role.
     #[tokio::test]
     #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
     async fn user_like_columns_guard_rows_like_any_column() {

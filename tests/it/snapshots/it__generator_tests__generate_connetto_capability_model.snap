@@ -1,6 +1,5 @@
 ---
 source: tests/it/generator_tests.rs
-assertion_line: 27
 expression: outputs.model().trim()
 ---
 model
@@ -16,10 +15,11 @@ type paper_shares
     define no_access: [nobody]
     define papers: [papers]
     define public_viewer: [user:*]
-    define can_delete: public_viewer and can_select
-    define can_insert: can_select from papers
-    define can_insert_returning: can_select from papers and can_select
-    define can_select: gate_shares_read_abbc62d2
+    define request_gate: [request_gate]
+    define can_delete: public_viewer and acting_app_user from request_gate and can_select
+    define can_insert: can_select from papers and acting_app_user from request_gate
+    define can_insert_returning: can_select from papers and acting_app_user from request_gate and can_select
+    define can_select: gate_shares_read_abbc62d2 and acting_app_user from request_gate
     define can_select_for_update: can_update
     define can_update: no_access
     define can_update_without_reading: can_update
@@ -32,12 +32,21 @@ type papers
   relations
     define owner: [user]
     define paper_shares_share: [paper_shares_share]
-    define can_delete: owner or gate_papers_p_3b273139 from paper_shares_share
-    define can_insert: owner or gate_papers_p_3b273139 from paper_shares_share
-    define can_select: owner or gate_papers_p_3b273139 from paper_shares_share
+    define request_gate: [request_gate]
+    define can_delete: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
+    define can_insert: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
+    define can_select: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
     define can_select_for_update: can_update
-    define can_update: owner or gate_papers_p_3b273139 from paper_shares_share
-    define can_update_without_reading: owner or gate_papers_p_3b273139 from paper_shares_share
+    define can_update: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
+    define can_update_without_reading: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
+
+type pg_role
+  relations
+    define usage: [user]
+
+type request_gate
+  relations
+    define acting_app_user: [pg_role#usage]
 
 condition when_viewer_in_app_subjects_394712ea(app_subjects: list<string>, viewer: string) {
   viewer in app_subjects

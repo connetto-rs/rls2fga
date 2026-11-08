@@ -5,10 +5,9 @@
 
 use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::types::ConfidenceLevel;
+use rls2fga::types::TranslationNote;
 
-use crate::support::footgun::{
-    db_of, pg_role_relation, relation_definition, relation_denies, translator, type_names,
-};
+use crate::support::footgun::{db_of, relation_definition, relation_denies, translator};
 
 /// A `SELECT` policy reading its own table needs itself, which `PostgreSQL` rejects
 /// as infinite recursion, so one such policy makes the whole table unreadable.
@@ -36,9 +35,14 @@ CREATE POLICY docs_tree ON docs FOR SELECT USING (
     );
     assert!(
         model.notes().iter().any(|note| {
-            note.subject() == "docs"
-                && note.message().contains("recursion")
-                && note.message().contains("docs reads docs")
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion { table, role, commands, relation }
+                    if table.to_string() == "docs"
+                        && role == "app_user"
+                        && commands == &["SELECT".to_string()]
+                        && relation == "docs"
+            )
         }),
         "the operator must be told the table's reads loop on itself, got {:#?}",
         model.notes()
@@ -171,13 +175,23 @@ fn a_read_cycle_across_two_tables_denies_both() {
     let mut complaints = Vec::new();
     for table in ["a", "b"] {
         if !outputs.notes().iter().any(|note| {
-            note.subject() == table
-                && note.message().contains("recursion")
-                && note.message().contains("SELECT")
-                && note.message().contains("a reads b")
-                && note.message().contains("b reads a")
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion {
+                    table: spelling,
+                    role,
+                    commands,
+                    relation,
+                }
+                    if spelling.to_string() == table
+                        && role == "app_user"
+                        && commands == &["SELECT".to_string()]
+                        && relation == table
+            )
         }) {
-            complaints.push(format!("no note walks the loop for '{table}'"));
+            complaints.push(format!(
+                "no note names the loop that denies SELECT of '{table}'"
+            ));
         }
     }
     assert!(
@@ -407,7 +421,7 @@ CREATE POLICY pdi_loop ON docs FOR INSERT WITH CHECK (
     let dsl = outputs.model();
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the read policy of 'docs' reads nothing that loops, so reads still translate:\n{dsl}"
     );
     assert_eq!(
@@ -417,21 +431,35 @@ CREATE POLICY pdi_loop ON docs FOR INSERT WITH CHECK (
     );
     assert!(
         outputs.notes().iter().any(|note| {
-            note.subject() == "docs"
-                && note.message().contains("recursion")
-                && note.message().contains("INSERT")
-                && note.message().contains("m reads m")
-                && !note.message().contains("SELECT")
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion { table, role, commands, relation }
+                    if table.to_string() == "docs"
+                        && role == "app_user"
+                        && commands == &["INSERT".to_string()]
+                        && relation == "m"
+            )
         }),
-        "the note names the INSERT and the loop, and reads of 'docs' are fine, so it must \
-         not name SELECT, got {:#?}",
+        "the note must name the INSERT and the relation whose reads loop, got {:#?}",
         outputs.notes()
     );
     assert!(
-        !outputs
-            .notes()
-            .iter()
-            .any(|note| note.severity().diverges_from_database()),
+        !outputs.notes().iter().any(|note| {
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion { table, commands, .. }
+                    if table.to_string() == "docs"
+                        && commands.iter().any(|command| command == "SELECT")
+            )
+        }),
+        "reads of 'docs' are fine, so no note may deny them, got {:#?}",
+        outputs.notes()
+    );
+    assert!(
+        !outputs.notes().iter().any(|note| {
+            note.severity().diverges_from_database()
+                && !matches!(note, TranslationNote::ClauseBelowThreshold { .. })
+        }),
         "PostgreSQL raises here rather than granting, so nothing may claim the model \
          denies what RLS grants, got {:#?}",
         outputs.notes()
@@ -462,7 +490,7 @@ CREATE POLICY pdu ON docs FOR UPDATE USING (owner_id = current_setting('app.user
     let dsl = outputs.model();
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("owner"),
+        Some("owner and acting_app_user from request_gate"),
         "the read clause reads nothing that loops, so reads still translate:\n{dsl}"
     );
     for relation in ["can_update", "can_update_without_reading"] {
@@ -473,39 +501,57 @@ CREATE POLICY pdu ON docs FOR UPDATE USING (owner_id = current_setting('app.user
     }
     assert!(
         outputs.notes().iter().any(|note| {
-            note.subject() == "docs"
-                && note.message().contains("recursion")
-                && note.message().contains("UPDATE")
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion { table, role, commands, relation }
+                    if table.to_string() == "docs"
+                        && role == "app_user"
+                        && commands == &["UPDATE".to_string()]
+                        && relation == "m"
+            )
         }),
-        "the note must name the UPDATE, got {:#?}",
+        "the note must name the UPDATE and the relation whose reads loop, got {:#?}",
         outputs.notes()
     );
-    // This policy is blocked on one clause and live on the other, so it still reaches the
-    // translation loop. Skipping the blocked clause is the only thing keeping the report
-    // from asking for membership rows of a table whose reads raise, and the DSL is
-    // identical either way, so nothing else here would notice.
+    // The policy is blocked on one clause and live on the other, and 'm' grants no reads,
+    // so no membership row is visible and no query may go looking for one.
     assert!(
-        !outputs
-            .notes()
-            .iter()
-            .any(|note| note.message().contains("membership table 'm'")),
-        "no relation reads 'm', so nothing may report on which of its rows are visible, \
-         got {:#?}",
+        outputs.notes().iter().any(|note| {
+            matches!(
+                note,
+                TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
+                    if join_table.to_string() == "m"
+            )
+        }),
+        "no membership row of 'm' is visible, so the note must say so, got {:#?}",
         outputs.notes()
     );
     assert!(
         !outputs
-            .notes()
+            .tuple_queries()
             .iter()
-            .any(|note| note.severity().diverges_from_database()),
+            .any(|query| query.sql.contains(" m ") || query.sql.contains(" m\n")),
+        "no relation reads 'm', so no query may load it, got {:#?}",
+        outputs
+            .tuple_queries()
+            .iter()
+            .map(|query| &query.sql)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !outputs.notes().iter().any(|note| {
+            note.severity().diverges_from_database()
+                && !matches!(note, TranslationNote::ClauseBelowThreshold { .. })
+        }),
         "PostgreSQL raises the update rather than granting it, so nothing diverges, got {:#?}",
         outputs.notes()
     );
 }
 
-/// The loop is a thing the operator has to fix in SQL, so the note walks it in the
-/// schema's own spelling rather than in the model's type names, which lowercase and can
-/// carry a disambiguating suffix.
+/// The loop is a thing the operator has to fix in SQL, so the note carries the table in
+/// the schema's own spelling rather than in the model's type names, which lowercase and
+/// can carry a disambiguating suffix, and the relation in the spelling the database's
+/// error names.
 #[test]
 fn a_read_recursion_note_names_tables_as_the_schema_spells_them() {
     let db = db_of(
@@ -522,19 +568,23 @@ CREATE POLICY docs_tree ON app.docs FOR SELECT USING (
         .expect("translation should plan")
         .outputs_accepting_gaps();
     assert!(
-        outputs
-            .notes()
-            .iter()
-            .any(|note| note.message().contains("app.docs reads app.docs")),
-        "the note must name the table as the schema does, got {:#?}",
+        outputs.notes().iter().any(|note| {
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion { table, relation, .. }
+                    if table.to_string() == "app.docs" && relation == "docs"
+            )
+        }),
+        "the note must carry the table as the schema spells it and the relation as the \
+         database's error names it, got {:#?}",
         outputs.notes()
     );
 }
 
-/// A policy whose every command the loop denies contributes nothing, so it must not leave
-/// a role scope relation and a note asking the operator to load memberships nothing reads.
+/// A `TO` role the deployment's acting roles never reach denies the policy's commands to
+/// every request, and the policy contributes nothing the operator has to load.
 #[test]
-fn a_fully_blocked_policy_leaves_no_role_scope_behind() {
+fn a_policy_no_acting_role_reaches_denies_and_contributes_nothing() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
@@ -548,22 +598,29 @@ CREATE POLICY docs_tree ON docs FOR SELECT TO auditor USING (
         .expect("translation should plan")
         .outputs_accepting_gaps();
     let dsl = outputs.model();
-    assert_eq!(
-        pg_role_relation(&dsl, "docs"),
-        None,
-        "the only policy is denied outright, so nothing consults a role scope:\n{dsl}"
-    );
+    for relation in ["can_select", "can_insert", "can_update", "can_delete"] {
+        assert!(
+            relation_denies(&dsl, "docs", relation),
+            "no acting role the deployment runs as reaches 'auditor', so {relation} denies:\n{dsl}"
+        );
+    }
     assert!(
-        !type_names(&dsl).iter().any(|name| name == "pg_role"),
-        "no relation references pg_role, so the type must not be declared:\n{dsl}"
-    );
-    assert!(
-        !outputs
-            .notes()
-            .iter()
-            .any(|note| note.message().contains("auditor")),
-        "nothing asks for role memberships nothing reads, got {:#?}",
+        outputs.notes().iter().any(|note| {
+            matches!(
+                note,
+                TranslationNote::RowSecurityRefused { table, role, commands, reason, .. }
+                    if table.to_string() == "docs"
+                        && role == "app_user"
+                        && commands == &["SELECT".to_string()]
+                        && reason.contains("auditor")
+            )
+        }),
+        "the operator must be told the policy's TO clause is unreachable, got {:#?}",
         outputs.notes()
+    );
+    assert!(
+        outputs.tuple_queries().is_empty(),
+        "no relation grants, so nothing is loaded:\n{dsl}"
     );
 }
 
@@ -726,12 +783,12 @@ CREATE POLICY pb_own ON b FOR SELECT USING (owner_id = current_setting('app.user
 }
 
 /// A membership table whose own reads loop makes every read of the table that joins it
-/// raise, so the grant denies. What this pins beyond the denial is the reporting: nothing
-/// may ask the operator to load membership rows for a relation no permission reaches, and
-/// no query may go looking for them. Probed on `postgres:18`: `SELECT` on `docs` raises
-/// `infinite recursion detected in policy for relation "m"`.
+/// raise, and the note names the relation `PostgreSQL` names. What this pins beyond the
+/// denial is that no query may go looking for rows of a table whose reads raise. Probed on
+/// `postgres:18`: `SELECT` on `docs` raises `infinite recursion detected in policy for
+/// relation "m"`.
 #[test]
-fn a_looping_membership_table_asks_for_no_tuples_and_no_disclosure() {
+fn a_looping_membership_table_asks_for_no_tuples() {
     let db = db_of(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
@@ -750,7 +807,7 @@ CREATE POLICY pd ON docs FOR SELECT USING (
 /// correlated one and would otherwise be one recognizer away from reporting a gap that
 /// does not exist.
 #[test]
-fn a_looping_uncorrelated_membership_table_asks_for_no_tuples_and_no_disclosure() {
+fn a_looping_uncorrelated_membership_table_asks_for_no_tuples() {
     let db = db_of(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
@@ -764,42 +821,53 @@ CREATE POLICY pd ON docs FOR SELECT USING (EXISTS (SELECT 1 FROM m WHERE m.user_
     assert_looping_membership_is_silent(&db, "the uncorrelated membership spelling");
 }
 
-/// Reads of `docs` deny, the note names the loop rather than the membership table's row
-/// visibility, and neither the report nor the tuple SQL asks for membership rows.
+/// Reads of `docs` and of `m` both deny, the note names the relation whose reads loop,
+/// the membership note says no row of `m` is visible, and no query goes looking for rows
+/// of a table whose reads raise.
 fn assert_looping_membership_is_silent(db: &ParserDB, spelling: &str) {
     let outputs = translator(ConfidenceLevel::B)
         .translate(db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
     let dsl = outputs.model();
-    assert_eq!(
-        relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("no_access"),
-        "{spelling}: reading 'docs' expands a clause reading 'm', whose reads loop:\n{dsl}"
+    for table in ["docs", "m"] {
+        assert_eq!(
+            relation_definition(&dsl, table, "can_select").as_deref(),
+            Some("no_access"),
+            "{spelling}: reading '{table}' expands a clause whose reads loop:\n{dsl}"
+        );
+    }
+    assert!(
+        outputs.notes().iter().any(|note| {
+            matches!(
+                note,
+                TranslationNote::PolicyReadRecursion { table, role, commands, relation }
+                    if table.to_string() == "docs"
+                        && role == "app_user"
+                        && commands == &["SELECT".to_string()]
+                        && relation == "m"
+            )
+        }),
+        "{spelling}: the note must name the relation whose reads loop, got {:#?}",
+        outputs.notes()
     );
     assert!(
         outputs.notes().iter().any(|note| {
-            note.subject() == "docs"
-                && note.message().contains("recursion")
-                && note.message().contains("m reads m")
+            matches!(
+                note,
+                TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
+                    if join_table.to_string() == "m"
+            )
         }),
-        "{spelling}: the note must name the loop, got {:#?}",
+        "{spelling}: no membership row of 'm' is visible, so the note must say so, \
+         got {:#?}",
         outputs.notes()
     );
     assert!(
-        !outputs
-            .notes()
-            .iter()
-            .any(|note| note.message().contains("membership table 'm'")),
-        "{spelling}: no permission reaches a membership relation, so nothing may report on \
-         which of its rows are visible, got {:#?}",
-        outputs.notes()
-    );
-    assert!(
-        !outputs
-            .notes()
-            .iter()
-            .any(|note| note.severity().diverges_from_database()),
+        !outputs.notes().iter().any(|note| {
+            note.severity().diverges_from_database()
+                && !matches!(note, TranslationNote::ClauseBelowThreshold { .. })
+        }),
         "{spelling}: PostgreSQL raises here rather than granting, so nothing diverges, got {:#?}",
         outputs.notes()
     );

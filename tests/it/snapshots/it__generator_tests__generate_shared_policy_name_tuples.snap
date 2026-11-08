@@ -1,6 +1,5 @@
 ---
 source: tests/it/generator_tests.rs
-assertion_line: 28
 expression: "tuple_generator::format_tuples(outputs.tuple_queries())"
 ---
 SET TIME ZONE 'UTC';
@@ -14,9 +13,25 @@ FROM "public"."campaigns"
 WHERE "id" IS NOT NULL AND length('campaigns:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END) <= 256
 AND "starts_at" IS NOT NULL;
 
+-- campaigns admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:campaigns' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every campaigns row is judged by the scope campaigns
+SELECT 'campaigns:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:campaigns' AS subject
+FROM "public"."campaigns"
+WHERE "id" IS NOT NULL AND length('campaigns:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END) <= 256;
+
 -- Request-time gate on lifts_at, evaluated by condition when_lifts_at_request_time_7b4d538f
 SELECT 'embargoes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'gate_visible_now_7dce72fa' AS relation, 'user:*' AS subject,
   'when_lifts_at_request_time_7b4d538f' AS condition, jsonb_build_object('lifts_at', "lifts_at") AS context
 FROM "public"."embargoes"
 WHERE "id" IS NOT NULL AND length('embargoes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END) <= 256
 AND "lifts_at" IS NOT NULL;
+
+-- embargoes admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
+SELECT 'request_gate:embargoes' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
+
+-- Every embargoes row is judged by the scope embargoes
+SELECT 'embargoes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:embargoes' AS subject
+FROM "public"."embargoes"
+WHERE "id" IS NOT NULL AND length('embargoes:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END) <= 256;

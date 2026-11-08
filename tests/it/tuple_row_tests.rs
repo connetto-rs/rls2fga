@@ -80,6 +80,26 @@ fn a_row_of_the_tuple_sql_becomes_the_fact_it_spells() {
     assert_eq!(record.context, None);
 }
 
+/// The acting kind's constant row names a userset subject, which the reader takes as the
+/// fact the tuple SQL writes.
+#[test]
+fn the_acting_kind_row_becomes_the_fact_it_spells() {
+    let db = ownership_db();
+    let outputs = ownership_outputs(&db);
+
+    let record = outputs
+        .record_from_tuple_row(TupleRow {
+            object: "request_gate:docs",
+            relation: "acting_app_user",
+            subject: "pg_role:app_user#usage",
+            condition: None,
+        })
+        .expect("the model defines acting_app_user on request_gate");
+
+    assert_eq!(record.subject, "pg_role:app_user#usage");
+    assert_eq!(record.context, None);
+}
+
 #[test]
 fn a_relation_the_model_does_not_define_is_refused() {
     let db = ownership_db();

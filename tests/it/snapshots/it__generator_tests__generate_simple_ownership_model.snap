@@ -9,13 +9,22 @@ type user
 
 type nobody
 
+type pg_role
+  relations
+    define usage: [user]
+
+type request_gate
+  relations
+    define acting_app_user: [pg_role#usage]
+
 type resources
   relations
     define no_access: [nobody]
     define owner: [user]
-    define can_delete: owner
+    define request_gate: [request_gate]
+    define can_delete: owner and acting_app_user from request_gate
     define can_insert: no_access
-    define can_select: owner
+    define can_select: owner and acting_app_user from request_gate
     define can_select_for_update: can_update
     define can_update: no_access
     define can_update_without_reading: can_update

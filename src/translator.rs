@@ -587,7 +587,8 @@ mod tests {
         for index in 0..source_count {
             writeln!(
                 schema,
-                "CREATE POLICY owner_{index} ON docs FOR SELECT USING (owner_{index} = current_user);"
+                "CREATE POLICY owner_{index} ON docs FOR SELECT \
+                 USING (owner_{index} = current_setting('app.user_id'));"
             )
             .expect("policy writes");
         }
@@ -615,7 +616,9 @@ mod tests {
                     .outputs_accepting_gaps()
                     .tuple_queries()
                     .len(),
-                source_count
+                // One per owner column, beside the acting kind's fact and each row's link
+                // to it.
+                source_count + 2
             );
             assert_eq!(unbounded_columns_resolutions(), 1);
         }

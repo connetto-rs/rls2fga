@@ -113,12 +113,17 @@ type orders
   relations
     define no_access: [nobody]
     define projects: [projects]
+    define request_gate: [request_gate]
     define can_delete: no_access
     define can_insert: no_access
-    define can_select: projects_with_read from projects
+    define can_select: projects_with_read from projects and acting_app_user from request_gate
     define can_select_for_update: can_update
-    define can_update: projects_with_write from projects and can_select
-    define can_update_without_reading: projects_with_write from projects
+    define can_update: projects_with_write from projects and acting_app_user from request_gate and can_select
+    define can_update_without_reading: projects_with_write from projects and acting_app_user from request_gate
+
+type pg_role
+  relations
+    define usage: [user]
 
 type projects
   relations
@@ -128,6 +133,10 @@ type projects
     define write: [user]
     define projects_with_read: read or write or admin or teams_with_read from teams
     define projects_with_write: write or admin or teams_with_write from teams
+
+type request_gate
+  relations
+    define acting_app_user: [pg_role#usage]
 
 type teams
   relations
@@ -177,7 +186,7 @@ fn a_policy_on_the_level_itself_reads_the_call_relation() {
     );
     assert_eq!(
         relation_definition(&model(&sql, BOTH), "projects", "can_select").as_deref(),
-        Some("projects_with_read")
+        Some("projects_with_read and acting_app_user from request_gate")
     );
 }
 
@@ -528,14 +537,20 @@ fn a_call_returning_nothing_denies() {
     let unkeyed =
         "CREATE TABLE orders (id TEXT, project_id TEXT NOT NULL REFERENCES projects (id),";
     let helpers = ["authz.projects_as", "authz.teams_as"];
-    for (orders, using) in [
+    for ((orders, using), expected) in [
         (
-            keyed,
-            "project_id = ANY (ARRAY(SELECT authz.projects_as('owner')))",
+            (
+                keyed,
+                "project_id = ANY (ARRAY(SELECT authz.projects_as('owner')))",
+            ),
+            "no_access and acting_app_user from request_gate",
         ),
         (
-            unkeyed,
-            "project_id = ANY (ARRAY(SELECT authz.projects_as('read')))",
+            (
+                unkeyed,
+                "project_id = ANY (ARRAY(SELECT authz.projects_as('read')))",
+            ),
+            "no_access",
         ),
     ] {
         let dsl = translator(ConfidenceLevel::B, &helpers)
@@ -546,7 +561,7 @@ fn a_call_returning_nothing_denies() {
             .clone();
         assert_eq!(
             relation_definition(&dsl, "orders", "can_select").as_deref(),
-            Some("no_access"),
+            Some(expected),
             "`{using}`: {dsl}"
         );
     }
@@ -584,7 +599,10 @@ CREATE POLICY docs_read ON docs FOR SELECT USING (id IN (SELECT docs_kept()));
     let mut kept: Vec<&str> = outputs
         .tuple_queries()
         .iter()
-        .filter(|query| !query.sql.contains("FROM \"public\".\"docs\""))
+        .filter(|query| {
+            query.sql.contains("FROM \"public\".\"doc_levels\"")
+                || query.sql.contains("FROM \"public\".\"doc_flags\"")
+        })
         .map(|query| {
             query
                 .sql
@@ -654,7 +672,7 @@ CREATE POLICY optional_read ON optional_tables FOR SELECT USING (
     let dsl = outputs.model();
     assert_eq!(
         relation_definition(&dsl, "optional_tables", "can_select").as_deref(),
-        Some("installations_of_bot from installations")
+        Some("installations_of_bot from installations and acting_app_user from request_gate")
     );
     let bots: Vec<&str> = outputs
         .tuple_queries()
@@ -713,7 +731,8 @@ fn a_column_with_no_foreign_key_is_a_parent_of_each_level_it_is_compared_with() 
     };
     assert_eq!(
         definition("installations", "can_select"),
-        "teams_with_admin from teams or projects_with_admin from projects"
+        "(teams_with_admin from teams or projects_with_admin from projects) \
+         and acting_app_user from request_gate"
     );
     assert_eq!(
         definition("installations", "installations_administered"),
@@ -723,6 +742,6 @@ fn a_column_with_no_foreign_key_is_a_parent_of_each_level_it_is_compared_with() 
     assert_eq!(definition("installations", "projects"), "[projects]");
     assert_eq!(
         definition("installation_tables", "can_select"),
-        "installations_administered from installations"
+        "installations_administered from installations and acting_app_user from request_gate"
     );
 }

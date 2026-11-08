@@ -1132,10 +1132,9 @@ mod parity {
                  TO targeted USING (NOT {BLOCKED});",
                 schema(&shared_grant)
             );
-            let mut scoped = case("role-scoped-blocklist", &sql, &["GRANT targeted TO bob;"])
+            let scoped = case("role-scoped-blocklist", &sql, &["GRANT targeted TO bob;"])
                 .after(&["CREATE ROLE targeted;"])
                 .loading_from_rows();
-            scoped.principals[1].pg_roles.push("targeted".to_string());
             let run = support::parity::run(&cluster, &scoped).await;
             for (subject, object, visible) in [
                 ("alice", "docs:d1", true),

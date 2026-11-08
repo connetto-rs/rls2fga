@@ -128,13 +128,34 @@ CREATE POLICY tasks_all ON tasks FOR ALL USING (
         .outputs_accepting_gaps()
         .model();
 
+    let mut bodies = Vec::new();
     for relation in ["can_select", "can_insert", "can_update", "can_delete"] {
-        assert_eq!(
-            relation_definition(&dsl, "tasks", relation).as_deref(),
-            Some("owner from projects"),
-            "every inherited command reads the same parent-side rule:\n{dsl}"
+        bodies.push(
+            relation_definition(&dsl, "tasks", relation)
+                .unwrap_or_else(|| panic!("tasks should define {relation}:\n{dsl}")),
         );
     }
+    assert!(
+        bodies.windows(2).all(|pair| pair[0] == pair[1]),
+        "every inherited command reads the same parent-side rule:\n{dsl}"
+    );
+    let walked = bodies[0]
+        .split(" and ")
+        .next()
+        .expect("the command walks one parent rule")
+        .split(" from ")
+        .next()
+        .expect("the rule sits on the parent");
+    assert!(
+        bodies[0].ends_with(" from projects and acting_app_user from request_gate"),
+        "the commands walk the parent rule through their own kind, got '{}':\n{dsl}",
+        bodies[0]
+    );
+    assert_eq!(
+        relation_definition(&dsl, "projects", walked).as_deref(),
+        Some("owner and can_select"),
+        "the rule consults the parent's SELECT rule, not a parent relation of its own name:\n{dsl}"
+    );
 }
 
 /// Operators at the outermost nesting level of a DSL definition body.
@@ -234,9 +255,22 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
 
     let tasks_select =
         relation_definition(&dsl, "tasks", "can_select").expect("tasks should define can_select");
+    let walked = tasks_select
+        .split(" and ")
+        .next()
+        .expect("the command walks one parent rule")
+        .split(" from ")
+        .next()
+        .expect("the rule sits on the parent");
+    assert!(
+        tasks_select.ends_with(" from projects and acting_app_user from request_gate"),
+        "tasks walks the parent rule through its own kind, got '{tasks_select}':\n{dsl}"
+    );
     assert_eq!(
-        tasks_select, "owner from projects",
-        "the task policy names ownership of the project, not any access to it:\n{dsl}"
+        relation_definition(&dsl, "projects", walked).as_deref(),
+        Some("owner and can_select"),
+        "the rule it walks names ownership of the project, not any access to it, gated by \
+         the parent's own read:\n{dsl}"
     );
 }
 
@@ -408,7 +442,10 @@ fn an_inherited_parent_rule_is_named_after_the_rule_itself() {
             .unwrap_or_else(|| panic!("{table} should define can_select"));
         assert_eq!(
             body,
-            format!("{} from projects", inherited[0].0),
+            format!(
+                "{} from projects and acting_app_user from request_gate",
+                inherited[0].0
+            ),
             "{table} must walk the shared inherited rule"
         );
     }
@@ -438,9 +475,10 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
 
     let can_select =
         relation_definition(&dsl, "tasks", "can_select").expect("tasks should define can_select");
-    let (_, tupleset) = can_select
+    let (_, rest) = can_select
         .split_once(" from ")
         .expect("inheritance walks a tupleset");
+    let tupleset = rest.split(" and ").next().unwrap_or(rest).trim();
     let walked = can_select
         .split_once(" from ")
         .map(|(relation, _)| relation.to_string())
@@ -676,22 +714,23 @@ CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_sett
         relation_definition(&dsl, "tasks", "can_select")
     };
 
-    assert_eq!(
-        inherited(
-            "EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id \
-             AND p.owner_id = current_setting('app.user_id', true))"
-        )
-        .as_deref(),
-        Some("owner from projects"),
-        "guard precondition: the unparenthesised spelling must inherit"
+    let unparen = inherited(
+        "EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id \
+         AND p.owner_id = current_setting('app.user_id', true))",
+    );
+    assert!(
+        unparen.as_deref().is_some_and(
+            |body| body.ends_with(" from projects and acting_app_user from request_gate")
+        ),
+        "guard precondition: the unparenthesised spelling must inherit the parent rule \
+         through its own kind, got {unparen:?}"
+    );
+    let paren = inherited(
+        "(EXISTS ( SELECT 1 FROM projects p WHERE ((p.id = tasks.project_id) \
+         AND (p.owner_id = current_setting('app.user_id', true)))))",
     );
     assert_eq!(
-        inherited(
-            "(EXISTS ( SELECT 1 FROM projects p WHERE ((p.id = tasks.project_id) \
-             AND (p.owner_id = current_setting('app.user_id', true)))))"
-        )
-        .as_deref(),
-        Some("owner from projects"),
+        paren, unparen,
         "pg_dump's parentheses must not cost the parent link"
     );
 }
@@ -848,7 +887,7 @@ fn an_inheritance_parents_tuples_read_only_its_own_rows() {
     // The narrowing lives in the tuples alone: the model is unchanged.
     assert_eq!(
         relation_definition(&outputs.model(), "docs", "can_select").as_deref(),
-        Some("owner")
+        Some("owner and acting_app_user from request_gate")
     );
 }
 
@@ -1185,7 +1224,7 @@ CREATE POLICY p ON docs FOR SELECT
     let dsl = outputs.model();
     assert_eq!(
         relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("can_select from orgs"),
+        Some("can_select from orgs and acting_app_user from request_gate"),
         "a restricted parent's gate is the whole rule:\n{dsl}"
     );
     assert_model_is_internally_consistent(&outputs.json_model());
