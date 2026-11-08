@@ -19,34 +19,51 @@ pub(crate) fn select_gate_rule(expr: &UsersetExpr) -> Option<&UsersetExpr> {
 }
 
 /// Whether `rule` can only hold where `visible` holds, both read on `plan`. Unrecognized
-/// shapes keep the gate.
+/// shapes keep the gate. `path` holds the relations being expanded, so a cycle stops.
 pub(crate) fn rule_implies(
     rule: &UsersetExpr,
     visible: &UsersetExpr,
     plan: &TypePlan,
     by_name: &BTreeMap<&TypeName, &TypePlan>,
-    seen: &mut BTreeSet<(TypeName, RelationName)>,
+    path: &mut Vec<(TypeName, RelationName)>,
 ) -> bool {
     if rule == visible {
         return true;
+    }
+    // A conjunct of the rule that implies the gate is enough, since the rule admits no more.
+    if let UsersetExpr::Intersection(conjuncts) = rule {
+        if conjuncts
+            .iter()
+            .any(|conjunct| rule_implies(conjunct, visible, plan, by_name, path))
+        {
+            return true;
+        }
     }
     match visible {
         // Any branch that admits the rule admits it for the whole union.
         UsersetExpr::Union(branches) => branches
             .iter()
-            .any(|branch| rule_implies(rule, branch, plan, by_name, seen)),
+            .any(|branch| rule_implies(rule, branch, plan, by_name, path)),
         // Every conjunct has to admit it.
         UsersetExpr::Intersection(children) => children
             .iter()
-            .all(|child| rule_implies(rule, child, plan, by_name, seen)),
+            .all(|child| rule_implies(rule, child, plan, by_name, path)),
         // A named relation stands for its own definition. Levels of a role
-        // hierarchy chain through here, and `seen` keeps a cycle from looping.
+        // hierarchy chain through here, and `path` keeps a cycle from looping.
         UsersetExpr::Computed(name) => {
-            seen.insert((plan.type_name.clone(), name.clone()))
-                && plan
-                    .computed_relations
-                    .get(name)
-                    .is_some_and(|expr| rule_implies(rule, expr, plan, by_name, seen))
+            let Some(expr) = plan.computed_relations.get(name) else {
+                return false;
+            };
+            if path
+                .iter()
+                .any(|(type_name, relation)| *type_name == plan.type_name && relation == name)
+            {
+                return false;
+            }
+            path.push((plan.type_name.clone(), name.clone()));
+            let implied = rule_implies(rule, expr, plan, by_name, path);
+            path.pop();
+            implied
         }
         // Both sides walking one relation reach the same objects, so the question moves to
         // the type they reach: a role ladder answered through a pointer chains here.
@@ -80,7 +97,7 @@ pub(crate) fn rule_implies(
                         &UsersetExpr::Computed(computed.clone()),
                         target,
                         by_name,
-                        seen,
+                        path,
                     )
                 })
         }
@@ -117,7 +134,7 @@ pub(crate) fn simplify_redundant_select_gates(all_types: &mut BTreeMap<TypeName,
             let Some(rule) = select_gate_rule(expr) else {
                 continue;
             };
-            if rule_implies(rule, visible, read, &by_name, &mut BTreeSet::new()) {
+            if rule_implies(rule, visible, read, &by_name, &mut Vec::new()) {
                 *expr = rule.clone();
             }
         }
