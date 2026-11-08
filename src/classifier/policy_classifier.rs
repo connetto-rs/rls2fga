@@ -1,7 +1,11 @@
+use crate::generator::db_lookup::{
+    key_collation_refusal, resolve_row_identity, TEAM_PRINCIPAL_TABLES, USER_PRINCIPAL_TABLES,
+};
+use crate::generator::model_generator::resolve_principal_info;
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
-use crate::parser::names::{lookup_table, table_has_column};
-use crate::types::ColumnName;
+use crate::parser::names::{lookup_table, resolve_table_id, table_has_column};
+use crate::types::{ColumnName, TableId};
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator, Value};
 
 use crate::classifier::expansion::{self, ExpansionState};
@@ -199,7 +203,8 @@ fn classify_clause<DB: DatabaseLike>(
         Err(reason) => unknown_d(expr, reason.to_string()),
         Ok(Some(classified)) => classified,
     };
-    apply_guarded_column_check(classified, expr, db, table)
+    let classified = apply_guarded_column_check(classified, expr, db, table);
+    apply_collation_check(classified, expr, db, registry, table)
 }
 
 /// Refuse a classification that names a missing guarded column.
@@ -277,7 +282,8 @@ pub(crate) fn classify_expr_depth<DB: DatabaseLike>(
     };
     // Every classification passes through here, including each part of a composite and
     // the inner rule of an inheritance, each against its own table.
-    apply_guarded_column_check(classified, expr, db, table)
+    let classified = apply_guarded_column_check(classified, expr, db, table);
+    apply_collation_check(classified, expr, db, registry, table)
 }
 
 /// The column of the table being classified that `pattern` reads, if it names one.
@@ -325,6 +331,187 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
     }
+}
+
+/// Refuse a classification whose grant `OpenFGA` would decide by comparing a column whose
+/// collation can find two spellings equal.
+fn apply_collation_check<DB: DatabaseLike>(
+    classified: ClassifiedExpr,
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> ClassifiedExpr {
+    let refusal = resolve_table_id(db, table)
+        .and_then(|guarded| compared_key_refusal(&classified.pattern, &guarded, db, registry));
+    match refusal {
+        Some(reason) => unknown_d(expr, reason),
+        None => classified,
+    }
+}
+
+/// Why a column `pattern` lets `OpenFGA` compare with another key or a request value cannot
+/// be compared there, if one cannot.
+///
+/// Matched exhaustively, as [`guarded_column`] is. A composite's parts and an inheritance's
+/// inner rule pass through [`classify_expr_depth`] in their own right, and an object's own
+/// key names the row it was read from without being compared, so neither is listed.
+fn compared_key_refusal<DB: DatabaseLike>(
+    pattern: &PatternClass,
+    guarded: &TableId,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Option<String> {
+    let check = |table: &TableId, column: &ColumnName| key_collation_refusal(table, column, db);
+    match pattern {
+        PatternClass::P3DirectOwnership(DirectOwnership { column })
+        | PatternClass::P11ArrayMembership(ArrayMembership { column })
+        | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { column, .. })
+        | PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { column, .. })
+        | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
+            column, ..
+        }) => check(guarded, column),
+        PatternClass::P20DeclaredHelper(DeclaredHelper { column, call }) => {
+            check(guarded, column).or_else(|| helper_call_refusal(call, db))
+        }
+        PatternClass::P1NumericThreshold(NumericThreshold {
+            function_name,
+            resource_column,
+            ..
+        })
+        | PatternClass::P2RoleNameInList(RoleNameInList {
+            function_name,
+            resource_column,
+            ..
+        }) => resource_column
+            .as_ref()
+            .and_then(|column| check(guarded, column))
+            .or_else(|| role_function_refusal(function_name, db, registry)),
+        PatternClass::P5ParentInheritance(ParentInheritance {
+            parent_table,
+            fk_column,
+            ..
+        }) => check(guarded, fk_column).or_else(|| {
+            resolve_row_identity(parent_table, db)?
+                .iter()
+                .find_map(|column| check(parent_table, column))
+        }),
+        PatternClass::P4ExistsMembership(membership)
+        | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { membership, .. }) => {
+            membership_refusal(membership, guarded, db)
+        }
+        PatternClass::MembershipExclusion(MembershipExclusion { subtract, .. }) => subtract
+            .iter()
+            .find_map(|membership| membership_refusal(membership, guarded, db)),
+        PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {
+            member_table,
+            user_column,
+            ..
+        }) => check(member_table, user_column),
+        PatternClass::P19IndirectMembership(IndirectMembership {
+            link_table,
+            pairs,
+            owner_table,
+            owner_columns,
+            memberships,
+            ..
+        }) => pairs
+            .iter()
+            .find_map(|pair| {
+                check(link_table, &pair.join_column).or_else(|| check(guarded, &pair.outer_column))
+            })
+            .or_else(|| {
+                owner_columns
+                    .iter()
+                    .find_map(|column| check(link_table, column))
+            })
+            .or_else(|| {
+                memberships
+                    .iter()
+                    .find_map(|membership| membership_refusal(membership, owner_table, db))
+            }),
+        PatternClass::ExpandedFunction(ExpandedFunction { .. })
+        | PatternClass::P6BooleanFlag(BooleanFlag { .. })
+        | PatternClass::P7AbacAnd(AbacAnd { .. })
+        | PatternClass::P8Composite(Composite { .. })
+        | PatternClass::P9AttributeCondition(AttributeCondition { .. })
+        | PatternClass::P10ConstantBool(ConstantBool { .. })
+        | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
+        | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
+    }
+}
+
+/// Why a key a declared role function's ladder reads cannot be compared in `OpenFGA`: a
+/// grant's grantee or owner, a team membership's team or member, or a principal's key.
+fn role_function_refusal<DB: DatabaseLike>(
+    function_name: &str,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Option<String> {
+    let Some(FunctionSemantic::RoleThreshold {
+        grant_table,
+        grant_grantee_col,
+        grant_resource_col,
+        team_membership,
+        user_table,
+        user_pk_col,
+        team_table,
+        team_pk_col,
+        ..
+    }) = registry.get(function_name)
+    else {
+        return None;
+    };
+    let principal = |table: &Option<String>, column: &Option<ColumnName>, fallback: &[&str]| {
+        resolve_principal_info(db, table.as_deref(), column.as_ref(), fallback).and_then(
+            |principal| key_collation_refusal(&principal.table, &principal.identity_col, db),
+        )
+    };
+    resolve_table_id(db, grant_table)
+        .and_then(|grant| {
+            key_collation_refusal(&grant, grant_grantee_col, db)
+                .or_else(|| key_collation_refusal(&grant, grant_resource_col, db))
+        })
+        .or_else(|| {
+            let membership = team_membership.as_ref()?;
+            let table = resolve_table_id(db, &membership.table)?;
+            key_collation_refusal(&table, &membership.user_col, db)
+                .or_else(|| key_collation_refusal(&table, &membership.team_col, db))
+        })
+        .or_else(|| principal(user_table, user_pk_col, USER_PRINCIPAL_TABLES))
+        .or_else(|| {
+            team_membership
+                .as_ref()
+                .and_then(|_| principal(team_table, team_pk_col, TEAM_PRINCIPAL_TABLES))
+        })
+}
+
+/// Why a membership's member column, or either side of one of its joins to `outer`, cannot
+/// be compared in `OpenFGA`.
+fn membership_refusal<DB: DatabaseLike>(
+    membership: &ExistsMembership,
+    outer: &TableId,
+    db: &DB,
+) -> Option<String> {
+    let join_table = &membership.join_table;
+    key_collation_refusal(join_table, &membership.user_column, db).or_else(|| {
+        membership.pairs.iter().find_map(|pair| {
+            key_collation_refusal(join_table, &pair.join_column, db)
+                .or_else(|| key_collation_refusal(outer, &pair.outer_column, db))
+        })
+    })
+}
+
+/// Why a grant row or a parent link a declared helper's call reads cannot be compared in
+/// `OpenFGA`.
+fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<String> {
+    call.arms.iter().find_map(|arm| match arm {
+        HelperSetArm::Grant(grant) => key_collation_refusal(&grant.table, &grant.object_column, db)
+            .or_else(|| key_collation_refusal(&grant.table, &grant.user_column, db)),
+        HelperSetArm::Parent(parent) => key_collation_refusal(&call.level, &parent.fk_column, db)
+            .or_else(|| helper_call_refusal(&parent.call, db)),
+    })
 }
 
 fn classify_expr_inner<DB: DatabaseLike>(

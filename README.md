@@ -106,7 +106,7 @@ SET DateStyle = 'ISO, MDY';
 SET bytea_output = 'hex';
 
 -- User ownership (owner_id references users)
-SELECT 'documents:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner' AS relation, 'user:' || CASE WHEN "owner_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner_id"::text ELSE '~' || encode(convert_to("owner_id"::text, 'UTF8'), 'hex') END AS subject
+SELECT 'documents:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner' AS relation, 'user:' || CASE WHEN "owner_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "owner_id"::text ELSE '~' || encode(convert_to("owner_id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."documents"
 WHERE "owner_id" IS NOT NULL
 AND "id" IS NOT NULL;
@@ -115,7 +115,7 @@ AND "id" IS NOT NULL;
 SELECT 'request_gate:documents' AS object, 'acting_web_user' AS relation, 'pg_role:web_user' || '#usage' AS subject;
 
 -- Every documents row is judged by the scope documents
-SELECT 'documents:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:documents' AS subject
+SELECT 'documents:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:documents' AS subject
 FROM "public"."documents"
 WHERE "id" IS NOT NULL;
 ```

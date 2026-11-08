@@ -190,8 +190,9 @@ fn no_generated_query_reads_a_column_its_table_does_not_declare() {
                 continue;
             };
             // Every name the query may legitimately spell in quotes: the columns of
-            // every table it reads, and the parts of those tables' own names.
-            let mut spellable: Vec<String> = Vec::new();
+            // every table it reads, the parts of those tables' own names, and the
+            // collation a key's verbatim test runs under.
+            let mut spellable: Vec<String> = vec!["C".to_string()];
             for table in &description.tables {
                 // A table stored without a schema resides in `public`, which is what the
                 // query spells.

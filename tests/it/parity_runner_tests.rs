@@ -126,6 +126,8 @@ async fn every_parity_case_agrees() {
             a_char_column_compares_without_its_padding,
             a_deadline_is_fixed_in_the_creating_sessions_zone,
             a_nondeterministic_collation_is_compared_by_the_database,
+            a_case_insensitive_owner_falls_closed_and_says_so,
+            a_case_insensitive_object_key_loads_and_agrees,
             a_local_literal_is_read_in_the_request_zone,
             a_literal_of_another_date_type_compares_in_no_zone,
             a_role_ladder_answers_four_thresholds,
@@ -3702,6 +3704,63 @@ CREATE POLICY docs_status ON docs FOR SELECT USING (status = 'open');
             visible,
         );
     }
+    assert_agrees(&case, &run);
+}
+
+/// `PostgreSQL` finds the owner `'ALICE'` equal to the caller `alice` on a case-insensitive
+/// column, which `OpenFGA` comparing `user:ALICE` with `user:alice` cannot. The grant
+/// falls closed and the translation says so rather than denying one of the two silently.
+async fn a_case_insensitive_owner_falls_closed_and_says_so(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-case-insensitive-owner",
+        "
+CREATE COLLATION case_insensitive (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT COLLATE case_insensitive);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_owner ON docs FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
+",
+        &[
+            "INSERT INTO docs (id, owner_id) VALUES ('d1', 'ALICE'), ('d2', 'alice'), ('d3', 'bob')",
+            "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+        ],
+        vec![Principal::with_setting("alice", "app_user", "app.user_id", "alice")],
+    );
+    let run = support::parity::run_disclosing(&cluster, &case).await;
+    for (id, visible) in [("d1", true), ("d2", true), ("d3", false)] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            "alice",
+            &format!("docs:{id}"),
+            ActionStatement::Select,
+            visible,
+        );
+    }
+}
+
+/// An object's own key is never compared with the caller, so a case-insensitive key loads,
+/// which the regular expression telling a verbatim key from an encoded one must allow.
+async fn a_case_insensitive_object_key_loads_and_agrees(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-case-insensitive-object-key",
+        "
+CREATE COLLATION case_insensitive (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+CREATE TABLE docs (id TEXT COLLATE case_insensitive PRIMARY KEY, owner_id TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_owner ON docs FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
+",
+        &[
+            "INSERT INTO docs (id, owner_id) VALUES ('D1', 'alice'), ('d2', 'bob'), ('x y', 'alice')",
+            "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+        ],
+        vec![
+            Principal::with_setting("alice", "app_user", "app.user_id", "alice"),
+            Principal::with_setting("bob", "app_user", "app.user_id", "bob"),
+        ],
+    );
+    let run = support::parity::run(&cluster, &case).await;
     assert_agrees(&case, &run);
 }
 

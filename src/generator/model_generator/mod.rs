@@ -2824,7 +2824,7 @@ fn referenced_table_for_fk_col<DB: DatabaseLike>(
     None
 }
 
-fn resolve_principal_info<DB: DatabaseLike>(
+pub(crate) fn resolve_principal_info<DB: DatabaseLike>(
     db: &DB,
     configured_table: Option<&str>,
     configured_pk_col: Option<&ColumnName>,

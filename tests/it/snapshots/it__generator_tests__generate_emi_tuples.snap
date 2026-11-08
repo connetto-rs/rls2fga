@@ -7,13 +7,13 @@ SET DateStyle = 'ISO, MDY';
 SET bytea_output = 'hex';
 
 -- Team memberships
-SELECT 'team_members_team:' || CASE WHEN "team_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "team_id"::text ELSE '~' || encode(convert_to("team_id"::text, 'UTF8'), 'hex') END AS object, 'member' AS relation, 'user:' || CASE WHEN "user_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "user_id"::text ELSE '~' || encode(convert_to("user_id"::text, 'UTF8'), 'hex') END AS subject
+SELECT 'team_members_team:' || CASE WHEN "team_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "team_id"::text ELSE '~' || encode(convert_to("team_id"::text, 'UTF8'), 'hex') END AS object, 'member' AS relation, 'user:' || CASE WHEN "user_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "user_id"::text ELSE '~' || encode(convert_to("user_id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."team_members"
 WHERE "team_id" IS NOT NULL
 AND "user_id" IS NOT NULL;
 
 -- ownables to owner_grants_owner bridge for tuple-to-userset
-SELECT 'ownables:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_id' AS relation, 'owner_grants_owner:' || CASE WHEN "owner_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "owner_id"::text ELSE '~' || encode(convert_to("owner_id"::text, 'UTF8'), 'hex') END AS subject
+SELECT 'ownables:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_id' AS relation, 'owner_grants_owner:' || CASE WHEN "owner_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "owner_id"::text ELSE '~' || encode(convert_to("owner_id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."ownables"
 WHERE "id" IS NOT NULL
 AND "owner_id" IS NOT NULL;
@@ -22,31 +22,31 @@ AND "owner_id" IS NOT NULL;
 SELECT 'request_gate:ownables' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
 
 -- Every ownables row is judged by the scope ownables
-SELECT 'ownables:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:ownables' AS subject
+SELECT 'ownables:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:ownables' AS subject
 FROM "public"."ownables"
 WHERE "id" IS NOT NULL;
 
 -- Owner identities that are rows of users
-SELECT 'owner_grants_owner:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_user' AS relation, 'user:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
+SELECT 'owner_grants_owner:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_user' AS relation, 'user:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."users"
 WHERE "id" IS NOT NULL;
 
 -- Owner identities that are rows of teams
-SELECT 'owner_grants_owner:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_team' AS relation, 'team_members_team:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
+SELECT 'owner_grants_owner:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_team' AS relation, 'team_members_team:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."teams"
 WHERE "id" IS NOT NULL;
 
 -- Explicit grants over owner_grants_owner identities (role_id: 2=viewer, 3=editor, 4=admin)
 SELECT
-  'owner_grants_owner:' || CASE WHEN og."granted_owner_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN og."granted_owner_id"::text ELSE '~' || encode(convert_to(og."granted_owner_id"::text, 'UTF8'), 'hex') END AS object,
+  'owner_grants_owner:' || CASE WHEN og."granted_owner_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN og."granted_owner_id"::text ELSE '~' || encode(convert_to(og."granted_owner_id"::text, 'UTF8'), 'hex') END AS object,
   CASE og."role_id"
     WHEN 2 THEN 'grant_viewer'
     WHEN 3 THEN 'grant_editor'
     WHEN 4 THEN 'grant_admin'
   END AS relation,
   CASE
-    WHEN u."id" IS NOT NULL THEN 'user:' || CASE WHEN og."grantee_owner_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN og."grantee_owner_id"::text ELSE '~' || encode(convert_to(og."grantee_owner_id"::text, 'UTF8'), 'hex') END
-    WHEN t."id" IS NOT NULL THEN 'team_members_team:' || CASE WHEN og."grantee_owner_id"::text ~ '^[A-Za-z0-9._@-]+$' THEN og."grantee_owner_id"::text ELSE '~' || encode(convert_to(og."grantee_owner_id"::text, 'UTF8'), 'hex') END
+    WHEN u."id" IS NOT NULL THEN 'user:' || CASE WHEN og."grantee_owner_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN og."grantee_owner_id"::text ELSE '~' || encode(convert_to(og."grantee_owner_id"::text, 'UTF8'), 'hex') END
+    WHEN t."id" IS NOT NULL THEN 'team_members_team:' || CASE WHEN og."grantee_owner_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN og."grantee_owner_id"::text ELSE '~' || encode(convert_to(og."grantee_owner_id"::text, 'UTF8'), 'hex') END
   END AS subject
 FROM "public"."owner_grants" og
 LEFT JOIN "public"."users" u ON u."id" = og."grantee_owner_id"
