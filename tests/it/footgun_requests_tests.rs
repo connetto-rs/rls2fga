@@ -1411,9 +1411,9 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
             "'2029-12-31 22:00:00+00'::TIMESTAMPTZ is cast to timestamptz",
         ),
         (
-            "expires_at < '2026-01-01'::date",
-            "expires_at 2025-12-31 23:30+00, true under UTC and false under Europe/Athens",
-            "'2026-01-01'::DATE is cast to date",
+            "day_on < '2026-01-01 12:00'::timestamp",
+            "day_on 2026-01-01, true where the date reads as its midnight",
+            "'2026-01-01 12:00:00'::TIMESTAMP is cast to timestamp",
         ),
         (
             "starts_on < '2026-01-01 23:00:00.6'::timestamp(0)",
@@ -1610,13 +1610,16 @@ fn a_literal_cast_to_its_columns_own_type_translates() {
     }
 }
 
-/// A literal of another date or time type is converted where `PostgreSQL` compares it, and
-/// a cast with a precision rounds the literal, so the guard stays refused.
+/// A literal of another date or time type compared with a column that carries no zone is
+/// converted where `PostgreSQL` compares it, and a cast with a precision rounds the literal,
+/// so the guard stays refused. A `date` or `timestamp` against a `timestamptz` column is a
+/// threshold instead, which `zoned_literal_tests` covers.
 #[test]
 fn a_literal_cast_to_another_temporal_type_stays_refused() {
     for guard in [
-        "expires_at > '2026-01-01'::date",
-        "expires_at > '2026-01-01 09:00'::timestamp",
+        "day_on > '2026-01-01 09:00'::timestamp",
+        "starts_on > '2026-01-01'::date",
+        "starts_on > '2026-01-01 09:00:00+00'::timestamptz",
         "starts_on > '2026-01-01 09:00:00.6'::timestamp(0)",
     ] {
         let (dsl, _) = translation(&format!(

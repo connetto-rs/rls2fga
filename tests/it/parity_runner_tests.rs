@@ -126,6 +126,7 @@ async fn every_parity_case_agrees() {
             a_char_column_compares_without_its_padding,
             a_deadline_is_fixed_in_the_creating_sessions_zone,
             a_nondeterministic_collation_is_compared_by_the_database,
+            a_local_literal_is_read_in_the_request_zone,
             a_role_ladder_answers_four_thresholds,
             an_insert_that_reads_back_applies_the_select_policy,
             an_upsert_applies_the_update_policy_too,
@@ -3675,6 +3676,55 @@ CREATE POLICY docs_status ON docs FOR SELECT USING (status = 'open');
             &run,
             "app_user",
             &format!("docs:{id}"),
+            ActionStatement::Select,
+            visible,
+        );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A `timestamp` compared with a `timestamptz` column is converted in the zone each query
+/// runs in. The database runs in `Pacific/Kiritimati`, fourteen hours ahead of UTC, so its
+/// 12:00 on 2026-01-01 is 22:00 UTC the day before, and a row expiring at 23:00 UTC on
+/// 2025-12-31 is past it there while a loader reading the literal in UTC would admit it.
+async fn a_local_literal_is_read_in_the_request_zone(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-local-literal-request-zone",
+        "
+CREATE TABLE docs (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_deadline ON docs FOR SELECT
+    USING (expires_at < '2026-01-01 12:00'::timestamp);
+",
+        &[
+            "DO $$
+             BEGIN
+                 EXECUTE format(
+                     'ALTER DATABASE %I SET timezone = %L',
+                     current_database(),
+                     'Pacific/Kiritimati'
+                 );
+             END $$",
+            "INSERT INTO docs (id, expires_at) VALUES
+                 ('d-before', '2025-12-31 21:00+00'),
+                 ('d-between', '2025-12-31 23:00+00'),
+                 ('d-after', '2026-01-01 13:00+00')",
+            "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+        ],
+        vec![Principal::as_role("app_user", "app_user").with_clock()],
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    for (object, visible) in [
+        ("docs:d-before", true),
+        // Before 12:00 in UTC and after 12:00 at UTC+14.
+        ("docs:d-between", false),
+        ("docs:d-after", false),
+    ] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            "app_user",
+            object,
             ActionStatement::Select,
             visible,
         );

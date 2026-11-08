@@ -44,7 +44,7 @@ pub use attribute::{
 };
 pub(crate) use attribute::{
     clock_refusals, comparison_renaming_cast, conjunct_reads_only_the_row,
-    residual_predicate_reading,
+    local_literal_comparison, local_literal_comparisons, residual_predicate_reading,
 };
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use helper::recognize_declared_helper;
@@ -56,6 +56,7 @@ pub(crate) use session::{
 pub(crate) use subquery::owner_key_of;
 pub(crate) use subquery::projected_select;
 pub use subquery::recognize_p19_indirect_membership;
+pub(crate) use subquery::session_zoned_columns;
 pub(crate) use subquery::{
     diagnose_p4_membership_ambiguity, diagnose_p5_parent_inheritance_ambiguity,
 };

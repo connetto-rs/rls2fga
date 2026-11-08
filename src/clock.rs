@@ -7,21 +7,24 @@ use sql_values::{
 
 use crate::types::ConditionParameterName;
 
-/// The request clock as a guard reads it, shifted by an interval, which the request
-/// supplies rather than the row.
+/// What a guard compares a `timestamptz` column with when the request supplies it rather
+/// than the row: the request clock, or a local time the request's zone places, shifted by
+/// an interval.
 ///
 /// `PostgreSQL` adds an interval's months and days on the calendar of the session
-/// `TimeZone`, and `current_date` and `localtimestamp` read the clock in that zone, so
-/// only an instant shifted by microseconds alone has one value in every zone.
+/// `TimeZone`, `current_date` and `localtimestamp` read the clock in that zone, and a
+/// `date` or `timestamp` compared with a `timestamptz` column is converted in it, so only
+/// an instant shifted by microseconds alone has one value in every zone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ClockThreshold {
-    /// What the guard reads off the clock.
+    /// What the guard reads.
     pub reading: ClockReading,
     /// The interval added to the reading.
     pub offset: ClockOffset,
 }
 
-/// What a guard reads off the statement's clock.
+/// What a guard reads off the statement's clock, or the local time it converts in the
+/// session `TimeZone`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ClockReading {
     /// `now()` and its spellings, the instant itself.
@@ -30,6 +33,9 @@ pub enum ClockReading {
     LocalTimestamp,
     /// `current_date`, the instant's date in the session `TimeZone`.
     LocalDate,
+    /// A `date` or `timestamp` the guard writes and compares with a `timestamptz` column,
+    /// which `PostgreSQL` converts in the session `TimeZone`. A date is its midnight.
+    FixedLocal(PgTimestamp),
 }
 
 /// An interval added to a clock reading, negated where the guard subtracts it.
@@ -91,9 +97,9 @@ impl ClockThreshold {
     /// The instant `PostgreSQL` compares a `timestamptz` column with when the statement
     /// runs at `request_time` with `zone` as its `TimeZone`.
     ///
-    /// An instant is shifted as `timestamptz + interval` shifts it. A local reading is
-    /// shifted as `timestamp + interval` shifts the zoneless clock, then read back in
-    /// `zone`, as the comparison with the column reads it.
+    /// An instant is shifted as `timestamptz + interval` shifts it. A local reading, and a
+    /// written local time, is shifted as `timestamp + interval` shifts the zoneless clock,
+    /// then read back in `zone`, as the comparison with the column reads it.
     ///
     /// ```
     /// use rls2fga::clock::{ClockOffset, ClockReading, ClockThreshold};
@@ -129,19 +135,21 @@ impl ClockThreshold {
                 PgTimestamp::new(request_time.to_date(zone)?, PgTime::MIDNIGHT)
                     .ok_or(DateTimeError::TimestampOutOfRange)?,
             ),
+            ClockReading::FixedLocal(written) => local(written),
         }
     }
 
     /// What a parameter holding this threshold appends to the clock parameter's name,
-    /// nothing for the bare instant: `_current_date_minus_1_day`, with each term's sign
-    /// written where it changes and the microseconds as the CEL duration of their
-    /// magnitude.
+    /// nothing for the bare instant: `_current_date_minus_1_day`, or `_at_2026_01_01` for a
+    /// written midnight, with each term's sign written where it changes and the
+    /// microseconds as the CEL duration of their magnitude.
     pub(crate) fn name_suffix(self) -> String {
-        let mut name = String::from(match self.reading {
-            ClockReading::Instant => "",
-            ClockReading::LocalTimestamp => "_localtimestamp",
-            ClockReading::LocalDate => "_current_date",
-        });
+        let mut name = match self.reading {
+            ClockReading::Instant => String::new(),
+            ClockReading::LocalTimestamp => String::from("_localtimestamp"),
+            ClockReading::LocalDate => String::from("_current_date"),
+            ClockReading::FixedLocal(written) => fixed_local_words(written),
+        };
         let ClockOffset {
             months,
             days,
@@ -166,6 +174,22 @@ impl ClockThreshold {
         }
         name
     }
+}
+
+/// A written local time as `PostgreSQL` prints it, each space or punctuation mark an
+/// underscore and a midnight its date alone: `_at_2026_01_01_12_00_00_5`.
+fn fixed_local_words(written: PgTimestamp) -> String {
+    let printed = written.to_string();
+    let printed = printed.strip_suffix(" 00:00:00").unwrap_or(&printed);
+    let mut words = String::from("_at_");
+    for character in printed.chars() {
+        words.push(if character.is_ascii_alphanumeric() {
+            character.to_ascii_lowercase()
+        } else {
+            '_'
+        });
+    }
+    words
 }
 
 /// A month count as `PostgreSQL` prints it, in years and months: `1_year_2_mons`.
