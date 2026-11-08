@@ -2051,9 +2051,10 @@ fn a_dropped_for_all_arm_undecides_every_action_relation_it_fed() {
     );
 }
 
-/// Phase 1, test 3. Losing the WITH CHECK costs the update, and nothing else. A
-/// locking read filters by the UPDATE USING alone, which survived, so it stays
-/// decidable and the scar does not spread further than the loss.
+/// Phase 1, test 3. Losing the WITH CHECK costs the update, and nothing else. The
+/// check half falls to the denial beside the read it still guards, a locking read
+/// filters by the UPDATE USING alone, which survived, so it stays decidable and the
+/// scar does not spread further than the loss.
 #[test]
 fn a_dropped_with_check_undecides_the_update_but_not_the_locking_read() {
     let shapes = shapes_at(WITH_CHECK_DROP, ACCESSOR_REGISTRY, ConfidenceLevel::B);
@@ -2061,6 +2062,11 @@ fn a_dropped_with_check_undecides_the_update_but_not_the_locking_read() {
     assert!(
         !entry(&shapes, "docs", "can_update").from_one_row,
         "the check half was lost, so can_update is not decidable"
+    );
+    assert!(
+        model_at(WITH_CHECK_DROP, ACCESSOR_REGISTRY, ConfidenceLevel::B)
+            .contains("define can_update_check: no_access and can_select"),
+        "the check half falls to the denial beside the read it still guards"
     );
     assert!(
         entry(&shapes, "docs", "can_select_for_update").from_one_row,

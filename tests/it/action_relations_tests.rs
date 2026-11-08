@@ -333,6 +333,19 @@ fn a_read_judges_the_row_an_insert_the_result_and_a_delete_the_row() {
     }
 }
 
+/// An `UPDATE` applies the `SELECT` policies to the row it writes, so beside a read
+/// policy the check half ends in the read.
+#[test]
+fn the_update_check_of_a_table_needs_the_read() {
+    let model = dsl(TWO_CONDITIONS);
+    let check = relation_definition(&model, "notes", "can_update_check")
+        .unwrap_or_else(|| panic!("the differing clauses define the check half:\n{model}"));
+    assert!(
+        check.ends_with(" and can_select"),
+        "the check half writes a row the table's reads gate: {check}"
+    );
+}
+
 /// A locking read is filtered by the `SELECT` policies and by the `UPDATE` policies'
 /// `USING` clause, and the relation named for it carries only the second.
 #[test]
@@ -347,8 +360,9 @@ fn a_locking_read_names_the_read_gate_beside_the_update_half() {
     );
 }
 
-/// `can_upsert` fuses an insert judging the result with an update judging both
-/// versions, so the report names its halves rather than the fusion.
+/// An upsert judges the conflicting row against the update rules for both versions and
+/// the new row against the read-gated insert, so the report names the three halves
+/// rather than a fusion.
 #[test]
 fn an_upsert_names_the_insert_and_the_update_halves() {
     let entries = report(INSERT_AND_UPDATE);
@@ -359,14 +373,14 @@ fn an_upsert_names_the_insert_and_the_update_halves() {
             ActionStatement::InsertOnConflictUpdate
         )),
         judged(&[
-            ("can_insert", RowVersion::Resulting),
+            ("can_insert_returning", RowVersion::Resulting),
             ("can_update", RowVersion::Existing),
             ("can_update", RowVersion::Resulting),
         ])
     );
     assert!(
-        relation_definition(&dsl(INSERT_AND_UPDATE), "notes", "can_upsert").is_some(),
-        "the schema is pointless unless the model defines the fusion it decomposes"
+        relation_definition(&dsl(INSERT_AND_UPDATE), "notes", "can_insert_returning").is_some(),
+        "the schema is pointless unless the model defines the read-gated insert"
     );
 }
 
@@ -442,14 +456,15 @@ fn a_blind_update_of_two_clauses_judges_each_clause_against_its_row_version() {
         )),
         judged(&[
             ("can_update_without_reading", RowVersion::Existing),
-            ("can_update_check", RowVersion::Resulting),
+            ("can_update_without_reading_check", RowVersion::Resulting),
         ])
     );
 }
 
 /// The unread relation is the `USING` half and nothing else: fusing the check into it
 /// answers the check against the row as it is, which grants a change the clause was
-/// written to refuse.
+/// written to refuse. The unread check beside it is the check half alone, since a blind
+/// update names no row and reads nothing.
 #[test]
 fn the_unread_update_relation_carries_only_the_using_half() {
     let model = dsl(DIFFERING_CLAUSES);
@@ -459,6 +474,11 @@ fn the_unread_update_relation_carries_only_the_using_half() {
         "the check half must not be answered against the existing row:\n{model}"
     );
     assert_eq!(
+        relation_definition(&model, "notes", "can_update_without_reading_check").as_deref(),
+        Some("editor"),
+        "the unread check is the check half alone, without the read it never performs:\n{model}"
+    );
+    assert_eq!(
         judges(entry(
             &report(DIFFERING_CLAUSES),
             "notes",
@@ -466,7 +486,7 @@ fn the_unread_update_relation_carries_only_the_using_half() {
         )),
         judged(&[
             ("can_update_without_reading", RowVersion::Existing),
-            ("can_update_check", RowVersion::Resulting),
+            ("can_update_without_reading_check", RowVersion::Resulting),
         ])
     );
 }

@@ -21,10 +21,10 @@ use crate::generator::tuple_generator::{resolve_bridge_columns, UnboundedColumns
 use crate::generator::well_known::{
     blocked_relation, can_delete_relation, can_insert_relation, can_insert_returning_relation,
     can_select_for_update_relation, can_select_relation, can_update_check_relation,
-    can_update_relation, can_update_using_relation, can_update_without_reading_relation,
-    can_upsert_relation, deny_relation, member_relation, owner_team_relation, owner_user_relation,
-    public_relation, request_gate_link_relation, scope_roles_relation, WellKnownTypes,
-    REQUEST_TIME_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
+    can_update_relation, can_update_using_relation, can_update_without_reading_check_relation,
+    can_update_without_reading_relation, deny_relation, member_relation, owner_team_relation,
+    owner_user_relation, public_relation, request_gate_link_relation, scope_roles_relation,
+    WellKnownTypes, REQUEST_TIME_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
 };
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
@@ -68,10 +68,10 @@ use actions::{
     action_relation_commands, action_relations, clauses_lost_to_the_threshold,
     commands_a_permissive_policy_covers, commands_denied_by_barriers_alone, commands_fed_by,
     compose_action, define_blanket_update_relations, define_locking_read_relations,
-    define_upsert_relations, derived_action_relations, dropped_attribute_guards,
-    fill_uncovered_actions_with_deny, for_each_policy_target_expr, mark_narrowed, narrowed_by,
-    policies_missing_a_clause, push_action_expr, scoped_policy_expr, targets_a_policy_feeds,
-    unreadable_clause_targets, ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
+    derived_action_relations, dropped_attribute_guards, fill_uncovered_actions_with_deny,
+    for_each_policy_target_expr, mark_narrowed, narrowed_by, policies_missing_a_clause,
+    push_action_expr, scoped_policy_expr, targets_a_policy_feeds, unreadable_clause_targets,
+    ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
 };
 use dsl::render_dsl;
 use emit_membership::{
@@ -1265,7 +1265,6 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     simplify_redundant_select_gates(&mut all_types);
     inline_synthetic_rule_aliases(&mut all_types);
     drop_implied_insert_readback(&mut all_types);
-    define_upsert_relations(&mut all_types);
     define_locking_read_relations(&mut all_types);
     define_blanket_update_relations(&mut all_types);
     prune_plain_subjects_fed_only_by_gated_sources(&mut all_types, &settings.well_known);
@@ -1587,11 +1586,12 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
 
     /// Compose each action's rule from its buckets and assign the relations it answers for.
     ///
-    /// The densest decision in the build. A per-row `UPDATE` or `DELETE` names the row it changes,
-    /// so `PostgreSQL` applies the `SELECT` policies too and these relations intersect the read. A
-    /// blanket `UPDATE` names no row and reads nothing, so it gets its own relation instead. A
-    /// command whose targets a policy loop blocks is denied here rather than deny-filled, and a
-    /// dropped permissive check must not come back as the `USING` it was refused beside.
+    /// A per-row `UPDATE` or `DELETE` names the row it changes, so `PostgreSQL` applies the
+    /// `SELECT` policies too and these relations intersect the read. An `INSERT` reading the row
+    /// back and an `UPDATE` writing one apply them to the new row. A blanket `UPDATE` names no
+    /// row and reads nothing, so it gets its own pair instead. A command whose targets a policy
+    /// loop blocks is denied here rather than deny-filled, and a dropped permissive check must
+    /// not come back as the `USING` it was refused beside.
     ///
     /// Returns the commands a loop denied, which the coverage report must not blame on a missing
     /// policy.
@@ -1674,13 +1674,8 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                     using_expr.clone()
                 }
             });
-            // An update that names no row reads nothing, so `PostgreSQL` applies the
-            // UPDATE policies to it and not the SELECT policies. This relation is the
-            // USING half alone: it judges the row as it is, and where the clauses
-            // differ [`ActionRelations`](crate::types::ActionRelations) pairs it
-            // with `can_update_check` against the result. Fusing the check in would
-            // answer the check against the existing row, which grants a change the
-            // clause was written to refuse.
+            // Fusing the check in would answer it against the existing row, which grants
+            // a change the clause was written to refuse.
             self.plan
                 .set_computed(can_update_without_reading_relation(), using_expr.clone());
             if using_expr == check_expr {
@@ -1691,8 +1686,14 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                     can_update_using_relation(),
                     requires_read_access(using_expr),
                 );
-                self.plan
-                    .set_computed(can_update_check_relation(), check_expr);
+                self.plan.set_computed(
+                    can_update_without_reading_check_relation(),
+                    check_expr.clone(),
+                );
+                self.plan.set_computed(
+                    can_update_check_relation(),
+                    requires_read_access(check_expr),
+                );
                 self.plan.set_computed(
                     can_update_relation(),
                     UsersetExpr::Intersection(vec![
