@@ -748,6 +748,7 @@ fn same_named_policies_on_two_tables_translate_apart() {
         let dsl = outputs.model();
         assert!(
             relation_denies(&dsl, "docs", "can_select")
+                && relation_definition(&dsl, "notes", "can_select").is_some()
                 && !relation_denies(&dsl, "notes", "can_select"),
             "each `p` answers for its own table ({policies:?}):\n{dsl}"
         );
