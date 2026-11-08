@@ -2043,6 +2043,36 @@ fn a_conjunct_of_the_rule_implying_the_gate_makes_the_gate_redundant() {
     );
 }
 
+/// Two relations defined through each other say nothing about a rule neither names, and
+/// the walk ends rather than loop.
+#[test]
+fn a_cycle_between_relations_implies_nothing() {
+    let mut docs = TypePlan::new(TypeName::canonicalized("docs"));
+    docs.set_computed(
+        "viewer",
+        UsersetExpr::Computed(RelationName::canonicalized("reader")),
+    );
+    docs.set_computed(
+        "reader",
+        UsersetExpr::Computed(RelationName::canonicalized("viewer")),
+    );
+    docs.ensure_direct(
+        "editor",
+        vec![DirectSubject::Type(TypeName::canonicalized(USER_TYPE))],
+    );
+    let plans = [docs];
+    let by_name: BTreeMap<&TypeName, &TypePlan> =
+        plans.iter().map(|plan| (&plan.type_name, plan)).collect();
+
+    assert!(!simplify::rule_implies(
+        &UsersetExpr::Computed(RelationName::canonicalized("editor")),
+        &UsersetExpr::Computed(RelationName::canonicalized("viewer")),
+        &plans[0],
+        &by_name,
+        &mut Vec::new()
+    ));
+}
+
 /// The walk reaches a target type through a conditional subject exactly as through a
 /// plain one: the condition restricts which tuples exist, not which type they name.
 #[test]
