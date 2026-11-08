@@ -929,7 +929,7 @@ fn bare_column(expr: &Expr) -> Option<ColumnName> {
 /// midnight, or why it has none. `None` for any other literal, and for an infinity, which
 /// every zone converts alike.
 fn local_literal(expr: &Expr) -> Option<Result<sql_values::PgTimestamp, LocalLiteralRefusal>> {
-    use sql_values::{CastError, CastTarget, CastValue, PgTime, PgTimestamp, PgType};
+    use sql_values::{CastError, CastTarget, CastValue, PgTime, PgTimestamp};
     let mut casts = 0_usize;
     let mut outermost = None;
     let peeled = peel_noting_casts(expr, |data_type| {
@@ -943,25 +943,27 @@ fn local_literal(expr: &Expr) -> Option<Result<sql_values::PgTimestamp, LocalLit
         }
         _ => return None,
     };
-    let (target, pg_type) = match cast_target(data_type)? {
-        target @ CastTarget::Date => (target, PgType::Date),
-        target @ CastTarget::Timestamp(_) => (target, PgType::Timestamp),
-        _ => return None,
+    let target = cast_target(data_type)
+        .filter(|target| matches!(target, CastTarget::Date | CastTarget::Timestamp(_)))?;
+    let read = || -> Result<Option<PgTimestamp>, CastError> {
+        Ok(
+            match sql_values::cast_literal(sql_values::Literal::Quoted(text), target)? {
+                CastValue::Date(date) if date.is_finite() => Some(
+                    PgTimestamp::new(date, PgTime::MIDNIGHT)
+                        .ok_or(CastError::DateOutOfRangeForTimestamp)?,
+                ),
+                CastValue::Timestamp(local) if local.is_finite() => Some(local),
+                _ => None,
+            },
+        )
     };
-    let unreadable = |source| LocalLiteralRefusal::Unreadable {
-        text: text.to_string(),
-        pg_type,
-        source,
-    };
-    match sql_values::cast_literal(sql_values::Literal::Quoted(text), target) {
-        Ok(CastValue::Date(date)) if date.is_finite() => Some(
-            PgTimestamp::new(date, PgTime::MIDNIGHT)
-                .ok_or_else(|| unreadable(CastError::DateOutOfRangeForTimestamp)),
-        ),
-        Ok(CastValue::Timestamp(local)) if local.is_finite() => Some(Ok(local)),
-        Ok(_) => None,
-        Err(error) => Some(Err(unreadable(error))),
-    }
+    read()
+        .map_err(|source| LocalLiteralRefusal::Unreadable {
+            text: text.to_string(),
+            pg_type: target.pg_type(),
+            source,
+        })
+        .transpose()
 }
 
 fn string_literal_value(expr: &Expr) -> Option<&str> {

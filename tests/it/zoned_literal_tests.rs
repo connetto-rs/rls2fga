@@ -237,18 +237,33 @@ fn a_local_literal_threshold_is_the_instant_postgres_reads_in_the_request_zone()
     }
 }
 
-/// A null-safe comparison, which no threshold condition carries, falls closed and the report
-/// names why.
+/// A null-safe comparison, which no threshold condition carries, and a literal with no value
+/// here fall closed, and the report names why.
 #[test]
 fn a_local_literal_with_no_threshold_falls_closed_naming_why() {
-    for (clause, stored) in [
+    const NOT_AN_ORDERING: &str = "compares expires_at with a local time PostgreSQL converts \
+                                   in the session TimeZone, which only an ordering or an \
+                                   equality carries as a threshold";
+    for (clause, reason) in [
         (
             "expires_at IS DISTINCT FROM '2026-01-01'::date",
-            "expires_at IS DISTINCT FROM '2026-01-01'::DATE",
+            format!("expires_at IS DISTINCT FROM '2026-01-01'::DATE {NOT_AN_ORDERING}"),
         ),
         (
             "expires_at IS NOT DISTINCT FROM '2026-01-01'::date",
-            "expires_at IS NOT DISTINCT FROM '2026-01-01'::DATE",
+            format!("expires_at IS NOT DISTINCT FROM '2026-01-01'::DATE {NOT_AN_ORDERING}"),
+        ),
+        (
+            "expires_at < '294277-01-01'::date",
+            "'294277-01-01' as a date has no value rls2fga computes (date out of range for \
+             timestamp)"
+                .to_string(),
+        ),
+        (
+            "expires_at IS DISTINCT FROM '294277-01-01'::date",
+            "'294277-01-01' as a date has no value rls2fga computes (date out of range for \
+             timestamp)"
+                .to_string(),
         ),
     ] {
         let outputs = translated(clause).outputs_accepting_gaps();
@@ -258,17 +273,30 @@ fn a_local_literal_with_no_threshold_falls_closed_naming_why() {
             Some("no_access"),
             "`{clause}` must fall closed:\n{dsl}"
         );
-        let reason = format!(
-            "Unknown: {stored} compares expires_at with a local time PostgreSQL converts in \
-             the session TimeZone, which only an ordering or an equality carries as a \
-             threshold"
-        );
         assert!(
-            outputs.report().contains(&reason),
+            outputs.report().contains(&format!("Unknown: {reason}")),
             "`{clause}` must be refused naming why:\n{}",
             outputs.report()
         );
     }
+}
+
+/// An infinite date, which every zone converts alike, takes no threshold and falls closed
+/// as any other cast across types does.
+#[test]
+fn an_infinite_local_literal_takes_no_threshold() {
+    let clause = "expires_at < 'infinity'::date";
+    let outputs = translated(clause).outputs_accepting_gaps();
+    let dsl = outputs.model();
+    assert!(
+        !dsl.contains("request_time_at_"),
+        "`{clause}` needs no threshold:\n{dsl}"
+    );
+    assert_eq!(
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("no_access"),
+        "`{clause}` must fall closed:\n{dsl}"
+    );
 }
 
 /// A literal naming its instant, and a literal against a column with no zone, read alike
