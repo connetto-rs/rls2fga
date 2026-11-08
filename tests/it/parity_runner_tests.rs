@@ -125,6 +125,7 @@ async fn every_parity_case_agrees() {
             a_share_record_replays_onto_another_types_object,
             a_char_column_compares_without_its_padding,
             a_deadline_is_fixed_in_the_creating_sessions_zone,
+            a_nondeterministic_collation_is_compared_by_the_database,
             a_role_ladder_answers_four_thresholds,
             an_insert_that_reads_back_applies_the_select_policy,
             an_upsert_applies_the_update_policy_too,
@@ -3638,6 +3639,42 @@ CREATE POLICY docs_deadline ON docs FOR SELECT USING (expires_at < '2026-01-01 1
             &run,
             "app_user",
             object,
+            ActionStatement::Select,
+            visible,
+        );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A case-insensitive collation makes `'AB'` and `'ab'` equal, which no byte comparison of
+/// the row tells. The guard on that column loads through its query, beside a guard on a
+/// plain column that still replays from the row, and both agree with the database.
+async fn a_nondeterministic_collation_is_compared_by_the_database(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-nondeterministic-collation",
+        "
+CREATE COLLATION case_insensitive (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+CREATE TABLE docs (id TEXT PRIMARY KEY, code TEXT COLLATE case_insensitive, status TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_code ON docs FOR SELECT USING (code <> 'ab');
+CREATE POLICY docs_status ON docs FOR SELECT USING (status = 'open');
+",
+        &[
+            "INSERT INTO docs (id, code, status) VALUES
+                 ('d1', 'AB', 'closed'), ('d2', 'ab', 'closed'),
+                 ('d3', 'x', 'closed'), ('d4', 'AB', 'open')",
+            "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+        ],
+        vec![Principal::as_role("app_user", "app_user")],
+    )
+    .loading_from_rows();
+    let run = support::parity::run(&cluster, &case).await;
+    for (id, visible) in [("d1", false), ("d2", false), ("d3", true), ("d4", true)] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            "app_user",
+            &format!("docs:{id}"),
             ActionStatement::Select,
             visible,
         );
