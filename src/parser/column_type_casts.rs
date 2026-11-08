@@ -75,8 +75,9 @@ pub(crate) fn without_column_type_casts<DB: DatabaseLike>(
         return clause.clone();
     }
     let mut query = wrapping_query::<DB>(clause.clone(), table);
-    let marked = match ColumnScope::from_query(&query, db, IdentifierCase::AsWritten) {
-        Ok(scope) => {
+    // A scope the catalog cannot build proves no column's type, so every cast stays.
+    let marked = ColumnScope::from_query(&query, db, IdentifierCase::AsWritten)
+        .map(|scope| {
             let mut finder = Finder {
                 scope: &scope,
                 selects: Vec::new(),
@@ -85,9 +86,8 @@ pub(crate) fn without_column_type_casts<DB: DatabaseLike>(
             let walk = Visit::visit(&query, &mut finder);
             debug_assert!(walk.is_continue(), "the search never breaks");
             finder.marked
-        }
-        Err(_) => return clause.clone(),
-    };
+        })
+        .unwrap_or_default();
     if marked.is_empty() {
         return clause.clone();
     }
@@ -326,5 +326,42 @@ impl VisitorMut for Restore<'_> {
     fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<Self::Break> {
         core::mem::swap(self.target, expr);
         ControlFlow::Break(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::sql_parser::{parse_schema, PolicyLike, TargetName};
+
+    /// Only a stored column proves a cast, so one compared with a derived table's computed
+    /// output stays while the one beside it, compared with a stored column, goes.
+    #[test]
+    fn only_a_stored_column_proves_its_cast() {
+        let db = parse_schema(
+            "CREATE TABLE docs (id INT PRIMARY KEY, day_on DATE);
+             CREATE TABLE members (doc_id INT, joined_on DATE);
+             CREATE POLICY p ON docs USING (EXISTS (
+               SELECT 1 FROM (SELECT doc_id, joined_on + 1 AS joined_on FROM members) AS m
+               WHERE m.doc_id = docs.id AND m.joined_on > '2026-01-01'::date
+                 AND docs.day_on > '2026-01-01'::date));",
+        )
+        .expect("the schema parses");
+        let policy = db.policies().next().expect("the schema declares p");
+        let clause = policy
+            .using_expression(&db)
+            .expect("the literals read")
+            .expect("p stores a USING clause");
+        let table = db
+            .resolve_target_table(TargetName::new("docs", false), IdentifierCase::AsWritten)
+            .expect("docs resolves")
+            .expect("docs exists");
+        let rewritten = without_column_type_casts(clause, table, &db).to_string();
+        assert!(
+            rewritten.contains("m.joined_on > '2026-01-01'::DATE")
+                && rewritten.contains("docs.day_on > '2026-01-01'")
+                && !rewritten.contains("docs.day_on > '2026-01-01'::DATE"),
+            "{rewritten}"
+        );
     }
 }

@@ -33,7 +33,7 @@ use rls2fga::parser::sql_parser::{
 };
 use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::RelationShapes;
-use rls2fga::types::{ConfidenceLevel, PolicyCommand};
+use rls2fga::types::{ConfidenceLevel, PolicyCommand, TranslationNote};
 
 const SCHEMA: &str = "
 CREATE TABLE public.users (id UUID PRIMARY KEY);
@@ -583,4 +583,39 @@ fn a_target_without_a_primary_key_fails_closed() {
         .collect::<Vec<String>>();
     assert!(key.is_empty(), "the target must hold no primary key");
     assert_indirect_membership_refused(&db);
+}
+
+/// A policy on a table the catalog does not hold keeps its clause as the catalog stores
+/// it, since no column there proves a cast, and the translation refuses the policy.
+#[test]
+fn a_policy_on_an_absent_table_keeps_its_clause_and_is_refused() {
+    let ddl = "CREATE TABLE docs (id UUID PRIMARY KEY, day_on DATE);
+               CREATE POLICY p ON ghosts USING (day_on > '2026-01-01'::date);";
+    assert!(parse_schema(ddl).is_err(), "ingestion must refuse the edge");
+    let db = rebuilt_catalog(ddl);
+    let classified = classify_policies(
+        &db,
+        &FunctionRegistry::new(),
+        &support::deployment::deployment([]),
+    );
+    let [policy] = classified.as_slice() else {
+        panic!("one policy, got {classified:?}");
+    };
+    assert!(policy.resolved_table().is_none());
+    assert_eq!(
+        policy.using().map(ToString::to_string).as_deref(),
+        Some("day_on > '2026-01-01'::DATE")
+    );
+    let translation = support::deployment::translator_builder()
+        .build()
+        .translate(&db)
+        .expect("translation should plan");
+    assert!(
+        translation.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::UnresolvedPolicyTable { policy, .. } if policy == "p"
+        )),
+        "{:#?}",
+        translation.notes()
+    );
 }
