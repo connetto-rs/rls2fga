@@ -10,7 +10,9 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::classifier::function_registry::DeclaredSources;
 use crate::classifier::recognizers::{projected_select, renaming_reason};
 use crate::parser::expr::{function_arg_expr, CastChain};
-use crate::parser::names::{builtin_function_name, is_current_user_keyword_name};
+use crate::parser::names::{
+    builtin_function_name, is_current_user_keyword_name, role_keyword, RoleKeyword,
+};
 use crate::types::ColumnName;
 
 /// Complete metadata for a role-threshold team membership join.
@@ -73,11 +75,10 @@ pub enum FunctionSemantic {
         returns: String,
     },
 
-    /// A function that returns the current user's role name as a string.
+    /// A function policies compare with role names, such as Supabase's `auth.role()`.
     ///
-    /// Typical example: Supabase `auth.role()` which returns `'authenticated'`,
-    /// `'anon'`, or a custom role string.  Policies using this function compare
-    /// the return value against string literals rather than integer levels.
+    /// It is read by the body the schema gives it, which replaces this declaration, so a
+    /// call to one the schema does not define is refused.
     #[serde(rename = "role_accessor")]
     RoleAccessor {
         /// SQL return type of the accessor (e.g. `"text"`).
@@ -347,28 +348,31 @@ fn body_caller_read(expr: &Expr, sources: &DeclaredSources) -> Option<BodyCaller
     })
 }
 
-/// Whether a whole body returns a keyword naming the acting role, which inside a
-/// `SECURITY DEFINER` body is the function owner for every caller.
-pub(crate) fn body_returns_acting_role(body: &str, return_type: &str, language: &str) -> bool {
+/// The role keyword a whole body returns, when the body is nothing but that keyword and
+/// no cast in it can rename the name the keyword reads.
+pub(crate) fn body_role_keyword(
+    body: &str,
+    return_type: &str,
+    language: &str,
+) -> Option<RoleKeyword> {
     if language != "sql"
         || !returns_one_identity(&return_type.to_lowercase())
-        || accessor_shape(body) != Some(true)
+        || contains_disallowed_complex_token(&significant_tokens(body)?)
     {
-        return false;
+        return None;
     }
-    body_single_projection(body).is_some_and(|expr| {
-        let (_, peeled) = CastChain::peeled(&expr);
-        match peeled {
-            Expr::Identifier(ident) => {
-                ident.quote_style.is_none() && is_current_user_keyword_name(&ident.value)
-            }
-            Expr::Function(func) => {
-                matches!(func.args, FunctionArguments::None)
-                    && is_current_user_keyword_name(&func.name.to_string())
-            }
-            _ => false,
+    let expr = body_single_projection(body)?;
+    let (casts, peeled) = CastChain::peeled(&expr);
+    if casts.renaming(Some("text")).is_some() {
+        return None;
+    }
+    match peeled {
+        Expr::Identifier(ident) if ident.quote_style.is_none() => role_keyword(&ident.value),
+        Expr::Function(func) if matches!(func.args, FunctionArguments::None) => {
+            role_keyword(&func.name.to_string())
         }
-    })
+        _ => None,
+    }
 }
 
 /// The single expression a one-statement `SELECT` body projects, when nothing in the
@@ -463,7 +467,7 @@ pub(crate) fn body_reads_effective_user(body: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FunctionSemantic, TeamMembershipConfig};
+    use super::{FunctionSemantic, RoleKeyword, TeamMembershipConfig};
     use crate::classifier::function_registry::DeclaredSources;
     use crate::test_support::{caller, caller_deployment, sources, typed_caller};
     use crate::types::ColumnName;
@@ -650,35 +654,39 @@ mod tests {
         }
     }
 
-    /// Inside a `SECURITY DEFINER` body the acting role is the owner, so the bodies that
-    /// return it are exactly the ones whose value the owner fixes. `session_user` is the
-    /// login role whatever the function runs as, and a quoted spelling is a column.
+    /// A body is a role keyword only when it is nothing but one, spelled as the keyword
+    /// and cast to nothing that can rename it. `session_user` is the login role whatever
+    /// the function runs as, and a quoted spelling is a column.
     #[test]
-    fn a_body_returns_the_acting_role_only_through_its_keywords() {
-        for body in [
-            "SELECT current_user",
-            "SELECT CURRENT_USER::text",
-            "SELECT current_role",
-            "SELECT user",
-            "SELECT (current_user)",
+    fn a_body_is_a_role_keyword_only_through_its_keywords() {
+        for (body, keyword) in [
+            ("SELECT current_user", RoleKeyword::Acting),
+            ("SELECT CURRENT_USER::text", RoleKeyword::Acting),
+            ("SELECT current_role", RoleKeyword::Acting),
+            ("SELECT user", RoleKeyword::Acting),
+            ("SELECT (current_user)", RoleKeyword::Acting),
+            ("SELECT session_user", RoleKeyword::Login),
+            ("SELECT SESSION_USER::varchar", RoleKeyword::Login),
         ] {
-            assert!(
-                super::body_returns_acting_role(body, "TEXT", "sql"),
-                "{body:?} returns the acting role"
+            assert_eq!(
+                super::body_role_keyword(body, "TEXT", "sql"),
+                Some(keyword),
+                "{body:?}"
             );
         }
         for (body, language) in [
-            ("SELECT session_user", "sql"),
             (r#"SELECT "current_user""#, "sql"),
             ("SELECT current_setting('app.user_id')", "sql"),
             ("SELECT current_user FROM audit", "sql"),
             ("SELECT current_user", "plpgsql"),
             ("SELECT 'a' || current_user", "sql"),
             ("SELECT 'current_user'", "sql"),
+            ("SELECT current_user::int", "sql"),
         ] {
-            assert!(
-                !super::body_returns_acting_role(body, "TEXT", language),
-                "{body:?} in {language} does not return the acting role"
+            assert_eq!(
+                super::body_role_keyword(body, "TEXT", language),
+                None,
+                "{body:?} in {language} is no role keyword"
             );
         }
     }

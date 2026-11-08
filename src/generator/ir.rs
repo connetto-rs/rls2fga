@@ -353,13 +353,12 @@ pub(crate) enum TupleSource {
     },
 
     /// Links every row of a table to one object of a synthetic type standing for
-    /// something every row shares, such as the scope a policy's `TO` clause declares or
-    /// the gates that read only the request. Produces `(type:pk, scope_relation,
-    /// scope_type:scope_object)` per row.
+    /// something every row shares, such as the gates that read only the request. Produces
+    /// `(type:pk, scope_relation, scope_type:scope_object)` per row.
     ///
     /// What the object admits is a fact about the policy, carried once by
-    /// [`Self::PolicyScopeRoles`] or [`Self::RequestGateEntry`], so a policy naming
-    /// several roles or a table carrying several gates writes one fact per row.
+    /// [`Self::RequestGateEntry`], so a table carrying several gates writes one fact per
+    /// row.
     PolicyScope {
         table: TableId,
         identity_cols: Vec<ColumnName>,
@@ -368,19 +367,6 @@ pub(crate) enum TupleSource {
         scope_type: TypeName,
         /// Object id standing for this scope.
         scope_object: String,
-    },
-
-    /// One role a policy's scope admits: `(scope_type:scope_object, roles, pg_role:pg_role)`.
-    ///
-    /// Names no table. Which roles a scope admits is decided by the policy, so the query is
-    /// a constant `SELECT` yielding exactly one row whatever any table holds. Reading it off
-    /// the guarded table instead tied the fact to that table having rows, and made every row
-    /// of it look like a reason the fact exists.
-    PolicyScopeRoles {
-        scope_type: TypeName,
-        scope_object: String,
-        relation: RelationName,
-        pg_role: String,
     },
 
     /// Every row of `table` pointing at the one holder object, so a member of the
@@ -654,12 +640,6 @@ pub(crate) enum TupleSourceKey<'a> {
         scope_type: &'a TypeName,
         scope_object: &'a str,
     },
-    PolicyScopeRoles {
-        scope_type: &'a TypeName,
-        scope_object: &'a str,
-        relation: &'a RelationName,
-        pg_role: &'a str,
-    },
     HolderBridge {
         table: &'a TableId,
         identity_cols: &'a [ColumnName],
@@ -702,7 +682,6 @@ impl TupleSource {
             | Self::HolderBridge { .. } => true,
             Self::ShareBridge { .. }
             | Self::ClosureBridge { .. }
-            | Self::PolicyScopeRoles { .. }
             | Self::ActingKind { .. }
             | Self::RequestGateEntry { .. }
             | Self::OwnerIdentity { .. }
@@ -789,11 +768,6 @@ impl TupleSource {
                 vec![(holder_type.clone(), relation.clone())]
             }
             Self::PolicyScope { scope_relation, .. } => own(scope_relation),
-            Self::PolicyScopeRoles {
-                scope_type,
-                relation,
-                ..
-            } => vec![(scope_type.clone(), relation.clone())],
             Self::RequestGateEntry {
                 gate_type,
                 relation,
@@ -1130,17 +1104,6 @@ impl TupleSource {
                 scope_relation,
                 scope_type,
                 scope_object,
-            },
-            Self::PolicyScopeRoles {
-                scope_type,
-                scope_object,
-                relation,
-                pg_role,
-            } => TupleSourceKey::PolicyScopeRoles {
-                scope_type,
-                scope_object,
-                relation,
-                pg_role,
             },
             Self::HolderBridge {
                 table,

@@ -394,27 +394,36 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (uid(id));
 }
 
 /// The same body under the default `SECURITY INVOKER` returns the acting role, which is the
-/// same name for every request and never the caller, so the call is no caller accessor and
-/// the clause it guards denies.
+/// same name for every request and never the caller, so the call reads as the keyword
+/// itself, a comparison of the column with the acting role's name.
 #[test]
 fn security_invoker_current_user_is_not_the_caller() {
-    let db = db_of(
-        r"
+    let can_select = |using: &str| {
+        let db = db_of(&format!(
+            r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE FUNCTION app_uid() RETURNS TEXT LANGUAGE sql AS 'SELECT current_user::text';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = app_uid());
-",
-    );
-    let model = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
+CREATE POLICY docs_own ON docs FOR SELECT USING ({using});
+"
+        ));
+        let model = translator(ConfidenceLevel::B)
+            .translate(&db)
+            .expect("translation should plan")
+            .outputs_accepting_gaps()
+            .model();
+        relation_definition(&model, "docs", "can_select")
+    };
+    let through_the_call = can_select("owner_id = app_uid()");
     assert_eq!(
-        relation_definition(&model.model(), "docs", "can_select").as_deref(),
+        through_the_call,
+        can_select("owner_id = current_user"),
+        "a body returning the acting role reads as the keyword"
+    );
+    assert_ne!(
+        through_the_call.as_deref(),
         Some("no_access"),
-        "a body returning the acting role names no caller:\n{}",
-        model.model()
+        "the acting role's own rows stay readable"
     );
 }
 

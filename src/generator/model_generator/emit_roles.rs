@@ -1,155 +1,10 @@
 //! Emission for the patterns a role decides, and the scaffolding they need.
 //!
-//! A numeric threshold, a role-name list, the `pg_role` scope a `TO` clause narrows by, and the
-//! grant relations a role-threshold function implies.
+//! A numeric threshold, a role-name list, and the grant relations a role-threshold
+//! function implies.
 
 use super::*;
 use crate::generator::well_known::owner_team_relation;
-
-/// The scope a `TO` clause narrows by, described in one value.
-///
-/// Five of these travelled as separate arguments and are one description: the relation to
-/// declare, the `pg_role` relation the caller's walk reads, the roles admitted, the note to
-/// raise, and what to say went unfilled when no tuple can name the row.
-pub(crate) struct RoleScopeSpec<'a> {
-    /// Relation to declare on the guarded type.
-    pub(crate) scope_relation: &'a RelationName,
-    /// The `pg_role` relation the caller's walk reads. Declared here so the walk and the
-    /// relation the operator loads cannot drift apart.
-    pub(crate) walked: &'a RelationName,
-    /// Roles the clause admits.
-    pub(crate) role_names: &'a [String],
-    /// Note raised once the scope is declared.
-    pub(crate) scope_note: TranslationNote,
-    /// What went unfilled, for the note raised when no tuple can name the row.
-    pub(crate) missing_object_what: &'a str,
-}
-
-/// Declare the `pg_role` scope a policy's `TO` clause narrows by, and load it.
-///
-/// Returns whether a tuple can name a row of the table. Where none can, the scope is
-/// left unminted rather than declared empty: a scope relation nothing can fill asks the
-/// operator for `pg_role` memberships no rule reads, and a caller whose whole grant
-/// rides on the scope falls closed on the answer.
-pub(crate) fn register_pg_role_scope<DB: DatabaseLike>(
-    table_plan: &mut TypePlan,
-    all_types: &mut BTreeMap<TypeName, TypePlan>,
-    notes: &mut Vec<TranslationNote>,
-    source_table: &TableId,
-    db: &DB,
-    spec: RoleScopeSpec<'_>,
-) -> bool {
-    let RoleScopeSpec {
-        scope_relation,
-        walked,
-        role_names,
-        scope_note,
-        missing_object_what,
-    } = spec;
-    if let Some(identity_cols) = resolve_row_identity(source_table, db) {
-        let well_known = table_plan.well_known.clone();
-        ensure_pg_role_relation(all_types, walked, &well_known);
-        // The roles a scope admits are a fact about the policy, so they hang on one scope
-        // object and the row carries only a pointer at it. Storing them per row instead
-        // multiplies the whole table by the number of roles the clause names.
-        let scope_object = scope_relation.as_str().to_string();
-        let scope_plan = all_types
-            .entry(well_known.pg_role_scope.clone())
-            .or_insert_with(|| {
-                TypePlan::new_with_well_known(well_known.pg_role_scope.clone(), &well_known)
-            });
-        let roles = scope_plan.ensure_direct(
-            scope_roles_relation(),
-            vec![DirectSubject::Type(well_known.pg_role.clone())],
-        );
-        scope_plan.ensure_computed(
-            walked.as_str().to_string(),
-            UsersetExpr::TupleToUserset {
-                tupleset: roles.clone(),
-                computed: walked.clone(),
-            },
-        );
-        table_plan.ensure_direct(
-            scope_relation.clone(),
-            vec![DirectSubject::Type(well_known.pg_role_scope.clone())],
-        );
-        notes.push(scope_note);
-        table_plan.add_source(TupleSource::PolicyScope {
-            table: source_table.clone(),
-            identity_cols,
-            scope_relation: scope_relation.clone(),
-            scope_type: well_known.pg_role_scope.clone(),
-            scope_object: scope_object.clone(),
-        });
-        for role in role_names {
-            table_plan.add_source(TupleSource::PolicyScopeRoles {
-                scope_type: well_known.pg_role_scope.clone(),
-                scope_object: scope_object.clone(),
-                relation: roles.clone(),
-                pg_role: role.clone(),
-            });
-        }
-        true
-    } else {
-        skip_source_without_row_identity(table_plan, source_table, missing_object_what, db);
-        false
-    }
-}
-
-/// Handle `P2RoleNameInList` when the function is *not* a `RoleThreshold` (e.g.
-/// `pg_has_role()` or Supabase `auth.role()`).  Creates scope-style direct
-/// relations per role name and emits `PolicyScope` tuple sources, mirroring the
-/// pattern used for policy-level `TO` role scoping.
-pub(crate) fn handle_p2_role_gate<DB: DatabaseLike>(
-    role_names: &[String],
-    privilege: RolePrivilege,
-    ctx: &PatternCtx<'_, DB>,
-    table_plan: &mut TypePlan,
-    all_types: &mut BTreeMap<TypeName, TypePlan>,
-    notes: &mut Vec<TranslationNote>,
-) -> UsersetExpr {
-    let policy_name = ctx.policy_name;
-    let source_table = ctx.source_table;
-    let db = ctx.db;
-    if role_names.is_empty() {
-        return deny_expr(table_plan);
-    }
-
-    let held_by = privilege.relation_name();
-    let scope_relation = role_scope_name(held_by.as_str(), role_names);
-    let scope_can_be_filled = register_pg_role_scope(
-        table_plan,
-        all_types,
-        notes,
-        source_table,
-        db,
-        RoleScopeSpec {
-            scope_relation: &scope_relation,
-            walked: &held_by,
-            role_names,
-            scope_note: TranslationNote::RoleGateScope {
-                policy: policy_name.to_string(),
-                roles: role_names.to_vec(),
-                relation: scope_relation.clone(),
-                held_by: held_by.to_string(),
-            },
-            missing_object_what: "role gate tuples",
-        },
-    );
-    // The whole grant is the scope, so an unfillable one is a permission nothing can
-    // satisfy rather than a narrower one.
-    if !scope_can_be_filled {
-        return deny_expr(table_plan);
-    }
-
-    // The scope relation holds `[pg_role]` subjects, so a `user:` subject can never satisfy
-    // it directly. Walking it to the role's holders is what admits them, and it is what
-    // makes the relation survive the pruner.
-    UsersetExpr::TupleToUserset {
-        tupleset: scope_relation,
-        computed: held_by,
-    }
-}
 
 /// The relation a numeric role threshold admits, or a denial when no role reaches it.
 pub(crate) fn emit_numeric_threshold<DB: DatabaseLike>(
@@ -196,7 +51,7 @@ pub(crate) fn emit_numeric_threshold<DB: DatabaseLike>(
     }
 }
 
-/// The relations a role-name list admits, whether the function is a role threshold or a plain role accessor.
+/// The relations a role-threshold function's role-name list admits.
 pub(crate) fn emit_role_name_in_list<DB: DatabaseLike>(
     role_name_in_list: &RoleNameInList,
     ctx: &PatternCtx<'_, DB>,
@@ -207,7 +62,6 @@ pub(crate) fn emit_role_name_in_list<DB: DatabaseLike>(
     let RoleNameInList {
         function_name,
         role_names,
-        privilege,
         resource_column,
     } = role_name_in_list;
     let Some(prepared) = prepare_role_threshold_translation(
@@ -219,9 +73,7 @@ pub(crate) fn emit_role_name_in_list<DB: DatabaseLike>(
         all_types,
         notes,
     ) else {
-        // Non-RoleThreshold function (e.g. pg_has_role, auth.role()) ,
-        // fall back to scope-style direct relations per role name.
-        return handle_p2_role_gate(role_names, *privilege, ctx, table_plan, all_types, notes);
+        return deny_expr(table_plan);
     };
     let Some(owner) = prepared.owner.clone() else {
         return deny_expr(table_plan);

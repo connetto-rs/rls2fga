@@ -239,7 +239,6 @@ fn pattern_to_expr_handles_missing_or_invalid_role_threshold_metadata() {
         resource_column: None,
         function_name: "missing_fn".to_string(),
         role_names: vec!["viewer".to_string()],
-        privilege: RolePrivilege::Member,
     });
 
     let p1_expr = pattern_to_expr(
@@ -259,26 +258,18 @@ fn pattern_to_expr_handles_missing_or_invalid_role_threshold_metadata() {
         &mut notes,
     );
 
-    assert_eq!(
-        p1_expr,
-        UsersetExpr::Computed(RelationName::canonicalized("no_access"))
-    );
-    // P2 with missing metadata falls through to `handle_p2_role_gate`, which walks a
-    // scope relation rather than denying.
+    for expr in [&p1_expr, &p2_expr] {
+        assert_eq!(
+            expr,
+            &UsersetExpr::Computed(RelationName::canonicalized("no_access"))
+        );
+    }
+    assert_eq!(notes.len(), 2, "{notes:?}");
     assert!(
-        matches!(
-            &p2_expr,
-            UsersetExpr::TupleToUserset { tupleset, computed }
-                if tupleset.as_str().starts_with("scope_") && computed == "member"
-        ),
-        "P2 with a non-RoleThreshold function should walk a scope relation, got: {p2_expr:?}"
-    );
-    // P1 emits a TODO about missing semantic metadata. P2 emits a TODO about
-    // the role gate, and possibly a missing object identifier.
-    assert!(notes[0].message().contains("missing semantic metadata"));
-    assert!(
-        notes.iter().any(|t| t.message().contains("gates on")),
-        "expected role-gate TODO: {notes:?}"
+        notes
+            .iter()
+            .all(|note| note.message().contains("missing semantic metadata")),
+        "{notes:?}"
     );
 }
 
@@ -293,13 +284,11 @@ fn pattern_to_expr_handles_empty_role_selection_paths() {
         resource_column: None,
         function_name: "role_level".to_string(),
         role_names: vec!["viewer".to_string()],
-        privilege: RolePrivilege::Member,
     });
     let p2_numeric_without_levels = PatternClass::P2RoleNameInList(RoleNameInList {
         resource_column: None,
         function_name: "role_level".to_string(),
         role_names: vec!["5".to_string()],
-        privilege: RolePrivilege::Member,
     });
 
     let first = pattern_to_expr(
@@ -914,7 +903,6 @@ fn pattern_to_expr_handles_unreachable_thresholds_and_case_insensitive_role_name
         resource_column: Some(ColumnName::from_stored("project_id")),
         function_name: "role_level".to_string(),
         role_names: vec!["VIEWER".to_string()],
-        privilege: RolePrivilege::Member,
     });
 
     let p1_expr = pattern_to_expr(

@@ -194,14 +194,6 @@ pub(crate) fn relation_definitions(dsl: &str, type_name: &str) -> Vec<(String, S
         .collect()
 }
 
-/// Name of the relation `type_name` declares to reach its database-role scope, if any.
-pub(crate) fn pg_role_relation(dsl: &str, type_name: &str) -> Option<String> {
-    defines_in_type(dsl, type_name)
-        .into_iter()
-        .find(|(_, body)| *body == "[pg_role_scope]")
-        .map(|(name, _)| name.to_string())
-}
-
 pub(crate) fn type_names(dsl: &str) -> Vec<String> {
     dsl.lines()
         .filter_map(|line| line.trim().strip_prefix("type "))

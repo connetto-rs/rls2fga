@@ -23,17 +23,16 @@ use crate::generator::well_known::{
     can_select_for_update_relation, can_select_relation, can_update_check_relation,
     can_update_relation, can_update_using_relation, can_update_without_reading_check_relation,
     can_update_without_reading_relation, deny_relation, member_relation, owner_team_relation,
-    owner_user_relation, public_relation, request_gate_link_relation, scope_roles_relation,
-    WellKnownTypes, REQUEST_TIME_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
+    owner_user_relation, public_relation, request_gate_link_relation, WellKnownTypes,
+    REQUEST_TIME_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
 };
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
     attribute_gate_relation_name, canonical_fga_type_name, clamp_relation_name,
     conditional_gate_relation_name, is_owner_like_column_name, lookup_table, lookup_table_id,
     parent_type_from_fk_column, public_flag_relation_name, request_gate_relation_name,
-    resolve_table_id, role_scope_name, row_presence_relation_name, stored_relation_name,
-    table_id_has_column, table_identity, yielded_relation_name, MAX_RELATION_NAME_LEN,
-    MAX_RELATION_RENAME_ATTEMPTS,
+    resolve_table_id, row_presence_relation_name, stored_relation_name, table_id_has_column,
+    table_identity, yielded_relation_name, MAX_RELATION_NAME_LEN, MAX_RELATION_RENAME_ATTEMPTS,
 };
 use crate::parser::sql_parser::{
     ColumnLike, DatabaseLike, ForeignKeyLike, IdentifierCase, PolicyLike, TableLike,

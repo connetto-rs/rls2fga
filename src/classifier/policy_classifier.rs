@@ -1014,6 +1014,13 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return unknown_d(expr, undeclared_sets.join(". "));
     }
 
+    // A call whose function no body reads names that body or its absence, since the
+    // registry entry the blame below would ask for is not what is missing.
+    let unread_calls = recognizers::unread_function_calls(expr, registry);
+    if !unread_calls.is_empty() {
+        return unknown_d(expr, unread_calls.join(". "));
+    }
+
     // A clock or shift no threshold follows, at any depth, is why the guard falls closed,
     // so the operator reads that rather than the clock's own call.
     let clock_refusals = recognizers::clock_refusals(expr);
@@ -2106,7 +2113,6 @@ CREATE TABLE tasks(id uuid primary key, project_id uuid references projects(id),
                 resource_column: None,
                 function_name: "f".into(),
                 role_names: vec!["a".into()],
-                privilege: RolePrivilege::Member,
             })
         ));
         assert!(is_relationship_pattern_for_p7(&p3));

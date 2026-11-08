@@ -179,40 +179,6 @@ pub(crate) fn yielded_relation_name(base: &str, key: &str, attempt: usize) -> Re
     RelationName::canonicalized(clamp_relation_name(candidate))
 }
 
-/// Derive a scope name from a privilege and an exact stored role set.
-#[must_use]
-pub fn role_scope_name(privilege: &str, roles: &[String]) -> RelationName {
-    let mut exact = roles.to_vec();
-    exact.sort_unstable();
-    exact.dedup();
-    let canonical: Vec<String> = exact
-        .iter()
-        .map(|role| canonical_fga_type_name(role).to_string())
-        .collect();
-    let base = canonical_fga_type_name(&format!("{privilege}_{}", canonical.join("_")));
-    let key = if exact == canonical {
-        format!("{privilege}.{}", exact.join("."))
-    } else {
-        let mut key = format!("{}:{privilege}", privilege.len());
-        for role in &exact {
-            key.push('.');
-            key.push_str(&role.len().to_string());
-            key.push(':');
-            key.push_str(role);
-        }
-        key
-    };
-    let suffix = stable_hex_suffix(&key);
-    RelationName::canonicalized(clamp_relation_name(format!("scope_{base}_{suffix}")))
-}
-
-/// Derive a stable relation name used to scope reads of a membership table by
-/// `PostgreSQL` roles.
-#[must_use]
-pub fn membership_read_scope_relation_name(join_table: &str) -> RelationName {
-    scope_relation_name("read_scope", join_table)
-}
-
 /// Derive a stable relation name for the part of an action a role scoped
 /// RESTRICTIVE policy binds.
 #[must_use]
@@ -646,58 +612,6 @@ mod tests {
                 "canonical_fga_type_name({name:?}) must name something"
             );
         }
-    }
-
-    #[test]
-    fn role_scope_name_is_the_privilege_and_the_role_set() {
-        let roles = |names: &[&str]| -> Vec<String> {
-            names.iter().map(|name| (*name).to_string()).collect()
-        };
-
-        let first = role_scope_name("usage", &roles(&["auditor", "support"]));
-        assert_eq!(
-            first,
-            role_scope_name("usage", &roles(&["auditor", "support"]))
-        );
-        assert!(first.as_str().starts_with("scope_"));
-
-        // Listing order and exact duplicates do not change a stored role set.
-        assert_eq!(
-            first,
-            role_scope_name("usage", &roles(&["support", "auditor"]))
-        );
-        assert_ne!(
-            first,
-            role_scope_name("usage", &roles(&["Support", "auditor"]))
-        );
-        assert_eq!(
-            first,
-            role_scope_name("usage", &roles(&["auditor", "support", "auditor"]))
-        );
-
-        // The three shapes that used to pool onto one object.
-        assert_ne!(
-            first,
-            role_scope_name("member", &roles(&["auditor", "support"]))
-        );
-        assert_ne!(first, role_scope_name("usage", &roles(&["auditor"])));
-        assert_ne!(
-            role_scope_name("usage", &roles(&["alpha"])),
-            role_scope_name("usage", &roles(&["beta"]))
-        );
-
-        // The base joins on an underscore, so the hash has to keep this pair apart.
-        assert_ne!(
-            role_scope_name("usage", &roles(&["a_b"])),
-            role_scope_name("usage_a", &roles(&["b"]))
-        );
-        assert_ne!(
-            role_scope_name("usage", &roles(&["a.b"])),
-            role_scope_name("usage", &roles(&["a", "b"]))
-        );
-        assert!(
-            role_scope_name("usage", &["r".repeat(80)]).as_str().len() <= MAX_RELATION_NAME_LEN
-        );
     }
 
     #[test]

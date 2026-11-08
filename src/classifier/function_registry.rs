@@ -5,10 +5,10 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
-    body_returns_acting_role, body_setting_key, body_single_projection, normalize_setting_key,
+    body_role_keyword, body_setting_key, body_single_projection, normalize_setting_key,
     renamed_caller_body, FunctionSemantic,
 };
-use crate::parser::names::stored_relation_name;
+use crate::parser::names::{stored_relation_name, RoleKeyword};
 use crate::parser::sql_parser::{
     DatabaseLike, Deployment, FunctionLike, SessionSetting, SetPacking, SettingContent,
     SettingPresence, SettingValue,
@@ -336,6 +336,10 @@ pub struct FunctionRegistry {
     /// Functions whose body reads the caller through a cast that can rename it, with the
     /// reason the report gives.
     renamed_accessors: BTreeMap<FunctionKey, String>,
+    /// Functions whose whole body is a role keyword, so a call names the role it does.
+    role_keyword_accessors: BTreeMap<FunctionKey, RoleKeyword>,
+    /// Functions the schema gives a `LANGUAGE sql` body that reads as no semantic above.
+    unread_bodies: BTreeSet<FunctionKey>,
     /// The deployment the schema is read for, set by [`FunctionRegistry::enrich_from_schema`].
     deployment: Option<Deployment>,
     /// Request-scoped sources the deployment declares, keyed on the setting and the field
@@ -358,6 +362,8 @@ impl FunctionRegistry {
             public_flag_columns: BTreeSet::new(),
             owner_bound_accessors: BTreeMap::new(),
             renamed_accessors: BTreeMap::new(),
+            role_keyword_accessors: BTreeMap::new(),
+            unread_bodies: BTreeSet::new(),
             deployment: None,
             sources: DeclaredSources::default(),
             acting_role: None,
@@ -385,6 +391,20 @@ impl FunctionRegistry {
         self.renamed_accessors
             .get(resolved.as_str())
             .map(String::as_str)
+    }
+
+    /// The role keyword a call to the function `name` stands for, when its whole body is one.
+    pub(crate) fn role_keyword_accessor(&self, name: &str) -> Option<RoleKeyword> {
+        let key = FunctionKey::parse(name);
+        let resolved = self.function_resolution.get(&key).unwrap_or(&key);
+        self.role_keyword_accessors.get(resolved.as_str()).copied()
+    }
+
+    /// Whether the schema gives the function `name` a body no semantic reads.
+    pub(crate) fn has_unread_body(&self, name: &str) -> bool {
+        let key = FunctionKey::parse(name);
+        let resolved = self.function_resolution.get(&key).unwrap_or(&key);
+        self.unread_bodies.contains(resolved.as_str())
     }
 
     /// Confirm a column as a public flag, lifting its `P6BooleanFlag` to confidence A.
@@ -608,8 +628,9 @@ impl FunctionRegistry {
         )
     }
 
-    /// Check if a function is a role-name accessor (returns the current user's role as a string).
-    pub fn is_role_accessor(&self, name: &str) -> bool {
+    /// Whether the function `name` is declared a role accessor the schema does not define,
+    /// since a definition replaces the declaration.
+    pub(crate) fn is_undefined_role_accessor(&self, name: &str) -> bool {
         matches!(self.get(name), Some(FunctionSemantic::RoleAccessor { .. }))
     }
 
@@ -619,20 +640,66 @@ impl FunctionRegistry {
         self.deployment = Some(deployment.clone());
     }
 
+    /// Read a body that is no role keyword. A wrapper around one declared setting is that
+    /// setting, a body reading the caller through a cast that can rename it is noted with
+    /// the reason, and any other `LANGUAGE sql` body is recorded as read by nothing. A
+    /// built-in arrives with an empty body, since the server provides it, so it is never
+    /// recorded.
+    fn read_setting_body(
+        &mut self,
+        target: &TargetName<'_>,
+        target_key: FunctionKey,
+        body: &str,
+        return_type: &str,
+        language: &str,
+    ) {
+        // A wrapper around a declared source is that source, so the inline and the wrapped
+        // spelling reach one declaration and cannot disagree.
+        if let Some(key) = body_setting_key(body)
+            .map(|(key, casts)| (normalize_setting_key(&key), casts.without_json_parse()))
+            .filter(|(key, casts)| {
+                self.sources.declares_key(key)
+                    && casts
+                        .renaming(
+                            self.sources
+                                .get(key, &[])
+                                .map(DeclaredSource::canonical_type)
+                                .as_deref(),
+                        )
+                        .is_none()
+            })
+            .map(|(key, _)| key)
+        {
+            self.register_target_if_absent(target, &FunctionSemantic::SettingReader { key });
+        } else if let Some(reason) = renamed_caller_body(body, return_type, language, &self.sources)
+        {
+            self.renamed_accessors.entry(target_key).or_insert(reason);
+        } else if language == "sql" && !body.trim().is_empty() {
+            self.unread_bodies.insert(target_key);
+        }
+    }
+
     /// Read `db` for `deployment` by adopting the sources it declares and then inferring
     /// the semantics of the schema's function bodies. Explicitly provided registry entries
-    /// take precedence.
+    /// take precedence, except a role accessor, which the schema's definition replaces.
     pub fn enrich_from_schema<DB: DatabaseLike>(&mut self, db: &DB, deployment: &Deployment) {
         self.adopt(deployment);
         self.prepare_function_resolution(db);
         for function in db.functions() {
+            let target = function.target_name();
+            if matches!(
+                self.get_target(&target),
+                Some(FunctionSemantic::RoleAccessor { .. })
+            ) {
+                let target_key = self.target_key(&target);
+                self.functions.remove(&target_key);
+            }
             let Some(body) = function.body() else {
                 continue;
             };
             let Some(language) = function.stored_language() else {
                 continue;
             };
-            let target = function.target_name();
             // A set of identities is not one identity, so a set returning function is
             // never an accessor. It is the only thing that can be a set reader, which
             // the pass below mints once every wrapper it might read is registered.
@@ -650,43 +717,26 @@ impl FunctionRegistry {
                 &self.sources,
             ) {
                 self.register_target_if_absent(&target, &semantic);
-            } else if self.get_target(&target).is_none()
-                && matches!(function.security_mode(), FunctionSecurity::Definer)
-                && body_returns_acting_role(body, &return_type, &language)
-            {
-                // Inside a definer body the acting role is the owner, the same name for
-                // every caller.
-                let target_key = self.target_key(&target);
-                self.owner_bound_accessors
-                    .entry(target_key)
-                    .or_insert_with(|| target.to_string());
             } else if self.get_target(&target).is_none() {
-                // A wrapper around a declared source is that source, so the inline and
-                // the wrapped spelling reach one declaration and cannot disagree.
-                if let Some(key) = body_setting_key(body)
-                    .map(|(key, casts)| (normalize_setting_key(&key), casts.without_json_parse()))
-                    .filter(|(key, casts)| {
-                        self.sources.declares_key(key)
-                            && casts
-                                .renaming(
-                                    self.sources
-                                        .get(key, &[])
-                                        .map(DeclaredSource::canonical_type)
-                                        .as_deref(),
-                                )
-                                .is_none()
-                    })
-                    .map(|(key, _)| key)
-                {
-                    self.register_target_if_absent(
-                        &target,
-                        &FunctionSemantic::SettingReader { key },
-                    );
-                } else if let Some(reason) =
-                    renamed_caller_body(body, &return_type, &language, &self.sources)
-                {
-                    let target_key = self.target_key(&target);
-                    self.renamed_accessors.entry(target_key).or_insert(reason);
+                let target_key = self.target_key(&target);
+                match body_role_keyword(body, &return_type, &language) {
+                    // Inside a definer body the acting role is the owner, the same name for
+                    // every caller.
+                    Some(RoleKeyword::Acting)
+                        if matches!(function.security_mode(), FunctionSecurity::Definer) =>
+                    {
+                        self.owner_bound_accessors
+                            .entry(target_key)
+                            .or_insert_with(|| target.to_string());
+                    }
+                    Some(keyword) => {
+                        self.role_keyword_accessors
+                            .entry(target_key)
+                            .or_insert(keyword);
+                    }
+                    None => {
+                        self.read_setting_body(&target, target_key, body, &return_type, &language);
+                    }
                 }
             }
         }

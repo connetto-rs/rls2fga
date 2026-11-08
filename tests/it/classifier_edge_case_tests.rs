@@ -441,68 +441,6 @@ CREATE POLICY p_flag ON docs FOR SELECT USING (is_public = TRUE);
     );
 }
 
-// ── P2 variations ────────────────────────────────────────────────────────────
-
-#[test]
-fn role_accessor_equality_classified_as_p2() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (auth.role() = 'authenticated');
-";
-    let db = parse_schema(sql).unwrap();
-    let mut registry = FunctionRegistry::new();
-    registry
-        .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
-        .unwrap();
-
-    let classified = policy_classifier::classify_policies(
-        &db,
-        &registry,
-        &support::deployment::caller_deployment(),
-    );
-    assert_eq!(classified.len(), 1);
-    let c = classified[0].using_classification().unwrap();
-    assert!(
-        matches!(
-            &c.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { role_names, .. }) if role_names == &["authenticated"]
-        ),
-        "Expected P2 for role accessor = 'authenticated', got: {:?}",
-        c.pattern
-    );
-}
-
-#[test]
-fn role_accessor_in_list_classified_as_p2() {
-    let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (auth.role() IN ('authenticated', 'admin'));
-";
-    let db = parse_schema(sql).unwrap();
-    let mut registry = FunctionRegistry::new();
-    registry
-        .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
-        .unwrap();
-
-    let classified = policy_classifier::classify_policies(
-        &db,
-        &registry,
-        &support::deployment::caller_deployment(),
-    );
-    assert_eq!(classified.len(), 1);
-    let c = classified[0].using_classification().unwrap();
-    assert!(
-        matches!(
-            &c.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { role_names, .. }) if role_names.len() == 2
-        ),
-        "Expected P2 with 2 role names, got: {:?}",
-        c.pattern
-    );
-}
-
 /// The two-argument `pg_has_role` asks about the acting role, and the schema's role
 /// memberships settle the answer, so the call classifies as the constant they decide.
 #[test]

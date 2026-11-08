@@ -70,6 +70,7 @@ mod relation_shapes_tests;
 mod request_gate_parity_tests;
 mod request_gate_recipe_parity_tests;
 mod request_gate_tests;
+mod role_accessor_tests;
 mod role_keyword_tests;
 mod row_naming_tests;
 mod row_security_tests;

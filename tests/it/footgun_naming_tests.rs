@@ -5,8 +5,8 @@
 
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::generator::well_known::{
-    WellKnownTypes, WellKnownTypesError, NOBODY_TYPE, PG_ROLE_SCOPE_TYPE, PG_ROLE_TYPE,
-    REQUEST_GATE_TYPE, TEAM_TYPE, USER_TYPE,
+    WellKnownTypes, WellKnownTypesError, NOBODY_TYPE, PG_ROLE_TYPE, REQUEST_GATE_TYPE, TEAM_TYPE,
+    USER_TYPE,
 };
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
@@ -695,11 +695,6 @@ fn custom_well_known_types(setting: &str, replacement: &str) -> WellKnownTypes {
         } else {
             PG_ROLE_TYPE
         },
-        if setting == "pg_role_scope" {
-            replacement
-        } else {
-            PG_ROLE_SCOPE_TYPE
-        },
         if setting == "request_gate" {
             replacement
         } else {
@@ -738,7 +733,6 @@ fn invalid_configured_well_known_type_names_are_rejected_at_construction() {
             name,
             TEAM_TYPE,
             PG_ROLE_TYPE,
-            PG_ROLE_SCOPE_TYPE,
             REQUEST_GATE_TYPE,
             NOBODY_TYPE,
         );
@@ -755,7 +749,6 @@ fn duplicate_configured_well_known_type_names_are_rejected_at_construction() {
         "principal",
         "principal",
         PG_ROLE_TYPE,
-        PG_ROLE_SCOPE_TYPE,
         REQUEST_GATE_TYPE,
         NOBODY_TYPE,
     );
@@ -771,7 +764,7 @@ fn duplicate_configured_well_known_type_names_are_rejected_at_construction() {
 
 #[test]
 fn tables_cannot_take_configured_well_known_type_names() {
-    for setting in ["user", "team", "pg_role", "pg_role_scope", "nobody"] {
+    for setting in ["user", "team", "pg_role", "nobody"] {
         let db = db_of(&reserved_type_collision_schema(setting));
         let error = translator(ConfidenceLevel::A)
             .translate(&db)
@@ -786,7 +779,7 @@ fn tables_cannot_take_configured_well_known_type_names() {
 
 #[test]
 fn renaming_the_well_known_type_releases_the_table_name() {
-    for setting in ["user", "team", "pg_role", "pg_role_scope", "nobody"] {
+    for setting in ["user", "team", "pg_role", "nobody"] {
         let db = db_of(&reserved_type_collision_schema(setting));
         let type_name = format!("configured_{setting}");
         let outputs = translator_with_types(custom_well_known_types(setting, &type_name))
@@ -821,7 +814,6 @@ fn well_known_names_have_a_single_source_of_truth() {
         "principal",
         "principal_group",
         "database_role",
-        "database_role_scope",
         "request_check",
         "empty_principal",
     )
@@ -892,7 +884,6 @@ fn valid_extended_well_known_type_name_keeps_its_exact_spelling() {
         user,
         TEAM_TYPE,
         PG_ROLE_TYPE,
-        PG_ROLE_SCOPE_TYPE,
         REQUEST_GATE_TYPE,
         NOBODY_TYPE,
     )
