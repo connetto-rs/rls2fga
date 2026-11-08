@@ -165,6 +165,72 @@ CREATE POLICY p_false ON docs AS RESTRICTIVE FOR SELECT TO PUBLIC USING (FALSE);
     );
 }
 
+/// A comparison between two literals settles before classification, so the guard
+/// translates as the owner rule with the folded `true` granting everyone.
+#[test]
+fn a_true_constant_comparison_translates_as_the_rule_it_guards() {
+    let owner_sql = r"
+CREATE TABLE docs (id UUID PRIMARY KEY, owner UUID NOT NULL);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
+  USING (owner = current_setting('app.user_id', true));
+";
+    let guarded_sql = r"
+CREATE TABLE docs (id UUID PRIMARY KEY, owner UUID NOT NULL);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
+  USING ('on' = 'on' AND owner = current_setting('app.user_id', true));
+";
+    let (classified, db, registry) = support::classify_sql(owner_sql, None);
+    let owner_model = support::plan_at(classified, &db, &registry, ConfidenceLevel::D);
+    let (classified, db, registry) = support::classify_sql(guarded_sql, None);
+    let guarded_model = support::plan_at(classified, &db, &registry, ConfidenceLevel::D);
+
+    // Strip the grant the folded `true` arm adds and what is left must be the owner
+    // rule's model.
+    let without_true_arm = guarded_model
+        .model()
+        .replace("    define public_viewer: [user:*]\n", "")
+        .replace(
+            "define can_select: owner and public_viewer",
+            "define can_select: owner",
+        )
+        .replace(
+            "define can_select: public_viewer and owner",
+            "define can_select: owner",
+        );
+    assert_eq!(
+        owner_model.model(),
+        without_true_arm,
+        "'on' = 'on' settles to true, so the clause reads as the owner rule alone, got:\n{}",
+        guarded_model.model()
+    );
+}
+
+/// A comparison settling to `false` in a restrictive policy denies the reads the
+/// permissive rule alone would grant.
+#[test]
+fn a_false_constant_comparison_in_restrictive_denies() {
+    let sql = r"
+CREATE TABLE docs (id UUID PRIMARY KEY, owner UUID NOT NULL);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
+  USING (owner = current_setting('app.user_id', true));
+CREATE POLICY p_off ON docs AS RESTRICTIVE FOR SELECT TO PUBLIC
+  USING ('on' = 'off');
+";
+    let (classified, db, registry) = support::classify_sql(sql, None);
+    let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::D);
+    let dsl = model.model();
+    let select = support::footgun::relation_definition(&dsl, "docs", "can_select")
+        .expect("docs defines can_select");
+    assert!(
+        select == "owner and no_access" || select == "no_access and owner",
+        "'on' = 'off' settles to false, so the read denies beside the grant, got \
+         'define can_select: {select}':\n{dsl}"
+    );
+}
+
 #[test]
 fn json_and_dsl_are_semantically_aligned_for_composite() {
     let sql = support::read_fixture_sql("compound_or");

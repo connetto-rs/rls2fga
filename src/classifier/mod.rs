@@ -1,5 +1,7 @@
 /// Maps SQL function names to their known semantics (role-threshold, current-user accessor, etc.).
 pub mod function_registry;
+// `constant_fold` documents itself in the file.
+pub(crate) mod constant_fold;
 // `exclusion` documents itself in the file.
 pub(crate) mod exclusion;
 // `expansion` documents itself in the file.
