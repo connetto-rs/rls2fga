@@ -8,7 +8,7 @@ use crate::classifier::expansion::{self, ExpansionState};
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::*;
 use crate::classifier::recognizers;
-use crate::classifier::role_keywords::lower_role_keywords;
+use crate::classifier::role_keywords::prepare_clause;
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::sql_parser::{DatabaseLike, Deployment};
 
@@ -173,7 +173,7 @@ fn classify_clause<DB: DatabaseLike>(
     command: PolicyCommand,
     mode: Option<PolicyMode>,
 ) -> ClassifiedExpr {
-    let expr = match lower_role_keywords(expr, registry) {
+    let expr = match prepare_clause(expr, registry) {
         Ok(lowered) => lowered,
         Err(refused) => return unknown_d(expr, refused.to_string()),
     };
@@ -222,7 +222,7 @@ pub(crate) fn classify_expr_in_state<DB: DatabaseLike>(
     command: PolicyCommand,
     state: &ExpansionState,
 ) -> ClassifiedExpr {
-    match lower_role_keywords(expr, registry) {
+    match prepare_clause(expr, registry) {
         Ok(lowered) => classify_expr_depth(&lowered, db, registry, table, command, 0, state),
         Err(refused) => unknown_d(expr, refused.to_string()),
     }
@@ -736,7 +736,7 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 if reads_bypass_rls {
                     state.enter_owner_read();
                 }
-                let inner = match lower_role_keywords(&body, registry) {
+                let inner = match prepare_clause(&body, registry) {
                     Ok(lowered) => classify_expr_depth(
                         &lowered,
                         db,

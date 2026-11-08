@@ -15,6 +15,7 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{Expr, FunctionArguments, Value, VisitMut, VisitorMut};
 
+use crate::classifier::constant_fold::fold_constant_comparisons;
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::parser::names::{role_keyword, RoleKeyword};
 
@@ -88,6 +89,19 @@ pub(crate) fn lower_role_keywords<'e>(
         Some(refused) => Err(refused),
         None => Ok(Cow::Owned(lowered)),
     }
+}
+
+/// `expr` as the classifier reads it, its role keywords named and every comparison
+/// between constants that leaves folded to its truth.
+///
+/// # Errors
+///
+/// As [`lower_role_keywords`].
+pub(crate) fn prepare_clause<'e>(
+    expr: &'e Expr,
+    registry: &FunctionRegistry,
+) -> Result<Cow<'e, Expr>, RoleKeywordError> {
+    lower_role_keywords(expr, registry).map(fold_constant_comparisons)
 }
 
 struct Lower<'r> {
