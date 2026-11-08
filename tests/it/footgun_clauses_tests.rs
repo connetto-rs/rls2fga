@@ -727,6 +727,48 @@ fn a_permissive_policy_whose_literal_cannot_be_read_is_refused() {
     );
 }
 
+/// `PostgreSQL` scopes a policy name to its table, so a policy named like another table's
+/// answers for its own clause alone, in whichever order the two are created.
+#[test]
+fn same_named_policies_on_two_tables_translate_apart() {
+    let unreadable = "CREATE POLICY p ON docs USING (expires > '2026-01-01 09:00');";
+    let readable = "CREATE POLICY p ON notes FOR SELECT USING (owner_id = current_user);";
+    for policies in [[unreadable, readable], [readable, unreadable]] {
+        let db = db_of(&format!(
+            "{UNREADABLE_LITERAL_TABLE}\
+             CREATE TABLE notes(id UUID PRIMARY KEY, owner_id TEXT);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             {}\n{}",
+            policies[0], policies[1]
+        ));
+        let outputs = translator(ConfidenceLevel::B)
+            .translate(&db)
+            .expect("translation should plan")
+            .outputs_accepting_gaps();
+        let dsl = outputs.model();
+        assert!(
+            relation_denies(&dsl, "docs", "can_select")
+                && relation_definition(&dsl, "notes", "can_select").is_some()
+                && !relation_denies(&dsl, "notes", "can_select"),
+            "each `p` answers for its own table ({policies:?}):\n{dsl}"
+        );
+        let refused: Vec<&str> = outputs
+            .notes()
+            .iter()
+            .filter_map(|note| match note {
+                TranslationNote::ExpressionRefused { policy, reason } if policy == "p" => {
+                    Some(reason.as_str())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(
+            refused.len() == 1 && refused[0].contains("'2026-01-01 09:00'"),
+            "only the clause on docs is refused, for its literal ({policies:?}): {refused:?}"
+        );
+    }
+}
+
 /// A barrier of unknown value may admit nothing, so it denies what it guards rather than
 /// stepping aside for the grant beside it.
 #[test]
