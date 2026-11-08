@@ -1987,8 +1987,59 @@ fn rule_implies_consults_conditional_tupleset_subjects() {
     };
 
     assert!(
-        !simplify::rule_implies(&rule, &visible, &plans[0], &by_name, &mut BTreeSet::new()),
+        !simplify::rule_implies(&rule, &visible, &plans[0], &by_name, &mut Vec::new()),
         "`groups` reaches editors who are not viewers, so the implication does not hold"
+    );
+}
+
+/// A barrier the rule and the visible rule both carry cancels out, so a grant of the rule
+/// that implies the visible grant implies the visible rule under the same barrier.
+#[test]
+fn a_conjunct_of_the_rule_implying_the_gate_makes_the_gate_redundant() {
+    let mut docs = TypePlan::new(TypeName::canonicalized("docs"));
+    docs.set_computed(
+        "viewer",
+        UsersetExpr::Union(vec![UsersetExpr::Computed(RelationName::canonicalized(
+            "editor",
+        ))]),
+    );
+    docs.ensure_direct(
+        "editor",
+        vec![DirectSubject::Type(TypeName::canonicalized(USER_TYPE))],
+    );
+    docs.ensure_direct(
+        "barrier",
+        vec![DirectSubject::Type(TypeName::canonicalized(USER_TYPE))],
+    );
+    let plans = [docs];
+    let by_name: BTreeMap<&TypeName, &TypePlan> =
+        plans.iter().map(|plan| (&plan.type_name, plan)).collect();
+    let gated = |grant: &str| {
+        UsersetExpr::Intersection(vec![
+            UsersetExpr::Computed(RelationName::canonicalized(grant)),
+            UsersetExpr::Computed(RelationName::canonicalized("barrier")),
+        ])
+    };
+
+    assert!(
+        simplify::rule_implies(
+            &gated("editor"),
+            &gated("viewer"),
+            &plans[0],
+            &by_name,
+            &mut Vec::new()
+        ),
+        "every editor is a viewer under the same barrier"
+    );
+    assert!(
+        !simplify::rule_implies(
+            &UsersetExpr::Computed(RelationName::canonicalized("editor")),
+            &gated("viewer"),
+            &plans[0],
+            &by_name,
+            &mut Vec::new()
+        ),
+        "an editor under no barrier is not a viewer of that barrier"
     );
 }
 

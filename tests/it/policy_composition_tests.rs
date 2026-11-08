@@ -224,3 +224,43 @@ CREATE POLICY p_upd ON docs FOR UPDATE TO PUBLIC
         "report should show WITH CHECK pattern details, got:\n{report_md}"
     );
 }
+
+#[test]
+fn a_read_gate_a_conjunct_of_the_rule_implies_is_dropped() {
+    let sql = r"
+CREATE TABLE users (id UUID PRIMARY KEY);
+CREATE TABLE docs (
+  id UUID PRIMARY KEY,
+  owner_id UUID REFERENCES users(id),
+  is_public BOOLEAN NOT NULL DEFAULT FALSE
+);
+CREATE FUNCTION auth_current_user_id() RETURNS UUID
+  LANGUAGE sql STABLE
+  AS 'SELECT current_setting(''app.current_user_id'')::uuid';
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p_owner_read ON docs AS PERMISSIVE FOR SELECT TO PUBLIC
+  USING (owner_id = auth_current_user_id());
+CREATE POLICY p_owner_delete ON docs AS PERMISSIVE FOR DELETE TO PUBLIC
+  USING (owner_id = auth_current_user_id());
+CREATE POLICY p_public_delete ON docs AS RESTRICTIVE FOR DELETE TO PUBLIC
+  USING (is_public = TRUE);
+";
+    let (classified, db, registry) = support::classify_sql(sql, Some(support::ACCESSOR_REGISTRY));
+    let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::D);
+
+    // The delete rule walks the same `owner` grant as the read and carries the barrier
+    // beside it, so it admits no more than the read and the gate adds nothing.
+    let dsl = model.model();
+    let can_delete = dsl
+        .lines()
+        .find(|line| line.trim().starts_with("define can_delete:"))
+        .expect("docs should define can_delete");
+    assert!(
+        can_delete.contains("owner"),
+        "expected the owner grant in can_delete, got: {can_delete}"
+    );
+    assert!(
+        !can_delete.contains("can_select"),
+        "the read gate the delete rule implies should be dropped, got: {can_delete}"
+    );
+}
