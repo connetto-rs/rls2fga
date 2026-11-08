@@ -222,18 +222,21 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
                 }
             }
             Ok(RowSecurity::Gated(gates)) => {
+                // A statement's gates feed only its own targets, so none is answered yet.
+                let mut buckets: BTreeMap<ActionTarget, ModeBuckets> = BTreeMap::new();
                 for gate in &gates {
                     reached.extend(gate.permissive().iter().map(|term| term.policy().name()));
                     let Some(target) = gate_target(gate.command(), gate.row()) else {
                         continue;
                     };
-                    let answer = answers
-                        .entry(target)
-                        .or_insert_with(|| TargetAnswer::Gated(ModeBuckets::default()));
-                    if let TargetAnswer::Gated(bucket) = answer {
-                        fill_bucket(bucket, target, gate.permissive(), gate.restrictive(), parts);
-                    }
+                    let bucket = buckets.entry(target).or_default();
+                    fill_bucket(bucket, target, gate.permissive(), gate.restrictive(), parts);
                 }
+                answers.extend(
+                    buckets
+                        .into_iter()
+                        .map(|(target, bucket)| (target, TargetAnswer::Gated(bucket))),
+                );
             }
             Ok(RowSecurity::InfiniteRecursion { relation }) => {
                 recursion
