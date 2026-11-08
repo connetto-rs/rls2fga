@@ -23,7 +23,7 @@ use alloc::borrow::Cow;
 
 use sql_traits::errors::DeploymentError;
 use sql_traits::structs::{
-    ActingRole, GateTerm, GatedCommand, RowSecurity, RowSecurityExemption, RowStatement, RowVersion,
+    ActingRole, GateTerm, RowSecurity, RowSecurityExemption, RowStatement, RowVersion,
 };
 
 /// What one policy's clause contributes to one target.
@@ -117,33 +117,49 @@ pub(super) enum TargetAnswer {
     Refused,
 }
 
-/// The statements whose gates name every target once.
-const STATEMENTS: [RowStatement; 4] = [
-    RowStatement::Select,
-    RowStatement::Insert { returning: false },
-    RowStatement::Update { reads: false },
-    RowStatement::Delete { reads: false },
-];
-
-/// The targets one statement's own gates feed.
-fn statement_targets(statement: RowStatement) -> &'static [ActionTarget] {
-    match statement {
-        RowStatement::Select => &[ActionTarget::Select],
-        RowStatement::Insert { .. } => &[ActionTarget::Insert],
-        RowStatement::Update { .. } => &[ActionTarget::UpdateUsing, ActionTarget::UpdateCheck],
-        _ => &[ActionTarget::Delete],
-    }
+/// One statement asked of `row_security`. None reads the row, so each of its gates judges
+/// the statement's own command.
+#[derive(Debug, Clone, Copy)]
+enum Asked {
+    Select,
+    Insert,
+    Update,
+    Delete,
 }
 
-/// The target a gate feeds.
-fn gate_target(command: GatedCommand, row: RowVersion) -> Option<ActionTarget> {
-    match (command, row) {
-        (GatedCommand::Select, RowVersion::Existing) => Some(ActionTarget::Select),
-        (GatedCommand::Insert, RowVersion::Inserted) => Some(ActionTarget::Insert),
-        (GatedCommand::Update, RowVersion::Existing) => Some(ActionTarget::UpdateUsing),
-        (GatedCommand::Update, RowVersion::Updated) => Some(ActionTarget::UpdateCheck),
-        (GatedCommand::Delete, RowVersion::Existing) => Some(ActionTarget::Delete),
-        _ => None,
+/// The statements whose gates name every target once.
+const ASKED: [Asked; 4] = [Asked::Select, Asked::Insert, Asked::Update, Asked::Delete];
+
+impl Asked {
+    /// The statement as `row_security` takes it.
+    fn statement(self) -> RowStatement {
+        match self {
+            Self::Select => RowStatement::Select,
+            Self::Insert => RowStatement::Insert { returning: false },
+            Self::Update => RowStatement::Update { reads: false },
+            Self::Delete => RowStatement::Delete { reads: false },
+        }
+    }
+
+    /// The targets the statement's gates feed.
+    fn targets(self) -> &'static [ActionTarget] {
+        match self {
+            Self::Select => &[ActionTarget::Select],
+            Self::Insert => &[ActionTarget::Insert],
+            Self::Update => &[ActionTarget::UpdateUsing, ActionTarget::UpdateCheck],
+            Self::Delete => &[ActionTarget::Delete],
+        }
+    }
+
+    /// The target the statement's gate on `row` feeds. Only an update judges two versions.
+    fn target(self, row: RowVersion) -> ActionTarget {
+        match self {
+            Self::Select => ActionTarget::Select,
+            Self::Insert => ActionTarget::Insert,
+            Self::Update if row == RowVersion::Existing => ActionTarget::UpdateUsing,
+            Self::Update => ActionTarget::UpdateCheck,
+            Self::Delete => ActionTarget::Delete,
+        }
     }
 }
 
@@ -165,6 +181,15 @@ fn commands_of(targets: &BTreeSet<ActionTarget>) -> Vec<String> {
     commands_fed_by(&targets.iter().copied().collect::<Vec<_>>())
 }
 
+/// Place one policy's part for one target in the bucket its mode makes it.
+fn place(bucket: &mut ModeBuckets, mode: PolicyMode, part: PolicyPart) {
+    match (mode, part) {
+        (PolicyMode::Permissive, PolicyPart::Grant(expr)) => bucket.permissive.push(expr),
+        (PolicyMode::Restrictive, PolicyPart::Grant(expr)) => bucket.restrictive.push(expr),
+        (_, PolicyPart::Subtract(expr)) => bucket.subtractions.push(expr),
+    }
+}
+
 /// Fill the bucket one gate's terms make, moving out the parts each policy's clause
 /// produced. Every target has one gate, so a part is taken at most once.
 ///
@@ -178,21 +203,17 @@ fn fill_bucket<P: PolicyLike>(
     restrictive: &[GateTerm<'_, P>],
     parts: &mut BTreeMap<String, BTreeMap<ActionTarget, PolicyPart>>,
 ) {
-    let mut take = |term: &GateTerm<'_, P>| {
-        parts
-            .get_mut(term.policy().name())
-            .and_then(|targets| targets.remove(&target))
-    };
-    for term in permissive {
-        if let Some(PolicyPart::Grant(expr)) = take(term) {
-            bucket.permissive.push(expr);
-        }
-    }
-    for term in restrictive {
-        match take(term) {
-            Some(PolicyPart::Grant(expr)) => bucket.restrictive.push(expr),
-            Some(PolicyPart::Subtract(expr)) => bucket.subtractions.push(expr),
-            None => {}
+    for (mode, terms) in [
+        (PolicyMode::Permissive, permissive),
+        (PolicyMode::Restrictive, restrictive),
+    ] {
+        for term in terms {
+            if let Some(part) = parts
+                .get_mut(term.policy().name())
+                .and_then(|targets| targets.remove(&target))
+            {
+                place(bucket, mode, part);
+            }
         }
     }
 }
@@ -212,9 +233,9 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
     let mut exempt = None;
     let mut recursion: BTreeMap<String, BTreeSet<ActionTarget>> = BTreeMap::new();
     let mut refused: BTreeMap<String, BTreeSet<ActionTarget>> = BTreeMap::new();
-    for statement in STATEMENTS {
-        let targets = statement_targets(statement);
-        match table.row_security(statement, branch.acting_role(), db) {
+    for asked in ASKED {
+        let targets = asked.targets();
+        match table.row_security(asked.statement(), branch.acting_role(), db) {
             Ok(RowSecurity::Exempt(exemption)) => {
                 exempt = Some(exemption);
                 for target in targets {
@@ -226,9 +247,7 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
                 let mut buckets: BTreeMap<ActionTarget, ModeBuckets> = BTreeMap::new();
                 for gate in &gates {
                     reached.extend(gate.permissive().iter().map(|term| term.policy().name()));
-                    let Some(target) = gate_target(gate.command(), gate.row()) else {
-                        continue;
-                    };
+                    let target = asked.target(gate.row());
                     let bucket = buckets.entry(target).or_default();
                     fill_bucket(bucket, target, gate.permissive(), gate.restrictive(), parts);
                 }
@@ -295,18 +314,8 @@ pub(super) fn answer_supplied_policies<DB: DatabaseLike>(
 ) -> BTreeMap<ActionTarget, TargetAnswer> {
     let mut buckets: BTreeMap<ActionTarget, ModeBuckets> = BTreeMap::new();
     for policy in policies.iter().filter(|policy| branch.classified(policy)) {
-        let Some(targets) = parts.remove(policy.name()) else {
-            continue;
-        };
-        for (target, part) in targets {
-            let bucket = buckets.entry(target).or_default();
-            match (policy.mode(), part) {
-                (PolicyMode::Permissive, PolicyPart::Grant(expr)) => bucket.permissive.push(expr),
-                (PolicyMode::Restrictive, PolicyPart::Grant(expr)) => {
-                    bucket.restrictive.push(expr);
-                }
-                (_, PolicyPart::Subtract(expr)) => bucket.subtractions.push(expr),
-            }
+        for (target, part) in parts.remove(policy.name()).into_iter().flatten() {
+            place(buckets.entry(target).or_default(), policy.mode(), part);
         }
     }
     buckets
@@ -318,27 +327,21 @@ pub(super) fn answer_supplied_policies<DB: DatabaseLike>(
 /// The rule one target answers for one role, `None` where no row passes.
 ///
 /// `walk` joins the role's kind, and is `None` for a branch acting as no role, which no
-/// kind tuple can name.
+/// kind tuple can name and no exemption reaches.
 pub(super) fn branch_expr(
     answer: &TargetAnswer,
     walk: Option<UsersetExpr>,
     table_plan: &mut TypePlan,
-    all_rows: impl FnOnce(&mut TypePlan) -> UsersetExpr,
 ) -> Option<UsersetExpr> {
     let rule = match answer {
         TargetAnswer::Refused => return None,
-        TargetAnswer::Exempt => None,
-        TargetAnswer::Gated(bucket) => {
-            if bucket.permissive.is_empty() {
-                return None;
-            }
-            compose_action(table_plan, Some(bucket))
-        }
+        // An exempt role reads every row its kind reaches.
+        TargetAnswer::Exempt => return walk,
+        TargetAnswer::Gated(bucket) if bucket.permissive.is_empty() => return None,
+        TargetAnswer::Gated(bucket) => compose_action(table_plan, Some(bucket))?,
     };
-    match (rule, walk) {
-        (Some(rule), Some(walk)) => Some(UsersetExpr::Intersection(vec![rule, walk])),
-        (Some(rule), None) => Some(rule),
-        (None, Some(walk)) => Some(walk),
-        (None, None) => Some(all_rows(table_plan)),
-    }
+    Some(match walk {
+        Some(walk) => UsersetExpr::Intersection(vec![rule, walk]),
+        None => rule,
+    })
 }

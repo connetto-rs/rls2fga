@@ -85,8 +85,8 @@ use emit_membership::{
     emit_uncorrelated_membership,
 };
 use emit_ownership::{
-    emit_all_rows, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
-    emit_direct_ownership, emit_row_ownership, emit_row_presence_gate, emit_unclassified,
+    emit_attribute_condition, emit_boolean_flag, emit_constant_bool, emit_direct_ownership,
+    emit_row_ownership, emit_row_presence_gate, emit_unclassified,
 };
 use emit_requests::{
     conditional_gate_expr, declare_temporal_condition, emit_membership_in_caller_set,
@@ -153,14 +153,18 @@ impl DirectSubject {
 
     /// The type a tupleset walk resolves this subject to, `None` for a wildcard,
     /// which cannot be walked. A condition restricts which tuples exist, not which
-    /// type they name, so a conditional subject resolves like a plain one.
+    /// type they name, so a conditional subject resolves like a plain one, and a userset
+    /// resolves to the type of the object it names.
     fn resolved_type_name(&self) -> Option<&TypeName> {
         match self {
             Self::Type(name)
             | Self::ConditionalType {
                 type_name: name, ..
+            }
+            | Self::Userset {
+                type_name: name, ..
             } => Some(name),
-            Self::Wildcard(_) | Self::ConditionalWildcard { .. } | Self::Userset { .. } => None,
+            Self::Wildcard(_) | Self::ConditionalWildcard { .. } => None,
         }
     }
 
@@ -1244,9 +1248,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                                 barrier_denied.insert(*target);
                             }
                         }
-                        if let Some(expr) = branch_expr(answer, walk.clone(), table_plan, |plan| {
-                            emit_all_rows(plan, &source_table, db)
-                        }) {
+                        if let Some(expr) = branch_expr(answer, walk.clone(), table_plan) {
                             per_target.entry(*target).or_default().push(expr);
                         }
                     }

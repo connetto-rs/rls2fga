@@ -865,9 +865,8 @@ fn a_type_name_is_decided_in_one_place() {
 /// declared. Carrying the newtype also removes the re-wrapping in the record templates, so
 /// the idempotence of the canonicalizer stops being load-bearing.
 ///
-/// Stored fields only. A function that renders a name as text, or looks one up by its
-/// rendered form, takes `&str` on purpose: `dsl::bare`, `TableTypes::spelling_of` and
-/// `Recursion::blocked_targets`.
+/// Stored fields only. A function that renders a name as text takes `&str` on purpose, as
+/// `dsl::bare` does.
 #[test]
 fn a_type_name_is_stored_as_a_type_name() {
     // Named rather than matched by suffix: `return_type` and `data_type` are SQL types,
