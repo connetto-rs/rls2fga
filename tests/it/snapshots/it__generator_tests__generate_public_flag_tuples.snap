@@ -7,7 +7,7 @@ SET DateStyle = 'ISO, MDY';
 SET bytea_output = 'hex';
 
 -- Public access flag (is_public)
-SELECT 'articles:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'public_when_is_public' AS relation, 'user:*' AS subject
+SELECT 'articles:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'public_when_is_public' AS relation, 'user:*' AS subject
 FROM "public"."articles"
 WHERE "id" IS NOT NULL
 AND "is_public" = TRUE;
@@ -16,6 +16,6 @@ AND "is_public" = TRUE;
 SELECT 'request_gate:articles' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
 
 -- Every articles row is judged by the scope articles
-SELECT 'articles:' || CASE WHEN "id"::text ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:articles' AS subject
+SELECT 'articles:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:articles' AS subject
 FROM "public"."articles"
 WHERE "id" IS NOT NULL;

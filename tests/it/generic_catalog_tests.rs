@@ -12,7 +12,7 @@ use crate::support;
 use std::sync::Arc;
 
 use sql_traits::errors::LookupError;
-use sql_traits::structs::metadata::{ExpressionCalls, PolicyMetadata};
+use sql_traits::structs::metadata::{ColumnMetadata, ExpressionCalls, PolicyMetadata};
 use sql_traits::structs::{TableAttribute, TableMetadata};
 use sqlparser::ast::{
     ColumnDef, ColumnOption, CreatePolicy, CreateRole, CreateTable, Expr, ForeignKeyConstraint,
@@ -306,8 +306,10 @@ fn rebuilt_catalog(ddl: &str) -> ParserDB {
             .iter()
             .map(|column| Arc::new(TableAttribute::new(table.clone(), column.clone())))
             .collect();
+        // The catalog holds every column, which is what lets a column answer its collation.
         for column in &columns {
-            metadata.add_column(column.clone());
+            metadata.add_column(Arc::clone(column));
+            builder = builder.add_column(Arc::clone(column), ColumnMetadata::default());
         }
         metadata.set_primary_key(
             columns

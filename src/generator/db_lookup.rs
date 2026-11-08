@@ -169,6 +169,31 @@ pub(crate) fn column_compares_bytewise<DB: DatabaseLike>(
     })
 }
 
+/// Why `OpenFGA` cannot decide a comparison of `column` of `table` the way `PostgreSQL`
+/// does: its collation can find two spellings equal, `'ALICE'` and `'alice'`, that `OpenFGA`
+/// holds as two keys because it compares them byte for byte.
+///
+/// `None` where `PostgreSQL` compares the column byte for byte, and where `table` declares
+/// no such column, which the reader naming it refuses for that reason.
+pub(crate) fn key_collation_refusal<DB: DatabaseLike>(
+    table: &TableId,
+    column: &ColumnName,
+    db: &DB,
+) -> Option<String> {
+    let collation = match declared_column(table, column.as_str(), db)?.collation(db) {
+        Ok(ColumnCollation::DatabaseDefault) => return None,
+        Ok(ColumnCollation::Named(named)) if named.postgres_deterministic() == Some(true) => {
+            return None;
+        }
+        Ok(ColumnCollation::Named(named)) => format!("the collation {}", named.name()),
+        Ok(ColumnCollation::Unknown) | Err(_) => "a collation the schema does not resolve".into(),
+    };
+    Some(format!(
+        "{table}.{column} compares under {collation}, which PostgreSQL can find equal for two \
+         spellings OpenFGA holds as different keys, since OpenFGA compares them byte for byte"
+    ))
+}
+
 const fn column_kind_from_scalar_family(family: Option<ScalarFamily>) -> ColumnKind {
     match family {
         Some(ScalarFamily::Bool) => ColumnKind::Bool,
