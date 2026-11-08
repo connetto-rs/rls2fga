@@ -127,6 +127,7 @@ async fn every_parity_case_agrees() {
             a_deadline_is_fixed_in_the_creating_sessions_zone,
             a_nondeterministic_collation_is_compared_by_the_database,
             a_local_literal_is_read_in_the_request_zone,
+            a_literal_of_another_date_type_compares_in_no_zone,
             a_role_ladder_answers_four_thresholds,
             an_insert_that_reads_back_applies_the_select_policy,
             an_upsert_applies_the_update_policy_too,
@@ -3730,6 +3731,63 @@ CREATE POLICY docs_deadline ON docs FOR SELECT
         );
     }
     assert_agrees(&case, &run);
+}
+
+/// A `date` against a `timestamp` column, and a `timestamp` against a `date` column, compare
+/// in no zone, so the tuple query keeps the literal typed and agrees with the database. The
+/// database runs at UTC+14 to show no zone enters.
+async fn a_literal_of_another_date_type_compares_in_no_zone(cluster: Arc<Cluster>) {
+    for (name, clause, visible) in [
+        (
+            "date-against-timestamp",
+            "starts_on < '2026-01-01'::date",
+            &["d1"][..],
+        ),
+        (
+            "timestamp-against-date",
+            "due < '2026-01-01 12:00'::timestamp",
+            &["d1", "d2"],
+        ),
+    ] {
+        let case = ParityCase::reading(
+            &format!("runner-cross-type-{name}"),
+            &format!(
+                "
+CREATE TABLE docs (id TEXT PRIMARY KEY, starts_on TIMESTAMP, due DATE);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_cross ON docs FOR SELECT USING ({clause});
+"
+            ),
+            &[
+                "DO $$
+                 BEGIN
+                     EXECUTE format(
+                         'ALTER DATABASE %I SET timezone = %L',
+                         current_database(),
+                         'Pacific/Kiritimati'
+                     );
+                 END $$",
+                "INSERT INTO docs (id, starts_on, due) VALUES
+                     ('d1', '2025-12-31 23:00', '2025-12-31'),
+                     ('d2', '2026-01-01 00:00', '2026-01-01'),
+                     ('d3', '2026-01-01 23:00', '2026-01-02')",
+                "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+            ],
+            vec![Principal::as_role("app_user", "app_user")],
+        );
+        let run = support::parity::run(&cluster, &case).await;
+        for id in ["d1", "d2", "d3"] {
+            support::parity::assert_postgres(
+                &case,
+                &run,
+                "app_user",
+                &format!("docs:{id}"),
+                ActionStatement::Select,
+                visible.contains(&id),
+            );
+        }
+        assert_agrees(&case, &run);
+    }
 }
 
 /// Ported from `translated_schema_parity_postgres18_and_openfga`.

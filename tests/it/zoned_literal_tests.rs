@@ -281,24 +281,6 @@ fn a_local_literal_with_no_threshold_falls_closed_naming_why() {
     }
 }
 
-/// An infinite date, which every zone converts alike, takes no threshold and falls closed
-/// as any other cast across types does.
-#[test]
-fn an_infinite_local_literal_takes_no_threshold() {
-    let clause = "expires_at < 'infinity'::date";
-    let outputs = translated(clause).outputs_accepting_gaps();
-    let dsl = outputs.model();
-    assert!(
-        !dsl.contains("request_time_at_"),
-        "`{clause}` needs no threshold:\n{dsl}"
-    );
-    assert_eq!(
-        relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("no_access"),
-        "`{clause}` must fall closed:\n{dsl}"
-    );
-}
-
 /// A literal naming its instant, and a literal against a column with no zone, read alike
 /// in every zone, so they stay filters on the row.
 #[test]

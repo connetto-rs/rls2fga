@@ -1860,6 +1860,11 @@ fn render_attribute_literal(value: &AttributeLiteral) -> Option<String> {
         AttributeLiteral::AsText(text) => Some(format!("{}::text", quote_sql_string_literal(text))),
         AttributeLiteral::Number(number) => Some(number.clone()),
         AttributeLiteral::Boolean(flag) => Some(if *flag { "TRUE" } else { "FALSE" }.to_string()),
+        AttributeLiteral::Temporal { kind, text } => Some(format!(
+            "{} {}",
+            kind.keyword(),
+            quote_sql_string_literal(text)
+        )),
         _ => None,
     }
 }

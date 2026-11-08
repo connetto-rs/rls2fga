@@ -1,6 +1,9 @@
 use super::*;
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::parser::expr::{element_type, peel_noting_casts};
+use crate::parser::sql_parser::DataTypeLike;
+use crate::types::TemporalKind;
+use sql_traits::utils::scalar_family::ScalarFamily;
 use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
 use sqlparser::ast::{self, DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
 
@@ -725,10 +728,18 @@ fn comparison_uses_session_zone(
     right: &Expr,
     session_zoned_columns: &[String],
 ) -> bool {
-    (is_session_zoned_column(left, session_zoned_columns)
-        && literal_uses_session_against_zoned_column(right))
-        || (is_session_zoned_column(right, session_zoned_columns)
-            && literal_uses_session_against_zoned_column(left))
+    let reads_session = |column: &Expr, value: &Expr| {
+        if is_session_zoned_column(column, session_zoned_columns) {
+            literal_uses_session_against_zoned_column(value)
+        } else {
+            // An instant meets a zoneless column only after the column is converted in
+            // the session zone.
+            bare_column(column).is_some()
+                && temporal_literal(value)
+                    .is_some_and(|(kind, _)| kind == TemporalKind::TimestampTz)
+        }
+    };
+    reads_session(left, right) || reads_session(right, left)
 }
 
 fn is_session_zoned_column(expr: &Expr, session_zoned_columns: &[String]) -> bool {
@@ -871,26 +882,25 @@ pub(crate) fn local_literal_comparison(
 }
 
 /// `column BETWEEN low AND high` as `column >= low AND column <= high`, and `column IN
-/// (a, b)` as `column = a OR column = b`, where `column` is one of `zoned` and a bound or a
-/// value is a local literal, so each comparison takes its own threshold. `PostgreSQL`
-/// stores such a `BETWEEN` as the two comparisons.
-pub(crate) fn local_literal_comparisons(expr: &Expr, zoned: &[String]) -> Option<Expr> {
+/// (a, b)` as `column = a OR column = b`, where `column` is a date or time column and a bound
+/// or a value a date or time literal, so each comparison is judged on its own.
+/// `PostgreSQL` stores such a `BETWEEN` as the two comparisons.
+pub(crate) fn temporal_literal_comparisons(expr: &Expr, columns: &TemporalColumns) -> Option<Expr> {
     let compared = |column: &Expr, op: BinaryOperator, value: &Expr| Expr::BinaryOp {
         left: Box::new(column.clone()),
         op,
         right: Box::new(value.clone()),
     };
-    let zoned_column = |column: &Expr| {
-        bare_column(column).is_some_and(|name| zoned.iter().any(|zoned| zoned == name.as_str()))
-    };
+    let temporal_column =
+        |column: &Expr| bare_column(column).is_some_and(|name| columns.kind(&name).is_some());
     match unparenthesize(expr) {
         Expr::Between {
             expr: column,
             negated: false,
             low,
             high,
-        } if zoned_column(column)
-            && (local_literal(low).is_some() || local_literal(high).is_some()) =>
+        } if temporal_column(column)
+            && (temporal_literal(low).is_some() || temporal_literal(high).is_some()) =>
         {
             Some(Expr::BinaryOp {
                 left: Box::new(compared(column, BinaryOperator::GtEq, low)),
@@ -903,7 +913,9 @@ pub(crate) fn local_literal_comparisons(expr: &Expr, zoned: &[String]) -> Option
             target: InTarget::List(list),
             negated: false,
             ..
-        } if zoned_column(column) && list.iter().any(|value| local_literal(value).is_some()) => {
+        } if temporal_column(column)
+            && list.iter().any(|value| temporal_literal(value).is_some()) =>
+        {
             list.iter()
                 .map(|value| compared(column, BinaryOperator::Eq, value))
                 .reduce(|left, right| Expr::BinaryOp {
@@ -911,6 +923,139 @@ pub(crate) fn local_literal_comparisons(expr: &Expr, zoned: &[String]) -> Option
                     op: BinaryOperator::Or,
                     right: Box::new(right),
                 })
+        }
+        _ => None,
+    }
+}
+
+/// The date and time columns of one table, with the type each compares as.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TemporalColumns(Vec<(String, TemporalKind)>);
+
+impl TemporalColumns {
+    /// `table`'s `date`, `timestamp` and `timestamptz` columns, as the schema stores
+    /// their names.
+    pub(crate) fn of<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> Self {
+        Self(
+            table
+                .columns(db)
+                .into_iter()
+                .flatten()
+                .filter_map(|column| {
+                    let kind = match column.data_type(db).scalar_family(db)? {
+                        ScalarFamily::Date => TemporalKind::Date,
+                        ScalarFamily::Timestamp => TemporalKind::Timestamp,
+                        ScalarFamily::TimestampTz => TemporalKind::TimestampTz,
+                        _ => return None,
+                    };
+                    Some((column.stored_column_name().into_owned(), kind))
+                })
+                .collect(),
+        )
+    }
+
+    fn kind(&self, column: &ColumnName) -> Option<TemporalKind> {
+        self.0
+            .iter()
+            .find(|(name, _)| name == column.as_str())
+            .map(|(_, kind)| *kind)
+    }
+}
+
+/// Why a date or time literal of another type than its column's becomes no guard.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum TemporalLiteralRefusal {
+    /// An instant compared with a `date` or `timestamp` column.
+    #[error(
+        "{comparison}: PostgreSQL converts {column} to a timestamptz in the session TimeZone \
+         to compare it with an instant, so the same row compares differently in each zone"
+    )]
+    ZonelessAgainstInstant {
+        /// The comparison as written.
+        comparison: String,
+        /// The column it converts.
+        column: ColumnName,
+    },
+}
+
+/// `column op literal` where `column` is a date or time column and the literal one of
+/// another type, or one a precision rounds, which `PostgreSQL` compares the same in every
+/// session. The literal stays typed as the policy stores it, so the tuple query compares
+/// as the policy does.
+///
+/// `None` for a `date` or `timestamp` compared with a `timestamptz` column, which the
+/// session zone converts and [`local_literal_comparison`] judges, and wherever no such
+/// literal meets such a column. An instant compared with a zoneless column is refused.
+pub(crate) fn temporal_literal_comparison(
+    expr: &Expr,
+    columns: &TemporalColumns,
+) -> Option<Result<AttributePredicate, TemporalLiteralRefusal>> {
+    let expr = unparenthesize(expr);
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    let operator = attribute_operator(op)?;
+    [
+        (left.as_ref(), right.as_ref(), operator),
+        (right.as_ref(), left.as_ref(), mirrored(operator)),
+    ]
+    .into_iter()
+    .find_map(|(column, value, operator)| {
+        let column = bare_column(column)?;
+        let column_kind = columns.kind(&column)?;
+        let (kind, text) = temporal_literal(value)?;
+        let zoned_column = column_kind == TemporalKind::TimestampTz;
+        let zoned_literal = kind == TemporalKind::TimestampTz;
+        if zoned_column && !zoned_literal && local_literal(value).is_some() {
+            return None;
+        }
+        if zoned_literal && !zoned_column {
+            return Some(Err(TemporalLiteralRefusal::ZonelessAgainstInstant {
+                comparison: expr.to_string(),
+                column,
+            }));
+        }
+        Some(Ok(AttributePredicate {
+            column,
+            test: AttributeTest::Compare {
+                operator,
+                value: AttributeLiteral::Temporal { kind, text },
+            },
+        }))
+    })
+}
+
+/// The type and printed value of a quoted literal cast once to `date`, `timestamp` or
+/// `timestamptz`, a precision applied as `PostgreSQL` applies it. `None` for any other
+/// literal, and for one the cast has no value for, which every other reading refuses.
+fn temporal_literal(expr: &Expr) -> Option<(TemporalKind, String)> {
+    use sql_values::CastTarget;
+    let (text, data_type) = cast_once(expr)?;
+    let (target, kind) = match cast_target(data_type)? {
+        target @ CastTarget::Date => (target, TemporalKind::Date),
+        target @ CastTarget::Timestamp(_) => (target, TemporalKind::Timestamp),
+        target @ CastTarget::TimestampTz(_) => (target, TemporalKind::TimestampTz),
+        _ => return None,
+    };
+    let value = sql_values::cast_literal(sql_values::Literal::Quoted(text), target).ok()?;
+    Some((kind, value.to_string()))
+}
+
+/// The quoted text and the type of a literal cast exactly once, in either spelling a cast
+/// takes, `'…'::date` or `DATE '…'`.
+fn cast_once(expr: &Expr) -> Option<(&str, &DataType)> {
+    let mut casts = 0_usize;
+    let mut outermost = None;
+    let peeled = peel_noting_casts(expr, |data_type| {
+        casts += 1;
+        outermost.get_or_insert(data_type);
+    });
+    match (peeled, casts, outermost) {
+        (Expr::Value(value), 1, Some(data_type)) => {
+            Some((sql_string_value(&value.value)?, data_type))
+        }
+        (Expr::TypedString(typed), 0, None) => {
+            Some((sql_string_value(&typed.value.value)?, &typed.data_type))
         }
         _ => None,
     }
@@ -930,19 +1075,7 @@ fn bare_column(expr: &Expr) -> Option<ColumnName> {
 /// every zone converts alike.
 fn local_literal(expr: &Expr) -> Option<Result<sql_values::PgTimestamp, LocalLiteralRefusal>> {
     use sql_values::{CastError, CastTarget, CastValue, PgTime, PgTimestamp};
-    let mut casts = 0_usize;
-    let mut outermost = None;
-    let peeled = peel_noting_casts(expr, |data_type| {
-        casts += 1;
-        outermost.get_or_insert(data_type);
-    });
-    let (text, data_type) = match (peeled, casts, outermost) {
-        (Expr::Value(value), 1, Some(data_type)) => (sql_string_value(&value.value)?, data_type),
-        (Expr::TypedString(typed), 0, None) => {
-            (sql_string_value(&typed.value.value)?, &typed.data_type)
-        }
-        _ => return None,
-    };
+    let (text, data_type) = cast_once(expr)?;
     let target = cast_target(data_type)
         .filter(|target| matches!(target, CastTarget::Date | CastTarget::Timestamp(_)))?;
     let read = || -> Result<Option<PgTimestamp>, CastError> {

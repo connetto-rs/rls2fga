@@ -4942,3 +4942,18 @@ fn a_residual_windowing_an_aggregate_is_refused() {
         "a framed aggregate is not the order-free one the name promises"
     );
 }
+
+/// A finite `date` against a `timestamptz` column is a request threshold, never a typed
+/// row filter, while an infinite one compares alike in every zone and is kept typed.
+#[test]
+fn a_local_literal_against_an_instant_column_is_left_to_its_threshold() {
+    let db = parse_schema("CREATE TABLE t (at TIMESTAMPTZ);").expect("schema parses");
+    let columns = TemporalColumns::of(lookup_table(&db, "t").expect("t exists"), &db);
+    assert!(
+        temporal_literal_comparison(&parse_expr("at < '2026-01-01'::date"), &columns).is_none()
+    );
+    assert!(matches!(
+        temporal_literal_comparison(&parse_expr("at < 'infinity'::date"), &columns),
+        Some(Ok(_))
+    ));
+}

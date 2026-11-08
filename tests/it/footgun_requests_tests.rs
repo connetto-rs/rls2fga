@@ -1406,21 +1406,6 @@ fn a_cast_that_can_change_a_compared_value_falls_closed_naming_it() {
             "1::NUMERIC(0,0) is cast to numeric(0,0)",
         ),
         (
-            "starts_on < '2030-01-01 00:00:00+02'::timestamptz",
-            "starts_on 2029-12-31 23:00, false under UTC and true under Europe/Athens",
-            "'2029-12-31 22:00:00+00'::TIMESTAMPTZ is cast to timestamptz",
-        ),
-        (
-            "day_on < '2026-01-01 12:00'::timestamp",
-            "day_on 2026-01-01, true where the date reads as its midnight",
-            "'2026-01-01 12:00:00'::TIMESTAMP is cast to timestamp",
-        ),
-        (
-            "starts_on < '2026-01-01 23:00:00.6'::timestamp(0)",
-            "starts_on 2026-01-01 23:00:00.8, the cast rounding to 23:00:01",
-            "'2026-01-01 23:00:00.6'::TIMESTAMP(0) is cast to timestamp(0)",
-        ),
-        (
             "expires_at > now()::date",
             "expires_at earlier today",
             "now()::DATE is cast to date",
@@ -1610,24 +1595,21 @@ fn a_literal_cast_to_its_columns_own_type_translates() {
     }
 }
 
-/// A literal of another date or time type compared with a column that carries no zone is
-/// converted where `PostgreSQL` compares it, and a cast with a precision rounds the literal,
-/// so the guard stays refused. A `date` or `timestamp` against a `timestamptz` column is a
-/// threshold instead, which `zoned_literal_tests` covers.
+/// An instant compared with a zoneless column converts the column in the session zone, so
+/// the guard stays refused. A literal no zone reads is kept typed instead, which
+/// `cross_type_temporal_tests` covers.
 #[test]
-fn a_literal_cast_to_another_temporal_type_stays_refused() {
+fn an_instant_against_a_zoneless_column_stays_refused() {
     for guard in [
-        "day_on > '2026-01-01 09:00'::timestamp",
-        "starts_on > '2026-01-01'::date",
         "starts_on > '2026-01-01 09:00:00+00'::timestamptz",
-        "starts_on > '2026-01-01 09:00:00.6'::timestamp(0)",
+        "day_on > '2026-01-01 09:00:00+00'::timestamptz",
     ] {
         let (dsl, _) = translation(&format!(
             "{TEMPORAL_GUARDED}CREATE POLICY p ON docs FOR SELECT USING ({guard});\n"
         ));
         assert!(
             dsl.contains("define can_select: no_access"),
-            "`{guard}` compares across types, so it must fall closed:\n{dsl}"
+            "`{guard}` compares across zones, so it must fall closed:\n{dsl}"
         );
     }
 }

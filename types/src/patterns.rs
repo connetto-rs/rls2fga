@@ -174,6 +174,37 @@ pub enum AttributeLiteral {
     Number(String),
     /// `TRUE` or `FALSE`.
     Boolean(bool),
+    /// A date or time value the comparison reads in no zone, kept typed so the database
+    /// compares it with the column as the policy does.
+    Temporal {
+        /// The type the policy stores the value as.
+        kind: TemporalKind,
+        /// The value as `PostgreSQL` prints it, a `timestamptz` in UTC.
+        text: String,
+    },
+}
+
+/// The date and time types a [`AttributeLiteral::Temporal`] value takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub enum TemporalKind {
+    /// `date`.
+    Date,
+    /// `timestamp`, without a time zone.
+    Timestamp,
+    /// `timestamptz`.
+    TimestampTz,
+}
+
+impl TemporalKind {
+    /// The SQL keyword that types a literal of this kind, as in `DATE '2026-01-01'`.
+    #[must_use]
+    pub const fn keyword(self) -> &'static str {
+        match self {
+            Self::Date => "DATE",
+            Self::Timestamp => "TIMESTAMP",
+            Self::TimestampTz => "TIMESTAMPTZ",
+        }
+    }
 }
 
 /// What an attribute guard asks of its column, against literal constants or NULL only.
