@@ -343,6 +343,9 @@ pub struct FunctionRegistry {
     sources: DeclaredSources,
     /// The acting role clauses are classified for, which `current_user` names.
     acting_role: Option<String>,
+    /// The `lc_monetary` the schema's `money` literals were written in, which the database
+    /// reads them by. `None` refuses every clause casting to `money`.
+    monetary_locale: Option<String>,
 }
 
 impl FunctionRegistry {
@@ -358,6 +361,7 @@ impl FunctionRegistry {
             deployment: None,
             sources: DeclaredSources::default(),
             acting_role: None,
+            monetary_locale: None,
         }
     }
 
@@ -396,6 +400,20 @@ impl FunctionRegistry {
     /// public-flag column.
     pub(crate) fn is_confirmed_public_flag_column(&self, column: &str) -> bool {
         self.public_flag_columns.contains(column)
+    }
+
+    /// Declare the `lc_monetary` the schema's `money` literals were written in.
+    ///
+    /// `PostgreSQL` parses `'$10.00'::money` by that setting, so a clause casting to `money`
+    /// translates only once it is known, and every tuple query then runs under it.
+    pub fn declare_monetary_locale(&mut self, locale: impl Into<String>) {
+        self.monetary_locale = Some(locale.into());
+    }
+
+    /// The `lc_monetary` the schema's `money` literals were written in, where declared.
+    #[must_use]
+    pub fn monetary_locale(&self) -> Option<&str> {
+        self.monetary_locale.as_deref()
     }
 
     /// Declare `SECURITY DEFINER` helpers whose returned sets translate to the grants

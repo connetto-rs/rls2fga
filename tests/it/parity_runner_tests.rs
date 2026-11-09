@@ -128,6 +128,7 @@ async fn every_parity_case_agrees() {
             a_nondeterministic_collation_is_compared_by_the_database,
             a_case_insensitive_owner_falls_closed_and_says_so,
             a_case_insensitive_object_key_loads_and_agrees,
+            a_money_guard_is_compared_under_the_declared_locale,
             a_local_literal_is_read_in_the_request_zone,
             a_literal_of_another_date_type_compares_in_no_zone,
             a_role_ladder_answers_four_thresholds,
@@ -3761,6 +3762,41 @@ CREATE POLICY docs_owner ON docs FOR SELECT
         ],
     );
     let run = support::parity::run(&cluster, &case).await;
+    assert_agrees(&case, &run);
+}
+
+/// `pg_policies` prints a `money` literal as `'$10.00'::money`, which `PostgreSQL` parses
+/// by `lc_monetary`. With the locale the schema was written in declared, the tuple queries
+/// keep the literals for the database and set that locale, and agree with it.
+async fn a_money_guard_is_compared_under_the_declared_locale(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-money-declared-locale",
+        "
+CREATE TABLE docs (id TEXT PRIMARY KEY, code MONEY);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_above ON docs FOR SELECT USING ((code > '$10.00'::money));
+CREATE POLICY docs_listed ON docs FOR SELECT
+    USING ((code = ANY (ARRAY['$5.50'::money, '$3.00'::money])));
+",
+        &[
+            "INSERT INTO docs (id, code) VALUES
+                 ('d1', '$12.50'), ('d2', '$5.50'), ('d3', '$1.00'), ('d4', '$10.00')",
+            "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+        ],
+        vec![Principal::as_role("app_user", "app_user")],
+    )
+    .created_in_monetary_locale("en_US.utf8");
+    let run = support::parity::run(&cluster, &case).await;
+    for (id, visible) in [("d1", true), ("d2", true), ("d3", false), ("d4", false)] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            "app_user",
+            &format!("docs:{id}"),
+            ActionStatement::Select,
+            visible,
+        );
+    }
     assert_agrees(&case, &run);
 }
 

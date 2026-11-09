@@ -48,6 +48,7 @@ mod indirect_membership_tests;
 mod joined_inner_rule_tests;
 mod membership_term_tests;
 mod model_equivalence_tests;
+mod money_literal_tests;
 #[cfg(feature = "client")]
 mod openfga_client_tests;
 #[cfg(feature = "client")]

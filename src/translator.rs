@@ -123,6 +123,18 @@ impl TranslatorBuilder {
         self
     }
 
+    /// Declare the `lc_monetary` the schema's `money` literals were written in, such as
+    /// `en_US.UTF-8`.
+    ///
+    /// `PostgreSQL` parses `'$10.00'::money` by that setting, so a clause casting to `money`
+    /// is refused until it is declared. Every tuple query then carries it as
+    /// [`TupleQuery::monetary_locale`] for its loader to set.
+    #[must_use]
+    pub fn with_monetary_locale(mut self, locale: impl Into<String>) -> Self {
+        self.registry.declare_monetary_locale(locale);
+        self
+    }
+
     /// Set the output confidence threshold used by model/tuple/report generation.
     #[must_use]
     pub fn with_min_confidence(mut self, min_confidence: ConfidenceLevel) -> Self {
@@ -257,7 +269,13 @@ impl Translation {
         let bounds = UnboundedColumns::resolve(db);
         let plan =
             build_filtered_schema_plan(&policies, db, registry, min_confidence, settings, &bounds)?;
-        let derived = Arc::new(DerivedOutputs::build(&plan, &policies, &bounds, db));
+        let mut derived = DerivedOutputs::build(&plan, &policies, &bounds, db);
+        if let Some(locale) = registry.monetary_locale() {
+            for query in &mut derived.tuple_queries {
+                query.monetary_locale = Some(locale.to_string());
+            }
+        }
+        let derived = Arc::new(derived);
         Ok(Self {
             plan,
             derived,

@@ -355,11 +355,24 @@ pub(crate) fn classify_db(
     registry_json: Option<&str>,
     deployment: &Deployment,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
+    classify_db_declaring(db, registry_json, None, deployment)
+}
+
+/// [`classify_db`] with the `lc_monetary` the schema's `money` literals were written in.
+pub(crate) fn classify_db_declaring(
+    db: ParserDB,
+    registry_json: Option<&str>,
+    monetary_locale: Option<&str>,
+    deployment: &Deployment,
+) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let mut registry = FunctionRegistry::new();
     if let Some(json) = registry_json {
         registry
             .load_from_json(json)
             .expect("registry json should parse");
+    }
+    if let Some(locale) = monetary_locale {
+        registry.declare_monetary_locale(locale);
     }
     let (classified, registry) =
         policy_classifier::classify_policies_with_effective_registry(&db, &registry, deployment);
@@ -451,6 +464,13 @@ pub(crate) fn execute_tuple_queries_for_parity(
         // comment as an empty query.
         if query.skipped.is_some() {
             continue;
+        }
+        if let Some(locale) = &query.monetary_locale {
+            diesel::connection::SimpleConnection::batch_execute(
+                conn,
+                &format!("SET lc_monetary = '{locale}'"),
+            )
+            .unwrap_or_else(|error| panic!("setting lc_monetary {locale}: {error}"));
         }
         if query.condition.is_some() {
             let rows: Vec<Conditional> =

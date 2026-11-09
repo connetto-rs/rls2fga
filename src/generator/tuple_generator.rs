@@ -57,6 +57,10 @@ pub struct TupleQuery {
     /// The gap this entry stands for, where no statement could be built. `sql` is then
     /// advice rather than something to run: executing it loads nothing and succeeds.
     pub skipped: Option<SkippedTuples>,
+    /// The `lc_monetary` the query has to run under, the one the schema's `money` literals
+    /// were written in, which `PostgreSQL` reads them by. A loader running the query on its
+    /// own sets it first. `None` where the translation declared none.
+    pub monetary_locale: Option<String>,
 }
 
 /// Format a list of tuple queries into a single SQL string.
@@ -73,8 +77,19 @@ pub fn format_tuples(tuples: &[TupleQuery]) -> String {
         return String::new();
     }
     let mut result =
-        "SET TIME ZONE 'UTC';\nSET DateStyle = 'ISO, MDY';\nSET bytea_output = 'hex';\n\n"
+        "SET TIME ZONE 'UTC';\nSET DateStyle = 'ISO, MDY';\nSET bytea_output = 'hex';\n"
             .to_string();
+    if let Some(locale) = tuples
+        .iter()
+        .find_map(|query| query.monetary_locale.as_deref())
+    {
+        let _ = writeln!(
+            result,
+            "SET lc_monetary = {};",
+            quote_sql_string_literal(locale)
+        );
+    }
+    result.push('\n');
     result.push_str(trimmed);
     result.push('\n');
     result
@@ -640,6 +655,7 @@ fn render_ownership_tuple_source(
         description: None,
         condition: None,
         skipped: None,
+        monetary_locale: None,
     }
 }
 
@@ -766,6 +782,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -798,6 +815,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -942,6 +960,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -977,6 +996,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1026,6 +1046,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                     description: None,
                     condition: None,
                     skipped: None,
+                    monetary_locale: None,
                 });
             };
             // The clock rides the member tuple as a condition, so the query drops its
@@ -1060,6 +1081,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(gate.condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1143,6 +1165,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1191,6 +1214,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1241,6 +1265,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1310,6 +1335,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1349,6 +1375,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                     description: None,
                     condition: None,
                     skipped: None,
+                    monetary_locale: None,
                 });
             };
             let (context, where_clause) = gate_context_sql(
@@ -1383,6 +1410,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(gate.condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1406,6 +1434,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1448,6 +1477,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1507,6 +1537,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1531,6 +1562,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1559,6 +1591,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1584,6 +1617,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1617,6 +1651,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1651,6 +1686,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1682,6 +1718,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: Some(condition.clone()),
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1703,6 +1740,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1728,6 +1766,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1755,6 +1794,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1781,6 +1821,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             })
         }
 
@@ -1796,6 +1837,7 @@ fn skipped_query(reason: &SkippedTuples) -> TupleQuery {
         description: None,
         condition: None,
         skipped: Some(reason.clone()),
+        monetary_locale: None,
     })
 }
 
@@ -1893,6 +1935,7 @@ fn render_attribute_literal(value: &AttributeLiteral) -> Option<String> {
             kind.keyword(),
             quote_sql_string_literal(text)
         )),
+        AttributeLiteral::Money(spelled) => Some(spelled.clone()),
         _ => None,
     }
 }
@@ -2070,6 +2113,7 @@ mod tests {
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             },
             TupleQuery {
                 comment: "-- two".to_string(),
@@ -2077,6 +2121,7 @@ mod tests {
                 description: None,
                 condition: None,
                 skipped: None,
+                monetary_locale: None,
             },
         ];
         let formatted = format_tuples(&tuples);
@@ -2093,6 +2138,7 @@ mod tests {
             description: None,
             condition: None,
             skipped: None,
+            monetary_locale: None,
         }];
 
         assert!(format_tuples(&tuples).starts_with(
