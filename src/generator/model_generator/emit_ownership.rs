@@ -96,6 +96,7 @@ fn literal_gate_key(value: &AttributeLiteral) -> Option<String> {
                 text.len()
             )
         }
+        AttributeLiteral::Money(spelled) => format!("m{}:{spelled}", spelled.len()),
         _ => return None,
     })
 }

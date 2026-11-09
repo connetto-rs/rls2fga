@@ -1225,7 +1225,8 @@ pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
 ///
 /// A date or time result is not folded, since how it compares with a zoned column depends
 /// on the session's `TimeZone`, and `char(n)` reads without the blank padding its cast to
-/// `text` drops.
+/// `text` drops. A last cast to `money` stays for the database, which reads it under
+/// `lc_monetary`.
 fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
     let mut targets = Vec::new();
     let peeled = peel_noting_casts(expr, |data_type| targets.push(data_type));
@@ -1238,12 +1239,13 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         Value::Number(number, _) => sql_values::Literal::Number(number),
         _ => return None,
     };
-    let mut targets = targets.into_iter().rev();
-    let first = sql_values::cast_literal(literal, cast_target(targets.next()?)?).ok()?;
-    let folded = targets.try_fold(first, |value, data_type| {
-        sql_values::cast_value(value, cast_target(data_type)?).ok()
-    })?;
-    match folded {
+    if let Some((_, inner)) = targets
+        .split_first()
+        .filter(|(outermost, _)| cast_type_name(outermost) == "money")
+    {
+        return money_literal(literal, inner);
+    }
+    match folded_cast(literal, &targets)? {
         sql_values::CastValue::Boolean(flag) => Some(AttributeLiteral::Boolean(flag)),
         number @ (sql_values::CastValue::Smallint(_)
         | sql_values::CastValue::Integer(_)
@@ -1264,6 +1266,50 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         | sql_values::CastValue::Timestamp(_)
         | sql_values::CastValue::TimestampTz(_) => None,
     }
+}
+
+/// The value a literal takes through `targets`, listed outermost first and applied
+/// innermost first, or `None` where `sql-values` computes no step.
+fn folded_cast(
+    literal: sql_values::Literal<'_>,
+    targets: &[&DataType],
+) -> Option<sql_values::CastValue> {
+    let mut targets = targets.iter().rev();
+    let first = sql_values::cast_literal(literal, cast_target(targets.next()?)?).ok()?;
+    targets.try_fold(first, |value, data_type| {
+        sql_values::cast_value(value, cast_target(data_type)?).ok()
+    })
+}
+
+/// A literal whose last cast is to `money`, spelled for the database with what the casts
+/// inside it made of it, since only `PostgreSQL` knows the `lc_monetary` it reads it by.
+fn money_literal(
+    literal: sql_values::Literal<'_>,
+    inner: &[&DataType],
+) -> Option<AttributeLiteral> {
+    let quoted = |text: &str| format!("'{}'", text.replace('\'', "''"));
+    let operand = if inner.is_empty() {
+        match literal {
+            sql_values::Literal::Quoted(text) => quoted(text),
+            sql_values::Literal::Number(number) => number.to_string(),
+        }
+    } else {
+        match folded_cast(literal, inner)? {
+            sql_values::CastValue::Text(text) => quoted(&text),
+            number @ (sql_values::CastValue::Smallint(_)
+            | sql_values::CastValue::Integer(_)
+            | sql_values::CastValue::Bigint(_)
+            | sql_values::CastValue::Numeric(_)) => {
+                let printed = number.to_string();
+                printed
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
+                    .then_some(printed)?
+            }
+            _ => return None,
+        }
+    };
+    Some(AttributeLiteral::Money(format!("{operand}::money")))
 }
 
 /// The cast `sql-values` computes for a cast to `data_type`, or `None` for a type it does

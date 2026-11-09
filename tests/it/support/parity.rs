@@ -205,6 +205,9 @@ pub(crate) struct ParityCase {
     /// The `TimeZone` the schema is created in, which `PostgreSQL` reads the policies'
     /// date and time literals in. `None` leaves the server's and tells rls2fga no zone.
     pub(crate) session_time_zone: Option<String>,
+    /// The `lc_monetary` the schema is created in, which `PostgreSQL` parses its `money`
+    /// literals by. Declared to rls2fga too, so its tuple queries set it.
+    pub(crate) monetary_locale: Option<String>,
 }
 
 /// A moment the database cannot be asked about, and what it would answer there.
@@ -244,6 +247,7 @@ impl ParityCase {
             loading_from_rows: false,
             future: None,
             session_time_zone: None,
+            monetary_locale: None,
         }
     }
 
@@ -271,6 +275,13 @@ impl ParityCase {
     /// The same case, its schema created in a session whose `TimeZone` is `zone`.
     pub(crate) fn created_in_time_zone(mut self, zone: &str) -> Self {
         self.session_time_zone = Some(zone.to_string());
+        self
+    }
+
+    /// The same case, its schema created in, and declared as written in, `locale`'s
+    /// `lc_monetary`.
+    pub(crate) fn created_in_monetary_locale(mut self, locale: &str) -> Self {
+        self.monetary_locale = Some(locale.to_string());
         self
     }
 
@@ -1036,6 +1047,10 @@ fn apply_case(conn: &mut PgConnection, case: &ParityCase) {
         conn.batch_execute(&format!("SET TIME ZONE '{zone}'"))
             .unwrap_or_else(|error| panic!("{}: setting the zone {zone}: {error}", case.name));
     }
+    if let Some(locale) = &case.monetary_locale {
+        conn.batch_execute(&format!("SET lc_monetary = '{locale}'"))
+            .unwrap_or_else(|error| panic!("{}: setting lc_monetary {locale}: {error}", case.name));
+    }
     conn.batch_execute(&case.schema)
         .unwrap_or_else(|error| panic!("{}: schema: {error}", case.name));
     for sql in &case.seed {
@@ -1066,9 +1081,10 @@ fn plan_case(
         None => rls2fga::parser::sql_parser::parse_schema(&source),
     }
     .expect("schema should parse");
-    let (classified, db, registry) = super::classify_db(
+    let (classified, db, registry) = super::classify_db_declaring(
         db,
         case.registry_json.as_deref(),
+        case.monetary_locale.as_deref(),
         &super::deployment::caller_deployment_acting_as(
             &case.acting_roles(),
             case.settings.iter().cloned(),

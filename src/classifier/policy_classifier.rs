@@ -4,8 +4,10 @@ use crate::generator::db_lookup::{
 use crate::generator::model_generator::resolve_principal_info;
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
+use crate::parser::expr::CastChain;
 use crate::parser::names::{lookup_table, resolve_table_id, table_has_column};
 use crate::types::{ColumnName, TableId};
+use core::ops::ControlFlow;
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator, Value};
 
 use crate::classifier::expansion::{self, ExpansionState};
@@ -204,7 +206,8 @@ fn classify_clause<DB: DatabaseLike>(
         Ok(Some(classified)) => classified,
     };
     let classified = apply_guarded_column_check(classified, expr, db, table);
-    apply_collation_check(classified, expr, db, registry, table)
+    let classified = apply_collation_check(classified, expr, db, registry, table);
+    apply_monetary_check(classified, expr, registry)
 }
 
 /// Refuse a classification that names a missing guarded column.
@@ -283,7 +286,8 @@ pub(crate) fn classify_expr_depth<DB: DatabaseLike>(
     // Every classification passes through here, including each part of a composite and
     // the inner rule of an inheritance, each against its own table.
     let classified = apply_guarded_column_check(classified, expr, db, table);
-    apply_collation_check(classified, expr, db, registry, table)
+    let classified = apply_collation_check(classified, expr, db, registry, table);
+    apply_monetary_check(classified, expr, registry)
 }
 
 /// The column of the table being classified that `pattern` reads, if it names one.
@@ -330,6 +334,39 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
+    }
+}
+
+/// Refuse a classification whose clause casts to `money` while nobody declared the
+/// `lc_monetary` its literals were written in, since `PostgreSQL` parses them by it.
+fn apply_monetary_check(
+    classified: ClassifiedExpr,
+    expr: &Expr,
+    registry: &FunctionRegistry,
+) -> ClassifiedExpr {
+    if registry.monetary_locale().is_some()
+        || matches!(classified.pattern, PatternClass::Unknown(_))
+    {
+        return classified;
+    }
+    let mut money_cast = None;
+    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+        if CastChain::peeled(node).0.outermost() == Some("money") {
+            money_cast = Some(node.to_string());
+            return ControlFlow::Break(());
+        }
+        ControlFlow::Continue(())
+    });
+    match money_cast {
+        Some(cast) => unknown_d(
+            expr,
+            format!(
+                "{cast} is read under the lc_monetary of the session that wrote it, which \
+                 rls2fga does not know, so declare it with \
+                 TranslatorBuilder::with_monetary_locale"
+            ),
+        ),
+        None => classified,
     }
 }
 

@@ -184,6 +184,7 @@ mod tests {
             description: None,
             condition: None,
             skipped: None,
+            monetary_locale: None,
         }];
 
         write_output(&dir, "docs", "model", &tuples, REPORT).expect("write_output should succeed");

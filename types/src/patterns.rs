@@ -182,6 +182,9 @@ pub enum AttributeLiteral {
         /// The value as `PostgreSQL` prints it, a `timestamptz` in UTC.
         text: String,
     },
+    /// A value cast to `money`, as SQL spells it with its cast, such as `'$10.00'::money`.
+    /// `PostgreSQL` reads it under `lc_monetary`, so only the database compares it.
+    Money(String),
 }
 
 /// The date and time types a [`AttributeLiteral::Temporal`] value takes.
