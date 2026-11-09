@@ -1217,7 +1217,7 @@ mod tests {
     use super::*;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
     use crate::parser::sql_parser::{parse_schema, ParserDB};
-    use crate::test_support::caller_registry;
+    use crate::test_support::{caller_registry, registry, scalar};
     use crate::types::{ColumnName, TableId};
 
     fn docs_db() -> ParserDB {
@@ -1499,6 +1499,31 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
             (
                 "NOT (status = 'deleted')",
                 "NOT applied to attribute-condition check",
+            ),
+        ];
+
+        for (expr_sql, expected_fragment) in cases {
+            let expr = parse_expr(expr_sql);
+            let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
+            assert_unknown_reason(&classified, expr_sql, expected_fragment);
+        }
+    }
+
+    /// The same refusal names a setting gate by its own description, so a caller learns
+    /// the clause reads one request value and must be rewritten as an allowlist.
+    #[test]
+    fn classify_not_of_a_setting_gate_names_the_setting_gate() {
+        let db = docs_db();
+        let registry = registry([scalar("app.tier")]);
+
+        let cases = [
+            (
+                "NOT (current_setting('app.tier', true) <> 'a')",
+                "NOT applied to declared caller value different from a constant",
+            ),
+            (
+                "NOT (current_setting('app.tier', true) IN ('a', 'b'))",
+                "NOT applied to declared caller value in a constant list",
             ),
         ];
 

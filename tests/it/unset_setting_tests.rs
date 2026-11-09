@@ -27,6 +27,28 @@ CREATE POLICY unblocked ON open_docs FOR SELECT
     USING (NOT (owner = ANY (string_to_array(current_setting('app.blocked', true), ','))));
 ";
 
+/// One scalar setting read as one value compared with literal lists, one policy per way
+/// the `''` reading passes them, the `IN` and `= ANY (ARRAY[...])` spellings together,
+/// and one list a non-literal element leaves undecided.
+const LIST_SCHEMA: &str = "
+CREATE TABLE listed_docs (id TEXT PRIMARY KEY, tier TEXT NOT NULL);
+ALTER TABLE listed_docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY in_empty ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) IN ('', 'gold'));
+CREATE POLICY in_gold ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) IN ('gold', 'silver'));
+CREATE POLICY not_in_gold ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) NOT IN ('gold', 'silver'));
+CREATE POLICY not_in_empty ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) NOT IN ('', 'gold'));
+CREATE POLICY any_empty ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) = ANY (ARRAY['', 'gold']));
+CREATE POLICY any_gold ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) = ANY (ARRAY['gold', 'silver']));
+CREATE POLICY in_column ON listed_docs FOR SELECT
+    USING (current_setting('app.tier', true) IN ('gold', tier));
+";
+
 /// The deployment's three settings, each a request may leave unset or not.
 fn settings(may_be_unset: bool) -> Vec<SessionSetting> {
     let presence = |setting: SessionSetting| {
@@ -44,11 +66,11 @@ fn settings(may_be_unset: bool) -> Vec<SessionSetting> {
 }
 
 /// The comparisons the translation names as made true by the empty reading, by policy.
-fn empty_readings(may_be_unset: bool) -> Vec<(String, String)> {
+fn named_reads(schema: &str, may_be_unset: bool) -> Vec<(String, String)> {
     let translation =
         rls2fga::translator::TranslatorBuilder::new(deployment(settings(may_be_unset)))
             .build()
-            .translate(&db(SCHEMA))
+            .translate(&db(schema))
             .expect("the schema translates");
     translation
         .notes()
@@ -60,6 +82,14 @@ fn empty_readings(may_be_unset: bool) -> Vec<(String, String)> {
             _ => None,
         })
         .collect()
+}
+
+fn empty_readings(may_be_unset: bool) -> Vec<(String, String)> {
+    named_reads(SCHEMA, may_be_unset)
+}
+
+fn list_readings(may_be_unset: bool) -> Vec<(String, String)> {
+    named_reads(LIST_SCHEMA, may_be_unset)
 }
 
 /// Every read whose empty reading admits rows is named, each with its setting.
@@ -81,6 +111,29 @@ fn every_read_an_empty_setting_admits_through_is_named() {
 #[test]
 fn a_setting_every_request_sets_names_nothing() {
     assert_eq!(empty_readings(false), Vec::<(String, String)>::new());
+}
+
+/// A list the `''` reading passes, and a negated list it passes, each earns a note, and
+/// the list it fails, and the one a non-literal element leaves undecided, earn none.
+#[test]
+fn a_list_the_empty_reading_passes_is_named() {
+    let mut named = list_readings(true);
+    named.sort();
+    assert_eq!(
+        named,
+        [
+            ("any_empty".to_string(), "app.tier".to_string()),
+            ("in_empty".to_string(), "app.tier".to_string()),
+            ("not_in_gold".to_string(), "app.tier".to_string()),
+        ]
+    );
+}
+
+/// With no unset state there is no `''` reading, so a list the `''` reading would pass
+/// names nothing either.
+#[test]
+fn a_list_the_empty_reading_passes_names_nothing_when_set_always() {
+    assert_eq!(list_readings(false), Vec::<(String, String)>::new());
 }
 
 #[cfg(feature = "client")]

@@ -969,6 +969,36 @@ mod tests {
         }
     }
 
+    /// `<>` against a row value is a gate with its own shape, not one value that must
+    /// differ from a constant, so the setting side stays refused.
+    #[test]
+    fn an_inequality_against_a_row_value_is_refused() {
+        let registry = registry([scalar("app.mode")]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr("current_setting('app.mode', true) <> other_mode"),
+                &registry
+            )
+            .is_none(),
+            "a row value the value must differ from is no constant"
+        );
+    }
+
+    /// `PostgreSQL` has no empty list and the model has no gate to state one, so an empty
+    /// `= ANY` stays refused.
+    #[test]
+    fn an_empty_list_is_refused() {
+        let registry = registry([scalar("app.mode")]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr("current_setting('app.mode', true) = ANY (ARRAY[])"),
+                &registry
+            )
+            .is_none(),
+            "an empty list holds no element a value can match"
+        );
+    }
+
     /// `= ALL` and the non-equality quantifiers are no membership the request value
     /// passes, and a cast that renames the read reaches a different value, so each stays
     /// refused.
