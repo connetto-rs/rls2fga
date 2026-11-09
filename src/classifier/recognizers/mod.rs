@@ -709,7 +709,8 @@ pub(crate) fn unread_function_calls(expr: &Expr, registry: &FunctionRegistry) ->
             } else if registry.has_unread_body(&name) {
                 Some(format!(
                     "The body of '{name}' is neither a role keyword nor one declared \
-                     setting, which is all a call compared with a value is read as"
+                     setting nor a fallback across them, which is all a call compared \
+                     with a value is read as"
                 ))
             } else {
                 None

@@ -158,9 +158,9 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P20 | `DeclaredHelper` | `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))` | One relation per role and per call, `projects_with_read from projects` |
 | P21 | `CallerScalarUnequalsConstant` | `current_setting('app.mode', true) <> 'main'` | A test of the caller's value, held once per table, see below |
 | P22 | `CallerScalarInConstantList` | `current_setting('app.mode', true) IN ('main', 'dev')`, `= ANY (ARRAY[...])`, `NOT IN` | A test of the caller's value, one per constant it names, see below |
-| P23 | `FallbackScalarEqualsConstant` | `coalesce(current_setting('app.first', true), current_setting('app.second', true)) = 'x'`, a value that falls back across declared settings | The same test on the value the first declared setting that is set hands over, see below |
-| P24 | `FallbackScalarUnequalsConstant` | The same value `<> 'x'` | The same test on the fallback value |
-| P25 | `FallbackScalarInConstantList` | The same value `IN ('x', 'y')`, `= ANY (ARRAY[...])`, `NOT IN` | The same test, one per constant it names |
+| P23 | `FallbackScalarEqualsConstant` | `auth.role() = 'authenticated'`, read through a body that falls back across declared settings | The same test on the value the first declared setting that is set hands over, see below |
+| P24 | `FallbackScalarUnequalsConstant` | `auth.role() <> 'anonymous'`, read through such a body | The same test on the fallback value |
+| P25 | `FallbackScalarInConstantList` | `auth.role() IN ('authenticated', 'anonymous')`, `NOT IN` | The same test, one per constant it names |
 | - | `MembershipExclusion` | Positive grant `AND NOT EXISTS (...)`, caller `NOT IN (...)`, caller `<> ALL (...)` | Grant `but not blocked`, with independent relations per blocklist |
 | - | `Unknown` | Anything else | Denied, with a TODO, unless an oracle classifies it |
 

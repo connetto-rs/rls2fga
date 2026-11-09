@@ -481,9 +481,10 @@ pub struct CallerScalarInConstantList {
     pub source: DeclaredSource,
 }
 
-/// The value a fallback read hands over equals a constant the policy names: a
-/// `COALESCE` of declared settings compared with a literal, the value the first source
-/// the read finds set stands for.
+/// The value a fallback read hands over equals a constant the policy names: Supabase's
+/// `auth.role() = 'authenticated'`, whose body reads
+/// `COALESCE(NULLIF(current_setting('request.jwt.claim.role', true), ''), NULLIF
+/// (current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FallbackScalarEqualsConstant {
     /// The constant the policy names.
@@ -717,15 +718,15 @@ pub enum PatternClass {
     /// names, so no row takes part: `current_setting('app.mode', true) IN ('main', 'dev')`.
     P22CallerScalarInConstantList(CallerScalarInConstantList),
     /// The value a fallback read hands over equals a constant the policy names, so no row
-    /// takes part: a `COALESCE` of declared settings compared with a literal.
+    /// takes part: `auth.role() = 'authenticated'`, read through the body's
+    /// `COALESCE` of declared settings.
     P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant),
     /// The value a fallback read hands over differs from a constant the policy names, so
     /// no row takes part. `PostgreSQL` reads an unset setting as `NULL`, which also
     /// differs, and the note carries the gap.
     P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant),
     /// The value a fallback read hands over is, or is not, one of the constants the
-    /// policy names, so no row takes part: a `COALESCE` of declared settings compared
-    /// with a list of literals.
+    /// policy names, so no row takes part: `auth.role() IN ('authenticated', 'anonymous')`.
     P25FallbackScalarInConstantList(FallbackScalarInConstantList),
     /// A membership row whose member column holds a value the caller's declared set has
     /// to contain: `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND

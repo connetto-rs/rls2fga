@@ -1,13 +1,15 @@
 //! Functions a policy compares with role names, read by the bodies the schema gives them.
 
 use rls2fga::classifier::patterns::{
-    CallerScalarEqualsConstant, ConstantBool, PatternClass, UnclassifiedExpr,
+    CallerScalarEqualsConstant, ConstantBool, FallbackScalarEqualsConstant, PatternClass,
+    UnclassifiedExpr,
 };
 use rls2fga::types::ConfidenceLevel;
 use sqlparser::ast::DataType;
 
 use crate::support;
-use crate::support::deployment::{self, typed_scalar};
+use crate::support::deployment::{self, json_setting, typed_scalar};
+use rls2fga::parser::sql_parser::{SessionSetting, SettingValue};
 
 /// The two acting roles the cases below run as.
 const ACTING_ROLES: &str = "CREATE ROLE reader; CREATE ROLE writer;";
@@ -43,13 +45,26 @@ fn read_per_role(
     registry_json: Option<&str>,
     acting_roles: &[&str],
 ) -> Vec<(String, PatternClass)> {
+    read_patterns(
+        sql,
+        registry_json,
+        acting_roles,
+        &[typed_scalar("request.jwt.claim.role", DataType::Text)],
+    )
+}
+
+/// The pattern each acting role reads the read policy of `sql` as, for the deployment's
+/// `settings`.
+fn read_patterns(
+    sql: &str,
+    registry_json: Option<&str>,
+    acting_roles: &[&str],
+    settings: &[SessionSetting],
+) -> Vec<(String, PatternClass)> {
     let (classified, _, _) = support::classify_with(
         &format!("{ACTING_ROLES}{sql}"),
         registry_json,
-        &deployment::caller_deployment_acting_as(
-            acting_roles,
-            [typed_scalar("request.jwt.claim.role", DataType::Text)],
-        ),
+        &deployment::caller_deployment_acting_as(acting_roles, settings.iter().cloned()),
     );
     classified
         .iter()
@@ -186,8 +201,11 @@ fn a_declared_accessor_without_a_body_is_refused() {
     }
 }
 
-/// A body that is neither a role keyword nor one declared setting is blamed for what it
-/// is, with or without a registry declaration, and never as a body the schema lacks.
+/// The `Supabase` body reads a `coalesce`/`nullif` fallback across two settings, so with
+/// the sources the body reads declared the call is the request gate on the value the
+/// first source that is set hands over, and with a source the deployment does not declare
+/// the call is still blamed for its body, with or without a registry declaration, and
+/// never as a body the schema lacks.
 #[test]
 fn an_accessor_body_of_neither_shape_is_blamed_for_its_body() {
     let sql = format!(
@@ -202,6 +220,25 @@ fn an_accessor_body_of_neither_shape_is_blamed_for_its_body() {
             "{registry_json:?}: {reason}"
         );
     }
+    let settings = [
+        typed_scalar("request.jwt.claim.role", DataType::Text),
+        json_setting(
+            "request.jwt.claims",
+            [(&["role"], SettingValue::Scalar(DataType::Text))],
+        ),
+    ];
+    let [(_, pattern)] = read_patterns(&sql, Some(DECLARED), &["reader"], &settings)
+        .try_into()
+        .expect("one acting role");
+    assert!(
+        matches!(
+            &pattern,
+            PatternClass::P23FallbackScalarEqualsConstant(
+                FallbackScalarEqualsConstant { value, .. }
+            ) if value == "authenticated"
+        ),
+        "the body reads the fallback it spells, got {pattern:?}"
+    );
 }
 
 #[cfg(all(not(target_os = "windows"), feature = "client"))]

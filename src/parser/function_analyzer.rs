@@ -13,7 +13,8 @@ use crate::parser::expr::{
     function_arg_expr, function_call, positional_function_arg, string_literal, CastChain,
 };
 use crate::parser::names::{
-    builtin_function_name, is_current_user_keyword_name, role_keyword, RoleKeyword,
+    builtin_function_name, folded_function_name, is_current_user_keyword_name, role_keyword,
+    RoleKeyword,
 };
 use crate::types::ColumnName;
 
@@ -94,6 +95,21 @@ pub enum FunctionSemantic {
     SettingReader {
         /// The key the body reads.
         key: String,
+    },
+
+    /// A function whose whole body is a `COALESCE` of declared sources, so calling it
+    /// hands over the value the first source gives, the way `PostgreSQL` reads the
+    /// `COALESCE`.
+    ///
+    /// Supabase's `auth.role()` reads
+    /// `COALESCE(NULLIF(current_setting('request.jwt.claim.role', true), ''), NULLIF
+    /// (current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')`, and a
+    /// comparison of a call against a constant is a comparison of the value that read
+    /// hands over.
+    #[serde(rename = "setting_fallback")]
+    SettingFallback {
+        /// The sources the body tries, in the order the body reads them.
+        sources: Vec<SettingFallbackSource>,
     },
 
     /// A function whose whole body expands one declared setting into rows, so calling it
@@ -424,6 +440,73 @@ pub(crate) fn body_setting_key(body: &str) -> Option<(String, CastChain)> {
     Some((current_setting_literal_key(peeled)?, casts))
 }
 
+/// One source of a fallback body read.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SettingFallbackSource {
+    /// The key the source reads.
+    pub key: String,
+    /// The field path taken out of that key's value, empty where the whole value is the
+    /// source.
+    #[serde(default)]
+    pub path: Vec<String>,
+    /// True where the source is wrapped in `NULLIF`, and so an empty value, or an unset
+    /// one, keeps the fallback going.
+    #[serde(default)]
+    pub skips_empty: bool,
+}
+
+/// The `COALESCE` of declared sources a whole body reads, when the body has the shape of
+/// a fallback, in the order the body tries them.
+///
+/// Each source must be declared one single value, and a cast that renames a source's
+/// value is a refusal, since the caller's value then stands for a different value than
+/// the one the deployment declares.
+pub(crate) fn body_setting_fallback(
+    body: &str,
+    sources: &DeclaredSources,
+) -> Option<Vec<SettingFallbackSource>> {
+    let expr = body_single_projection(body)?;
+    let (outer, peeled) = CastChain::peeled(&expr);
+    let function = function_call(peeled)?;
+    // The `COALESCE` argument list the body projects, since no other call is a fallback.
+    let (Some("coalesce"), FunctionArguments::List(list)) =
+        (folded_function_name(function).as_deref(), &function.args)
+    else {
+        return None;
+    };
+    // A `COALESCE` of one source is that source, which is the setting reader above.
+    if list.args.len() < 2 {
+        return None;
+    }
+    list.args
+        .iter()
+        .filter_map(function_arg_expr)
+        .map(|arg| {
+            let shape = fallback_source_shape(arg)?;
+            let FallbackSourceShape {
+                key,
+                path,
+                skips_empty,
+                value_casts,
+            } = shape;
+            let declared = sources
+                .get(&key, &path)
+                .filter(|source| source.is_scalar())?;
+            let mut casts = outer.clone();
+            casts.extend(value_casts);
+            if casts.renaming(Some(&declared.canonical_type())).is_some() {
+                return None;
+            }
+            Some(SettingFallbackSource {
+                key: normalize_setting_key(&key),
+                path,
+                skips_empty,
+            })
+        })
+        .collect()
+}
+
 /// One source shape a fallback read has, before the deployment declares it.
 #[derive(Debug, Clone)]
 pub(crate) struct FallbackSourceShape {
@@ -556,9 +639,15 @@ pub(crate) fn body_reads_effective_user(body: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{FunctionSemantic, RoleKeyword, TeamMembershipConfig};
+    use super::{
+        body_setting_fallback, FunctionSemantic, RoleKeyword, SettingFallbackSource,
+        TeamMembershipConfig,
+    };
     use crate::classifier::function_registry::DeclaredSources;
-    use crate::test_support::{caller, caller_deployment, sources, typed_caller};
+    use crate::parser::sql_parser::SettingValue;
+    use crate::test_support::{
+        caller, caller_deployment, json_field, scalar, sources, typed_caller,
+    };
     use crate::types::ColumnName;
     use alloc::collections::BTreeMap;
     use sqlparser::ast::DataType;
@@ -571,6 +660,87 @@ mod tests {
             language,
             &DeclaredSources::of(&caller_deployment()),
         )
+    }
+
+    /// A body falling back across two declared sources reads as that fallback, the
+    /// sources in the order the body tries them, the field of the document among them.
+    #[test]
+    fn a_fallback_body_reads_its_sources_in_order() {
+        let body = "SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'))::text";
+        let sources = sources([
+            scalar("request.jwt.claim.role"),
+            json_field(
+                "request.jwt.claims",
+                &["role"],
+                SettingValue::Scalar(DataType::Text),
+            ),
+        ]);
+        assert_eq!(
+            body_setting_fallback(body, &sources),
+            Some(vec![
+                SettingFallbackSource {
+                    key: "request.jwt.claim.role".to_string(),
+                    path: vec![],
+                    skips_empty: true,
+                },
+                SettingFallbackSource {
+                    key: "request.jwt.claims".to_string(),
+                    path: vec!["role".to_string()],
+                    skips_empty: true,
+                }
+            ])
+        );
+    }
+
+    /// A body reads no fallback when a source it reads is not declared, when the document
+    /// of a field is cast to anything other than the `jsonb` parse, when a cast renames a
+    /// source's value, and when the `COALESCE` reads one source, which is the setting
+    /// reader above.
+    #[test]
+    fn a_fallback_body_with_a_part_it_cannot_read_is_no_fallback() {
+        let both = sources([
+            scalar("request.jwt.claim.role"),
+            json_field(
+                "request.jwt.claims",
+                &["role"],
+                SettingValue::Scalar(DataType::Text),
+            ),
+        ]);
+        // A source the deployment does not declare.
+        assert_eq!(
+            body_setting_fallback(
+                "SELECT coalesce(current_setting('request.jwt.claim.role', true), \
+                 current_setting('request.jwt.claims', true)::jsonb ->> 'role')",
+                &sources([scalar("request.jwt.claim.role")])
+            ),
+            None
+        );
+        // A document cast other than the `jsonb` parse.
+        assert_eq!(
+            body_setting_fallback(
+                "SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), \
+                 (nullif(current_setting('request.jwt.claims', true), '')::text ->> 'role'))",
+                &both
+            ),
+            None
+        );
+        // A cast that renames a source's value.
+        assert_eq!(
+            body_setting_fallback(
+                "SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), \
+                 (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')::integer)::text",
+                &both
+            ),
+            None
+        );
+        // A `COALESCE` of one source is that source, which is the setting reader above.
+        assert_eq!(
+            body_setting_fallback(
+                "SELECT coalesce(current_setting('request.jwt.claim.role', true))",
+                &sources([scalar("request.jwt.claim.role")])
+            ),
+            None
+        );
     }
 
     /// Every non-code placement of the keyword, for the one question that decides whether a
