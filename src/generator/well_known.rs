@@ -189,6 +189,17 @@ pub const STRING_PARAMETER_TYPE: &str = "TYPE_NAME_STRING";
 /// `OpenFGA` name for a list condition parameter, whose element type is a generic.
 pub const LIST_PARAMETER_TYPE: &str = "TYPE_NAME_LIST";
 
+/// `OpenFGA` name for a map condition parameter, whose value type is a generic.
+pub const MAP_PARAMETER_TYPE: &str = "TYPE_NAME_MAP";
+
+/// The one condition parameter every single value a request supplies travels in, as a
+/// map from the value's parameter name to its text. A set keeps a list parameter of its
+/// own.
+///
+/// A value the request leaves unset is an absent key, and the map is always present,
+/// empty when nothing is set, so an absent key reads as `PostgreSQL`'s `NULL`.
+pub const SETTINGS_PARAMETER: &str = "settings";
+
 /// Relation holding the users a membership row attaches to its parent object.
 #[must_use]
 pub fn member_relation() -> RelationName {

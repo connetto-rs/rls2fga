@@ -122,10 +122,10 @@ async fn gated_membership_parity() {
     )
     .await;
 
+    // The mode travels in the `settings` map the harness builds from the session.
     let mode_reader = |subject, keys: &[&str], mode: &str| {
         let mut principal = Principal::with_bot_list(subject, Some(keys));
         principal.session.push(("app.mode".into(), mode.into()));
-        principal.context["app_mode"] = serde_json::json!(mode);
         principal
     };
     assert_exact(
@@ -387,11 +387,9 @@ async fn gated_membership_parity() {
         let principals = ["alice", "carol"]
             .into_iter()
             .map(|user| {
-                let mut principal = Principal::with_bot_list(user, Some(&["members:read"]))
-                    .with_clock()
-                    .with_context(serde_json::json!({
-                        "app_bot_list": ["members:read"], "app_mode": "other"
-                    }));
+                let mut principal =
+                    Principal::with_bot_list(user, Some(&["members:read"])).with_clock();
+                // The mode travels in the `settings` map the harness builds from the session.
                 principal.session.push(("app.mode".into(), "other".into()));
                 principal
             })
@@ -458,11 +456,12 @@ async fn gated_membership_parity() {
         let principals = ["alice", "carol"]
             .into_iter()
             .map(|user| {
+                // The mode travels in the `settings` map the harness builds from the
+                // session, the two sets in their own list parameters.
                 let mut principal = Principal::with_bot_list(user, Some(&["members:read"]))
                     .with_clock()
                     .with_context(serde_json::json!({
                         "app_bot_list": ["members:read"],
-                        "app_mode": "approved",
                         "app_members": [user]
                     }));
                 principal.session.extend([

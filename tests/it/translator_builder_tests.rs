@@ -1005,7 +1005,8 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = auth_uid());
 
 #[test]
 fn the_request_time_parameter_rejects_names_cel_cannot_read() {
-    for name in ["", "tenant-id", "1tenant", "in"] {
+    // `settings` is refused for its own sake, the generator's map, not for `CEL`.
+    for name in ["", "tenant-id", "1tenant", "in", "settings"] {
         assert!(
             translator_builder()
                 .with_request_time_parameter(name)

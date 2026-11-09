@@ -7,6 +7,7 @@
 use core::fmt::Write;
 use core::time::Duration;
 
+use rls2fga::classifier::function_registry::DeclaredSources;
 use rls2fga::types::{records_from_row, ActionStatement, ConfidenceLevel, RowDecision};
 
 use crate::support;
@@ -14,8 +15,8 @@ use crate::support;
 use crate::support::deployment;
 use crate::support::footgun::{gated_tables, OPEN_PLUS_CAP_BOT_LIST_GATES};
 use crate::support::parity::{
-    assert_agrees, assert_postgres, request_predicate_holds, Cluster, Mutations, ParityCase,
-    Principal,
+    assert_agrees, assert_postgres, request_predicate_holds, settings_map, Cluster, Mutations,
+    ParityCase, Principal,
 };
 use crate::support::JsonRowValues;
 
@@ -124,19 +125,31 @@ fn recipe_allows(
     }
 }
 
+/// The deployment the harness checks the gates with, acting as the caller's login role.
+fn gate_deployment() -> rls2fga::parser::sql_parser::Deployment {
+    deployment::caller_deployment_acting_as(
+        &["app_rw"],
+        [deployment::delimited_set("app.bot_list", ",")],
+    )
+}
+
+/// A snapshot of the caller's check context with the harness' `settings` map merged in,
+/// the value the local recipe reads the gates from.
+fn with_settings_map(sources: &DeclaredSources, principal: &Principal) -> serde_json::Value {
+    let mut context = principal.context.clone();
+    if let Some(entries) = context.as_object_mut() {
+        entries.insert("settings".to_string(), settings_map(sources, principal));
+    }
+    context
+}
+
 /// The recipe `t0#can_select` reports, read without a round trip, for the deployment the
 /// harness checks with: acting as the caller's login role.
 fn select_recipe() -> RowDecision {
+    let deployment = gate_deployment();
     // The role the harness creates in its seed, so the deployment resolves against it.
     let sql = format!("CREATE ROLE app_rw LOGIN;\n{}", gated_tables(TABLES));
-    let (classified, db, registry) = support::classify_with(
-        &sql,
-        None,
-        &deployment::caller_deployment_acting_as(
-            &["app_rw"],
-            [deployment::delimited_set("app.bot_list", ",")],
-        ),
-    );
+    let (classified, db, registry) = support::classify_with(&sql, None, &deployment);
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     planned
         .translation()
@@ -176,7 +189,9 @@ async fn request_gate_parity() {
         // `assert_agrees` holds `OpenFGA` to `PostgreSQL`, so a recipe answering as
         // `PostgreSQL` does answers as `OpenFGA` too.
         let recipe = select_recipe();
+        let sources = DeclaredSources::of(&gate_deployment());
         for principal in callers() {
+            let context = with_settings_map(&sources, &principal);
             for owner in ["entry", "star", "neither", "unset"] {
                 let row = serde_json::json!({ "id": owner, "owner": owner });
                 assert_postgres(
@@ -189,7 +204,7 @@ async fn request_gate_parity() {
                         &recipe,
                         &row,
                         &principal.subject,
-                        &principal.context,
+                        &context,
                         &principal.login_role,
                     ),
                 );
@@ -272,6 +287,93 @@ async fn gated_aggregate_parity() {
             // `paper_shares` reads empty, so no membership exists.
             ("tiers", "papers:tiers-hi", false),
             ("unset", "papers:unset-hi", false),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+/// A caller holding `tier` and `mode` in its session, either one left out where the
+/// request leaves the setting unset.
+fn scalar_caller(subject: &str, tier: Option<&str>, mode: Option<&str>) -> Principal {
+    let mut principal = Principal::as_role(subject, "app_reader");
+    if let Some(tier) = tier {
+        principal.session.push(("app.tier".into(), tier.into()));
+    }
+    if let Some(mode) = mode {
+        principal.session.push(("app.mode".into(), mode.into()));
+    }
+    principal
+}
+
+/// A row value and a formula each read one declared value the request may leave unset,
+/// the formula among them comparing the value with the empty reading, which only a
+/// setting sent as `''` makes true. `PostgreSQL` 18 and `OpenFGA` agree in all three
+/// states, the value set, set to `''` and unset.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn scalar_setting_parity() {
+    let cluster = Cluster::start().await;
+    for from_rows in [false, true] {
+        let mut case = ParityCase::reading(
+            if from_rows {
+                "scalar-setting-rows"
+            } else {
+                "scalar-setting"
+            },
+            "CREATE TABLE tiered_docs(id TEXT PRIMARY KEY, tier TEXT);
+             ALTER TABLE tiered_docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY tiered_read ON tiered_docs FOR SELECT USING (
+                 tier = current_setting('app.tier', true));
+             CREATE TABLE modes(id TEXT PRIMARY KEY);
+             ALTER TABLE modes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY empty_mode ON modes FOR SELECT USING (
+                 current_setting('app.mode', true) = '');
+             CREATE POLICY main_mode ON modes FOR SELECT USING (
+                 current_setting('app.mode', true) = 'main');",
+            &[
+                "INSERT INTO tiered_docs VALUES ('gold-row', 'gold'), ('empty-row', '');",
+                "INSERT INTO modes VALUES ('m1');",
+                "CREATE ROLE app_reader LOGIN;
+                 GRANT SELECT ON tiered_docs, modes TO app_reader",
+            ],
+            vec![
+                scalar_caller("gold", Some("gold"), Some("main")),
+                scalar_caller("empty", Some(""), Some("")),
+                scalar_caller("unset", None, None),
+                scalar_caller("other", Some("bronze"), Some("other")),
+            ],
+        )
+        .with_settings([
+            deployment::scalar("app.tier"),
+            deployment::scalar("app.mode"),
+        ]);
+        case.loading_from_rows = from_rows;
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(120)).await;
+        for (subject, object, allowed) in [
+            // The value set admits its own reading.
+            ("gold", "tiered_docs:gold-row", true),
+            ("gold", "tiered_docs:empty-row", false),
+            ("gold", "modes:m1", true),
+            // The value set to `''` admits the `''` reading and no other.
+            ("empty", "tiered_docs:empty-row", true),
+            ("empty", "tiered_docs:gold-row", false),
+            ("empty", "modes:m1", true),
+            // The setting unset is an absent key, which admits nothing.
+            ("unset", "tiered_docs:gold-row", false),
+            ("unset", "tiered_docs:empty-row", false),
+            ("unset", "modes:m1", false),
+            // A value neither arm reads admits nothing.
+            ("other", "tiered_docs:gold-row", false),
+            ("other", "modes:m1", false),
         ] {
             assert_postgres(
                 &case,

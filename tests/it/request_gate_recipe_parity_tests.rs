@@ -6,6 +6,7 @@
 use core::time::Duration;
 use std::collections::BTreeMap;
 
+use rls2fga::classifier::function_registry::DeclaredSources;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionStatement, ConfidenceLevel, RelationShapes,
     RequestComparison, RowDecision,
@@ -15,7 +16,8 @@ use crate::support;
 
 use crate::support::deployment;
 use crate::support::parity::{
-    assert_agrees, assert_postgres, request_predicate_holds, Cluster, ParityCase, Principal,
+    assert_agrees, assert_postgres, request_predicate_holds, settings_map, Cluster, ParityCase,
+    Principal,
 };
 use crate::support::JsonRowValues;
 
@@ -152,7 +154,14 @@ fn grants(
                 .as_ref()
                 .expect("a gated record carries its context")
                 .values[context_key];
-            let caller_side = &context[request_parameter.as_str()];
+            // A set keeps its own list parameter the row tests membership in, and a
+            // single value travels in the `settings` map under its parameter name.
+            let caller_side = match comparison {
+                RequestComparison::CallerSetHolds => &context[request_parameter.as_str()],
+                RequestComparison::CallerValueEquals => {
+                    &context["settings"][request_parameter.as_str()]
+                }
+            };
             match comparison {
                 RequestComparison::CallerSetHolds => caller_side
                     .as_array()
@@ -206,20 +215,27 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
     // The deployment the harness checks with: acting as the caller's login role, whose
     // role the seed declares.
     let sql = format!("CREATE ROLE app_reader LOGIN;\n{schema}");
-    let (classified, db, registry) = support::classify_with(
-        &sql,
-        None,
-        &deployment::caller_deployment_acting_as(
-            &["app_reader"],
-            [deployment::delimited_set("app.bot_list", ",")],
-        ),
+    let deployment = deployment::caller_deployment_acting_as(
+        &["app_reader"],
+        [deployment::delimited_set("app.bot_list", ",")],
     );
+    let (classified, db, registry) = support::classify_with(&sql, None, &deployment);
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let translation = planned.translation();
     let rows = rows();
+    // The consumer builds the check's `settings` map from the declared sources beside
+    // the caller's own entries, which the recipe reads the gates from.
+    let sources = DeclaredSources::of(&deployment);
     let contexts: BTreeMap<String, (serde_json::Value, String)> = callers()
         .into_iter()
-        .map(|principal| (principal.subject, (principal.context, principal.login_role)))
+        .map(|principal| {
+            let map = settings_map(&sources, &principal);
+            let mut context = principal.context;
+            if let Some(entries) = context.as_object_mut() {
+                entries.insert("settings".to_string(), map);
+            }
+            (principal.subject, (context, principal.login_role))
+        })
         .collect();
 
     let cluster = Cluster::start().await;

@@ -67,28 +67,40 @@ pub(crate) fn session_attribute_expr<DB: DatabaseLike>(
 }
 
 /// The condition comparing what a tuple carries under `row_parameter` against what the
-/// caller supplies under `request_parameter`.
+/// caller supplies. A set keeps its own `list<string>` parameter the row tests membership
+/// in, and a single value travels in the `settings` map, keyed by `request_parameter`,
+/// which the row tests equality against, guarded so an absent key reads as `NULL`.
 fn request_comparison_spec(
     row_parameter: &ConditionParameterName,
     request_parameter: &ConditionParameterName,
     comparison: RequestComparison,
 ) -> ConditionSpec {
-    let (request_type, operator) = match comparison {
-        RequestComparison::CallerSetHolds => {
-            (ConditionParameter::ListOf(STRING_PARAMETER_TYPE), "in")
-        }
+    let (expression, request_name, request_type) = match comparison {
+        RequestComparison::CallerSetHolds => (
+            format!("{row_parameter} in {request_parameter}"),
+            request_parameter.to_string(),
+            ConditionParameter::ListOf(STRING_PARAMETER_TYPE),
+        ),
         RequestComparison::CallerValueEquals => {
-            (ConditionParameter::Scalar(STRING_PARAMETER_TYPE), "==")
+            let key = format!("{}{}{}", '"', request_parameter, '"');
+            (
+                format!(
+                    "{key} in {SETTINGS_PARAMETER} && \
+                     {SETTINGS_PARAMETER}[{key}] == {row_parameter}"
+                ),
+                SETTINGS_PARAMETER.to_string(),
+                ConditionParameter::MapOf(STRING_PARAMETER_TYPE),
+            )
         }
     };
     ConditionSpec {
-        expression: format!("{row_parameter} {operator} {request_parameter}"),
+        expression,
         parameters: [
             (
                 row_parameter.to_string(),
                 ConditionParameter::Scalar(STRING_PARAMETER_TYPE),
             ),
-            (request_parameter.to_string(), request_type),
+            (request_name, request_type),
         ]
         .into_iter()
         .collect(),

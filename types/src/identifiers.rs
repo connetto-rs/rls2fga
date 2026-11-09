@@ -612,6 +612,12 @@ pub enum ConditionParameterNameError {
         /// Refused name.
         name: String,
     },
+    /// The name is held by the generator's own vocabulary.
+    #[error("{name:?} is reserved by the generator")]
+    Reserved {
+        /// Refused name.
+        name: String,
+    },
 }
 
 fn is_condition_parameter_name(name: &str) -> bool {

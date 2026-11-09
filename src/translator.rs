@@ -22,7 +22,7 @@ use crate::generator::tuple_generator::{
     UnboundedColumns,
 };
 use crate::generator::unrestricted::unrestricted_tables;
-use crate::generator::well_known::WellKnownTypes;
+use crate::generator::well_known::{WellKnownTypes, SETTINGS_PARAMETER};
 #[cfg(feature = "std")]
 use crate::output::formatter::{write_output, WriteError};
 use crate::output::report::build_report;
@@ -67,12 +67,17 @@ impl TranslatorBuilder {
     ///
     /// # Errors
     ///
-    /// Returns an error when `name` is not a usable `CEL` identifier.
+    /// Returns an error when `name` is not a usable `CEL` identifier, or when it is
+    /// `settings`, the parameter single request values travel in.
     pub fn with_request_time_parameter(
         mut self,
         name: impl Into<String>,
     ) -> Result<Self, ConditionParameterNameError> {
-        self.generator.request_time_parameter = ConditionParameterName::try_from(name.into())?;
+        let name = name.into();
+        if name == SETTINGS_PARAMETER {
+            return Err(ConditionParameterNameError::Reserved { name });
+        }
+        self.generator.request_time_parameter = ConditionParameterName::try_from(name)?;
         Ok(self)
     }
 

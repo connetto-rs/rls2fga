@@ -401,9 +401,11 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (true);
     ];
 
     /// One caller sending `value` as its identity, its tenant and its one-element set.
+    /// The tenant travels in the check's `settings` map the harness builds from the
+    /// session, the set in its own list parameter.
     fn caller(value: &str) -> Principal {
         let mut principal = Principal::with_setting(value, "app_reader", "app.user_id", value)
-            .with_context(serde_json::json!({ "app_tenant": value, "app_subjects": [value] }));
+            .with_context(serde_json::json!({ "app_subjects": [value] }));
         principal
             .session
             .push(("app.tenant".to_string(), value.to_string()));

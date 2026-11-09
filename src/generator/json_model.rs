@@ -7,7 +7,7 @@ use serde::Serialize;
 use crate::generator::model_generator::{
     ConditionParameter, DirectSubject, SchemaPlan, TypePlan, UsersetExpr, OPENFGA_SCHEMA_VERSION,
 };
-use crate::generator::well_known::LIST_PARAMETER_TYPE;
+use crate::generator::well_known::{LIST_PARAMETER_TYPE, MAP_PARAMETER_TYPE};
 use crate::types::{ConditionName, RelationName, TypeName};
 
 /// `OpenFGA` authorization model in the JSON form the API accepts.
@@ -63,6 +63,13 @@ fn condition_param_type(kind: &ConditionParameter) -> ConditionParamType {
         },
         ConditionParameter::ListOf(element) => ConditionParamType {
             parameter_type: LIST_PARAMETER_TYPE.to_string(),
+            generic_types: Some(vec![ConditionParamType {
+                parameter_type: (*element).to_string(),
+                generic_types: None,
+            }]),
+        },
+        ConditionParameter::MapOf(element) => ConditionParamType {
+            parameter_type: MAP_PARAMETER_TYPE.to_string(),
             generic_types: Some(vec![ConditionParamType {
                 parameter_type: (*element).to_string(),
                 generic_types: None,
