@@ -13,9 +13,10 @@ use alloc::collections::BTreeMap;
 use crate::classifier::function_registry::DeclaredSource;
 use crate::classifier::patterns::{
     BoolOp, CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
-    Composite, ConstantBool, ConstantInCallerSet, PatternClass,
+    Composite, ConstantBool, ConstantInCallerSet, FallbackScalarEqualsConstant,
+    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass,
 };
-use crate::types::{ConditionParameterName, RequestAtom, RequestComparison};
+use crate::types::{ConditionParameterName, FallbackStep, RequestAtom, RequestComparison};
 
 /// One test of a request value against a constant the policy names, with the caller
 /// contract it states.
@@ -30,6 +31,9 @@ pub(crate) struct GateAtom {
     pub(crate) setting_key: String,
     /// Separator the policy splits that setting on, for a set.
     pub(crate) separator: Option<String>,
+    /// The settings the caller's value falls back across, one per setting in the order the
+    /// policy reads them. Empty for one single read.
+    pub(crate) fallback: Vec<FallbackStep>,
 }
 
 impl GateAtom {
@@ -46,6 +50,7 @@ impl GateAtom {
             value: value.clone(),
             setting_key: source.setting_key().to_string(),
             separator: separator.clone(),
+            fallback: vec![],
         }
     }
 
@@ -75,6 +80,47 @@ impl GateAtom {
             value: value.to_string(),
             setting_key: source.setting_key().to_string(),
             separator: None,
+            fallback: vec![],
+        }
+    }
+
+    /// The value a fallback read hands over equals a constant the policy names.
+    pub(crate) fn fallback_equal_to_value(test: &FallbackScalarEqualsConstant) -> Self {
+        Self::of_fallback(
+            &test.first,
+            &test.rest,
+            RequestComparison::CallerValueEquals,
+            &test.value,
+        )
+    }
+
+    /// The value a fallback read hands over differs from a constant the policy names.
+    pub(crate) fn fallback_unequal_to_value(test: &FallbackScalarUnequalsConstant) -> Self {
+        Self::of_fallback(
+            &test.first,
+            &test.rest,
+            RequestComparison::CallerValueUnequals,
+            &test.value,
+        )
+    }
+
+    /// One constant test on the value a fallback read hands over, whose sources the
+    /// condition admits through in the order the read tries them.
+    fn of_fallback(
+        first: &FallbackStep,
+        rest: &[FallbackStep],
+        comparison: RequestComparison,
+        value: &str,
+    ) -> Self {
+        let mut fallback = alloc::vec![first.clone()];
+        fallback.extend(rest.iter().cloned());
+        Self {
+            request_parameter: ConditionParameterName::derived(&first.parameter),
+            comparison,
+            value: value.to_string(),
+            setting_key: first.setting_key.clone(),
+            separator: None,
+            fallback,
         }
     }
 
@@ -84,17 +130,34 @@ impl GateAtom {
             request_parameter: self.request_parameter.to_string(),
             comparison: self.comparison,
             value: self.value.clone(),
+            fallback: self.fallback.clone(),
         }
     }
 
     /// Exact structural identity, unambiguous whatever the constant holds.
     fn key(&self) -> String {
+        let fallback = self
+            .fallback
+            .iter()
+            .map(|step| {
+                format!(
+                    "{}/{}/{}/{}/{}",
+                    step.parameter,
+                    step.from_json_field,
+                    step.skips_empty,
+                    step.may_be_unset,
+                    step.setting_key
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
         format!(
-            "{}:{:?}:{}:{}",
+            "{}:{:?}:{}:{}:{}",
             self.request_parameter,
             self.comparison,
             self.value.len(),
-            self.value
+            self.value,
+            fallback
         )
     }
 }
@@ -127,6 +190,25 @@ impl RequestFormula {
                 Some(Self::Atom(GateAtom::unequal_to_caller_value(test)))
             }
             PatternClass::P22CallerScalarInConstantList(test) => Some(Self::in_constant_list(test)),
+            PatternClass::P23FallbackScalarEqualsConstant(test) => {
+                Some(Self::Atom(GateAtom::of_fallback(
+                    &test.first,
+                    &test.rest,
+                    RequestComparison::CallerValueEquals,
+                    &test.value,
+                )))
+            }
+            PatternClass::P24FallbackScalarUnequalsConstant(test) => {
+                Some(Self::Atom(GateAtom::of_fallback(
+                    &test.first,
+                    &test.rest,
+                    RequestComparison::CallerValueUnequals,
+                    &test.value,
+                )))
+            }
+            PatternClass::P25FallbackScalarInConstantList(test) => {
+                Some(Self::fallback_in_constant_list(test))
+            }
             PatternClass::P8Composite(Composite { op, parts }) => {
                 let children = parts
                     .iter()
@@ -150,6 +232,28 @@ impl RequestFormula {
             .values
             .iter()
             .map(|value| GateAtom::of(&test.source, comparison, value))
+            .map(Self::Atom)
+            .collect();
+        if test.negated {
+            Self::join(BoolOp::And, atoms)
+        } else {
+            Self::join(BoolOp::Or, atoms)
+        }
+    }
+
+    /// The `OR` of the constants' equality tests on the value a fallback read hands over,
+    /// or where negated the `AND` of their inequality tests, which denies on the unset
+    /// reading.
+    pub(crate) fn fallback_in_constant_list(test: &FallbackScalarInConstantList) -> Self {
+        let comparison = if test.negated {
+            RequestComparison::CallerValueUnequals
+        } else {
+            RequestComparison::CallerValueEquals
+        };
+        let atoms = test
+            .values
+            .iter()
+            .map(|value| GateAtom::of_fallback(&test.first, &test.rest, comparison, value))
             .map(Self::Atom)
             .collect();
         if test.negated {
@@ -211,17 +315,34 @@ fn child_keys(children: &[RequestFormula]) -> String {
 }
 
 /// One request value equal to two different constants, which no caller satisfies.
+///
+/// The value the atoms test is the parameter with the fallback chain, and two atoms with
+/// different chains test different values, so they cannot contradict each other here.
 fn equates_one_value_to_two_constants(conjuncts: &[RequestFormula]) -> bool {
-    let mut required: BTreeMap<&ConditionParameterName, &str> = BTreeMap::new();
+    let mut required: BTreeMap<GateAtomKey, &str> = BTreeMap::new();
     conjuncts.iter().any(|conjunct| match conjunct {
         RequestFormula::Atom(atom) if atom.comparison == RequestComparison::CallerValueEquals => {
-            *required
-                .entry(&atom.request_parameter)
-                .or_insert(atom.value.as_str())
-                != atom.value
+            let key = atom.value_key();
+            *required.entry(key).or_insert(atom.value.as_str()) != atom.value
         }
         _ => false,
     })
+}
+
+/// Which value an atom tests, the parameter and the fallback chain it reads.
+#[derive(Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct GateAtomKey {
+    parameter: ConditionParameterName,
+    fallback: Vec<FallbackStep>,
+}
+
+impl GateAtom {
+    fn value_key(&self) -> GateAtomKey {
+        GateAtomKey {
+            parameter: self.request_parameter.clone(),
+            fallback: self.fallback.clone(),
+        }
+    }
 }
 
 /// Drop every child a sibling subsumes: under `OR`, `a OR (a AND b)` is `a`, and under
@@ -267,6 +388,7 @@ mod tests {
             value: value.to_string(),
             setting_key: "app.bot_list".to_string(),
             separator: Some(",".to_string()),
+            fallback: vec![],
         })
     }
 
@@ -277,6 +399,7 @@ mod tests {
             value: value.to_string(),
             setting_key: "app.tier".to_string(),
             separator: None,
+            fallback: vec![],
         })
     }
 

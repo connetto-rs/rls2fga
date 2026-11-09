@@ -509,3 +509,121 @@ async fn setting_operator_parity() {
         assert_agrees(&case, &run);
     }
 }
+
+/// The fallback the cases below spell inline.
+const FALLBACK: &str = "coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'))::text";
+
+/// A caller holding `a` in the bare setting and the `role` field of `c`, `None` for a
+/// setting the request leaves unset and a document that is not `JSON` for one that raises
+/// when the fallback reaches it.
+fn fallback_caller(subject: &str, a: Option<&str>, c: Option<&str>) -> Principal {
+    let mut principal = Principal::as_role(subject, "app_reader");
+    if let Some(a) = a {
+        principal
+            .session
+            .push(("request.jwt.claim.role".into(), a.into()));
+    }
+    if let Some(c) = c {
+        principal
+            .session
+            .push(("request.jwt.claims".into(), c.into()));
+    }
+    principal
+}
+
+/// The value the fallback hands over, the four operators over it, over the readers the
+/// plan's table states: the first source holding the literal admits, the first source
+/// holding anything else denies, an unset first source hands over the second source's
+/// `role`, and a second source that is not a `JSON` document raises where the fallback
+/// reaches it.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn fallback_parity() {
+    const INSERTS: &str = "INSERT INTO i_eq VALUES ('r1');
+        INSERT INTO i_neq VALUES ('r1');
+        INSERT INTO i_in VALUES ('r1');
+        INSERT INTO i_notin VALUES ('r1');";
+    const X: &str = "authenticated";
+    let cluster = Cluster::start().await;
+    let operators = [
+        ("eq", "= 'authenticated'"),
+        ("neq", "<> 'authenticated'"),
+        ("in", "= ANY (ARRAY['authenticated', 'anon'])"),
+        ("notin", "NOT IN ('authenticated', 'anon')"),
+    ];
+    let mut schema = String::new();
+    let mut grants = String::new();
+    for (suffix, operator) in operators {
+        let table = format!("i_{suffix}");
+        let _ = writeln!(
+            schema,
+            "CREATE TABLE {table}(id TEXT PRIMARY KEY);
+             ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY {table}_read ON {table} FOR SELECT USING ({FALLBACK} {operator});"
+        );
+        let _ = write!(grants, "{table}, ");
+    }
+    for from_rows in [false, true] {
+        let mut case = ParityCase::reading(
+            if from_rows {
+                "fallback-rows"
+            } else {
+                "fallback"
+            },
+            &schema,
+            &[
+                INSERTS,
+                &format!(
+                    "CREATE ROLE app_reader LOGIN;
+                     GRANT SELECT ON {} TO app_reader",
+                    grants.trim_end().trim_end_matches(',')
+                ),
+            ],
+            vec![
+                fallback_caller("listed_a", Some(X), None),
+                fallback_caller("listed_c", None, Some(r#"{"role":"authenticated"}"#)),
+                fallback_caller("both", Some(X), Some(r#"{"role":"authenticated"}"#)),
+                fallback_caller("neither", None, None),
+                fallback_caller("no_field", None, Some("{}")),
+                fallback_caller("other_a", Some("other"), None),
+                fallback_caller("other_c", None, Some(r#"{"role":"other"}"#)),
+                fallback_caller("bad_c", None, Some("not a document"))
+                    .reading_a_non_json_document(),
+            ],
+        )
+        .with_settings([
+            deployment::typed_scalar("request.jwt.claim.role", DataType::Text).may_be_unset(),
+            deployment::json_setting(
+                "request.jwt.claims",
+                [(&["role"], SettingValue::Scalar(DataType::Text))],
+            ),
+        ]);
+        case.loading_from_rows = from_rows;
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(300)).await;
+        // The value holding the literal admits only `eq` and `in`, the value holding
+        // anything else only `neq` and `notin`, and an unset value, a missing field and
+        // a document that raises admit nothing.
+        let expected = |subject: &str, suffix: &str| {
+            matches!(
+                (subject, suffix),
+                ("listed_a" | "listed_c" | "both", "eq" | "in")
+                    | ("other_a" | "other_c", "neq" | "notin")
+            )
+        };
+        for subject in [
+            "listed_a", "listed_c", "both", "neither", "no_field", "other_a", "other_c", "bad_c",
+        ] {
+            for (suffix, _) in operators {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("i_{suffix}:r1"),
+                    ActionStatement::Select,
+                    expected(subject, suffix),
+                );
+            }
+        }
+        assert_agrees(&case, &run);
+    }
+}

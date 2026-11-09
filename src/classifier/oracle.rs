@@ -69,10 +69,11 @@ use crate::classifier::patterns::{
     composite_confidence, AbacAnd, ArrayMembership, AttributeCondition, BooleanFlag,
     CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
     ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
-    ConstantInCallerSet, DirectOwnership, ExistsMembership, ExpandedFunction, JsonbFieldOwnership,
-    MembershipExclusion, MembershipInCallerSet, NumericThreshold, ParentInheritance, PatternClass,
-    RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr,
-    UncorrelatedMembership,
+    ConstantInCallerSet, DirectOwnership, ExistsMembership, ExpandedFunction,
+    FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
+    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
+    ParentInheritance, PatternClass, RoleNameInList, RowValueEqualsCallerScalar,
+    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 
 /// Which clause of a policy an expression came from.
@@ -313,6 +314,11 @@ where
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
+        | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
+        | PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+            ..
+        })
+        | PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList { .. })
         | PatternClass::P1NumericThreshold(NumericThreshold { .. })
         | PatternClass::P2RoleNameInList(RoleNameInList { .. })
         | PatternClass::P3DirectOwnership(DirectOwnership { .. })

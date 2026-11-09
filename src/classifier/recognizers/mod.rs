@@ -63,7 +63,7 @@ pub(crate) use subquery::{
 };
 pub use subquery::{recognize_p4, recognize_p4_in_subquery, recognize_p5};
 pub(crate) use subquery::{resolve_membership_pairing, MembershipPairing};
-pub(crate) use unset::empty_readings;
+pub(crate) use unset::{empty_readings, fallback_empty_readings};
 
 /// Recognize P1: `role_fn(user, resource) >= N`, in either operand order.
 pub fn recognize_p1<DB: DatabaseLike>(

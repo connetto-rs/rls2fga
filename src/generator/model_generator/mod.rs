@@ -39,7 +39,8 @@ use crate::parser::sql_parser::{
 };
 use crate::types::{
     stable_hex_suffix, ColumnKind, ColumnName, ConditionName, ConditionParameterName,
-    ContextWitness, RelationName, RequestComparison, TableId, TranslationNote, TypeName,
+    ContextWitness, FallbackStep, RelationName, RequestComparison, TableId, TranslationNote,
+    TypeName,
 };
 
 /// The kind a request acts as, joined to every row.
@@ -902,17 +903,25 @@ pub(crate) fn build_filtered_schema_plan<DB: DatabaseLike>(
     // and the reader still learns that the database admits more there.
     for policy in policies {
         for clause in policy.using().into_iter().chain(policy.with_check()) {
-            for (source, expression) in
-                crate::classifier::recognizers::empty_readings(clause, registry)
-            {
+            let mut note = |setting: String, expression: String| {
                 let note = TranslationNote::UnsetSettingReadAsEmpty {
                     policy: policy.name().to_string(),
-                    setting: source.setting_key().to_string(),
+                    setting,
                     expression,
                 };
                 if !plan.notes.contains(&note) {
                     plan.notes.push(note);
                 }
+            };
+            for (source, expression) in
+                crate::classifier::recognizers::empty_readings(clause, registry)
+            {
+                note(source.setting_key().to_string(), expression);
+            }
+            for (setting, expression) in
+                crate::classifier::recognizers::fallback_empty_readings(clause, registry)
+            {
+                note(setting, expression);
             }
         }
     }
@@ -2663,6 +2672,24 @@ fn translate_pattern<DB: DatabaseLike>(
         ),
         PatternClass::P22CallerScalarInConstantList(test) => emit_request_formula(
             &RequestFormula::in_constant_list(test),
+            ctx,
+            table_plan,
+            all_types,
+        ),
+        PatternClass::P23FallbackScalarEqualsConstant(test) => emit_request_formula(
+            &RequestFormula::Atom(GateAtom::fallback_equal_to_value(test)),
+            ctx,
+            table_plan,
+            all_types,
+        ),
+        PatternClass::P24FallbackScalarUnequalsConstant(test) => emit_request_formula(
+            &RequestFormula::Atom(GateAtom::fallback_unequal_to_value(test)),
+            ctx,
+            table_plan,
+            all_types,
+        ),
+        PatternClass::P25FallbackScalarInConstantList(test) => emit_request_formula(
+            &RequestFormula::fallback_in_constant_list(test),
             ctx,
             table_plan,
             all_types,

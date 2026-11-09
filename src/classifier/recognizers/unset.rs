@@ -12,10 +12,11 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
 
-use super::session::{declared_read, set_read, sole_projection};
+use super::session::{declared_read, fallback_read, set_read, sole_projection};
 use super::{accessor_read, caller_source, string_literal, unparenthesize};
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::parser::expr::unwrap_cast_or_nested;
+use crate::types::FallbackStep;
 
 /// Each comparison in `expr` that the `''` reading of a setting a request may leave unset
 /// makes true for some row, beside that setting's declaration.
@@ -106,6 +107,91 @@ pub(crate) fn empty_readings<'r>(
                     .and_then(|projected| unset_delimited_set(projected, registry))
                 {
                     record(source);
+                }
+            }
+            _ => {}
+        }
+        ControlFlow::<()>::Continue(())
+    });
+    readings
+}
+
+/// Each source of a fallback comparison the `''` reading of a setting a request may leave
+/// unset makes true for some row, beside that setting's declaration, one per source the
+/// model stops at on the absent key.
+///
+/// The model reads the absent key as `NULL`, which fails the test, and `PostgreSQL`'s
+/// `''` reading of the same source stops the fallback there, so the model is the
+/// narrower of the two where the `''` reading admits: equality against `''`, inequality
+/// against anything else, and the list tests the `''` element passes. A source wrapped
+/// in `NULLIF` skips the `''` reading and the unset one alike, so it admits least by
+/// design and is not listed.
+pub(crate) fn fallback_empty_readings(
+    expr: &Expr,
+    registry: &FunctionRegistry,
+) -> Vec<(String, String)> {
+    let mut readings: Vec<(String, String)> = Vec::new();
+    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+        let mut record = |first: &FallbackStep, rest: &[FallbackStep], admits: bool| {
+            if !admits {
+                return;
+            }
+            for step in core::iter::once(first)
+                .chain(rest.iter())
+                .filter(|step| step.may_be_unset && !step.skips_empty)
+            {
+                let reading = (step.setting_key.clone(), node.to_string());
+                if !readings.contains(&reading) {
+                    readings.push(reading);
+                }
+            }
+        };
+        match node {
+            Expr::BinaryOp { left, op, right }
+                if matches!(*op, BinaryOperator::Eq | BinaryOperator::NotEq) =>
+            {
+                let equality = *op == BinaryOperator::Eq;
+                let (read, tested) = match (
+                    fallback_read(right, registry),
+                    fallback_read(left, registry),
+                ) {
+                    (Some(read), _) => (read, left.as_ref()),
+                    (_, Some(read)) => (read, right.as_ref()),
+                    _ => return ControlFlow::Continue(()),
+                };
+                if let Some(value) = string_literal(tested) {
+                    record(
+                        &read.0,
+                        &read.1,
+                        if equality {
+                            value.is_empty()
+                        } else {
+                            !value.is_empty()
+                        },
+                    );
+                }
+            }
+            Expr::In {
+                expr: tested,
+                target: InTarget::List(values),
+                negated,
+                global: false,
+            } => {
+                if let Some(read) = fallback_read(tested, registry) {
+                    record(&read.0, &read.1, list_holds_for_empty(*negated, values));
+                }
+            }
+            Expr::AnyOp {
+                left,
+                compare_op: BinaryOperator::Eq,
+                right,
+                is_some: false,
+            } => {
+                let Expr::Array(array) = unwrap_cast_or_nested(right) else {
+                    return ControlFlow::Continue(());
+                };
+                if let Some(read) = fallback_read(left, registry) {
+                    record(&read.0, &read.1, list_holds_for_empty(false, &array.elem));
                 }
             }
             _ => {}
@@ -354,5 +440,68 @@ mod tests {
             };
             assert_eq!(settings_read(expression, unset()), expected, "{expression}");
         }
+    }
+
+    /// Each source of a fallback the model stops at on the absent key, one per source.
+    fn fallback_sources_read(expr: &str, settings: Vec<SessionSetting>) -> Vec<String> {
+        let registry = registry(settings);
+        fallback_empty_readings(&parse_expr(expr), &registry)
+            .into_iter()
+            .map(|(setting, _)| setting)
+            .collect()
+    }
+
+    /// A fallback source the request may leave unset stops the model on the absent key,
+    /// and the `''` reading that it makes true is noted, one per source the model stops
+    /// at. A source wrapped in `NULLIF` skips the `''` reading and the unset one alike,
+    /// so it is not noted, and a source every request sets has no empty reading at all.
+    #[test]
+    fn a_fallback_source_the_model_stops_at_admits_on_the_empty_reading() {
+        let may_unset = || {
+            vec![
+                scalar("app.first").may_be_unset(),
+                scalar("app.second").may_be_unset(),
+            ]
+        };
+        let coalesce =
+            "coalesce(current_setting('app.first', true), current_setting('app.second', true))";
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} = 'x'"), may_unset()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} = ''"), may_unset()),
+            ["app.first", "app.second"]
+        );
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} <> 'x'"), may_unset()),
+            ["app.first", "app.second"]
+        );
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} IN ('x', 'y')"), may_unset()),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} NOT IN ('x', 'y')"), may_unset()),
+            ["app.first", "app.second"]
+        );
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} = ANY (ARRAY['', 'x'])"), may_unset()),
+            ["app.first", "app.second"]
+        );
+        let wrapped = "coalesce(nullif(current_setting('app.first', true), ''), current_setting('app.second', true)) <> 'x'";
+        assert_eq!(
+            fallback_sources_read(wrapped, may_unset()),
+            ["app.second"],
+            "the wrapped source skips the empty reading"
+        );
+        assert_eq!(
+            fallback_sources_read(
+                &format!("{coalesce} <> 'x'"),
+                vec![scalar("app.first"), scalar("app.second")]
+            ),
+            Vec::<String>::new(),
+            "a source every request sets has no empty reading"
+        );
     }
 }

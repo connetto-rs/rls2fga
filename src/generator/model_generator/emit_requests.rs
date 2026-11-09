@@ -112,6 +112,67 @@ fn request_comparison_spec(
     }
 }
 
+/// The condition comparing what a tuple carries under `row_parameter` against the value
+/// a fallback read hands over. The value travels in the `settings` map, one entry per
+/// source in the order the policy reads them, which the row walks source by source: a
+/// source wrapped in `NULLIF` skips its value on the empty one and on the absent key,
+/// and a source without the wrap stops the walk on the absent key, where the model reads
+/// `false`, since `PostgreSQL`'s `NULL` reading there may admit.
+fn fallback_comparison_spec(
+    row_parameter: &ConditionParameterName,
+    comparison: RequestComparison,
+    sources: &[FallbackStep],
+) -> Option<ConditionSpec> {
+    let operator = match comparison {
+        RequestComparison::CallerValueEquals => "==",
+        RequestComparison::CallerValueUnequals => "!=",
+        // A set never falls back across settings.
+        RequestComparison::CallerSetHolds => return None,
+    };
+    // The sources right to left, each with the chain it falls through to.
+    let mut expression = "false".to_string();
+    for step in sources.iter().rev() {
+        // The value skips past this source only where the deployment reads it empty and
+        // the wrap lets the empty one and the unset one stand for nothing.
+        let skips = step.skips_empty && !step.from_json_field;
+        // A skipped source reads the sources it was read before, which stand in the
+        // inner expression, and the walk's end, which is `false` plain.
+        let absent = if skips && expression != "false" {
+            format!("({expression})")
+        } else {
+            "false".to_string()
+        };
+        let key = format!("{}{}{}", '"', step.parameter, '"');
+        let present = if skips {
+            format!(
+                "{key} in {SETTINGS_PARAMETER} && \
+                 {SETTINGS_PARAMETER}[{key}] != ''"
+            )
+        } else {
+            format!("{key} in {SETTINGS_PARAMETER}")
+        };
+        expression = format!(
+            "{present} ? \
+             {SETTINGS_PARAMETER}[{key}] {operator} {row_parameter} : {absent}"
+        );
+    }
+    Some(ConditionSpec {
+        expression,
+        parameters: [
+            (
+                row_parameter.to_string(),
+                ConditionParameter::Scalar(STRING_PARAMETER_TYPE),
+            ),
+            (
+                SETTINGS_PARAMETER.to_string(),
+                ConditionParameter::MapOf(STRING_PARAMETER_TYPE),
+            ),
+        ]
+        .into_iter()
+        .collect(),
+    })
+}
+
 /// The request's half of the comparison, as the policy declared it.
 #[derive(Clone, Copy)]
 pub(crate) struct RequestSide<'a> {
@@ -219,11 +280,15 @@ impl GateObject<'_> {
                 // The rule supplies it, so it is named after what it is rather than after
                 // its value, which may be any text at all.
                 let row_parameter = namespace.allocate_row("required_value");
-                let spec = request_comparison_spec(
-                    &row_parameter,
-                    &atom.request_parameter,
-                    atom.comparison,
-                );
+                let spec = if atom.fallback.is_empty() {
+                    request_comparison_spec(
+                        &row_parameter,
+                        &atom.request_parameter,
+                        atom.comparison,
+                    )
+                } else {
+                    fallback_comparison_spec(&row_parameter, atom.comparison, &atom.fallback)?
+                };
                 let condition = declare_condition(self.plan, spec);
                 let verb = match atom.comparison {
                     RequestComparison::CallerSetHolds => "holds",
@@ -680,4 +745,86 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
         all_types,
         notes,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::{ConditionParameterName, FallbackStep, RequestComparison};
+
+    /// The two sources `Supabase`'s `auth.role()` tries, in the order the read tries them.
+    fn supabase_sources() -> Vec<FallbackStep> {
+        vec![
+            FallbackStep {
+                setting_key: "request.jwt.claim.role".to_string(),
+                parameter: "request_jwt_claim_role".to_string(),
+                from_json_field: false,
+                skips_empty: true,
+                may_be_unset: true,
+            },
+            FallbackStep {
+                setting_key: "request.jwt.claims".to_string(),
+                parameter: "request_jwt_claims_role".to_string(),
+                from_json_field: true,
+                skips_empty: true,
+                may_be_unset: false,
+            },
+        ]
+    }
+
+    /// The condition walks the sources from the last tried back to the first, guarding
+    /// each key so an absent one reads as `NULL`, the wrapped bare source also on the
+    /// empty one, and ending the walk on `false`.
+    #[test]
+    fn the_fallback_condition_walks_the_sources_right_to_left() {
+        let row = ConditionParameterName::derived("required_value");
+        let spec = fallback_comparison_spec(
+            &row,
+            RequestComparison::CallerValueEquals,
+            &supabase_sources(),
+        )
+        .expect("a value comparison is a condition");
+        assert_eq!(
+            spec,
+            ConditionSpec {
+                expression: "\"request_jwt_claim_role\" in settings && \
+                             settings[\"request_jwt_claim_role\"] != '' ? \
+                             settings[\"request_jwt_claim_role\"] == required_value : \
+                             (\"request_jwt_claims_role\" in settings ? \
+                             settings[\"request_jwt_claims_role\"] == required_value : false)"
+                    .to_string(),
+                parameters: [
+                    (
+                        "required_value".to_string(),
+                        ConditionParameter::Scalar(STRING_PARAMETER_TYPE),
+                    ),
+                    (
+                        SETTINGS_PARAMETER.to_string(),
+                        ConditionParameter::MapOf(STRING_PARAMETER_TYPE),
+                    ),
+                ]
+                .into_iter()
+                .collect(),
+            }
+        );
+        let unequal = fallback_comparison_spec(
+            &row,
+            RequestComparison::CallerValueUnequals,
+            &supabase_sources(),
+        )
+        .expect("a value comparison is a condition");
+        assert_eq!(
+            unequal.expression,
+            "\"request_jwt_claim_role\" in settings && \
+             settings[\"request_jwt_claim_role\"] != '' ? \
+             settings[\"request_jwt_claim_role\"] != required_value : \
+             (\"request_jwt_claims_role\" in settings ? \
+             settings[\"request_jwt_claims_role\"] != required_value : false)"
+        );
+        assert!(
+            fallback_comparison_spec(&row, RequestComparison::CallerSetHolds, &supabase_sources())
+                .is_none(),
+            "a set never falls back across settings"
+        );
+    }
 }

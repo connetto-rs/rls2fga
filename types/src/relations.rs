@@ -126,6 +126,31 @@ pub enum RequestPredicate {
     All(Vec<RequestPredicate>),
 }
 
+/// One source of a fallback read, in the order `PostgreSQL` tries them.
+///
+/// The caller's value falls back through the sources one by one, and the value the first
+/// source hands over stands. `PostgreSQL` reads an unset setting as `NULL`, which a
+/// source wrapped in `NULLIF` skips on, and a `NULLIF` without the skip would not, so a
+/// source that stops the fallback on an unset setting may read more strictly than the
+/// database does.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FallbackStep {
+    /// Setting the source reads, as the deployment spells it.
+    pub setting_key: String,
+    /// Parameter carrying the source's value, in every check context.
+    pub parameter: String,
+    /// True for a source taken from a field of a caller value, which is out of the
+    /// fallback whenever the caller does not send that value at all or does not send it
+    /// as `JSON`.
+    pub from_json_field: bool,
+    /// True when the source is wrapped in `NULLIF`, and so the empty value and the unset
+    /// one both keep the fallback going.
+    pub skips_empty: bool,
+    /// True when the deployment can read the setting as unset, and an unset read may
+    /// fall through where the model's stops.
+    pub may_be_unset: bool,
+}
+
 /// One test of a request value against a constant the policy names.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RequestAtom {
@@ -136,4 +161,7 @@ pub struct RequestAtom {
     pub comparison: RequestComparison,
     /// The constant the policy names.
     pub value: String,
+    /// When non-empty, the settings the caller's value falls back across, one per setting
+    /// in the order the policy reads them. Empty for one single read.
+    pub fallback: Vec<FallbackStep>,
 }

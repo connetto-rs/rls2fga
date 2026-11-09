@@ -63,7 +63,7 @@ pub use records::{
     SubjectKey, ValueSource,
 };
 pub use relations::{
-    RelationShapes, RequestAtom, RequestComparison, RequestPredicate, RowDecision,
+    FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestPredicate, RowDecision,
 };
 pub use row_naming::RowNaming;
 pub use unrestricted::UnrestrictedTable;

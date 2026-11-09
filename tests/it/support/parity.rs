@@ -23,7 +23,7 @@ use rls2fga::classifier::function_registry::DeclaredSources;
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ConfidenceLevel,
-    NoteSeverity, RequestComparison, RequestPredicate, RowNaming, RowVersion, TableId,
+    NoteSeverity, RequestAtom, RequestComparison, RequestPredicate, RowNaming, RowVersion, TableId,
     TranslationNote, ValueSource,
 };
 
@@ -55,6 +55,12 @@ pub(crate) struct Principal {
     /// denial. Declared per caller, because everywhere else a read that raises is a case
     /// granting no privilege or naming no column.
     pub(crate) reads_an_unset_setting: bool,
+    /// Whether a policy raises parsing this caller's document as `JSON`.
+    ///
+    /// A document that is not `JSON` raises where the read reaches it, and the read
+    /// returns no row, so the raise is a denial. Declared per caller, for the same reason
+    /// an unset setting is.
+    pub(crate) reads_a_non_json_document: bool,
 }
 
 impl Principal {
@@ -67,6 +73,7 @@ impl Principal {
             context: serde_json::json!({}),
             carries_request_time: false,
             reads_an_unset_setting: false,
+            reads_a_non_json_document: false,
         }
     }
 
@@ -92,6 +99,7 @@ impl Principal {
             context: serde_json::json!({}),
             carries_request_time: false,
             reads_an_unset_setting: false,
+            reads_a_non_json_document: false,
         }
     }
 
@@ -118,6 +126,13 @@ impl Principal {
         self.reads_an_unset_setting = true;
         self
     }
+
+    /// The same caller, whose read raises because a policy parses a document it holds as
+    /// `JSON`.
+    pub(crate) fn reading_a_non_json_document(mut self) -> Self {
+        self.reads_a_non_json_document = true;
+        self
+    }
 }
 
 /// Whether a caller acting as `acting_role` with `context` satisfies a predicate the request
@@ -128,18 +143,24 @@ pub(crate) fn request_predicate_holds(
     acting_role: &str,
 ) -> bool {
     match predicate {
-        RequestPredicate::Holds(atom) => match atom.comparison {
-            RequestComparison::CallerSetHolds => context[atom.request_parameter.as_str()]
-                .as_array()
-                .is_some_and(|set| set.iter().any(|entry| entry == atom.value.as_str())),
-            RequestComparison::CallerValueEquals => {
-                context["settings"][atom.request_parameter.as_str()] == atom.value.as_str()
+        RequestPredicate::Holds(atom) => {
+            if atom.fallback.is_empty() {
+                match atom.comparison {
+                    RequestComparison::CallerSetHolds => context[atom.request_parameter.as_str()]
+                        .as_array()
+                        .is_some_and(|set| set.iter().any(|entry| entry == atom.value.as_str())),
+                    RequestComparison::CallerValueEquals => {
+                        context["settings"][atom.request_parameter.as_str()] == atom.value.as_str()
+                    }
+                    // The absent key reads as `NULL`, which is no inequality either.
+                    RequestComparison::CallerValueUnequals => context["settings"]
+                        .get(atom.request_parameter.as_str())
+                        .is_some_and(|stored| *stored != atom.value.as_str()),
+                }
+            } else {
+                request_fallback_holds(atom, context)
             }
-            // The absent key reads as `NULL`, which is no inequality either.
-            RequestComparison::CallerValueUnequals => context["settings"]
-                .get(atom.request_parameter.as_str())
-                .is_some_and(|stored| *stored != atom.value.as_str()),
-        },
+        }
         RequestPredicate::ActsAs { role } => role == acting_role,
         RequestPredicate::Any(children) => children
             .iter()
@@ -148,6 +169,34 @@ pub(crate) fn request_predicate_holds(
             .iter()
             .all(|child| request_predicate_holds(child, context, acting_role)),
     }
+}
+
+/// The answer the model gives on the value a fallback read hands over, walking the
+/// sources in the order the policy reads them.
+///
+/// A source wrapped in `NULLIF` skips its value on the empty one and on the absent key,
+/// and a source without the wrap, and every source of a field, stops the walk on the
+/// absent key, where the model reads `NULL`.
+fn request_fallback_holds(atom: &RequestAtom, context: &serde_json::Value) -> bool {
+    let settings = &context["settings"];
+    for step in &atom.fallback {
+        match settings
+            .get(&step.parameter)
+            .and_then(serde_json::Value::as_str)
+        {
+            Some(value) if !(step.skips_empty && !step.from_json_field && value.is_empty()) => {
+                // The walk lands on the value the source hands over, tested as the
+                // comparison spells it.
+                return match atom.comparison {
+                    RequestComparison::CallerValueEquals => value == atom.value.as_str(),
+                    _ => value != atom.value.as_str(),
+                };
+            }
+            Some(_) | None if step.skips_empty && !step.from_json_field => {}
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// What a write would attempt on one table.
@@ -702,6 +751,12 @@ fn postgres_allows(
             *raised = true;
             Some(false)
         }
+        // A document that is not `JSON` raises where the read reaches it, which is a
+        // denial, where the case says so.
+        Err(error) if principal.reads_a_non_json_document && reads_a_non_json_document(&error) => {
+            *raised = true;
+            Some(false)
+        }
         // Otherwise a plain read never raises, so an error is a case that granted no
         // privilege or named no column, and calling it a denial would hide the mistake.
         Err(error) if statement == ActionStatement::Select => panic!(
@@ -727,6 +782,12 @@ fn reads_as_a_policy_refusal(error: &diesel::result::Error) -> bool {
 fn reads_an_unset_setting(error: &diesel::result::Error) -> bool {
     matches!(error, diesel::result::Error::DatabaseError(_, info)
         if info.message().contains("unrecognized configuration parameter"))
+}
+
+/// Whether `error` is a policy parsing a value that is not a `JSON` document, `22P02`.
+fn reads_a_non_json_document(error: &diesel::result::Error) -> bool {
+    matches!(error, diesel::result::Error::DatabaseError(_, info)
+        if info.message().contains("invalid input syntax for type json"))
 }
 
 /// The model under test, as the three things every question about it needs.
@@ -1013,7 +1074,6 @@ async fn run_in(
 
     let answers = doctor(planned.translation().action_relations().to_vec());
     let naming = planned.translation().row_naming().to_vec();
-
     let objects = objects(conn, &naming, &case.not_read_directly);
     let tuples = if case.loading_from_rows {
         tuples_replaying_pure_queries(conn, case, planned.tuple_queries())
@@ -1252,6 +1312,13 @@ async fn compare_every_pair(
             !principal.reads_an_unset_setting || raised,
             "{}: {} claims to read a setting it never set, and no read of any row raised, \
              so the claim is stale",
+            case.name,
+            principal.subject
+        );
+        assert!(
+            !principal.reads_a_non_json_document || raised,
+            "{}: {} claims to parse a document that is not `JSON`, and no read of any row \
+             raised, so the claim is stale",
             case.name,
             principal.subject
         );
