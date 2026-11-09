@@ -9,7 +9,7 @@ use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
 
-use crate::support::deployment::caller_deployment_acting_as;
+use crate::support::deployment::{caller, caller_deployment_acting_as, delimited_set};
 use crate::support::footgun::{
     assert_model_is_internally_consistent, db_of, relation_definition, relation_denies, translator,
 };
@@ -255,6 +255,110 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
         2,
         "both branches walk the same membership relation, got '{can_select}':\n{model}"
     );
+}
+
+/// A membership read cap restricted to `anon`.
+const CAPPED_FOR_ANON: &str = r"
+CREATE ROLE anon NOLOGIN;
+CREATE ROLE authenticated NOLOGIN;
+CREATE TABLE members (doc_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (doc_id, user_id));
+ALTER TABLE members ENABLE ROW LEVEL SECURITY;
+CREATE POLICY members_open ON members FOR ALL USING (true) WITH CHECK (true);
+CREATE POLICY members_cap ON members AS RESTRICTIVE FOR SELECT TO anon
+  USING ('members:read' = ANY(string_to_array(current_setting('app.read_caps', true), ',')));
+CREATE TABLE docs (id TEXT PRIMARY KEY);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY shared ON docs FOR SELECT
+  USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
+";
+
+/// Translate the membership cap for the deployment's acting roles.
+fn translate_capped(acting_roles: &[&str], sql: &str) -> Outputs {
+    TranslatorBuilder::new(caller_deployment_acting_as(
+        acting_roles,
+        [caller("app.user_id"), delimited_set("app.read_caps", ",")],
+    ))
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db_of(sql))
+    .expect("translation should plan")
+    .outputs_accepting_gaps()
+}
+
+/// A membership cap outside every acting role leaves the table open.
+#[test]
+fn a_membership_read_cap_no_caller_role_runs_under_leaves_the_table_open() {
+    let outputs = translate_capped(&["authenticated"], CAPPED_FOR_ANON);
+    assert!(
+        !outputs
+            .notes()
+            .iter()
+            .any(|note| note.severity().diverges_from_database()),
+        "the cap reaches no acting role, so nothing may be refused or guarded: {:#?}",
+        outputs.notes()
+    );
+    let unguarded = translate_capped(
+        &["authenticated"],
+        &CAPPED_FOR_ANON.replace("ALTER TABLE members ENABLE ROW LEVEL SECURITY;", ""),
+    );
+    assert_eq!(
+        relation_definition(&outputs.model(), "docs", "can_select"),
+        relation_definition(&unguarded.model(), "docs", "can_select"),
+        "the branch outside the cap must read the membership table as open:\n{}",
+        outputs.model()
+    );
+}
+
+/// A membership cap constrains `anon` while another acting role retains its reads.
+#[cfg(all(not(target_os = "windows"), feature = "client"))]
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_membership_read_cap_some_caller_roles_run_under_keeps_the_table_guarded() {
+    use crate::support::parity::{
+        assert_agrees, assert_postgres, run, Cluster, ParityCase, Principal,
+    };
+    use rls2fga::types::ActionStatement;
+
+    let cluster = Cluster::start().await;
+    let mut permitted = Principal::with_setting("carol", "anon", "app.user_id", "carol")
+        .with_context(serde_json::json!({"app_read_caps": ["members:read"]}));
+    permitted
+        .session
+        .push(("app.read_caps".into(), "members:read".into()));
+    let case = ParityCase::reading(
+        "membership-cap-by-acting-role",
+        CAPPED_FOR_ANON,
+        &["GRANT SELECT ON docs, members TO anon, authenticated;
+             INSERT INTO docs VALUES ('d1'), ('d2');
+             INSERT INTO members VALUES ('d1', 'alice'), ('d2', 'alice'), ('d1', 'bob'), ('d1', 'carol')"],
+        vec![
+            Principal::with_setting("alice", "anon", "app.user_id", "alice")
+                .with_context(serde_json::json!({"app_read_caps": []})),
+            Principal::with_setting("bob", "authenticated", "app.user_id", "bob")
+                .with_context(serde_json::json!({"app_read_caps": []})),
+            permitted,
+        ],
+    )
+    .with_settings([delimited_set("app.read_caps", ",")]);
+    let result = run(&cluster, &case).await;
+    for (subject, object, visible) in [
+        ("alice", "docs:d1", false),
+        ("alice", "docs:d2", false),
+        ("bob", "docs:d1", true),
+        ("bob", "docs:d2", false),
+        ("carol", "docs:d1", true),
+        ("carol", "docs:d2", false),
+    ] {
+        assert_postgres(
+            &case,
+            &result,
+            subject,
+            object,
+            ActionStatement::Select,
+            visible,
+        );
+    }
+    assert_agrees(&case, &result);
 }
 
 /// A policy the schema gives no clause constrains nothing, so it must not leave a

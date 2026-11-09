@@ -42,8 +42,7 @@ pub(crate) enum TableReadability {
     Unreadable,
 }
 
-/// The read determination for `table`, the shared policy walk behind both the classifier's
-/// residual check and the generator's membership scope.
+/// The read determination for `table`, for the acting role `registry` classifies.
 ///
 /// A policy of `table` can hold a residual whose check asks for this very answer, so a walk
 /// reached from inside its own walk answers [`TableReadability::Guarded`], having proven
@@ -68,7 +67,7 @@ pub(crate) fn table_readability<DB: DatabaseLike>(
         .unwrap_or(TableReadability::Guarded)
 }
 
-/// The read `PostgreSQL` applies to the acting role `registry` classifies for.
+/// The read `PostgreSQL` applies to the role, guarded where the role is unset.
 ///
 /// A role no policy reaches reads nothing, a role row security exempts reads everything, and
 /// a read that raises or that sql-traits cannot settle for the role shows nothing.
