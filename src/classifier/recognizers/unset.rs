@@ -478,8 +478,18 @@ mod tests {
             ["app.first", "app.second"]
         );
         assert_eq!(
+            fallback_sources_read(&format!("'' = {coalesce}"), may_unset()),
+            ["app.first", "app.second"],
+            "the reversed reading notes the same sources"
+        );
+        assert_eq!(
             fallback_sources_read(&format!("{coalesce} IN ('x', 'y')"), may_unset()),
             Vec::<String>::new()
+        );
+        assert_eq!(
+            fallback_sources_read(&format!("{coalesce} = t.name"), may_unset()),
+            Vec::<String>::new(),
+            "a row value the read is compared with is no literal the reading holds against"
         );
         assert_eq!(
             fallback_sources_read(&format!("{coalesce} NOT IN ('x', 'y')"), may_unset()),

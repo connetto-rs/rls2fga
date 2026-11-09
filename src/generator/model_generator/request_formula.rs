@@ -615,4 +615,131 @@ mod tests {
             ])
         );
     }
+
+    /// The two sources a fallback read walks, in the order the read tries them.
+    fn fallback_steps() -> (FallbackStep, Vec<FallbackStep>) {
+        (
+            FallbackStep {
+                setting_key: "request.jwt.claim.role".to_string(),
+                parameter: "request_jwt_claim_role".to_string(),
+                from_json_field: false,
+                skips_empty: false,
+                may_be_unset: true,
+            },
+            vec![FallbackStep {
+                setting_key: "request.jwt.claims".to_string(),
+                parameter: "request_jwt_claims_role".to_string(),
+                from_json_field: true,
+                skips_empty: false,
+                may_be_unset: true,
+            }],
+        )
+    }
+
+    /// A fallback gate inside a composite reads through `of` like a single read, so a
+    /// policy that joins it with another request gate keeps the fallback's tests beside
+    /// the other gate's in one form, and `<>` and the `IN` list over one value compose
+    /// like the single read's.
+    #[test]
+    fn a_fallback_gate_joined_with_another_request_gate_reads_through_of() {
+        let source = declared_source();
+        let (first, rest) = fallback_steps();
+        let fallback_equal =
+            PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant {
+                value: "a".to_string(),
+                first: first.clone(),
+                rest: rest.clone(),
+            });
+        assert_eq!(
+            RequestFormula::of(&fallback_equal),
+            Some(RequestFormula::Atom(GateAtom::of_fallback(
+                &first,
+                &rest,
+                RequestComparison::CallerValueEquals,
+                "a"
+            )))
+        );
+        let tier_equal = PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant {
+            value: "b".to_string(),
+            source: source.clone(),
+        });
+        assert_eq!(
+            RequestFormula::of(&PatternClass::P8Composite(Composite {
+                op: BoolOp::Or,
+                parts: vec![
+                    ClassifiedExpr {
+                        pattern: fallback_equal,
+                        confidence: ConfidenceLevel::B,
+                    },
+                    ClassifiedExpr {
+                        pattern: tier_equal,
+                        confidence: ConfidenceLevel::B,
+                    },
+                ],
+            })),
+            Some(or(vec![
+                RequestFormula::Atom(GateAtom::of_fallback(
+                    &first,
+                    &rest,
+                    RequestComparison::CallerValueEquals,
+                    "a"
+                )),
+                RequestFormula::Atom(GateAtom::of(
+                    &source,
+                    RequestComparison::CallerValueEquals,
+                    "b"
+                ))
+            ]))
+        );
+        assert_eq!(
+            RequestFormula::of(&PatternClass::P8Composite(Composite {
+                op: BoolOp::And,
+                parts: vec![
+                    ClassifiedExpr {
+                        pattern: PatternClass::P24FallbackScalarUnequalsConstant(
+                            FallbackScalarUnequalsConstant {
+                                value: "a".to_string(),
+                                first: first.clone(),
+                                rest: rest.clone(),
+                            }
+                        ),
+                        confidence: ConfidenceLevel::B,
+                    },
+                    ClassifiedExpr {
+                        pattern: PatternClass::P25FallbackScalarInConstantList(
+                            FallbackScalarInConstantList {
+                                values: vec!["b".to_string(), "c".to_string()],
+                                negated: false,
+                                first: first.clone(),
+                                rest: rest.clone(),
+                            }
+                        ),
+                        confidence: ConfidenceLevel::B,
+                    },
+                ],
+            })),
+            Some(and(vec![
+                RequestFormula::Atom(GateAtom::of_fallback(
+                    &first,
+                    &rest,
+                    RequestComparison::CallerValueUnequals,
+                    "a"
+                )),
+                or(vec![
+                    RequestFormula::Atom(GateAtom::of_fallback(
+                        &first,
+                        &rest,
+                        RequestComparison::CallerValueEquals,
+                        "b"
+                    )),
+                    RequestFormula::Atom(GateAtom::of_fallback(
+                        &first,
+                        &rest,
+                        RequestComparison::CallerValueEquals,
+                        "c"
+                    )),
+                ])
+            ]))
+        );
+    }
 }

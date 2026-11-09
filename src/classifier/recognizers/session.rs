@@ -14,7 +14,9 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use sqlparser::ast::{BinaryOperator, Expr, FunctionArguments, InTarget, Query, SelectItem};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArguments, InTarget, Query, SelectItem,
+};
 
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
@@ -197,12 +199,12 @@ pub(super) fn fallback_read(
 ) -> Option<(FallbackStep, Vec<FallbackStep>, CastChain)> {
     let (outer, peeled) = CastChain::peeled(expr);
     let (first, rest, tested_side) = match peeled {
-        Expr::Function(function)
-            if builtin_function_name(function).as_deref() == Some("coalesce") =>
-        {
-            let FunctionArguments::List(list) = &function.args else {
-                return None;
-            };
+        Expr::Function(
+            function @ Function {
+                args: FunctionArguments::List(list),
+                ..
+            },
+        ) if builtin_function_name(function).as_deref() == Some("coalesce") => {
             let mut args = list.args.iter().filter_map(function_arg_expr);
             // A `COALESCE` of one source is that source, which the setting read above
             // reads.
@@ -1306,6 +1308,22 @@ mod tests {
         assert_eq!(classified.confidence, ConfidenceLevel::B);
     }
 
+    /// The same fallback gate in either operand order classifies alike, the read and the
+    /// value the pattern stands for unchanged by which side the value stands on.
+    #[test]
+    fn the_fallback_test_reads_in_either_operand_order() {
+        let registry = registry(fallback_settings());
+        let value = "authenticated";
+        let read = "coalesce(current_setting('request.jwt.claim.role', true), current_setting('request.jwt.claims', true)::jsonb ->> 'role')";
+        let forward =
+            recognize_session_attribute(&parse_expr(&format!("{read} = '{value}'")), &registry)
+                .expect("the forward test reads the fallback");
+        let reversed =
+            recognize_session_attribute(&parse_expr(&format!("'{value}' = {read}")), &registry)
+                .expect("the reversed test reads the fallback");
+        assert_eq!(forward, reversed);
+    }
+
     /// A `NULLIF` against the empty text wraps the source it sits on, whether that is the
     /// value or, for a field, the document it is taken from, and an outer cast that does
     /// not rename stands for the value the read hands over.
@@ -1411,6 +1429,8 @@ mod tests {
             &format!("{declared} IN (t.name)"),
             // A list element the tested side's casts rename.
             &format!("{declared} = ANY (ARRAY['x'::integer::text])"),
+            // A document cast beyond the parse into jsonb the arrow needs.
+            "coalesce(current_setting('app.first', true)::jsonb::text ->> 'f', current_setting('app.second', true)) = 'x'",
         ];
         for clause in refusals {
             assert!(
