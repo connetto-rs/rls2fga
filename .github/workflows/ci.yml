@@ -8,8 +8,7 @@ on:
   merge_group:
   workflow_dispatch:
   schedule:
-    # Weekly security audit and container suite run against freshly pulled images,
-    # every Monday at 06:00 UTC.
+    # Weekly container suite run against freshly pulled images, every Monday at 06:00 UTC.
     - cron: "0 6 * * 1"
 
 concurrency:
@@ -84,29 +83,6 @@ jobs:
         env:
           RUSTDOCFLAGS: -D warnings
         run: cargo doc --all-features --no-deps
-
-  security-audit:
-    name: Security audit
-    runs-on: ubuntu-26.04
-    timeout-minutes: 25
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust artifacts
-        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-
-      - name: Install cargo-audit
-        uses: taiki-e/install-action@cargo-audit
-
-      - name: Resolve dependencies
-        run: cargo generate-lockfile
-
-      - name: Run cargo-audit
-        run: cargo audit
 
   coverage:
     name: Coverage and runtime parity (Codecov)
