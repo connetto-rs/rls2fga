@@ -350,17 +350,6 @@ pub enum TranslationNote {
         /// Commands a policy covers that the read gate closes anyway.
         commands: Vec<String>,
     },
-    /// A role test in the expression became a role scope relation.
-    RoleGateScope {
-        /// Policy carrying the test.
-        policy: String,
-        /// Roles it admits.
-        roles: Vec<String>,
-        /// Relation the gate became.
-        relation: RelationName,
-        /// Relation on `pg_role` holding the kind of membership the policy asked about.
-        held_by: String,
-    },
     /// Two table spellings canonicalize to one type name.
     TypeNameCollision {
         /// Table whose type was renamed.
@@ -570,7 +559,6 @@ impl TranslationNote {
             | Self::AttributeNeedsRuntimeEnforcement { .. }
             | Self::InheritanceParentReadsOwnRowsOnly { .. } => NoteSeverity::Partial,
             Self::ReadsDeniedSoWritesCannotName { .. }
-            | Self::RoleGateScope { .. }
             | Self::CallerSuppliesConditionParameter { .. }
             | Self::RowIdentifierBudget { .. }
             | Self::TypeNameCollision { .. }
@@ -631,7 +619,6 @@ impl TranslationNote {
             | Self::RestrictiveAttributeRefused { policy }
             | Self::PolicyClauseAbsent { policy, .. }
             | Self::PolicyClauseIllegal { policy, .. }
-            | Self::RoleGateScope { policy, .. }
             | Self::MembershipTableGrantsNoReads { policy, .. }
             | Self::FunctionExpanded { policy, .. }
             | Self::MembershipTableGuarded { policy, .. }
@@ -779,18 +766,6 @@ impl fmt::Display for TranslationNote {
                 "Reads of '{table}' are denied, so {} cannot name a row either. \
                  Add a SELECT policy the model can translate.",
                 commands.join(", ")
-            ),
-            Self::RoleGateScope {
-                policy,
-                roles,
-                relation,
-                held_by,
-            } => write!(
-                f,
-                "Policy '{policy}' gates on ({}) through relation '{relation}', which reads \
-                 pg_role '{held_by}', so load that pg_role relation with the roles' holders of \
-                 that kind",
-                roles.join(", ")
             ),
             Self::TypeNameCollision {
                 spelling,

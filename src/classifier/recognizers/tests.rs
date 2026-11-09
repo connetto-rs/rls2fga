@@ -304,55 +304,6 @@ fn pg_has_role_refuses_a_role_it_cannot_name() {
     .is_none());
 }
 
-#[test]
-fn recognize_p2_role_accessor_equality_and_in_list() {
-    let db = db_with_docs_and_members();
-    let mut registry = FunctionRegistry::new();
-    registry.register_if_absent(
-        "auth.role",
-        &FunctionSemantic::RoleAccessor {
-            returns: "text".to_string(),
-        },
-    );
-
-    let eq_expr = parse_expr("auth.role() = 'authenticated'");
-    let c_eq =
-        recognize_p2(&eq_expr, &db, &registry).expect("expected P2 for role_accessor = literal");
-    assert!(
-        matches!(
-            &c_eq.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { function_name, role_names, .. })
-                if function_name == "auth.role" && role_names == &["authenticated"]
-        ),
-        "auth.role() = 'authenticated' should produce P2, got: {:?}",
-        c_eq.pattern
-    );
-    assert_eq!(c_eq.confidence, ConfidenceLevel::A);
-
-    // IN-list form: auth.role() IN ('authenticated', 'service_role')
-    let in_expr = parse_expr("auth.role() IN ('authenticated', 'service_role')");
-    let c_in =
-        recognize_p2(&in_expr, &db, &registry).expect("expected P2 for role_accessor IN list");
-    assert!(
-        matches!(
-            &c_in.pattern,
-            PatternClass::P2RoleNameInList(RoleNameInList { function_name, role_names, .. })
-                if function_name == "auth.role"
-                    && role_names == &["authenticated", "service_role"]
-        ),
-        "auth.role() IN (...) should produce P2, got: {:?}",
-        c_in.pattern
-    );
-
-    // Unregistered role function should not match.
-    let empty_registry = FunctionRegistry::new();
-    let not_matched = parse_expr("auth.role() = 'authenticated'");
-    assert!(
-        recognize_p2(&not_matched, &db, &empty_registry).is_none(),
-        "unregistered role function should not match P2"
-    );
-}
-
 /// A non-literal element of a role IN-list is a per-row grant the literals cannot
 /// stand in for: `IN ('viewer', owner_id)` admits a row whose threshold equals the
 /// row's own `owner_id`, and keeping only the literal would translate a subset of
@@ -367,19 +318,6 @@ fn p2_in_list_refuses_a_mixed_literal_and_non_literal_list() {
     assert!(
         recognize_p2(&mixed_threshold, &db, &registry).is_none(),
         "a non-literal element in a threshold IN-list fails closed"
-    );
-
-    let mut accessor_registry = FunctionRegistry::new();
-    accessor_registry.register_if_absent(
-        "role",
-        &FunctionSemantic::RoleAccessor {
-            returns: "text".to_string(),
-        },
-    );
-    let mixed_accessor = parse_expr("auth.role() IN ('admin', owner_id)");
-    assert!(
-        recognize_p2(&mixed_accessor, &db, &accessor_registry).is_none(),
-        "a non-literal element in a role-accessor IN-list fails closed"
     );
 }
 
@@ -3298,56 +3236,6 @@ fn pg_has_role_rejects_wrong_arg_count() {
     assert!(recognize_pg_has_role(&expr, &db, &registry).is_none());
     let expr = parse_expr("pg_has_role('app_user', 'admin', 'MEMBER', 'extra')");
     assert!(recognize_pg_has_role(&expr, &db, &registry).is_none());
-}
-
-#[test]
-fn role_accessor_comparison_reversed_eq() {
-    let mut registry = FunctionRegistry::new();
-    registry
-        .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
-        .unwrap();
-    // reversed: 'authenticated' = auth.role()
-    let expr = parse_expr("'authenticated' = auth.role()");
-    let classified = recognize_role_accessor_comparison(&expr, &registry);
-    assert!(classified.is_some());
-    let c = classified.unwrap();
-    assert!(matches!(
-        c.pattern,
-        PatternClass::P2RoleNameInList(RoleNameInList {
-            ref role_names, ..
-        }) if role_names == &["authenticated"]
-    ));
-}
-
-#[test]
-fn role_accessor_comparison_rejects_non_string_literal() {
-    let mut registry = FunctionRegistry::new();
-    registry
-        .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
-        .unwrap();
-    let expr = parse_expr("auth.role() = 42");
-    assert!(recognize_role_accessor_comparison(&expr, &registry).is_none());
-}
-
-#[test]
-fn role_accessor_comparison_rejects_column_rhs() {
-    let mut registry = FunctionRegistry::new();
-    registry
-        .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
-        .unwrap();
-    let expr = parse_expr("auth.role() = some_column");
-    assert!(recognize_role_accessor_comparison(&expr, &registry).is_none());
-}
-
-#[test]
-fn role_accessor_in_list_rejects_non_string_items() {
-    let mut registry = FunctionRegistry::new();
-    registry
-        .load_from_json(r#"{"auth.role": {"kind": "role_accessor"}}"#)
-        .unwrap();
-    // All non-string items -> empty role_names -> returns None
-    let expr = parse_expr("auth.role() IN (42, 99)");
-    assert!(recognize_role_accessor_comparison(&expr, &registry).is_none());
 }
 
 #[test]

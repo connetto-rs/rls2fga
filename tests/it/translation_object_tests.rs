@@ -525,15 +525,9 @@ fn a_request_time_parameter_over_fifty_characters_refuses_the_translation() {
 /// model is checked, since the constructor takes what the deployment spells.
 #[test]
 fn a_configured_type_name_past_two_hundred_fifty_four_refuses_the_translation() {
-    let well_known = WellKnownTypes::new(
-        "u".repeat(255),
-        "team",
-        "pg_role",
-        "pg_role_scope",
-        "request_gate",
-        "nobody",
-    )
-    .expect("the name is otherwise valid");
+    let well_known =
+        WellKnownTypes::new("u".repeat(255), "team", "pg_role", "request_gate", "nobody")
+            .expect("the name is otherwise valid");
     let db = db_of(CLEAN);
     let error = TranslatorBuilder::new(deployment::caller_deployment())
         .with_well_known_types(well_known)

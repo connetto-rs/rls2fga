@@ -3,7 +3,6 @@ use rls2fga::classifier::patterns::{ConstantBool, PatternClass};
 use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator;
 use rls2fga::parser::function_analyzer::FunctionSemantic;
-use rls2fga::parser::names::role_scope_name;
 use rls2fga::parser::sql_parser;
 use rls2fga::types::ConfidenceLevel;
 
@@ -286,42 +285,6 @@ CREATE POLICY docs_select ON docs FOR SELECT
         Some("no_access"),
         "the refusal keeps the table closed:\n{}",
         model.model()
-    );
-}
-
-/// The role accessor admits every member of the role it names, so it walks the scope the
-/// operator loads the memberships into.
-#[test]
-fn role_accessor_walks_the_scope_to_the_roles_members() {
-    let sql = r"
-CREATE TABLE public.docs (id UUID PRIMARY KEY, title TEXT);
-ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_select ON docs FOR SELECT
-    USING (auth.role() = 'authenticated');
-";
-    let registry_json = r#"{
-  "auth.role": {"kind": "role_accessor"}
-}"#;
-    let (classified, db, registry) = support::classify_sql(sql, Some(registry_json));
-
-    let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-    assert_eq!(
-        support::footgun::relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some(
-            format!(
-                "member from {} and acting_app_user from request_gate",
-                role_scope_name("member", &["authenticated".to_string()])
-            )
-            .as_str()
-        ),
-        "the role accessor admits every member of the role:\n{}",
-        model.model()
-    );
-    insta::assert_snapshot!("role_accessor_model", model.model().trim());
-
-    insta::assert_snapshot!(
-        "role_accessor_tuples",
-        tuple_generator::format_tuples(model.tuple_queries())
     );
 }
 

@@ -119,7 +119,7 @@ pub fn recognize_p2<DB: DatabaseLike>(
                     return None;
                 }
 
-                let role_names = extract_role_names_from_in_list(list, true)?;
+                let role_names = extract_role_names_from_in_list(list)?;
                 if !role_names.is_empty() {
                     return Some(ClassifiedExpr {
                         pattern: PatternClass::P2RoleNameInList(RoleNameInList {
@@ -128,7 +128,6 @@ pub fn recognize_p2<DB: DatabaseLike>(
                             ),
                             function_name: registry.resolved_name(&func_name),
                             role_names,
-                            privilege: RolePrivilege::Member,
                         }),
                         confidence: ConfidenceLevel::A,
                     });
@@ -137,11 +136,7 @@ pub fn recognize_p2<DB: DatabaseLike>(
         }
     }
 
-    if let Some(c) = recognize_pg_has_role(expr, db, registry) {
-        return Some(c);
-    }
-
-    recognize_role_accessor_comparison(expr, registry)
+    recognize_pg_has_role(expr, db, registry)
 }
 
 /// The column a role-threshold call passes as its resource.
@@ -236,82 +231,19 @@ fn recognize_pg_has_role<DB: DatabaseLike>(
     })
 }
 
-fn recognize_role_accessor_comparison(
-    expr: &Expr,
-    registry: &FunctionRegistry,
-) -> Option<ClassifiedExpr> {
-    let extract_role_func_name = |e: &Expr| -> Option<String> {
-        let name = extract_function_name(e)?;
-        if registry.is_role_accessor(&name) {
-            Some(registry.resolved_name(&name))
-        } else {
-            None
-        }
-    };
-
-    if let Expr::BinaryOp {
-        left,
-        op: BinaryOperator::Eq,
-        right,
-    } = expr
-    {
-        let (func_name, literal_expr) = if let Some(name) = extract_role_func_name(left) {
-            (name, right.as_ref())
-        } else {
-            let name = extract_role_func_name(right)?;
-            (name, left.as_ref())
-        };
-
-        let role_name = string_literal(literal_expr)?;
-
-        return Some(ClassifiedExpr {
-            pattern: PatternClass::P2RoleNameInList(RoleNameInList {
-                resource_column: None,
-                function_name: func_name,
-                role_names: vec![role_name],
-                // A role accessor names the caller's role rather than asking about a kind of
-                // membership in another one, so the widest kind is the faithful reading.
-                privilege: RolePrivilege::Member,
-            }),
-            confidence: ConfidenceLevel::A,
-        });
-    }
-
-    if let Some((inner, list)) = constant_in_list(expr) {
-        let func_name = extract_role_func_name(inner)?;
-        let role_names = extract_role_names_from_in_list(list, false)?;
-
-        if role_names.is_empty() {
-            return None;
-        }
-
-        return Some(ClassifiedExpr {
-            pattern: PatternClass::P2RoleNameInList(RoleNameInList {
-                resource_column: None,
-                function_name: func_name,
-                role_names,
-                privilege: RolePrivilege::Member,
-            }),
-            confidence: ConfidenceLevel::A,
-        });
-    }
-
-    None
-}
-
 /// Every element as a role literal, or `None` when any element is not one.
 ///
 /// A non-literal element is a per-row grant the literals cannot stand in for, so
 /// keeping only the literals would translate a subset of the policy and report it
 /// as faithful.
-fn extract_role_names_from_in_list(list: &[Expr], allow_numeric: bool) -> Option<Vec<String>> {
+fn extract_role_names_from_in_list(list: &[Expr]) -> Option<Vec<String>> {
     list.iter()
         .map(|e| {
             // A dump deparses list elements with casts, which change no value here.
             if let Expr::Value(v) = unwrap_cast_or_nested(e) {
                 return match &v.value {
                     Value::SingleQuotedString(s) => Some(s.clone()),
-                    Value::Number(n, _) if allow_numeric => Some(n.clone()),
+                    Value::Number(n, _) => Some(n.clone()),
                     _ => None,
                 };
             }
@@ -757,6 +689,38 @@ pub(crate) fn called_function_names(expr: &Expr, registry: &FunctionRegistry) ->
         core::ops::ControlFlow::<()>::Continue(())
     });
     names
+}
+
+/// Why each call in `expr` to a function no body reads does not translate, in source
+/// order, deduplicated. A declared role accessor is read by its body, so one the schema
+/// does not define is refused for that, and a body the schema gives is blamed for being
+/// neither a role keyword nor one declared setting, which is all a call compared with a
+/// value is read as.
+pub(crate) fn unread_function_calls(expr: &Expr, registry: &FunctionRegistry) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+        if let Expr::Function(func) = node {
+            let name = func.name.to_string();
+            let reason = if registry.is_undefined_role_accessor(&name) {
+                Some(format!(
+                    "'{name}' is declared a role accessor, which is read by its body, and \
+                     the schema does not define it"
+                ))
+            } else if registry.has_unread_body(&name) {
+                Some(format!(
+                    "The body of '{name}' is neither a role keyword nor one declared \
+                     setting, which is all a call compared with a value is read as"
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = reason.filter(|reason| !reasons.contains(reason)) {
+                reasons.push(reason);
+            }
+        }
+        core::ops::ControlFlow::<()>::Continue(())
+    });
+    reasons
 }
 
 /// Normalized names of every set constructor in `expr`, in source order, deduplicated.

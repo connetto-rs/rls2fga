@@ -1,5 +1,5 @@
 //! `current_user`, `current_role`, `user` and `session_user`, read as the names of the
-//! roles a request runs under.
+//! roles a request runs under, and so is a call to a function whose whole body is one.
 //!
 //! A request logs in as the deployment's login role and acts as one of its acting roles,
 //! so `session_user` is the login role's name and the other three are the acting role's.
@@ -44,17 +44,27 @@ pub(crate) enum RoleKeywordError {
 
 /// The role keyword `expr` is, spelled as the parser leaves it: an unquoted identifier
 /// (`current_role`), or a call with no argument list (`current_user`, `user`,
-/// `session_user`).
-fn keyword_of(expr: &Expr) -> Option<RoleKeyword> {
+/// `session_user`). A call with an empty argument list is one when `registry` reads the
+/// function's whole body as one.
+fn keyword_of(expr: &Expr, registry: &FunctionRegistry) -> Option<RoleKeyword> {
     match expr {
         Expr::Identifier(ident) if ident.quote_style.is_none() => role_keyword(&ident.value),
         Expr::Function(function)
-            if matches!(function.args, FunctionArguments::None)
-                && matches!(function.parameters, FunctionArguments::None)
+            if matches!(function.parameters, FunctionArguments::None)
                 && function.over.is_none()
                 && function.filter.is_none() =>
         {
-            role_keyword(&function.name.to_string())
+            match &function.args {
+                FunctionArguments::None => role_keyword(&function.name.to_string()),
+                FunctionArguments::List(list)
+                    if list.args.is_empty()
+                        && list.clauses.is_empty()
+                        && list.duplicate_treatment.is_none() =>
+                {
+                    registry.role_keyword_accessor(&function.name.to_string())
+                }
+                _ => None,
+            }
         }
         _ => None,
     }
@@ -68,7 +78,7 @@ pub(crate) fn lower_role_keywords<'e>(
 ) -> Result<Cow<'e, Expr>, RoleKeywordError> {
     let mut found = false;
     let _ = sqlparser::ast::visit_expressions(expr, |node| {
-        if keyword_of(node).is_some() {
+        if keyword_of(node, registry).is_some() {
             found = true;
             return ControlFlow::Break(());
         }
@@ -142,7 +152,7 @@ impl VisitorMut for Lower<'_> {
     type Break = ();
 
     fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
-        let Some(keyword) = keyword_of(expr) else {
+        let Some(keyword) = keyword_of(expr, self.registry) else {
             return ControlFlow::Continue(());
         };
         match role_name(self.registry, keyword, &expr.to_string()) {

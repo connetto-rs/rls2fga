@@ -255,15 +255,8 @@ fn request_children<'a>(
 /// the gate admits, so a subject of another type or a userset is refused rather than let in.
 #[test]
 fn a_request_gate_names_its_link_and_the_type_it_admits() {
-    let names = WellKnownTypes::new(
-        "principal",
-        "team",
-        "pg_role",
-        "pg_role_scope",
-        "request_gate",
-        "nobody",
-    )
-    .expect("the names are valid");
+    let names = WellKnownTypes::new("principal", "team", "pg_role", "request_gate", "nobody")
+        .expect("the names are valid");
     let outputs = TranslatorBuilder::new(deployment::caller_deployment_with([
         deployment::delimited_set("app.bot_list", ","),
     ]))

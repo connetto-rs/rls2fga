@@ -615,30 +615,9 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             Vec::new(),
         )),
 
-        // The roles a scope admits follow from the policy, so the fact is the whole
+        // Which role a kind stands for follows from the deployment, so the fact is the whole
         // description: no row is read, no table is named, and a consumer replaying a
         // changed row never reaches it.
-        TupleSource::PolicyScopeRoles {
-            scope_type,
-            scope_object,
-            relation,
-            pg_role,
-        } => Some(RecordDescription {
-            tables: Vec::new(),
-            derivation: RecordDerivation::Constant {
-                // Spelled exactly as the query spells it, since the differential test
-                // compares the two.
-                record: Record {
-                    object: format!("{scope_type}:{}", encode_part(scope_object)),
-                    relation: relation.clone(),
-                    subject: format!("{}:{}", well_known.pg_role, encode_part(pg_role)),
-                    context: None,
-                },
-            },
-        }),
-
-        // Which role a kind stands for follows from the deployment, so the fact is the whole
-        // description, exactly as for the roles a scope admits.
         TupleSource::ActingKind {
             gate_type,
             gate_object,

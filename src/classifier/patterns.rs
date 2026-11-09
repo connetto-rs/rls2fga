@@ -266,11 +266,8 @@ pub struct RoleNameInList {
     pub function_name: String,
     /// Roles the list admits.
     pub role_names: Vec<String>,
-    /// Which kind of membership in those roles the policy asked about.
-    pub privilege: RolePrivilege,
     /// Column whose value the call passes as the resource, as
-    /// [`NumericThreshold::resource_column`]. Absent for a plain role accessor, which
-    /// takes no resource at all.
+    /// [`NumericThreshold::resource_column`].
     pub resource_column: Option<ColumnName>,
 }
 

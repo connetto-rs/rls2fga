@@ -1770,34 +1770,6 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
-        // No `FROM`: which roles a scope admits is a fact about the policy, so the query
-        // yields its one row whatever any table holds, and the load no longer scans a
-        // table per role to find out.
-        TupleSource::PolicyScopeRoles {
-            scope_type,
-            scope_object,
-            relation,
-            pg_role,
-        } => {
-            let object_sql = typed_name_literal(scope_type, scope_object);
-            let subject_sql = typed_name_literal(&well_known.pg_role, pg_role);
-            Some(TupleQuery {
-                comment: format!(
-                    "-- Scope {scope_object} admits PostgreSQL role '{pg_role}', which the \
-                     policy decides rather than any row"
-                ),
-                sql: format!(
-                    "SELECT {object_sql} AS object, \
-                     '{relation}' AS relation, \
-                     {subject_sql} AS subject;"
-                ),
-                description: None,
-                condition: None,
-                skipped: None,
-                monetary_locale: None,
-            })
-        }
-
         // No `FROM`: which role a kind stands for follows from the deployment, so the query
         // yields its one row whatever any table holds.
         TupleSource::ActingKind {
@@ -2755,15 +2727,8 @@ CREATE POLICY docs_select ON docs FOR SELECT
     fn explicit_grants_team_only_uses_configured_team_type() {
         use crate::generator::ir::{PrincipalInfo, TupleSource};
 
-        let well_known = WellKnownTypes::new(
-            "user",
-            "group",
-            "pg_role",
-            "pg_role_scope",
-            "request_gate",
-            "nobody",
-        )
-        .expect("valid well-known types");
+        let well_known = WellKnownTypes::new("user", "group", "pg_role", "request_gate", "nobody")
+            .expect("valid well-known types");
         let source = TupleSource::ExplicitGrants {
             owner_type: TypeName::canonicalized("doc"),
             grant_table: table("doc_grants"),

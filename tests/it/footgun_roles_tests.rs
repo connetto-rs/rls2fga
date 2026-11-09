@@ -11,8 +11,7 @@ use rls2fga::types::{NoteSeverity, TranslationNote};
 
 use crate::support::deployment::caller_deployment_acting_as;
 use crate::support::footgun::{
-    assert_model_is_internally_consistent, db_of, pg_role_relation, relation_definition,
-    relation_denies, translator,
+    assert_model_is_internally_consistent, db_of, relation_definition, relation_denies, translator,
 };
 
 /// RLS is `(permissive OR ...) AND restrictive AND ...`, so dropping a
@@ -696,11 +695,6 @@ CREATE POLICY p ON docs FOR SELECT TO {spelling} USING (owner_id = current_setti
              closed:\n{dsl}"
         );
         assert!(
-            pg_role_relation(&dsl, "docs").is_none(),
-            "no scope relation may ask for tuples of a role that does not exist \
-             (`TO {spelling}`):\n{dsl}"
-        );
-        assert!(
             !outputs
                 .tuple_queries()
                 .iter()
@@ -840,14 +834,6 @@ CREATE POLICY docs_scoped ON docs FOR SELECT TO auditor USING (opaque_gate(id));
             .iter()
             .map(|query| &query.sql)
             .collect::<Vec<_>>()
-    );
-    assert!(
-        !outputs
-            .notes()
-            .iter()
-            .any(|note| matches!(note, TranslationNote::RoleGateScope { .. })),
-        "nor a note asking for memberships nothing reads: {:?}",
-        outputs.notes()
     );
     assert!(
         outputs.notes().iter().any(|note| matches!(
