@@ -3903,6 +3903,7 @@ fn an_open_table_under_a_request_gate_settles_its_open_arm_from_the_row() {
             request_parameter: "app_bot_list".to_string(),
             comparison: RequestComparison::CallerSetHolds,
             value: value.to_string(),
+            fallback: vec![],
         })
     };
     let link = entry(&shapes, "orders", "request_gate");

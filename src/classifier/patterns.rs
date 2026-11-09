@@ -11,6 +11,7 @@ use crate::clock::ClockThreshold;
 use crate::parser::column_type_casts::without_column_type_casts;
 use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
+use crate::types::FallbackStep;
 pub(crate) use crate::types::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ColumnName,
     ConfidenceLevel, PolicyCommand, RolePrivilege, TableId,
@@ -480,6 +481,51 @@ pub struct CallerScalarInConstantList {
     pub source: DeclaredSource,
 }
 
+/// The value a fallback read hands over equals a constant the policy names: a
+/// `COALESCE` of declared settings compared with a literal, the value the first source
+/// the read finds set stands for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallbackScalarEqualsConstant {
+    /// The constant the policy names.
+    pub value: String,
+    /// The first source the read tries.
+    pub first: FallbackStep,
+    /// The sources the read falls back through after it, in the order the policy reads
+    /// them.
+    pub rest: Vec<FallbackStep>,
+}
+
+/// The value a fallback read hands over differs from a constant the policy names.
+///
+/// `PostgreSQL` reads an unset setting as `NULL`, which also differs from the constant,
+/// so the unset reading admits where the model's denies, and the note says so.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallbackScalarUnequalsConstant {
+    /// The constant the policy names.
+    pub value: String,
+    /// The first source the read tries.
+    pub first: FallbackStep,
+    /// The sources the read falls back through after it, in the order the policy reads
+    /// them.
+    pub rest: Vec<FallbackStep>,
+}
+
+/// The value a fallback read hands over is one of the constants the policy names, or is
+/// not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FallbackScalarInConstantList {
+    /// The constants the policy names, in the order written.
+    pub values: Vec<String>,
+    /// Whether the policy negates the list, as `NOT IN` does, which also admits on the
+    /// unset reading `PostgreSQL` gives a source the model stops at.
+    pub negated: bool,
+    /// The first source the read tries.
+    pub first: FallbackStep,
+    /// The sources the read falls back through after it, in the order the policy reads
+    /// them.
+    pub rest: Vec<FallbackStep>,
+}
+
 /// A membership row whose member column holds a value the caller's declared set has
 /// to contain: `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND
 /// s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ',')))`.
@@ -670,6 +716,17 @@ pub enum PatternClass {
     /// The caller's declared single value is, or is not, one of the constants the policy
     /// names, so no row takes part: `current_setting('app.mode', true) IN ('main', 'dev')`.
     P22CallerScalarInConstantList(CallerScalarInConstantList),
+    /// The value a fallback read hands over equals a constant the policy names, so no row
+    /// takes part: a `COALESCE` of declared settings compared with a literal.
+    P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant),
+    /// The value a fallback read hands over differs from a constant the policy names, so
+    /// no row takes part. `PostgreSQL` reads an unset setting as `NULL`, which also
+    /// differs, and the note carries the gap.
+    P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant),
+    /// The value a fallback read hands over is, or is not, one of the constants the
+    /// policy names, so no row takes part: a `COALESCE` of declared settings compared
+    /// with a list of literals.
+    P25FallbackScalarInConstantList(FallbackScalarInConstantList),
     /// A membership row whose member column holds a value the caller's declared set has
     /// to contain: `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND
     /// s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ',')))`.

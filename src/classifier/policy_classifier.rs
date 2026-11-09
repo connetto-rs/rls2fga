@@ -333,6 +333,11 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
+        | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
+        | PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+            ..
+        })
+        | PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
@@ -479,6 +484,11 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
+        | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
+        | PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+            ..
+        })
+        | PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
     }
 }
@@ -1147,6 +1157,15 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. }) => {
             "declared caller value in a constant list"
         }
+        PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. }) => {
+            "fallback caller value equal to a constant"
+        }
+        PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+            ..
+        }) => "fallback caller value different from a constant",
+        PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList { .. }) => {
+            "fallback caller value in a constant list"
+        }
         PatternClass::P19IndirectMembership(IndirectMembership { .. }) => {
             "membership-through-a-second-table check"
         }
@@ -1208,6 +1227,9 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
+        | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
+        | PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant { .. })
+        | PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => false,
     }
 }
@@ -1506,6 +1528,36 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
             let expr = parse_expr(expr_sql);
             let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
             assert_unknown_reason(&classified, expr_sql, expected_fragment);
+        }
+
+        // A negated fallback comparison names the fallback it negates.
+        let fallback_registry =
+            crate::test_support::registry([scalar("app.first"), scalar("app.second")]);
+        let coalesce =
+            "coalesce(current_setting('app.first', true), current_setting('app.second', true))";
+        for (expr_sql, expected_fragment) in [
+            (
+                format!("NOT ({coalesce} = 'x')"),
+                "NOT applied to fallback caller value equal to a constant",
+            ),
+            (
+                format!("NOT ({coalesce} <> 'x')"),
+                "NOT applied to fallback caller value different from a constant",
+            ),
+            (
+                format!("NOT ({coalesce} IN ('a', 'b'))"),
+                "NOT applied to fallback caller value in a constant list",
+            ),
+        ] {
+            let expr = parse_expr(&expr_sql);
+            let classified = classify_expr(
+                &expr,
+                &db,
+                &fallback_registry,
+                "docs",
+                PolicyCommand::Select,
+            );
+            assert_unknown_reason(&classified, &expr_sql, expected_fragment);
         }
     }
 

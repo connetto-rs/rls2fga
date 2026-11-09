@@ -2,14 +2,16 @@
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{Expr, FunctionArguments, SelectItem, Statement};
+use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArguments, SelectItem, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::classifier::function_registry::DeclaredSources;
 use crate::classifier::recognizers::{projected_select, renaming_reason};
-use crate::parser::expr::{function_arg_expr, CastChain};
+use crate::parser::expr::{
+    function_arg_expr, function_call, positional_function_arg, string_literal, CastChain,
+};
 use crate::parser::names::{
     builtin_function_name, is_current_user_keyword_name, role_keyword, RoleKeyword,
 };
@@ -321,7 +323,7 @@ pub(crate) fn current_setting_literal_key(expr: &Expr) -> Option<String> {
     let ([arg] | [arg, _]) = arg_list.args.as_slice() else {
         return None;
     };
-    let key = crate::parser::expr::string_literal(function_arg_expr(arg)?)?;
+    let key = string_literal(function_arg_expr(arg)?)?;
 
     Some(normalize_setting_key(&key))
 }
@@ -420,6 +422,93 @@ pub(crate) fn body_setting_key(body: &str) -> Option<(String, CastChain)> {
     let expr = body_single_projection(body)?;
     let (casts, peeled) = CastChain::peeled(&expr);
     Some((current_setting_literal_key(peeled)?, casts))
+}
+
+/// One source shape a fallback read has, before the deployment declares it.
+#[derive(Debug, Clone)]
+pub(crate) struct FallbackSourceShape {
+    /// The `current_setting` key the source reads.
+    pub(crate) key: String,
+    /// The field path taken out of that key's value, empty for the whole value.
+    pub(crate) path: Vec<String>,
+    /// True where the source is wrapped in `NULLIF(_, '')`.
+    pub(crate) skips_empty: bool,
+    /// The casts on the source's value, outermost first.
+    pub(crate) value_casts: CastChain,
+}
+
+/// The shape one source of a fallback read has: a declared read, optionally wrapped in
+/// `NULLIF(_, '')`, the whole value or one field of it.
+///
+/// The wrap is what the unset reading `PostgreSQL` gives a bare setting needs, and a
+/// field the document does not carry reads as `NULL` the same way an unset setting does.
+/// The wrap may sit on the value itself or, for a field, on the document it is taken
+/// from, where the unset and the `''` readings of the document both leave the field
+/// `NULL`.
+pub(crate) fn fallback_source_shape(arg: &Expr) -> Option<FallbackSourceShape> {
+    let (value_casts, peeled) = CastChain::peeled(arg);
+    let (inner, skips_empty) = match function_call(peeled) {
+        Some(function) if empty_sentinel_nullif(function) => {
+            (positional_function_arg(function, 0)?, true)
+        }
+        _ => (peeled, false),
+    };
+    let (value_casts, key, path, skips_empty) = match CastChain::peeled(inner) {
+        (
+            inner_casts,
+            Expr::BinaryOp {
+                left,
+                op: BinaryOperator::LongArrow,
+                right,
+            },
+        ) => {
+            let field = string_literal(right)?;
+            let (document_casts, document) = CastChain::peeled(left);
+            // The parse into `jsonb` the arrow needs is structure, not a value cast, and
+            // any other cast of the document is not one `PostgreSQL` would run.
+            if document_casts.without_json_parse().outermost().is_some() {
+                return None;
+            }
+            let (document, skips_empty) = match function_call(document) {
+                Some(function) if empty_sentinel_nullif(function) => {
+                    (positional_function_arg(function, 0)?, true)
+                }
+                _ => (document, skips_empty),
+            };
+            let mut value_casts = value_casts;
+            value_casts.extend(inner_casts);
+            (
+                value_casts,
+                current_setting_literal_key(document)?,
+                vec![field],
+                skips_empty,
+            )
+        }
+        (inner_casts, root) => {
+            let mut value_casts = value_casts;
+            value_casts.extend(inner_casts);
+            (
+                value_casts,
+                current_setting_literal_key(root)?,
+                vec![],
+                skips_empty,
+            )
+        }
+    };
+    Some(FallbackSourceShape {
+        key,
+        path,
+        skips_empty,
+        value_casts,
+    })
+}
+
+/// Whether `function` is `NULLIF(_, '')`, whose sentinel is the reading a bare
+/// `current_setting` gives a setting the request left unset.
+fn empty_sentinel_nullif(function: &Function) -> bool {
+    builtin_function_name(function).as_deref() == Some("nullif")
+        && positional_function_arg(function, 1)
+            .is_some_and(|sentinel| string_literal(sentinel).is_some_and(|value| value.is_empty()))
 }
 
 impl FunctionSemantic {

@@ -49,29 +49,49 @@ CREATE POLICY in_column ON listed_docs FOR SELECT
     USING (current_setting('app.tier', true) IN ('gold', tier));
 ";
 
+/// Two fallback reads over the same two settings, one spelled bare and one wrapping the
+/// first source in `NULLIF`, the `''` reading making the inequality true for some row.
+const FALLBACK_SCHEMA: &str = "
+CREATE TABLE fallback_docs (id TEXT PRIMARY KEY, role TEXT NOT NULL);
+ALTER TABLE fallback_docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY stops ON fallback_docs FOR SELECT
+    USING (coalesce(current_setting('app.first', true), current_setting('app.second', true)) <> 'x');
+CREATE POLICY wrapped ON fallback_docs FOR SELECT
+    USING (coalesce(nullif(current_setting('app.first', true), ''), current_setting('app.second', true)) <> 'x');
+";
+
+/// The setting as the deployment declares it, which a request may or may not leave unset.
+fn presence(setting: SessionSetting, may_be_unset: bool) -> SessionSetting {
+    if may_be_unset {
+        setting.may_be_unset()
+    } else {
+        setting
+    }
+}
+
 /// The deployment's three settings, each a request may leave unset or not.
 fn settings(may_be_unset: bool) -> Vec<SessionSetting> {
-    let presence = |setting: SessionSetting| {
-        if may_be_unset {
-            setting.may_be_unset()
-        } else {
-            setting
-        }
-    };
     vec![
-        presence(caller("app.user_id")),
-        presence(scalar("app.tier")),
-        presence(delimited_set("app.blocked", ",")),
+        presence(caller("app.user_id"), may_be_unset),
+        presence(scalar("app.tier"), may_be_unset),
+        presence(delimited_set("app.blocked", ","), may_be_unset),
+    ]
+}
+
+/// The two settings a fallback read walks, each a request may leave unset or not.
+fn fallback_settings(may_be_unset: bool) -> Vec<SessionSetting> {
+    vec![
+        presence(scalar("app.first"), may_be_unset),
+        presence(scalar("app.second"), may_be_unset),
     ]
 }
 
 /// The comparisons the translation names as made true by the empty reading, by policy.
-fn named_reads(schema: &str, may_be_unset: bool) -> Vec<(String, String)> {
-    let translation =
-        rls2fga::translator::TranslatorBuilder::new(deployment(settings(may_be_unset)))
-            .build()
-            .translate(&db(schema))
-            .expect("the schema translates");
+fn named_reads(schema: &str, settings: Vec<SessionSetting>) -> Vec<(String, String)> {
+    let translation = rls2fga::translator::TranslatorBuilder::new(deployment(settings))
+        .build()
+        .translate(&db(schema))
+        .expect("the schema translates");
     translation
         .notes()
         .iter()
@@ -85,11 +105,15 @@ fn named_reads(schema: &str, may_be_unset: bool) -> Vec<(String, String)> {
 }
 
 fn empty_readings(may_be_unset: bool) -> Vec<(String, String)> {
-    named_reads(SCHEMA, may_be_unset)
+    named_reads(SCHEMA, settings(may_be_unset))
 }
 
 fn list_readings(may_be_unset: bool) -> Vec<(String, String)> {
-    named_reads(LIST_SCHEMA, may_be_unset)
+    named_reads(LIST_SCHEMA, settings(may_be_unset))
+}
+
+fn fallback_readings(may_be_unset: bool) -> Vec<(String, String)> {
+    named_reads(FALLBACK_SCHEMA, fallback_settings(may_be_unset))
 }
 
 /// Every read whose empty reading admits rows is named, each with its setting.
@@ -134,6 +158,30 @@ fn a_list_the_empty_reading_passes_is_named() {
 #[test]
 fn a_list_the_empty_reading_passes_names_nothing_when_set_always() {
     assert_eq!(list_readings(false), Vec::<(String, String)>::new());
+}
+
+/// A fallback source the model stops at on the absent key earns the note, one per
+/// source the `''` reading makes true, and the source wrapped in `NULLIF` skips the
+/// reading, so it is not named.
+#[test]
+fn a_fallback_source_the_model_stops_at_is_named() {
+    let mut named = fallback_readings(true);
+    named.sort();
+    assert_eq!(
+        named,
+        [
+            ("stops".to_string(), "app.first".to_string()),
+            ("stops".to_string(), "app.second".to_string()),
+            ("wrapped".to_string(), "app.second".to_string()),
+        ]
+    );
+}
+
+/// A setting every request sets has no unset state, so a fallback over its sources
+/// names nothing either.
+#[test]
+fn a_fallback_source_every_request_sets_names_nothing() {
+    assert_eq!(fallback_readings(false), Vec::<(String, String)>::new());
 }
 
 #[cfg(feature = "client")]

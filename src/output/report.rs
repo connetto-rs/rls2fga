@@ -7,6 +7,7 @@ use crate::classifier::patterns::{
     CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
     ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
     ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership, ExpandedFunction,
+    FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
     JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
     ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
     UnclassifiedExpr, UncorrelatedMembership,
@@ -157,6 +158,12 @@ fn write_classification_row(
         md_escape(notes)
     );
     true
+}
+
+/// The parameter the first source of a fallback read carries, which a display names the
+/// value by.
+fn fallback_parameter(first: &crate::types::FallbackStep) -> String {
+    first.parameter.clone()
 }
 
 fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String {
@@ -315,6 +322,40 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 negation
             )
         }
+        PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant {
+            value,
+            first,
+            ..
+        }) => {
+            let parameter = fallback_parameter(first);
+            format!("P23 (fallback value {parameter} = '{value}')")
+        }
+        PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+            value,
+            first,
+            ..
+        }) => {
+            let parameter = fallback_parameter(first);
+            format!("P24 (fallback value {parameter} <> '{value}')")
+        }
+        PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList {
+            values,
+            negated,
+            first,
+            ..
+        }) => {
+            let negation = if *negated { "NOT " } else { "" };
+            let listed = values
+                .iter()
+                .map(|value| format!("'{value}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "P25 (fallback value {} {}IN ({listed}))",
+                fallback_parameter(first),
+                negation
+            )
+        }
         PatternClass::MembershipExclusion(MembershipExclusion { base, subtract }) => {
             let mut rendered = match base {
                 Some(base) => {
@@ -412,6 +453,69 @@ CREATE POLICY {name} ON docs USING (TRUE);
             command: PolicyCommand::Delete,
         });
         assert_eq!(format_pattern(&pattern), "P1 (threshold > 5)");
+    }
+
+    /// The row names the value the fallback read hands over by the first source's
+    /// parameter, the constants in the order the list names them, the `NOT IN` spelling
+    /// among them.
+    #[test]
+    fn format_pattern_names_the_fallback_value_by_its_first_source() {
+        let first = crate::types::FallbackStep {
+            setting_key: "request.jwt.claim.role".to_string(),
+            parameter: "request_jwt_claim_role".to_string(),
+            from_json_field: false,
+            skips_empty: true,
+            may_be_unset: true,
+        };
+        let rest = vec![crate::types::FallbackStep {
+            setting_key: "request.jwt.claims".to_string(),
+            parameter: "request_jwt_claims_role".to_string(),
+            from_json_field: true,
+            skips_empty: true,
+            may_be_unset: false,
+        }];
+        for (pattern, rendered) in [
+            (
+                PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant {
+                    value: "authenticated".to_string(),
+                    first: first.clone(),
+                    rest: rest.clone(),
+                }),
+                "P23 (fallback value request_jwt_claim_role = 'authenticated')".to_string(),
+            ),
+            (
+                PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+                    value: "anonymous".to_string(),
+                    first: first.clone(),
+                    rest: rest.clone(),
+                }),
+                "P24 (fallback value request_jwt_claim_role <> 'anonymous')".to_string(),
+            ),
+            (
+                PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList {
+                    values: vec!["authenticated".to_string(), "anonymous".to_string()],
+                    negated: false,
+                    first: first.clone(),
+                    rest: rest.clone(),
+                }),
+                "P25 (fallback value request_jwt_claim_role IN \
+                 ('authenticated', 'anonymous'))"
+                    .to_string(),
+            ),
+            (
+                PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList {
+                    values: vec!["authenticated".to_string(), "anonymous".to_string()],
+                    negated: true,
+                    first: first.clone(),
+                    rest: rest.clone(),
+                }),
+                "P25 (fallback value request_jwt_claim_role NOT IN \
+                 ('authenticated', 'anonymous'))"
+                    .to_string(),
+            ),
+        ] {
+            assert_eq!(format_pattern(&pattern), rendered);
+        }
     }
 
     /// The cell reads the notes the translation computed, so a pattern the report has no

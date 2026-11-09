@@ -14,19 +14,24 @@ use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
 
-use sqlparser::ast::{BinaryOperator, Expr, FunctionArguments, InTarget, Query, SelectItem};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArguments, InTarget, Query, SelectItem,
+};
 
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
-    ClassifiedExpr, ConfidenceLevel, ConstantInCallerSet, PatternClass, RowValueEqualsCallerScalar,
-    RowValueInCallerSet,
+    ClassifiedExpr, ConfidenceLevel, ConstantInCallerSet, FallbackScalarEqualsConstant,
+    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass,
+    RowValueEqualsCallerScalar, RowValueInCallerSet,
 };
 use crate::parser::expr::{function_arg_expr, unwrap_cast_or_nested, CastChain};
-use crate::parser::function_analyzer::FunctionSemantic;
+use crate::parser::function_analyzer::{
+    fallback_source_shape, FallbackSourceShape, FunctionSemantic,
+};
 use crate::parser::names::builtin_function_name;
 use crate::parser::sql_parser::SetPacking;
-use crate::types::ColumnName;
+use crate::types::{ColumnName, FallbackStep};
 
 use super::casts::other_side_renaming;
 use super::{
@@ -48,6 +53,226 @@ pub fn recognize_session_attribute(
         .or_else(|| scalar_equality(expr, registry))
         .or_else(|| scalar_inequality(expr, registry))
         .or_else(|| scalar_in_constant_list(expr, registry))
+        .or_else(|| fallback_comparison(expr, registry))
+}
+
+/// The value a fallback read hands over, compared with a constant the policy names:
+/// a `COALESCE` of declared settings against a literal, and the `IN` or `NOT IN`, or
+/// the `= ANY (ARRAY[...])` the same value admits.
+///
+/// A column or a call the tested side names stays unclassified, since the fallback is a
+/// value the request carries and a row's part in it is a different gate.
+fn fallback_comparison(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    fallback_equality(expr, registry)
+        .or_else(|| fallback_inequality(expr, registry))
+        .or_else(|| fallback_in_constant_list(expr, registry))
+}
+
+/// `<constant> = <the value a fallback read hands over>`, either way round.
+fn fallback_equality(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let ((first, rest, casts), tested) = match fallback_read(right, registry) {
+        Some(read) => (read, left.as_ref()),
+        None => (fallback_read(left, registry)?, right.as_ref()),
+    };
+    let value = fallback_tested_value(tested, &casts)?;
+    Some(ClassifiedExpr {
+        pattern: PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant {
+            value,
+            first,
+            rest,
+        }),
+        confidence: ConfidenceLevel::B,
+    })
+}
+
+/// `<the value a fallback read hands over> <> <literal>`, either way round.
+///
+/// A column on the literal's side stays unclassified, since a row value the fallback
+/// value has to differ from is a different gate with its own shape.
+fn fallback_inequality(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::NotEq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let ((first, rest, casts), tested) = match fallback_read(left, registry) {
+        Some(read) => (read, right.as_ref()),
+        None => (fallback_read(right, registry)?, left.as_ref()),
+    };
+    let value = fallback_tested_value(tested, &casts)?;
+    Some(ClassifiedExpr {
+        pattern: PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+            value,
+            first,
+            rest,
+        }),
+        confidence: ConfidenceLevel::B,
+    })
+}
+
+/// `<the value a fallback read hands over> IN (<literals>)`, however negated, and the
+/// same test spelled `= ANY (ARRAY[<literals>])`, which `PostgreSQL` reads as one
+/// membership.
+///
+/// Every element has to be a literal, since a column among them is a per-row value the
+/// list cannot stand in for, and an element a cast renames reads as a different value.
+fn fallback_in_constant_list(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    let (tested, list, negated) = match expr {
+        Expr::In {
+            expr: tested,
+            target: InTarget::List(list),
+            negated,
+            global: false,
+        } => (tested.as_ref(), list.as_slice(), *negated),
+        Expr::AnyOp {
+            left: tested,
+            compare_op: BinaryOperator::Eq,
+            right,
+            is_some: false,
+        } => {
+            let Expr::Array(array) = unwrap_cast_or_nested(right) else {
+                return None;
+            };
+            (tested.as_ref(), array.elem.as_slice(), false)
+        }
+        _ => return None,
+    };
+    // `PostgreSQL` has no empty list, and the model has no gate to state one.
+    if list.is_empty() {
+        return None;
+    }
+    let (first, rest, casts) = fallback_read(tested, registry)?;
+    if list
+        .iter()
+        .any(|element| other_side_renaming(element, &casts).is_some())
+    {
+        return None;
+    }
+    let values = list
+        .iter()
+        .map(string_literal)
+        .collect::<Option<Vec<_>>>()?;
+    Some(ClassifiedExpr {
+        pattern: PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList {
+            values,
+            negated,
+            first,
+            rest,
+        }),
+        confidence: ConfidenceLevel::B,
+    })
+}
+
+/// The constant a fallback read is compared against, a column and a cast that renames it
+/// refused with the column.
+fn fallback_tested_value(tested: &Expr, casts: &CastChain) -> Option<String> {
+    if other_side_renaming(tested, casts).is_some() {
+        return None;
+    }
+    match tested_value(tested) {
+        TestedValue::Constant(value) => Some(value),
+        _ => None,
+    }
+}
+
+/// The first source the fallback `expr` tries and the ones it falls back through after
+/// it, in the order the read tries them, and the casts that decide the type the tested
+/// side stands in, so a literal it is compared with keeps its spelling or is refused
+/// with it.
+///
+/// Each source must be declared one single value, and a cast that renames a source's
+/// value is a refusal.
+pub(super) fn fallback_read(
+    expr: &Expr,
+    registry: &FunctionRegistry,
+) -> Option<(FallbackStep, Vec<FallbackStep>, CastChain)> {
+    let (outer, peeled) = CastChain::peeled(expr);
+    let (first, rest, tested_side) = match peeled {
+        Expr::Function(
+            function @ Function {
+                args: FunctionArguments::List(list),
+                ..
+            },
+        ) if builtin_function_name(function).as_deref() == Some("coalesce") => {
+            let mut args = list.args.iter().filter_map(function_arg_expr);
+            // A `COALESCE` of one source is that source, which the setting read above
+            // reads.
+            let first = fallback_source_shape(args.next()?)?;
+            let FallbackSourceShape {
+                key,
+                path,
+                skips_empty,
+                value_casts,
+            } = first;
+            let first_step =
+                resolve_fallback_source(&key, &path, skips_empty, &value_casts, &outer, registry)?;
+            let mut tested_side = outer.clone();
+            if tested_side.outermost().is_none() {
+                // The tested side stands in the type the first source gives, so its casts
+                // decide a literal's spelling.
+                tested_side.extend(value_casts);
+            }
+            let mut rest = Vec::new();
+            for arg in args {
+                let shape = fallback_source_shape(arg)?;
+                let FallbackSourceShape {
+                    key,
+                    path,
+                    skips_empty,
+                    value_casts,
+                } = shape;
+                rest.push(resolve_fallback_source(
+                    &key,
+                    &path,
+                    skips_empty,
+                    &value_casts,
+                    &outer,
+                    registry,
+                )?);
+            }
+            (first_step, rest, tested_side)
+        }
+        _ => return None,
+    };
+    Some((first, rest, tested_side))
+}
+
+/// The source a fallback read tries, declared one single value and read by a cast that
+/// cannot rename it.
+fn resolve_fallback_source(
+    key: &str,
+    path: &[String],
+    skips_empty: bool,
+    value_casts: &CastChain,
+    outer: &CastChain,
+    registry: &FunctionRegistry,
+) -> Option<FallbackStep> {
+    let declared = registry
+        .declared_source(key, path)
+        .filter(|source| source.is_scalar())?;
+    let mut casts = outer.clone();
+    casts.extend(value_casts.clone());
+    if casts.renaming(Some(&declared.canonical_type())).is_some() {
+        return None;
+    }
+    Some(FallbackStep {
+        setting_key: declared.setting_key().to_string(),
+        parameter: declared.request_parameter().to_string(),
+        from_json_field: !declared.path().is_empty(),
+        skips_empty,
+        may_be_unset: declared.may_be_unset(),
+    })
 }
 
 /// `<row column or constant> = ANY (<the caller's set>)`.
@@ -589,7 +814,7 @@ mod tests {
     use crate::classifier::function_registry::DeclaredSources;
     use crate::classifier::recognizers::is_current_user_expr;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
-    use crate::parser::sql_parser::SettingValue;
+    use crate::parser::sql_parser::{SessionSetting, SettingValue};
     use crate::test_support::{caller, delimited_set, deployment, json_field, registry, scalar};
     use sqlparser::ast::DataType;
 
@@ -603,7 +828,7 @@ mod tests {
     }
 
     /// A JSON setting whose `teams` field holds a JSON array of text.
-    fn teams_claim() -> crate::parser::sql_parser::SessionSetting {
+    fn teams_claim() -> SessionSetting {
         json_field(
             "request.jwt.claims",
             &["teams"],
@@ -1038,5 +1263,180 @@ mod tests {
             })
         ));
         assert_eq!(classified.confidence, ConfidenceLevel::B);
+    }
+
+    /// The two sources a fallback test reads, declared the way `Supabase` declares them.
+    fn fallback_settings() -> [SessionSetting; 2] {
+        [
+            scalar("request.jwt.claim.role"),
+            json_field(
+                "request.jwt.claims",
+                &["role"],
+                SettingValue::Scalar(DataType::Text),
+            ),
+        ]
+    }
+
+    /// The source the step reads, so a test asserts the read order and the wrap.
+    fn step_source(step: &FallbackStep) -> (&str, bool, bool) {
+        (&step.setting_key, step.from_json_field, step.skips_empty)
+    }
+
+    /// The value a `coalesce` of the declared sources hands over, compared with a literal,
+    /// is a request gate on that value, the sources in the order the read tries them.
+    #[test]
+    fn a_fallback_of_declared_sources_is_read() {
+        let registry = registry(fallback_settings());
+        let classified = recognize_session_attribute(
+            &parse_expr("coalesce(current_setting('request.jwt.claim.role', true), current_setting('request.jwt.claims', true)::jsonb ->> 'role') = 'authenticated'"),
+            &registry,
+        )
+        .expect("the coalesce reads the fallback");
+        assert!(
+            matches!(
+                &classified.pattern,
+                PatternClass::P23FallbackScalarEqualsConstant(
+                    FallbackScalarEqualsConstant { value, first, rest }
+                ) if value == "authenticated"
+                    && rest.len() == 1
+                    && step_source(first) == ("request.jwt.claim.role", false, false)
+                    && step_source(&rest[0]) == ("request.jwt.claims", true, false)
+            ),
+            "the read keeps the sources in order, got {:?}",
+            classified.pattern
+        );
+        assert_eq!(classified.confidence, ConfidenceLevel::B);
+    }
+
+    /// The same fallback gate in either operand order classifies alike, the read and the
+    /// value the pattern stands for unchanged by which side the value stands on.
+    #[test]
+    fn the_fallback_test_reads_in_either_operand_order() {
+        let registry = registry(fallback_settings());
+        let value = "authenticated";
+        let read = "coalesce(current_setting('request.jwt.claim.role', true), current_setting('request.jwt.claims', true)::jsonb ->> 'role')";
+        let forward =
+            recognize_session_attribute(&parse_expr(&format!("{read} = '{value}'")), &registry)
+                .expect("the forward test reads the fallback");
+        let reversed =
+            recognize_session_attribute(&parse_expr(&format!("'{value}' = {read}")), &registry)
+                .expect("the reversed test reads the fallback");
+        assert_eq!(forward, reversed);
+    }
+
+    /// A `NULLIF` against the empty text wraps the source it sits on, whether that is the
+    /// value or, for a field, the document it is taken from, and an outer cast that does
+    /// not rename stands for the value the read hands over.
+    #[test]
+    fn a_nullif_wraps_the_source_it_sits_on() {
+        let registry = registry(fallback_settings());
+        let classified = recognize_session_attribute(
+            &parse_expr("coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'))::text = 'authenticated'"),
+            &registry,
+        )
+        .expect("the wrapped coalesce reads the fallback");
+        assert!(
+            matches!(
+                &classified.pattern,
+                PatternClass::P23FallbackScalarEqualsConstant(
+                    FallbackScalarEqualsConstant { first, rest, .. }
+                ) if rest.len() == 1
+                    && step_source(first) == ("request.jwt.claim.role", false, true)
+                    && step_source(&rest[0]) == ("request.jwt.claims", true, true)
+            ),
+            "the wrap follows the source it sits on, got {:?}",
+            classified.pattern
+        );
+    }
+
+    /// The same value differing from a constant, and one of a list of constants, spelled
+    /// `IN` or `= ANY`, the `NOT IN` negating the list.
+    #[test]
+    fn the_fallback_value_is_read_by_the_other_tests_of_a_value() {
+        let registry = registry(fallback_settings());
+        let coalesce = "coalesce(current_setting('request.jwt.claim.role', true), current_setting('request.jwt.claims', true)::jsonb ->> 'role')";
+        let unequal = recognize_session_attribute(
+            &parse_expr(&format!("{coalesce} <> 'anonymous'")),
+            &registry,
+        )
+        .expect("the coalesce differing from a constant reads");
+        assert!(
+            matches!(
+                &unequal.pattern,
+                PatternClass::P24FallbackScalarUnequalsConstant(FallbackScalarUnequalsConstant {
+                    value, ..
+                }) if value == "anonymous"
+            ),
+            "got {:?}",
+            unequal.pattern
+        );
+        for (clause, negated) in [
+            (
+                format!("{coalesce} IN ('authenticated', 'anonymous')"),
+                false,
+            ),
+            (
+                format!("{coalesce} NOT IN ('authenticated', 'anonymous')"),
+                true,
+            ),
+            (
+                format!("{coalesce} = ANY (ARRAY['authenticated', 'anonymous'])"),
+                false,
+            ),
+        ] {
+            let classified = recognize_session_attribute(&parse_expr(&clause), &registry)
+                .expect("the list test reads the fallback");
+            assert!(
+                matches!(
+                    &classified.pattern,
+                    PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList {
+                        negated: spelled,
+                        values,
+                        ..
+                    }) if *spelled == negated
+                        && *values == vec!["authenticated".to_string(), "anonymous".to_string()]
+                ),
+                "`{clause}`: got {:?}",
+                classified.pattern
+            );
+        }
+    }
+
+    /// A source the deployment does not declare, a column, a call or a literal among the
+    /// sources leaves the read unclassified, as does a literal that renames a source or
+    /// the tested side, and a column or a column element where a value is tested.
+    #[test]
+    fn a_part_the_read_cannot_stand_stays_unclassified() {
+        let registry = registry([scalar("app.first"), scalar("app.second")]);
+        let declared =
+            "coalesce(current_setting('app.first', true), current_setting('app.second', true))";
+        let refusals = [
+            // A source the deployment does not declare.
+            "coalesce(current_setting('app.first', true), current_setting('app.other', true)) = 'x'",
+            // A column the fallback is compared with.
+            &format!("{declared} = t.name"),
+            // A column among the sources.
+            "coalesce(t.name, current_setting('app.first', true)) = 'x'",
+            // A call among the sources.
+            "coalesce(other(), current_setting('app.first', true)) = 'x'",
+            // A literal among the sources.
+            "coalesce('x', current_setting('app.first', true)) = 'x'",
+            // A cast that renames a source's value.
+            "coalesce(current_setting('app.first', true)::integer, current_setting('app.second', true)::integer) = 1",
+            // A cast on the literal that renames the value the read hands over.
+            &format!("{declared} = '1'::integer"),
+            // A column element of the list.
+            &format!("{declared} IN (t.name)"),
+            // A list element the tested side's casts rename.
+            &format!("{declared} = ANY (ARRAY['x'::integer::text])"),
+            // A document cast beyond the parse into jsonb the arrow needs.
+            "coalesce(current_setting('app.first', true)::jsonb::text ->> 'f', current_setting('app.second', true)) = 'x'",
+        ];
+        for clause in refusals {
+            assert!(
+                recognize_session_attribute(&parse_expr(clause), &registry).is_none(),
+                "`{clause}` stays unclassified"
+            );
+        }
     }
 }
