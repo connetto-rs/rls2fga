@@ -158,7 +158,7 @@ fn grants(
             // single value travels in the `settings` map under its parameter name.
             let caller_side = match comparison {
                 RequestComparison::CallerSetHolds => &context[request_parameter.as_str()],
-                RequestComparison::CallerValueEquals => {
+                RequestComparison::CallerValueEquals | RequestComparison::CallerValueUnequals => {
                     &context["settings"][request_parameter.as_str()]
                 }
             };
@@ -167,6 +167,13 @@ fn grants(
                     .as_array()
                     .is_some_and(|held| held.iter().any(|value| value == row_side.as_str())),
                 RequestComparison::CallerValueEquals => caller_side == row_side.as_str(),
+                // The absent key reads as `NULL`, which is no inequality either.
+                RequestComparison::CallerValueUnequals => {
+                    caller_side != row_side.as_str()
+                        && context["settings"]
+                            .get(request_parameter.as_str())
+                            .is_some()
+                }
             }
         }),
         RowDecision::Request {

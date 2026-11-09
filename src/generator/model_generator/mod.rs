@@ -2655,6 +2655,18 @@ fn translate_pattern<DB: DatabaseLike>(
             table_plan,
             all_types,
         ),
+        PatternClass::P21CallerScalarUnequalsConstant(test) => emit_request_formula(
+            &RequestFormula::Atom(GateAtom::unequal_to_caller_value(test)),
+            ctx,
+            table_plan,
+            all_types,
+        ),
+        PatternClass::P22CallerScalarInConstantList(test) => emit_request_formula(
+            &RequestFormula::in_constant_list(test),
+            ctx,
+            table_plan,
+            all_types,
+        ),
         PatternClass::Unknown(unclassified) => {
             emit_unclassified(unclassified, ctx, table_plan, notes)
         }

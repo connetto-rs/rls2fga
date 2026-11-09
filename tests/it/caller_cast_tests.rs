@@ -260,6 +260,20 @@ const CASES: &[(&str, Declarations, bool)] = &[
     ("current_setting('app.tenant', true) = '7'", NONE, true),
     ("current_setting('app.tenant', true)::integer = '7'", &[("app.tenant", "integer")], false),
     ("current_setting('app.tenant', true) = '07'::integer::text", NONE, false),
+    // P21, the declared value differing from a constant, the casts judged as for `=`.
+    ("current_setting('app.tenant', true) <> '7'", NONE, true),
+    ("current_setting('app.tenant', true)::integer <> '7'", NONE, false),
+    ("current_setting('app.tenant', true)::integer <> '7'", &[("app.tenant", "integer")], false),
+    // P22, the declared value in a list of constants, one cast on the read and the list.
+    ("current_setting('app.tenant', true) IN ('a', 'b')", NONE, true),
+    ("current_setting('app.tenant', true) NOT IN ('a', 'b')", NONE, true),
+    ("current_setting('app.tenant', true) = ANY (ARRAY['a', 'b'])", NONE, true),
+    ("current_setting('app.tenant', true)::integer IN ('7', '8')", NONE, false),
+    (
+        "current_setting('app.tenant', true)::integer IN ('7', '8')",
+        &[("app.tenant", "integer")],
+        false,
+    ),
     // The caller's presence beside a rule, which a cast turns into a filter of its own.
     (
         "owner = current_setting('app.user_id', true)

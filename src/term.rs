@@ -345,6 +345,8 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P15RowValueEqualsCallerScalar(_)
             | PatternClass::P16ConstantInCallerSet(_)
             | PatternClass::P17CallerScalarEqualsConstant(_)
+            | PatternClass::P21CallerScalarUnequalsConstant(_)
+            | PatternClass::P22CallerScalarInConstantList(_)
             | PatternClass::Unknown(_) => continue,
         };
         if !found.contains(&caller) {

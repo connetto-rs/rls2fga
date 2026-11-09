@@ -458,6 +458,28 @@ pub struct CallerScalarEqualsConstant {
     pub source: DeclaredSource,
 }
 
+/// The caller's declared single value differs from a constant the policy names, so no row
+/// takes part: `current_setting('app.mode', true) <> 'main'`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallerScalarUnequalsConstant {
+    /// The constant the value has to differ from.
+    pub value: String,
+    /// The declared source, carrying the parameter the caller supplies.
+    pub source: DeclaredSource,
+}
+
+/// The caller's declared single value is, or is not, one of the constants the policy
+/// names, so no row takes part: `current_setting('app.mode', true) IN ('main', 'dev')`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CallerScalarInConstantList {
+    /// The constants the policy names, in the order written.
+    pub values: Vec<String>,
+    /// Whether the policy negates the list, as `NOT IN` does.
+    pub negated: bool,
+    /// The declared source, carrying the parameter the caller supplies.
+    pub source: DeclaredSource,
+}
+
 /// A membership row whose member column holds a value the caller's declared set has
 /// to contain: `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND
 /// s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ',')))`.
@@ -642,6 +664,12 @@ pub enum PatternClass {
     /// The caller's declared single value equals a constant the policy names, so no row
     /// takes part: `(SELECT auth.jwt() ->> 'aal') = 'aal2'`.
     P17CallerScalarEqualsConstant(CallerScalarEqualsConstant),
+    /// The caller's declared single value differs from a constant the policy names, so no
+    /// row takes part: `current_setting('app.mode', true) <> 'main'`.
+    P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant),
+    /// The caller's declared single value is, or is not, one of the constants the policy
+    /// names, so no row takes part: `current_setting('app.mode', true) IN ('main', 'dev')`.
+    P22CallerScalarInConstantList(CallerScalarInConstantList),
     /// A membership row whose member column holds a value the caller's declared set has
     /// to contain: `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND
     /// s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ',')))`.

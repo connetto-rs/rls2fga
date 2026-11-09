@@ -10,8 +10,10 @@
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeMap;
 
+use crate::classifier::function_registry::DeclaredSource;
 use crate::classifier::patterns::{
-    BoolOp, CallerScalarEqualsConstant, Composite, ConstantBool, ConstantInCallerSet, PatternClass,
+    BoolOp, CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
+    Composite, ConstantBool, ConstantInCallerSet, PatternClass,
 };
 use crate::types::{ConditionParameterName, RequestAtom, RequestComparison};
 
@@ -49,11 +51,28 @@ impl GateAtom {
 
     /// `caller value = 'value'`.
     pub(crate) fn equal_to_caller_value(test: &CallerScalarEqualsConstant) -> Self {
-        let CallerScalarEqualsConstant { value, source } = test;
+        Self::of(
+            &test.source,
+            RequestComparison::CallerValueEquals,
+            &test.value,
+        )
+    }
+
+    /// `caller value <> 'value'`.
+    pub(crate) fn unequal_to_caller_value(test: &CallerScalarUnequalsConstant) -> Self {
+        Self::of(
+            &test.source,
+            RequestComparison::CallerValueUnequals,
+            &test.value,
+        )
+    }
+
+    /// One constant test on the caller's single value.
+    fn of(source: &DeclaredSource, comparison: RequestComparison, value: &str) -> Self {
         Self {
             request_parameter: source.condition_parameter().clone(),
-            comparison: RequestComparison::CallerValueEquals,
-            value: value.clone(),
+            comparison,
+            value: value.to_string(),
             setting_key: source.setting_key().to_string(),
             separator: None,
         }
@@ -104,6 +123,10 @@ impl RequestFormula {
             PatternClass::P17CallerScalarEqualsConstant(test) => {
                 Some(Self::Atom(GateAtom::equal_to_caller_value(test)))
             }
+            PatternClass::P21CallerScalarUnequalsConstant(test) => {
+                Some(Self::Atom(GateAtom::unequal_to_caller_value(test)))
+            }
+            PatternClass::P22CallerScalarInConstantList(test) => Some(Self::in_constant_list(test)),
             PatternClass::P8Composite(Composite { op, parts }) => {
                 let children = parts
                     .iter()
@@ -112,6 +135,27 @@ impl RequestFormula {
                 Some(Self::join(*op, children))
             }
             _ => None,
+        }
+    }
+
+    /// `caller value IN ('a', 'b')`, the `OR` of the constants' equality tests, or where
+    /// negated the `AND` of their inequality tests, which denies on the unset reading.
+    pub(crate) fn in_constant_list(test: &CallerScalarInConstantList) -> Self {
+        let comparison = if test.negated {
+            RequestComparison::CallerValueUnequals
+        } else {
+            RequestComparison::CallerValueEquals
+        };
+        let atoms = test
+            .values
+            .iter()
+            .map(|value| GateAtom::of(&test.source, comparison, value))
+            .map(Self::Atom)
+            .collect();
+        if test.negated {
+            Self::join(BoolOp::And, atoms)
+        } else {
+            Self::join(BoolOp::Or, atoms)
         }
     }
 
@@ -304,5 +348,94 @@ mod tests {
     fn keys_tell_apart_constants_that_fold_to_one_name() {
         assert_ne!(atom("t0:read").key(), atom("t0_read").key());
         assert_ne!(atom("a,b").key(), or(vec![atom("a"), atom("b")]).key());
+    }
+
+    /// One source for a formula test, declared the way the recognizers read it.
+    fn declared_source() -> DeclaredSource {
+        use crate::classifier::function_registry::DeclaredSources;
+        use crate::test_support::{deployment, scalar};
+
+        DeclaredSources::of(&deployment([scalar("app.mode")]))
+            .iter()
+            .next()
+            .expect("the declared setting")
+            .clone()
+    }
+
+    /// `IN` composes one equality test per constant, and `NOT IN` one inequality test per
+    /// constant, so the two negations deny on the unset reading the `IN` admits.
+    #[test]
+    fn an_in_list_composes_one_test_per_constant() {
+        let of_list = |negated: bool| {
+            RequestFormula::in_constant_list(&CallerScalarInConstantList {
+                values: vec!["main".to_string(), "dev".to_string()],
+                negated,
+                source: declared_source(),
+            })
+        };
+        let in_list = of_list(false);
+        let not_in_list = of_list(true);
+        let children = |formula: &RequestFormula| match formula {
+            RequestFormula::Any(children) | RequestFormula::All(children) => children.len(),
+            _ => panic!("a two-constant list is a join: {formula:?}"),
+        };
+        assert_eq!(children(&in_list), 2);
+        assert_eq!(children(&not_in_list), 2);
+        // The positive list is an `OR` of `=` and the negated one an `AND` of `<>`.
+        let comparisons = |formula: &RequestFormula| match formula {
+            RequestFormula::Any(children) | RequestFormula::All(children) => children
+                .iter()
+                .map(|child| match child {
+                    RequestFormula::Atom(atom) => atom.comparison,
+                    _ => panic!("a list child is an atom: {child:?}"),
+                })
+                .collect::<Vec<_>>(),
+            _ => panic!("a two-constant list is a join: {formula:?}"),
+        };
+        assert_eq!(
+            comparisons(&in_list),
+            vec![
+                RequestComparison::CallerValueEquals,
+                RequestComparison::CallerValueEquals
+            ]
+        );
+        assert_eq!(
+            comparisons(&not_in_list),
+            vec![
+                RequestComparison::CallerValueUnequals,
+                RequestComparison::CallerValueUnequals
+            ]
+        );
+    }
+
+    /// `<>` is one inequality atom over the caller's value, the `=` mirror one equality
+    /// atom, the two sharing the source's parameter and setting.
+    #[test]
+    fn an_unequal_test_composes_one_inequality_atom() {
+        let unequal = RequestFormula::of(&PatternClass::P21CallerScalarUnequalsConstant(
+            CallerScalarUnequalsConstant {
+                value: "main".to_string(),
+                source: declared_source(),
+            },
+        ))
+        .expect("a declared value compared to a constant is a request formula");
+        let equal = RequestFormula::of(&PatternClass::P17CallerScalarEqualsConstant(
+            CallerScalarEqualsConstant {
+                value: "main".to_string(),
+                source: declared_source(),
+            },
+        ))
+        .expect("a declared value compared to a constant is a request formula");
+        let RequestFormula::Atom(unequal) = unequal else {
+            panic!("one constant is one atom, not {unequal:?}")
+        };
+        let RequestFormula::Atom(equal) = equal else {
+            panic!("one constant is one atom, not {equal:?}")
+        };
+        assert_eq!(unequal.comparison, RequestComparison::CallerValueUnequals);
+        assert_eq!(equal.comparison, RequestComparison::CallerValueEquals);
+        assert_eq!(unequal.value, equal.value);
+        assert_eq!(unequal.request_parameter, equal.request_parameter);
+        assert_eq!(unequal.setting_key, equal.setting_key);
     }
 }

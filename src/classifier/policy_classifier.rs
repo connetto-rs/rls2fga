@@ -331,6 +331,8 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
+        | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
@@ -475,6 +477,8 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
+        | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
     }
 }
@@ -790,6 +794,10 @@ fn classify_expr_inner<DB: DatabaseLike>(
         ..
     } = expr
     {
+        // A value the request carries still reads as a request gate, `NOT IN` among them.
+        if let Some(classified) = recognizers::recognize_session_attribute(expr, registry) {
+            return classified;
+        }
         return unknown_d(
             expr,
             "NOT IN (...) cannot be represented as static OpenFGA tuples because negation \
@@ -1133,6 +1141,12 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. }) => {
             "declared caller value equal to a constant"
         }
+        PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. }) => {
+            "declared caller value different from a constant"
+        }
+        PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. }) => {
+            "declared caller value in a constant list"
+        }
         PatternClass::P19IndirectMembership(IndirectMembership { .. }) => {
             "membership-through-a-second-table check"
         }
@@ -1192,6 +1206,8 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
+        | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => false,
     }
 }

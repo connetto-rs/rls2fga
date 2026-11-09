@@ -4,11 +4,12 @@ use core::fmt::Write;
 
 use crate::classifier::patterns::{
     apply_threshold, AbacAnd, ArrayMembership, AttributeCondition, BooleanFlag,
-    CallerScalarEqualsConstant, ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel,
-    ConstantBool, ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership,
-    ExpandedFunction, JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet,
-    NumericThreshold, ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar,
-    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
+    ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
+    ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership, ExpandedFunction,
+    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
+    ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
+    UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -286,6 +287,32 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
             format!(
                 "P17 (caller value {} = '{value}')",
                 source.request_parameter()
+            )
+        }
+        PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
+            value,
+            source,
+        }) => {
+            format!(
+                "P21 (caller value {} <> '{value}')",
+                source.request_parameter()
+            )
+        }
+        PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList {
+            values,
+            negated,
+            source,
+        }) => {
+            let negation = if *negated { "NOT " } else { "" };
+            let listed = values
+                .iter()
+                .map(|value| format!("'{value}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "P22 (caller value {} {}IN ({listed}))",
+                source.request_parameter(),
+                negation
             )
         }
         PatternClass::MembershipExclusion(MembershipExclusion { base, subtract }) => {
