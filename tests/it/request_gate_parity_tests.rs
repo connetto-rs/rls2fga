@@ -510,8 +510,18 @@ async fn setting_operator_parity() {
     }
 }
 
-/// The fallback the cases below spell inline.
+/// Supabase's `auth.role()` body, the fallback the cases below spell inline and through
+/// the body alike.
 const FALLBACK: &str = "coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role'))::text";
+
+/// The fallback read as Supabase's `auth.role()` spells it.
+fn fallback_accessor() -> String {
+    format!(
+        "CREATE SCHEMA auth;
+CREATE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $f$SELECT {FALLBACK}$f$;
+"
+    )
+}
 
 /// A caller holding `a` in the bare setting and the `role` field of `c`, `None` for a
 /// setting the request leaves unset and a document that is not `JSON` for one that raises
@@ -531,18 +541,22 @@ fn fallback_caller(subject: &str, a: Option<&str>, c: Option<&str>) -> Principal
     principal
 }
 
-/// The value the fallback hands over, the four operators over it, over the readers the
-/// plan's table states: the first source holding the literal admits, the first source
-/// holding anything else denies, an unset first source hands over the second source's
-/// `role`, and a second source that is not a `JSON` document raises where the fallback
-/// reaches it.
+/// The value the fallback hands over, the four operators over it, inline and through the
+/// body alike, over the readers the plan's table states: the first source holding the
+/// literal admits, the first source holding anything else denies, an unset first source
+/// hands over the second source's `role`, and a second source that is not a `JSON`
+/// document raises where the fallback reaches it.
 #[tokio::test]
 #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
 async fn fallback_parity() {
     const INSERTS: &str = "INSERT INTO i_eq VALUES ('r1');
         INSERT INTO i_neq VALUES ('r1');
         INSERT INTO i_in VALUES ('r1');
-        INSERT INTO i_notin VALUES ('r1');";
+        INSERT INTO i_notin VALUES ('r1');
+        INSERT INTO b_eq VALUES ('r1');
+        INSERT INTO b_neq VALUES ('r1');
+        INSERT INTO b_in VALUES ('r1');
+        INSERT INTO b_notin VALUES ('r1');";
     const X: &str = "authenticated";
     let cluster = Cluster::start().await;
     let operators = [
@@ -553,16 +567,19 @@ async fn fallback_parity() {
     ];
     let mut schema = String::new();
     let mut grants = String::new();
-    for (suffix, operator) in operators {
-        let table = format!("i_{suffix}");
-        let _ = writeln!(
-            schema,
-            "CREATE TABLE {table}(id TEXT PRIMARY KEY);
-             ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY {table}_read ON {table} FOR SELECT USING ({FALLBACK} {operator});"
-        );
-        let _ = write!(grants, "{table}, ");
+    for (prefix, source) in [("i", FALLBACK), ("b", "auth.role()")] {
+        for (suffix, operator) in operators {
+            let table = format!("{prefix}_{suffix}");
+            let _ = writeln!(
+                schema,
+                "CREATE TABLE {table}(id TEXT PRIMARY KEY);
+                 ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY {table}_read ON {table} FOR SELECT USING ({source} {operator});"
+            );
+            let _ = write!(grants, "{table}, ");
+        }
     }
+    let accessor = fallback_accessor();
     for from_rows in [false, true] {
         let mut case = ParityCase::reading(
             if from_rows {
@@ -570,12 +587,14 @@ async fn fallback_parity() {
             } else {
                 "fallback"
             },
-            &schema,
+            &format!("{accessor}{schema}"),
             &[
                 INSERTS,
                 &format!(
                     "CREATE ROLE app_reader LOGIN;
-                     GRANT SELECT ON {} TO app_reader",
+                     GRANT SELECT ON {} TO app_reader;
+                     GRANT USAGE ON SCHEMA auth TO app_reader;
+                     GRANT EXECUTE ON FUNCTION auth.role() TO app_reader",
                     grants.trim_end().trim_end_matches(',')
                 ),
             ],
@@ -591,6 +610,7 @@ async fn fallback_parity() {
                     .reading_a_non_json_document(),
             ],
         )
+        .with_registry(r#"{"auth.role": {"kind": "role_accessor"}}"#)
         .with_settings([
             deployment::typed_scalar("request.jwt.claim.role", DataType::Text).may_be_unset(),
             deployment::json_setting(
@@ -614,14 +634,16 @@ async fn fallback_parity() {
             "listed_a", "listed_c", "both", "neither", "no_field", "other_a", "other_c", "bad_c",
         ] {
             for (suffix, _) in operators {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    &format!("i_{suffix}:r1"),
-                    ActionStatement::Select,
-                    expected(subject, suffix),
-                );
+                for prefix in ["i", "b"] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        &format!("{prefix}_{suffix}:r1"),
+                        ActionStatement::Select,
+                        expected(subject, suffix),
+                    );
+                }
             }
         }
         assert_agrees(&case, &run);

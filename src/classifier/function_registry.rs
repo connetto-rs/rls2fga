@@ -5,8 +5,8 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
-    body_role_keyword, body_setting_key, body_single_projection, normalize_setting_key,
-    renamed_caller_body, FunctionSemantic,
+    body_role_keyword, body_setting_fallback, body_setting_key, body_single_projection,
+    normalize_setting_key, renamed_caller_body, FunctionSemantic,
 };
 use crate::parser::names::{stored_relation_name, RoleKeyword};
 use crate::parser::sql_parser::{
@@ -674,6 +674,8 @@ impl FunctionRegistry {
             .map(|(key, _)| key)
         {
             self.register_target_if_absent(target, &FunctionSemantic::SettingReader { key });
+        } else if let Some(sources) = body_setting_fallback(body, &self.sources) {
+            self.register_target_if_absent(target, &FunctionSemantic::SettingFallback { sources });
         } else if let Some(reason) = renamed_caller_body(body, return_type, language, &self.sources)
         {
             self.renamed_accessors.entry(target_key).or_insert(reason);

@@ -25,7 +25,7 @@ use crate::classifier::patterns::{
     FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass,
     RowValueEqualsCallerScalar, RowValueInCallerSet,
 };
-use crate::parser::expr::{function_arg_expr, unwrap_cast_or_nested, CastChain};
+use crate::parser::expr::{function_arg_expr, function_call, unwrap_cast_or_nested, CastChain};
 use crate::parser::function_analyzer::{
     fallback_source_shape, FallbackSourceShape, FunctionSemantic,
 };
@@ -57,8 +57,8 @@ pub fn recognize_session_attribute(
 }
 
 /// The value a fallback read hands over, compared with a constant the policy names:
-/// a `COALESCE` of declared settings against a literal, and the `IN` or `NOT IN`, or
-/// the `= ANY (ARRAY[...])` the same value admits.
+/// `auth.role() = 'authenticated'`, and the `IN` or `NOT IN`, or the `= ANY (ARRAY
+/// [...])` the same value admits, spelled however the fallback is.
 ///
 /// A column or a call the tested side names stays unclassified, since the fallback is a
 /// value the request carries and a row's part in it is a different gate.
@@ -191,8 +191,9 @@ fn fallback_tested_value(tested: &Expr, casts: &CastChain) -> Option<String> {
 /// side stands in, so a literal it is compared with keeps its spelling or is refused
 /// with it.
 ///
-/// Each source must be declared one single value, and a cast that renames a source's
-/// value is a refusal.
+/// Two spellings reach one declaration: a `COALESCE` spelled where the comparison is,
+/// and a call whose body is one, which the registry reads at adoption. Each source must
+/// be declared one single value, and a cast that renames a source's value is a refusal.
 pub(super) fn fallback_read(
     expr: &Expr,
     registry: &FunctionRegistry,
@@ -243,7 +244,37 @@ pub(super) fn fallback_read(
             }
             (first_step, rest, tested_side)
         }
-        _ => return None,
+        other => {
+            let function = function_call(other)?;
+            let FunctionSemantic::SettingFallback { sources: declared } =
+                registry.get(&function.name.to_string())?
+            else {
+                return None;
+            };
+            let mut declared = declared.iter();
+            let first_source = declared.next()?;
+            let first = resolve_fallback_source(
+                &first_source.key,
+                &first_source.path,
+                first_source.skips_empty,
+                &CastChain::default(),
+                &outer,
+                registry,
+            )?;
+            // The body's own casts were judged at adoption; the read's are.
+            let mut rest = Vec::with_capacity(declared.len());
+            for source in declared {
+                rest.push(resolve_fallback_source(
+                    &source.key,
+                    &source.path,
+                    source.skips_empty,
+                    &CastChain::default(),
+                    &outer,
+                    registry,
+                )?);
+            }
+            (first, rest, outer)
+        }
     };
     Some((first, rest, tested_side))
 }
