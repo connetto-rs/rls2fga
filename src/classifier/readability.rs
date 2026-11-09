@@ -165,7 +165,9 @@ pub(crate) fn is_request_only_gate(pattern: &PatternClass) -> bool {
     match pattern {
         PatternClass::P10ConstantBool(_)
         | PatternClass::P16ConstantInCallerSet(_)
-        | PatternClass::P17CallerScalarEqualsConstant(_) => true,
+        | PatternClass::P17CallerScalarEqualsConstant(_)
+        | PatternClass::P21CallerScalarUnequalsConstant(_)
+        | PatternClass::P22CallerScalarInConstantList(_) => true,
         PatternClass::P8Composite(composite) => composite
             .parts
             .iter()

@@ -331,6 +331,8 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
+        | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
@@ -475,6 +477,8 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
+        | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
     }
 }
@@ -790,6 +794,10 @@ fn classify_expr_inner<DB: DatabaseLike>(
         ..
     } = expr
     {
+        // A value the request carries still reads as a request gate, `NOT IN` among them.
+        if let Some(classified) = recognizers::recognize_session_attribute(expr, registry) {
+            return classified;
+        }
         return unknown_d(
             expr,
             "NOT IN (...) cannot be represented as static OpenFGA tuples because negation \
@@ -1133,6 +1141,12 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. }) => {
             "declared caller value equal to a constant"
         }
+        PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. }) => {
+            "declared caller value different from a constant"
+        }
+        PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. }) => {
+            "declared caller value in a constant list"
+        }
         PatternClass::P19IndirectMembership(IndirectMembership { .. }) => {
             "membership-through-a-second-table check"
         }
@@ -1192,6 +1206,8 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
+        | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => false,
     }
 }
@@ -1201,7 +1217,7 @@ mod tests {
     use super::*;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
     use crate::parser::sql_parser::{parse_schema, ParserDB};
-    use crate::test_support::caller_registry;
+    use crate::test_support::{caller_registry, registry, scalar};
     use crate::types::{ColumnName, TableId};
 
     fn docs_db() -> ParserDB {
@@ -1483,6 +1499,31 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
             (
                 "NOT (status = 'deleted')",
                 "NOT applied to attribute-condition check",
+            ),
+        ];
+
+        for (expr_sql, expected_fragment) in cases {
+            let expr = parse_expr(expr_sql);
+            let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
+            assert_unknown_reason(&classified, expr_sql, expected_fragment);
+        }
+    }
+
+    /// The same refusal names a setting gate by its own description, so a caller learns
+    /// the clause reads one request value and must be rewritten as an allowlist.
+    #[test]
+    fn classify_not_of_a_setting_gate_names_the_setting_gate() {
+        let db = docs_db();
+        let registry = registry([scalar("app.tier")]);
+
+        let cases = [
+            (
+                "NOT (current_setting('app.tier', true) <> 'a')",
+                "NOT applied to declared caller value different from a constant",
+            ),
+            (
+                "NOT (current_setting('app.tier', true) IN ('a', 'b'))",
+                "NOT applied to declared caller value in a constant list",
             ),
         ];
 

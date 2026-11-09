@@ -100,6 +100,9 @@ pub enum RequestComparison {
     CallerSetHolds,
     /// The caller's single value has to equal the row's.
     CallerValueEquals,
+    /// The caller's single value has to differ from the row's, which `PostgreSQL`'s
+    /// `NULL` reading also fails, so an unset setting denies.
+    CallerValueUnequals,
 }
 
 /// A predicate over the values the caller supplies in every check context.

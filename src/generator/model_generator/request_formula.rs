@@ -10,8 +10,10 @@
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeMap;
 
+use crate::classifier::function_registry::DeclaredSource;
 use crate::classifier::patterns::{
-    BoolOp, CallerScalarEqualsConstant, Composite, ConstantBool, ConstantInCallerSet, PatternClass,
+    BoolOp, CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
+    Composite, ConstantBool, ConstantInCallerSet, PatternClass,
 };
 use crate::types::{ConditionParameterName, RequestAtom, RequestComparison};
 
@@ -49,11 +51,28 @@ impl GateAtom {
 
     /// `caller value = 'value'`.
     pub(crate) fn equal_to_caller_value(test: &CallerScalarEqualsConstant) -> Self {
-        let CallerScalarEqualsConstant { value, source } = test;
+        Self::of(
+            &test.source,
+            RequestComparison::CallerValueEquals,
+            &test.value,
+        )
+    }
+
+    /// `caller value <> 'value'`.
+    pub(crate) fn unequal_to_caller_value(test: &CallerScalarUnequalsConstant) -> Self {
+        Self::of(
+            &test.source,
+            RequestComparison::CallerValueUnequals,
+            &test.value,
+        )
+    }
+
+    /// One constant test on the caller's single value.
+    fn of(source: &DeclaredSource, comparison: RequestComparison, value: &str) -> Self {
         Self {
             request_parameter: source.condition_parameter().clone(),
-            comparison: RequestComparison::CallerValueEquals,
-            value: value.clone(),
+            comparison,
+            value: value.to_string(),
             setting_key: source.setting_key().to_string(),
             separator: None,
         }
@@ -104,6 +123,10 @@ impl RequestFormula {
             PatternClass::P17CallerScalarEqualsConstant(test) => {
                 Some(Self::Atom(GateAtom::equal_to_caller_value(test)))
             }
+            PatternClass::P21CallerScalarUnequalsConstant(test) => {
+                Some(Self::Atom(GateAtom::unequal_to_caller_value(test)))
+            }
+            PatternClass::P22CallerScalarInConstantList(test) => Some(Self::in_constant_list(test)),
             PatternClass::P8Composite(Composite { op, parts }) => {
                 let children = parts
                     .iter()
@@ -112,6 +135,27 @@ impl RequestFormula {
                 Some(Self::join(*op, children))
             }
             _ => None,
+        }
+    }
+
+    /// `caller value IN ('a', 'b')`, the `OR` of the constants' equality tests, or where
+    /// negated the `AND` of their inequality tests, which denies on the unset reading.
+    pub(crate) fn in_constant_list(test: &CallerScalarInConstantList) -> Self {
+        let comparison = if test.negated {
+            RequestComparison::CallerValueUnequals
+        } else {
+            RequestComparison::CallerValueEquals
+        };
+        let atoms = test
+            .values
+            .iter()
+            .map(|value| GateAtom::of(&test.source, comparison, value))
+            .map(Self::Atom)
+            .collect();
+        if test.negated {
+            Self::join(BoolOp::And, atoms)
+        } else {
+            Self::join(BoolOp::Or, atoms)
         }
     }
 
@@ -214,6 +258,7 @@ fn terms(op: BoolOp, child: &RequestFormula) -> Vec<&RequestFormula> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classifier::patterns::{ClassifiedExpr, ConfidenceLevel};
 
     fn atom(value: &str) -> RequestFormula {
         RequestFormula::Atom(GateAtom {
@@ -304,5 +349,147 @@ mod tests {
     fn keys_tell_apart_constants_that_fold_to_one_name() {
         assert_ne!(atom("t0:read").key(), atom("t0_read").key());
         assert_ne!(atom("a,b").key(), or(vec![atom("a"), atom("b")]).key());
+    }
+
+    /// One source for a formula test, declared the way the recognizers read it.
+    fn declared_source() -> DeclaredSource {
+        use crate::classifier::function_registry::DeclaredSources;
+        use crate::test_support::{deployment, scalar};
+
+        DeclaredSources::of(&deployment([scalar("app.mode")]))
+            .iter()
+            .next()
+            .expect("the declared setting")
+            .clone()
+    }
+
+    /// `IN` composes one equality test per constant, and `NOT IN` one inequality test per
+    /// constant, so the two negations deny on the unset reading the `IN` admits.
+    #[test]
+    fn an_in_list_composes_one_test_per_constant() {
+        let source = declared_source();
+        let of_list = |negated: bool| {
+            RequestFormula::in_constant_list(&CallerScalarInConstantList {
+                values: vec!["main".to_string(), "dev".to_string()],
+                negated,
+                source: source.clone(),
+            })
+        };
+        // The positive list is an `OR` of `=` and the negated one an `AND` of `<>`.
+        assert_eq!(
+            of_list(false),
+            or(vec![
+                RequestFormula::Atom(GateAtom::of(
+                    &source,
+                    RequestComparison::CallerValueEquals,
+                    "main"
+                )),
+                RequestFormula::Atom(GateAtom::of(
+                    &source,
+                    RequestComparison::CallerValueEquals,
+                    "dev"
+                ))
+            ])
+        );
+        assert_eq!(
+            of_list(true),
+            and(vec![
+                RequestFormula::Atom(GateAtom::of(
+                    &source,
+                    RequestComparison::CallerValueUnequals,
+                    "main"
+                )),
+                RequestFormula::Atom(GateAtom::of(
+                    &source,
+                    RequestComparison::CallerValueUnequals,
+                    "dev"
+                ))
+            ])
+        );
+    }
+
+    /// `<>` is one inequality atom over the caller's value, the `=` mirror one equality
+    /// atom, the two sharing the source's parameter and setting.
+    #[test]
+    fn an_unequal_test_composes_one_inequality_atom() {
+        let source = declared_source();
+        let unequal = PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
+            value: "main".to_string(),
+            source: source.clone(),
+        });
+        let equal = PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant {
+            value: "main".to_string(),
+            source: source.clone(),
+        });
+        assert_eq!(
+            RequestFormula::of(&unequal),
+            Some(RequestFormula::Atom(GateAtom::of(
+                &source,
+                RequestComparison::CallerValueUnequals,
+                "main"
+            )))
+        );
+        assert_eq!(
+            RequestFormula::of(&equal),
+            Some(RequestFormula::Atom(GateAtom::of(
+                &source,
+                RequestComparison::CallerValueEquals,
+                "main"
+            )))
+        );
+    }
+
+    /// A list gate inside a composite reads through `of`, so a policy that joins it with
+    /// another request gate keeps the list's tests beside the other gate's in one form.
+    #[test]
+    fn a_list_gate_joined_with_another_request_gate_reads_through_of() {
+        let source = declared_source();
+        let composite = PatternClass::P8Composite(Composite {
+            op: BoolOp::Or,
+            parts: vec![
+                ClassifiedExpr {
+                    pattern: PatternClass::P22CallerScalarInConstantList(
+                        CallerScalarInConstantList {
+                            values: vec!["main".to_string(), "dev".to_string()],
+                            negated: false,
+                            source: source.clone(),
+                        },
+                    ),
+                    confidence: ConfidenceLevel::A,
+                },
+                ClassifiedExpr {
+                    pattern: PatternClass::P21CallerScalarUnequalsConstant(
+                        CallerScalarUnequalsConstant {
+                            value: "staging".to_string(),
+                            source: source.clone(),
+                        },
+                    ),
+                    confidence: ConfidenceLevel::A,
+                },
+            ],
+        });
+        let formula = RequestFormula::of(&composite).expect("both parts read only the request");
+        assert_eq!(
+            formula,
+            or(vec![
+                or(vec![
+                    RequestFormula::Atom(GateAtom::of(
+                        &source,
+                        RequestComparison::CallerValueEquals,
+                        "main"
+                    )),
+                    RequestFormula::Atom(GateAtom::of(
+                        &source,
+                        RequestComparison::CallerValueEquals,
+                        "dev"
+                    ))
+                ]),
+                RequestFormula::Atom(GateAtom::of(
+                    &source,
+                    RequestComparison::CallerValueUnequals,
+                    "staging"
+                ))
+            ])
+        );
     }
 }

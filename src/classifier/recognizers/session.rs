@@ -18,10 +18,11 @@ use sqlparser::ast::{BinaryOperator, Expr, FunctionArguments, InTarget, Query, S
 
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
-    CallerScalarEqualsConstant, ClassifiedExpr, ConfidenceLevel, ConstantInCallerSet, PatternClass,
-    RowValueEqualsCallerScalar, RowValueInCallerSet,
+    CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
+    ClassifiedExpr, ConfidenceLevel, ConstantInCallerSet, PatternClass, RowValueEqualsCallerScalar,
+    RowValueInCallerSet,
 };
-use crate::parser::expr::{function_arg_expr, CastChain};
+use crate::parser::expr::{function_arg_expr, unwrap_cast_or_nested, CastChain};
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::builtin_function_name;
 use crate::parser::sql_parser::SetPacking;
@@ -45,6 +46,8 @@ pub fn recognize_session_attribute(
     set_membership(expr, registry)
         .or_else(|| set_membership_in_subquery(expr, registry))
         .or_else(|| scalar_equality(expr, registry))
+        .or_else(|| scalar_inequality(expr, registry))
+        .or_else(|| scalar_in_constant_list(expr, registry))
 }
 
 /// `<row column or constant> = ANY (<the caller's set>)`.
@@ -150,6 +153,96 @@ fn scalar_equality(expr: &Expr, registry: &FunctionRegistry) -> Option<Classifie
     };
     Some(ClassifiedExpr {
         pattern,
+        confidence: grade(source),
+    })
+}
+
+/// `<declared single value> <> <literal>`, either way round.
+///
+/// A column on the literal's side stays unclassified, since a row value the request's
+/// value has to differ from is a different gate with its own shape.
+fn scalar_inequality(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::NotEq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+
+    let ((source, casts), tested) = match declared_scalar(left, registry) {
+        Some(source) => (source, right.as_ref()),
+        None => (declared_scalar(right, registry)?, left.as_ref()),
+    };
+    if other_side_renaming(tested, &casts).is_some() {
+        return None;
+    }
+
+    let pattern = match tested_value(tested) {
+        TestedValue::Constant(value) => {
+            PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
+                value,
+                source: source.clone(),
+            })
+        }
+        _ => return None,
+    };
+    Some(ClassifiedExpr {
+        pattern,
+        confidence: grade(source),
+    })
+}
+
+/// `<declared single value> IN (<literals>)`, however negated, and the same test spelled
+/// `= ANY (ARRAY[<literals>])`, which `PostgreSQL` reads as one membership.
+///
+/// Every element has to be a literal, since a column among them is a per-row value the
+/// list cannot stand in for, and an element a cast renames reads as a different value.
+fn scalar_in_constant_list(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    let (tested, list, negated) = match expr {
+        Expr::In {
+            expr: tested,
+            target: InTarget::List(list),
+            negated,
+            global: false,
+        } => (tested.as_ref(), list.as_slice(), *negated),
+        Expr::AnyOp {
+            left: tested,
+            compare_op: BinaryOperator::Eq,
+            right,
+            is_some: false,
+        } => {
+            let Expr::Array(array) = unwrap_cast_or_nested(right) else {
+                return None;
+            };
+            (tested.as_ref(), array.elem.as_slice(), false)
+        }
+        _ => return None,
+    };
+    // `PostgreSQL` has no empty list, and the model has no gate to state one.
+    if list.is_empty() {
+        return None;
+    }
+    let (source, casts) = declared_scalar(tested, registry)?;
+    // An element a cast renames, or that is no literal, is a value the list cannot stand
+    // in for, so the whole list stays refused.
+    if list
+        .iter()
+        .any(|element| other_side_renaming(element, &casts).is_some())
+    {
+        return None;
+    }
+    let values = list
+        .iter()
+        .map(string_literal)
+        .collect::<Option<Vec<_>>>()?;
+    Some(ClassifiedExpr {
+        pattern: PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList {
+            values,
+            negated,
+            source: source.clone(),
+        }),
         confidence: grade(source),
     })
 }
@@ -493,11 +586,21 @@ pub(super) fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> O
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::classifier::function_registry::DeclaredSources;
     use crate::classifier::recognizers::is_current_user_expr;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
     use crate::parser::sql_parser::SettingValue;
-    use crate::test_support::{caller, delimited_set, json_field, registry, scalar};
+    use crate::test_support::{caller, delimited_set, deployment, json_field, registry, scalar};
     use sqlparser::ast::DataType;
+
+    /// The source a declared `app.mode` scalar reads, for an expected pattern.
+    fn mode_source() -> DeclaredSource {
+        DeclaredSources::of(&deployment([scalar("app.mode")]))
+            .iter()
+            .next()
+            .expect("the declared setting")
+            .clone()
+    }
 
     /// A JSON setting whose `teams` field holds a JSON array of text.
     fn teams_claim() -> crate::parser::sql_parser::SessionSetting {
@@ -790,5 +893,150 @@ mod tests {
             recognize_session_attribute(&hopped, &registry).map(|c| c.confidence),
             Some(ConfidenceLevel::B)
         );
+    }
+
+    /// `<>` against a literal is one value that must differ from the constant, either way
+    /// round, and a text cast the value keeps its spelling under stays allowed.
+    #[test]
+    fn a_declared_value_differing_from_a_constant_is_read() {
+        let registry = registry([scalar("app.mode")]);
+        let read = |clause: &str| {
+            recognize_session_attribute(&parse_expr(clause), &registry).map(|c| c.pattern)
+        };
+        let expected =
+            PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
+                value: "main".to_string(),
+                source: mode_source(),
+            });
+        assert_eq!(
+            read("current_setting('app.mode', true) <> 'main'"),
+            Some(expected.clone())
+        );
+        // The constant on the left reads the same gate, and a text cast renames nothing.
+        assert_eq!(
+            read("'main' <> current_setting('app.mode', true)"),
+            Some(expected.clone())
+        );
+        assert_eq!(
+            read("current_setting('app.mode', true)::text <> 'main'"),
+            Some(expected)
+        );
+    }
+
+    /// `IN`, `NOT IN` and `= ANY (ARRAY[...])` against literals are one value in a named
+    /// list, however negated, and the negation is kept.
+    #[test]
+    fn a_declared_value_in_a_constant_list_is_read() {
+        let registry = registry([scalar("app.mode")]);
+        let read = |clause: &str| {
+            recognize_session_attribute(&parse_expr(clause), &registry).map(|c| c.pattern)
+        };
+        let list = |negated: bool| {
+            PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList {
+                values: vec!["main".to_string(), "dev".to_string()],
+                negated,
+                source: mode_source(),
+            })
+        };
+        assert_eq!(
+            read("current_setting('app.mode', true) IN ('main', 'dev')"),
+            Some(list(false))
+        );
+        assert_eq!(
+            read("current_setting('app.mode', true) NOT IN ('main', 'dev')"),
+            Some(list(true))
+        );
+        // `= ANY (ARRAY[...])` is one membership, read the same way.
+        assert_eq!(
+            read("current_setting('app.mode', true) = ANY (ARRAY['main', 'dev'])"),
+            Some(list(false))
+        );
+    }
+
+    /// A list element that is no literal is a per-row value the list cannot stand in for,
+    /// so the whole list stays refused.
+    #[test]
+    fn a_list_with_a_non_literal_element_is_refused() {
+        let registry = registry([scalar("app.mode")]);
+        for clause in [
+            "current_setting('app.mode', true) IN ('main', other_mode)",
+            "current_setting('app.mode', true) = ANY (ARRAY['main', other_mode])",
+        ] {
+            assert!(
+                recognize_session_attribute(&parse_expr(clause), &registry).is_none(),
+                "{clause} names a value the list does not hold"
+            );
+        }
+    }
+
+    /// `<>` against a row value is a gate with its own shape, not one value that must
+    /// differ from a constant, so the setting side stays refused.
+    #[test]
+    fn an_inequality_against_a_row_value_is_refused() {
+        let registry = registry([scalar("app.mode")]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr("current_setting('app.mode', true) <> other_mode"),
+                &registry
+            )
+            .is_none(),
+            "a row value the value must differ from is no constant"
+        );
+    }
+
+    /// `PostgreSQL` has no empty list and the model has no gate to state one, so an empty
+    /// `= ANY` stays refused.
+    #[test]
+    fn an_empty_list_is_refused() {
+        let registry = registry([scalar("app.mode")]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr("current_setting('app.mode', true) = ANY (ARRAY[])"),
+                &registry
+            )
+            .is_none(),
+            "an empty list holds no element a value can match"
+        );
+    }
+
+    /// `= ALL` and the non-equality quantifiers are no membership the request value
+    /// passes, and a cast that renames the read reaches a different value, so each stays
+    /// refused.
+    #[test]
+    fn a_list_the_request_value_cannot_pass_stays_refused() {
+        let registry = registry([scalar("app.mode")]);
+        for clause in [
+            "current_setting('app.mode', true) = ALL (ARRAY['main', 'dev'])",
+            "current_setting('app.mode', true) <> ANY (ARRAY['main', 'dev'])",
+            "current_setting('app.mode', true)::integer IN ('7', '8')",
+        ] {
+            assert!(
+                recognize_session_attribute(&parse_expr(clause), &registry).is_none(),
+                "{clause} is no membership the request value passes"
+            );
+        }
+    }
+
+    /// A field the deployment declares reads the same list, grading at the field's B.
+    #[test]
+    fn a_field_value_in_a_constant_list_is_read() {
+        let registry = registry([json_field(
+            "request.jwt.claims",
+            &["mode"],
+            SettingValue::Scalar(DataType::Text),
+        )]);
+        let expr = parse_expr(
+            "current_setting('request.jwt.claims')::jsonb ->> 'mode' IN ('main', 'dev')",
+        );
+        let classified = recognize_session_attribute(&expr, &registry)
+            .expect("the declared field reads the list");
+        assert!(matches!(
+            classified.pattern,
+            PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList {
+                negated: false,
+                ..
+            })
+        ));
+        assert_eq!(classified.confidence, ConfidenceLevel::B);
     }
 }

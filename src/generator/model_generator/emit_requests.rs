@@ -69,7 +69,8 @@ pub(crate) fn session_attribute_expr<DB: DatabaseLike>(
 /// The condition comparing what a tuple carries under `row_parameter` against what the
 /// caller supplies. A set keeps its own `list<string>` parameter the row tests membership
 /// in, and a single value travels in the `settings` map, keyed by `request_parameter`,
-/// which the row tests equality against, guarded so an absent key reads as `NULL`.
+/// which the row tests for equality or inequality against, guarded so an absent key
+/// reads as `NULL`.
 fn request_comparison_spec(
     row_parameter: &ConditionParameterName,
     request_parameter: &ConditionParameterName,
@@ -81,12 +82,16 @@ fn request_comparison_spec(
             request_parameter.to_string(),
             ConditionParameter::ListOf(STRING_PARAMETER_TYPE),
         ),
-        RequestComparison::CallerValueEquals => {
+        RequestComparison::CallerValueEquals | RequestComparison::CallerValueUnequals => {
+            let operator = match comparison {
+                RequestComparison::CallerValueEquals => "==",
+                _ => "!=",
+            };
             let key = format!("{}{}{}", '"', request_parameter, '"');
             (
                 format!(
                     "{key} in {SETTINGS_PARAMETER} && \
-                     {SETTINGS_PARAMETER}[{key}] == {row_parameter}"
+                     {SETTINGS_PARAMETER}[{key}] {operator} {row_parameter}"
                 ),
                 SETTINGS_PARAMETER.to_string(),
                 ConditionParameter::MapOf(STRING_PARAMETER_TYPE),
@@ -223,6 +228,7 @@ impl GateObject<'_> {
                 let verb = match atom.comparison {
                     RequestComparison::CallerSetHolds => "holds",
                     RequestComparison::CallerValueEquals => "is",
+                    RequestComparison::CallerValueUnequals => "differs",
                 };
                 let subjects = vec![DirectSubject::ConditionalWildcard {
                     type_name: self.plan.well_known.user.clone(),

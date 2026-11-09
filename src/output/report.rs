@@ -4,11 +4,12 @@ use core::fmt::Write;
 
 use crate::classifier::patterns::{
     apply_threshold, AbacAnd, ArrayMembership, AttributeCondition, BooleanFlag,
-    CallerScalarEqualsConstant, ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel,
-    ConstantBool, ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership,
-    ExpandedFunction, JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet,
-    NumericThreshold, ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar,
-    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
+    ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
+    ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership, ExpandedFunction,
+    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
+    ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
+    UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -288,6 +289,32 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 source.request_parameter()
             )
         }
+        PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
+            value,
+            source,
+        }) => {
+            format!(
+                "P21 (caller value {} <> '{value}')",
+                source.request_parameter()
+            )
+        }
+        PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList {
+            values,
+            negated,
+            source,
+        }) => {
+            let negation = if *negated { "NOT " } else { "" };
+            let listed = values
+                .iter()
+                .map(|value| format!("'{value}'"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "P22 (caller value {} {}IN ({listed}))",
+                source.request_parameter(),
+                negation
+            )
+        }
         PatternClass::MembershipExclusion(MembershipExclusion { base, subtract }) => {
             let mut rendered = match base {
                 Some(base) => {
@@ -345,7 +372,8 @@ fn notes_for_policy(notes: &[TranslationNote], policy_name: &str) -> String {
 mod tests {
     use super::*;
     use crate::classifier::patterns::*;
-    use crate::parser::sql_parser::{parse_schema, DatabaseLike};
+    use crate::parser::sql_parser::{parse_schema, DatabaseLike, SessionSetting};
+    use crate::test_support::{deployment, scalar};
     use crate::types::ColumnName;
 
     fn classified_policy(
@@ -544,8 +572,9 @@ CREATE POLICY p ON docs FOR SELECT USING (my_mystery(meta));
         );
     }
 
-    /// The report row for the USING clause `using`.
-    fn using_row(using: &str) -> String {
+    /// The report row for the USING clause `using`, where the deployment declares
+    /// `settings`.
+    fn using_row(settings: impl IntoIterator<Item = SessionSetting>, using: &str) -> String {
         let sql = format!(
             "
 CREATE TABLE docs(id uuid PRIMARY KEY, owner_id TEXT, expires_at TIMESTAMPTZ, meta TEXT);
@@ -558,7 +587,7 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
         let classified = crate::classifier::policy_classifier::classify_policies(
             &db,
             &registry,
-            &crate::test_support::caller_deployment(),
+            &deployment(settings),
         );
         let report = build_report(&[], &classified, ConfidenceLevel::B);
         report
@@ -603,10 +632,39 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
                 "P8 (And of 2 parts)".to_string(),
             ),
         ] {
-            let row = using_row(using);
+            let row = using_row([], using);
             assert!(
                 row.starts_with(&format!("| p (USING) | {rendered} |")),
                 "`{using}` must render as `{rendered}`, got: {row}"
+            );
+        }
+    }
+
+    /// `<>` and `IN` against literals compare the request's value with constants the rule
+    /// supplies, so the row names the constant and the list's negation.
+    #[test]
+    fn setting_comparisons_name_their_constants() {
+        let settings = || [scalar("app.tier")];
+        let row = using_row(settings(), "current_setting('app.tier', true) <> 'a'");
+        assert_eq!(
+            row,
+            "| p (USING) | P21 (caller value app_tier <> 'a') | A |  |"
+        );
+        for (using, rendered) in [
+            (
+                "current_setting('app.tier', true) IN ('a', 'b')",
+                "P22 (caller value app_tier IN ('a', 'b'))",
+            ),
+            (
+                "current_setting('app.tier', true) NOT IN ('a', 'b')",
+                "P22 (caller value app_tier NOT IN ('a', 'b'))",
+            ),
+        ] {
+            let row = using_row(settings(), using);
+            assert_eq!(
+                row,
+                format!("| p (USING) | {rendered} | A |  |"),
+                "`{using}` got: {row}"
             );
         }
     }

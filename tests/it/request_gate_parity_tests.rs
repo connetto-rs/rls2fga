@@ -8,7 +8,9 @@ use core::fmt::Write;
 use core::time::Duration;
 
 use rls2fga::classifier::function_registry::DeclaredSources;
+use rls2fga::parser::sql_parser::SettingValue;
 use rls2fga::types::{records_from_row, ActionStatement, ConfidenceLevel, RowDecision};
+use sqlparser::ast::DataType;
 
 use crate::support;
 
@@ -383,6 +385,126 @@ async fn scalar_setting_parity() {
                 ActionStatement::Select,
                 allowed,
             );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+/// A caller holding `value` in both the bare setting and the JSON field, or neither where
+/// the request leaves the setting unset.
+fn mode_caller(subject: &str, value: Option<&str>) -> Principal {
+    let mut principal = Principal::as_role(subject, "app_reader");
+    if let Some(value) = value {
+        principal.session.push(("app.mode".into(), value.into()));
+        principal.session.push((
+            "request.jwt.claims".into(),
+            format!(r#"{{"mode":"{value}"}}"#),
+        ));
+    }
+    principal
+}
+
+/// Eight gates read one declared scalar value the request may leave unset, the bare
+/// `app.mode` and the `request.jwt.claims` field `mode` each four ways, by `<>`, `IN`,
+/// `= ANY` and `NOT IN` against literals. `PostgreSQL` 18 and `OpenFGA` agree in all four
+/// states, the value set to a listed value, to another value, to `''`, and unset, and the
+/// local recipe agrees with both.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn setting_operator_parity() {
+    const INSERTS: &str = "INSERT INTO m_neq VALUES ('r1');
+        INSERT INTO m_in VALUES ('r1');
+        INSERT INTO m_any VALUES ('r1');
+        INSERT INTO m_notin VALUES ('r1');
+        INSERT INTO j_neq VALUES ('r1');
+        INSERT INTO j_in VALUES ('r1');
+        INSERT INTO j_any VALUES ('r1');
+        INSERT INTO j_notin VALUES ('r1');";
+    let cluster = Cluster::start().await;
+    // Each table is one operator over one source, the bare setting and the JSON field.
+    let operators = [
+        ("neq", "<> 'main'"),
+        ("in", "IN ('main', 'dev')"),
+        ("any", "= ANY (ARRAY['main', 'dev'])"),
+        ("notin", "NOT IN ('main', 'dev')"),
+    ];
+    let mut schema = String::new();
+    let mut grants = String::new();
+    for (prefix, source) in [
+        ("m", "current_setting('app.mode', true)"),
+        (
+            "j",
+            "current_setting('request.jwt.claims', true)::jsonb ->> 'mode'",
+        ),
+    ] {
+        for (suffix, operator) in operators {
+            let table = format!("{prefix}_{suffix}");
+            let _ = writeln!(
+                schema,
+                "CREATE TABLE {table}(id TEXT PRIMARY KEY);
+                 ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY {table}_read ON {table} FOR SELECT USING ({source} {operator});"
+            );
+            let _ = write!(grants, "{table}, ");
+        }
+    }
+    for from_rows in [false, true] {
+        let mut case = ParityCase::reading(
+            if from_rows {
+                "setting-operator-rows"
+            } else {
+                "setting-operator"
+            },
+            &schema,
+            &[
+                INSERTS,
+                &format!(
+                    "CREATE ROLE app_reader LOGIN;
+                     GRANT SELECT ON {} TO app_reader",
+                    grants.trim_end().trim_end_matches(',')
+                ),
+            ],
+            vec![
+                mode_caller("listed", Some("main")),
+                mode_caller("other", Some("other")),
+                mode_caller("empty", Some("")),
+                mode_caller("unset", None),
+            ],
+        )
+        .with_settings([
+            deployment::scalar("app.mode"),
+            deployment::json_setting(
+                "request.jwt.claims",
+                [(&["mode"], SettingValue::Scalar(DataType::Text))],
+            ),
+        ]);
+        case.loading_from_rows = from_rows;
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(300)).await;
+        // `neq` and `notin` admit the other and `''` readings and deny the listed and
+        // unset ones; `in` and `any` admit only the listed value.
+        for (subject, membership, negation) in [
+            ("listed", true, false),
+            ("other", false, true),
+            ("empty", false, true),
+            ("unset", false, false),
+        ] {
+            for (suffix, expected) in [
+                ("neq", negation),
+                ("in", membership),
+                ("any", membership),
+                ("notin", negation),
+            ] {
+                for prefix in ["m", "j"] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        &format!("{prefix}_{suffix}:r1"),
+                        ActionStatement::Select,
+                        expected,
+                    );
+                }
+            }
         }
         assert_agrees(&case, &run);
     }

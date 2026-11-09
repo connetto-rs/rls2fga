@@ -15,6 +15,7 @@ use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
 use super::session::{declared_read, set_read, sole_projection};
 use super::{accessor_read, caller_source, string_literal, unparenthesize};
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
+use crate::parser::expr::unwrap_cast_or_nested;
 
 /// Each comparison in `expr` that the `''` reading of a setting a request may leave unset
 /// makes true for some row, beside that setting's declaration.
@@ -46,12 +47,42 @@ pub(crate) fn empty_readings<'r>(
             Expr::IsDistinctFrom(left, right) => {
                 compare(Comparison::Unequal, left, right, registry, &mut record);
             }
+            Expr::AnyOp {
+                left,
+                compare_op: BinaryOperator::Eq,
+                right,
+                ..
+            } => {
+                if let Some(source) = unset_value(left, registry) {
+                    // `x = ANY (ARRAY[...])` is the `IN` shape, so a literal list is judged
+                    // by the empty reading, and a right side that is no list stays noted.
+                    let holds = match unwrap_cast_or_nested(right) {
+                        Expr::Array(array) => list_holds_for_empty(false, &array.elem),
+                        _ => true,
+                    };
+                    if holds {
+                        record(source);
+                    }
+                }
+            }
             Expr::AnyOp { left, right, .. } | Expr::AllOp { left, right, .. } => {
                 if let Some(source) = unset_value(left, registry) {
                     record(source);
                 }
                 if matches!(node, Expr::AllOp { .. }) {
                     if let Some(source) = unset_delimited_set(right, registry) {
+                        record(source);
+                    }
+                }
+            }
+            Expr::In {
+                expr: tested,
+                target: InTarget::List(values),
+                negated,
+                global: false,
+            } => {
+                if let Some(source) = unset_value(tested, registry) {
+                    if list_holds_for_empty(*negated, values) {
                         record(source);
                     }
                 }
@@ -162,6 +193,24 @@ fn unset_value<'r>(expr: &Expr, registry: &'r FunctionRegistry) -> Option<&'r De
     caller
         .or_else(|| declared_read(expr, registry).map(|(source, _)| source))
         .filter(|source| source.may_be_unset())
+}
+
+/// Whether the `''` reading of the value tested against `values` passes the list test,
+/// `false` where a non-literal element leaves the reading undecided.
+fn list_holds_for_empty(negated: bool, values: &[Expr]) -> bool {
+    let Some(literals) = values
+        .iter()
+        .map(string_literal)
+        .collect::<Option<Vec<_>>>()
+    else {
+        return false;
+    };
+    let holds_empty = literals.iter().any(String::is_empty);
+    if negated {
+        !holds_empty
+    } else {
+        holds_empty
+    }
 }
 
 /// The declaration of the delimited set `expr` reads, when a request may leave it unset.

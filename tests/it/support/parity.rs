@@ -135,6 +135,10 @@ pub(crate) fn request_predicate_holds(
             RequestComparison::CallerValueEquals => {
                 context["settings"][atom.request_parameter.as_str()] == atom.value.as_str()
             }
+            // The absent key reads as `NULL`, which is no inequality either.
+            RequestComparison::CallerValueUnequals => context["settings"]
+                .get(atom.request_parameter.as_str())
+                .is_some_and(|stored| *stored != atom.value.as_str()),
         },
         RequestPredicate::ActsAs { role } => role == acting_role,
         RequestPredicate::Any(children) => children
