@@ -3511,13 +3511,16 @@ fn every_request_scoped_gate_states_its_contract_with_the_caller() {
         );
         checked += stated.len();
 
-        // The parameter the note names is the one the model declares, or a caller
-        // following the note would still have every check refused.
+        // The parameter the note names is one the model reads, declared under its own
+        // name or quoted as a key of the `settings` map in a condition expression, or
+        // a caller following the note would still have every check refused.
         let json = serde_json::to_string(&outputs.json_model()).expect("the model serializes");
         for (parameter, _) in &stated {
+            let declared = json.contains(&format!("\"{parameter}\""));
+            let quoted_key = json.contains(&format!("\\\"{parameter}\\\""));
             assert!(
-                json.contains(&format!("\"{parameter}\"")),
-                "{fixture}: the model declares no parameter named {parameter}"
+                declared || quoted_key,
+                "{fixture}: the model reads no parameter named {parameter}"
             );
         }
     }

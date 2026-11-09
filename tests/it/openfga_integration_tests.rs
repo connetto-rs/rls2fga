@@ -99,9 +99,11 @@ CREATE POLICY p ON timed_docs FOR SELECT USING ("in" > now());
         .json_model();
 
     let conditions = model.conditions.as_ref().expect("conditions should exist");
+    // The tenant travels in the `settings` map the check carries, which the tenant gate
+    // reads under the value's parameter name.
     assert!(conditions
         .values()
-        .any(|condition| condition.parameters.contains_key("app_tenant")));
+        .any(|condition| condition.parameters.contains_key("settings")));
     assert!(conditions
         .values()
         .any(|condition| condition.parameters.contains_key("_in")));

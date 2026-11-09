@@ -87,7 +87,7 @@ impl DeclaredSource {
     }
 
     /// Whether the source is one value the request carries, other than the caller.
-    pub(crate) fn is_scalar(&self) -> bool {
+    pub fn is_scalar(&self) -> bool {
         matches!(self.value, SettingValue::Scalar(_))
     }
 
@@ -155,14 +155,17 @@ fn parameter_name(key: &str, path: &[String]) -> ConditionParameterName {
     ConditionParameterName::derived(&source)
 }
 
-/// Every source a deployment declares, keyed on the setting and the field path.
+/// Every source a deployment declares, keyed on the setting and field path.
+///
+/// Built only from a [`Deployment`], so the declared sources a checker reads to build
+/// its `settings` map are the same ones the generator reads.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct DeclaredSources(BTreeMap<(String, Vec<String>), DeclaredSource>);
+pub struct DeclaredSources(BTreeMap<(String, Vec<String>), DeclaredSource>);
 
 impl DeclaredSources {
     /// The sources `deployment` declares, each whole setting and each field of a JSON
     /// one.
-    pub(crate) fn of(deployment: &Deployment) -> Self {
+    pub fn of(deployment: &Deployment) -> Self {
         let mut sources = BTreeMap::new();
         for setting in deployment.settings() {
             let mut declare = |path: &[String], value: &SettingValue| {
@@ -198,7 +201,7 @@ impl DeclaredSources {
     }
 
     /// Every source, ordered by setting and field path.
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &DeclaredSource> {
+    pub fn iter(&self) -> impl Iterator<Item = &DeclaredSource> {
         self.0.values()
     }
 }

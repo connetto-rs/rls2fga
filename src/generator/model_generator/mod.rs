@@ -24,7 +24,7 @@ use crate::generator::well_known::{
     can_update_relation, can_update_using_relation, can_update_without_reading_check_relation,
     can_update_without_reading_relation, deny_relation, member_relation, owner_team_relation,
     owner_user_relation, public_relation, request_gate_link_relation, WellKnownTypes,
-    REQUEST_TIME_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
+    REQUEST_TIME_PARAMETER, SETTINGS_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
 };
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
@@ -211,6 +211,7 @@ impl ConditionSpec {
             let (shape, element) = match kind {
                 ConditionParameter::Scalar(element) => ("scalar", *element),
                 ConditionParameter::ListOf(element) => ("list", *element),
+                ConditionParameter::MapOf(element) => ("map", *element),
                 ConditionParameter::Clock(_) => ("scalar", TIMESTAMP_PARAMETER_TYPE),
             };
             for part in [parameter.as_str(), shape, element] {
@@ -233,6 +234,8 @@ pub(crate) enum ConditionParameter {
     Scalar(&'static str),
     /// A list of values of the named element type.
     ListOf(&'static str),
+    /// A map of values of the named value type, keyed by text.
+    MapOf(&'static str),
     /// A timestamp the checker computes from the request clock, under its own name.
     Clock(ClockParameter),
 }
@@ -721,8 +724,13 @@ impl ConditionParameterAllocator {
         settings: &GeneratorSettings,
         registry: &FunctionRegistry,
     ) -> Result<Self, PlanningError> {
+        // The one map every single declared value travels in holds a name of its own,
+        // which no request source may take.
         let mut allocator = Self {
-            request_sources: BTreeMap::new(),
+            request_sources: BTreeMap::from([(
+                ConditionParameterName::derived(SETTINGS_PARAMETER),
+                "the settings map".to_string(),
+            )]),
             request_time: settings.request_time_parameter.clone(),
         };
         allocator.reserve_request(
@@ -1373,6 +1381,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 parameter: clock.name().to_string(),
                 setting_key: None,
                 separator: None,
+                is_list: false,
             }),
     );
 
@@ -1752,18 +1761,26 @@ fn scar_unfillable_grants<DB: DatabaseLike>(
 /// Read back off the sources the arms recorded, so the note and the emitted conditions cannot name
 /// different parameters. The clock's parameters are noted off the surviving conditions instead.
 fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
-    let mut contracts: BTreeSet<(String, Option<String>, Option<String>)> = BTreeSet::new();
+    let mut contracts: BTreeSet<(String, Option<String>, Option<String>, bool)> = BTreeSet::new();
     for source in &plan.table_tuple_sources {
         match source {
-            // A set carried against a row column and one carried against a membership row
-            // state the same caller contract.
+            // A row column gate states either a set or a value, by its comparison.
             TupleSource::SessionAttributeGate {
                 request_parameter,
                 setting_key,
                 separator,
+                comparison,
                 ..
+            } => {
+                contracts.insert((
+                    request_parameter.clone(),
+                    Some(setting_key.clone()),
+                    separator.clone(),
+                    matches!(comparison, RequestComparison::CallerSetHolds),
+                ));
             }
-            | TupleSource::CallerSetShareGate {
+            // A share gate is a set, so its parameter holds a list.
+            TupleSource::CallerSetShareGate {
                 request_parameter,
                 setting_key,
                 separator,
@@ -1773,6 +1790,7 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     request_parameter.clone(),
                     Some(setting_key.clone()),
                     separator.clone(),
+                    true,
                 ));
             }
             TupleSource::RequestGateEntry { atom, .. } => {
@@ -1780,16 +1798,18 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     atom.request_parameter.to_string(),
                     Some(atom.setting_key.clone()),
                     atom.separator.clone(),
+                    matches!(atom.comparison, RequestComparison::CallerSetHolds),
                 ));
             }
             _ => {}
         }
     }
-    for (parameter, setting_key, separator) in contracts {
+    for (parameter, setting_key, separator, is_list) in contracts {
         notes.push(TranslationNote::CallerSuppliesConditionParameter {
             parameter,
             setting_key,
             separator,
+            is_list,
         });
     }
 }
@@ -1861,7 +1881,9 @@ fn clock_parameters(
         .flat_map(|spec| spec.parameters.values())
         .filter_map(|kind| match kind {
             ConditionParameter::Clock(clock) => Some(clock),
-            ConditionParameter::Scalar(_) | ConditionParameter::ListOf(_) => None,
+            ConditionParameter::Scalar(_)
+            | ConditionParameter::ListOf(_)
+            | ConditionParameter::MapOf(_) => None,
         })
     {
         match clocks.get(clock.name().as_str()) {

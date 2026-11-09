@@ -954,6 +954,7 @@ fn a_request_gate_that_names_no_row_keeps_the_membership_translated() {
             parameter,
             setting_key: Some(key),
             separator: Some(separator),
+            ..
         } if parameter == "app_bot_list" && key == "app.bot_list" && separator == ","
     )));
 }

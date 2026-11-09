@@ -19,6 +19,7 @@ use diesel::sql_types::Jsonb;
 use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
 use testcontainers::{ContainerAsync, GenericImage};
 
+use rls2fga::classifier::function_registry::DeclaredSources;
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ConfidenceLevel,
@@ -127,15 +128,14 @@ pub(crate) fn request_predicate_holds(
     acting_role: &str,
 ) -> bool {
     match predicate {
-        RequestPredicate::Holds(atom) => {
-            let supplied = &context[atom.request_parameter.as_str()];
-            match atom.comparison {
-                RequestComparison::CallerSetHolds => supplied
-                    .as_array()
-                    .is_some_and(|set| set.iter().any(|entry| entry == atom.value.as_str())),
-                RequestComparison::CallerValueEquals => supplied == atom.value.as_str(),
+        RequestPredicate::Holds(atom) => match atom.comparison {
+            RequestComparison::CallerSetHolds => context[atom.request_parameter.as_str()]
+                .as_array()
+                .is_some_and(|set| set.iter().any(|entry| entry == atom.value.as_str())),
+            RequestComparison::CallerValueEquals => {
+                context["settings"][atom.request_parameter.as_str()] == atom.value.as_str()
             }
-        }
+        },
         RequestPredicate::ActsAs { role } => role == acting_role,
         RequestPredicate::Any(children) => children
             .iter()
@@ -733,6 +733,8 @@ struct Model<'run> {
     translation: &'run rls2fga::translator::Translation,
     /// For the case's name, which every refusal reports.
     case: &'run ParityCase,
+    /// The declared sources a check's `settings` map is built from.
+    sources: &'run DeclaredSources,
 }
 
 /// The clock parameters a check at `instant` carries, computed as a checker computes them
@@ -1002,7 +1004,8 @@ async fn run_in(
     doctor: impl FnOnce(Vec<ActionRelations>) -> Vec<ActionRelations>,
 ) -> Run {
     apply_case(conn, case);
-    let (planned, disclosed) = plan_case(case, expectation);
+    let (planned, disclosed, deployment) = plan_case(case, expectation);
+    let sources = DeclaredSources::of(&deployment);
 
     let answers = doctor(planned.translation().action_relations().to_vec());
     let naming = planned.translation().row_naming().to_vec();
@@ -1024,6 +1027,7 @@ async fn run_in(
         answers: &answers,
         translation: planned.translation(),
         case,
+        sources: &sources,
     };
     let mutations = resolved_mutations(case, &naming);
 
@@ -1063,7 +1067,11 @@ fn apply_case(conn: &mut PgConnection, case: &ParityCase) {
 fn plan_case(
     case: &ParityCase,
     expectation: Class,
-) -> (rls2fga::translator::Outputs, Vec<Disclosure>) {
+) -> (
+    rls2fga::translator::Outputs,
+    Vec<Disclosure>,
+    rls2fga::parser::sql_parser::Deployment,
+) {
     // The roles a case runs its callers as are created by its prelude and seed, and the
     // deployment resolves them in the schema it reads, so all three are read together.
     let mut source = format!(
@@ -1081,14 +1089,15 @@ fn plan_case(
         None => rls2fga::parser::sql_parser::parse_schema(&source),
     }
     .expect("schema should parse");
+    let deployment = super::deployment::caller_deployment_acting_as(
+        &case.acting_roles(),
+        case.settings.iter().cloned(),
+    );
     let (classified, db, registry) = super::classify_db_declaring(
         db,
         case.registry_json.as_deref(),
         case.monetary_locale.as_deref(),
-        &super::deployment::caller_deployment_acting_as(
-            &case.acting_roles(),
-            case.settings.iter().cloned(),
-        ),
+        &deployment,
     );
     let planned = super::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let disclosed: Vec<Disclosure> = planned
@@ -1098,7 +1107,7 @@ fn plan_case(
         .map(licence_of)
         .collect();
     hold_to_class(case, expectation, &disclosed);
-    (planned, disclosed)
+    (planned, disclosed, deployment)
 }
 
 /// Whether `sql` is one anonymous `DO` block, which sets up the database and declares no
@@ -1216,7 +1225,7 @@ async fn compare_every_pair(
                 let Some(openfga) = openfga_allows(
                     model,
                     principal,
-                    &asked_context(principal, &clock),
+                    &asked_context(principal, &clock, model.sources),
                     object,
                     statement,
                     candidate.is_some_and(|mutations| mutations.check_neutral),
@@ -1246,18 +1255,68 @@ async fn compare_every_pair(
     observations
 }
 
-/// The context a check carries, with the clock parameters where the caller needs them.
+/// The context a check carries, with the clock parameters where the caller needs them
+/// and the `settings` map beside them.
 fn asked_context(
     principal: &Principal,
     clock: &serde_json::Map<String, serde_json::Value>,
+    sources: &DeclaredSources,
 ) -> serde_json::Value {
     let mut context = principal.context.clone();
-    if principal.carries_request_time {
-        if let Some(entries) = context.as_object_mut() {
+    if let Some(entries) = context.as_object_mut() {
+        if principal.carries_request_time {
             entries.extend(clock.clone());
         }
+        entries.insert("settings".to_string(), settings_map(sources, principal));
     }
     context
+}
+
+/// The `settings` map a check carries, the one value a declared value the caller set
+/// travels under its parameter name, absent where the caller set nothing so it reads as
+/// `PostgreSQL`'s `NULL`.
+pub(crate) fn settings_map(sources: &DeclaredSources, principal: &Principal) -> serde_json::Value {
+    let mut map = serde_json::Map::new();
+    for source in sources.iter() {
+        if !source.is_scalar() {
+            continue;
+        }
+        let Some(value) = principal
+            .session
+            .iter()
+            .find(|(name, _)| name.trim().to_ascii_lowercase() == source.setting_key())
+            .map(|(_, value)| value.as_str())
+        else {
+            continue;
+        };
+        let text = if source.path().is_empty() {
+            Some(value.to_string())
+        } else {
+            jsonb_text(value, source.path())
+        };
+        if let Some(text) = text {
+            map.insert(
+                source.request_parameter().to_string(),
+                serde_json::Value::String(text),
+            );
+        }
+    }
+    serde_json::Value::Object(map)
+}
+
+/// `document` read at `path` rendered as `->>` would, so the map holds the same text
+/// `PostgreSQL` compares, and `null` leaves the key absent.
+fn jsonb_text(document: &str, path: &[String]) -> Option<String> {
+    let document = serde_json::from_str::<serde_json::Value>(document).ok()?;
+    let mut node = &document;
+    for segment in path {
+        node = node.get(segment)?;
+    }
+    match node {
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Null => None,
+        other => Some(other.to_string()),
+    }
 }
 
 /// Apply the case and compare every pair, taking the translation's answers as they are.
@@ -1474,6 +1533,10 @@ async fn compare_at_future_instant(
             let mut context = principal.context.clone();
             if let Some(entries) = context.as_object_mut() {
                 entries.extend(clock.clone());
+                entries.insert(
+                    "settings".to_string(),
+                    settings_map(model.sources, principal),
+                );
             }
             let Some(openfga) = openfga_allows(
                 model,

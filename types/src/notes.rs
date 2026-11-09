@@ -410,16 +410,21 @@ pub enum TranslationNote {
     },
     /// A condition parameter the caller has to put in every check context.
     ///
-    /// The model is complete without it, but a check that omits the key is refused by
-    /// the service outright rather than denied, so the contract is part of using the
-    /// model at all.
+    /// A list parameter and a clock parameter are carried by name, and a single value
+    /// travels in the `settings` map under its key, which is absent where the setting is
+    /// unset and reads as `NULL`. The model is complete without either, but a check
+    /// omitting what it must carry is refused by the service outright rather than
+    /// denied, so the contract is part of using the model at all.
     CallerSuppliesConditionParameter {
-        /// Parameter name every check context must use.
+        /// Parameter name every check context must use, the `settings` map's key for a
+        /// single value.
         parameter: String,
         /// The session setting it mirrors, when it mirrors one.
         setting_key: Option<String>,
-        /// Separator the policy splits that setting on, for a list parameter.
+        /// Separator the policy splits that setting on, for a delimited list parameter.
         separator: Option<String>,
+        /// Whether the parameter holds a list of values rather than one value.
+        is_list: bool,
     },
     /// The membership table grants no reads, so no membership row is visible.
     MembershipTableGrantsNoReads {
@@ -653,27 +658,36 @@ impl fmt::Display for TranslationNote {
                 parameter,
                 setting_key,
                 separator,
+                is_list,
             } => {
-                write!(
-                    f,
-                    "Every check context must carry '{parameter}'. Omitting it makes the \
-                     service refuse the check outright, where PostgreSQL would have hidden \
-                     the row"
-                )?;
-                match (setting_key, separator) {
-                    (Some(key), Some(separator)) => write!(
+                let refuse = "Omitting it makes the service refuse the check outright, \
+                              where PostgreSQL would have hidden the row";
+                match (setting_key, separator, is_list) {
+                    (Some(key), Some(separator), true) => write!(
                         f,
-                        ", so send exactly the elements string_to_array({key}, '{separator}') \
-                         would produce, and an empty list where {key} is unset. Sending your \
-                         own list instead grants a value holding '{separator}', which \
-                         PostgreSQL cannot represent in {key} and therefore refuses"
+                        "Every check context must carry the list parameter '{parameter}'. \
+                         {refuse}, so send exactly the elements string_to_array({key}, \
+                         '{separator}') would produce, and an empty list where {key} is \
+                         unset. Sending your own list instead grants a value holding \
+                         '{separator}', which PostgreSQL cannot represent in {key} and \
+                         therefore refuses"
                     ),
-                    (Some(key), None) => write!(
+                    (Some(key), None, true) => write!(
                         f,
-                        ", so send the value of {key} exactly as PostgreSQL renders it, and \
-                         an empty string where {key} is unset"
+                        "Every check context must carry the list parameter '{parameter}'. \
+                         {refuse}, so send exactly the elements of the JSON array {key} \
+                         holds, and an empty list where {key} is unset"
                     ),
-                    _ => write!(f, ""),
+                    (Some(key), _, false) => write!(
+                        f,
+                        "Every check context must carry the `settings` map. {refuse}, so \
+                         put the value of {key} in it under the key '{parameter}', exactly \
+                         as PostgreSQL renders it, and no key where {key} is unset. An \
+                         absent key reads as NULL, which admits least, so never send an \
+                         empty string in its place, which is a value that admits what \
+                         NULL does not"
+                    ),
+                    _ => write!(f, "Every check context must carry '{parameter}'. {refuse}"),
                 }
             }
             Self::UnresolvedPolicyTable { policy, named } => write!(

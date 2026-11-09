@@ -55,6 +55,7 @@ fn dsl_parameter_type(kind: &ConditionParameter) -> String {
         ConditionParameter::Scalar(type_name) => bare(type_name),
         ConditionParameter::Clock(_) => bare(TIMESTAMP_PARAMETER_TYPE),
         ConditionParameter::ListOf(element) => format!("list<{}>", bare(element)),
+        ConditionParameter::MapOf(element) => format!("map<{}>", bare(element)),
     }
 }
 
