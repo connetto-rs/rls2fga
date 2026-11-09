@@ -10,11 +10,11 @@ use sqlparser::tokenizer::{Token, Tokenizer};
 use crate::classifier::function_registry::DeclaredSources;
 use crate::classifier::recognizers::{projected_select, renaming_reason};
 use crate::parser::expr::{
-    function_arg_expr, function_call, is_coalesce_wrapped, positional_function_arg, string_literal,
-    CastChain,
+    function_arg_expr, function_call, positional_function_arg, string_literal, CastChain,
 };
 use crate::parser::names::{
-    builtin_function_name, is_current_user_keyword_name, role_keyword, RoleKeyword,
+    builtin_function_name, folded_function_name, is_current_user_keyword_name, role_keyword,
+    RoleKeyword,
 };
 use crate::types::ColumnName;
 
@@ -469,10 +469,10 @@ pub(crate) fn body_setting_fallback(
     let expr = body_single_projection(body)?;
     let (outer, peeled) = CastChain::peeled(&expr);
     let function = function_call(peeled)?;
-    if !is_coalesce_wrapped(peeled) {
-        return None;
-    }
-    let FunctionArguments::List(list) = &function.args else {
+    // The `COALESCE` argument list the body projects, since no other call is a fallback.
+    let (Some("coalesce"), FunctionArguments::List(list)) =
+        (folded_function_name(function).as_deref(), &function.args)
+    else {
         return None;
     };
     // A `COALESCE` of one source is that source, which is the setting reader above.
@@ -693,8 +693,9 @@ mod tests {
     }
 
     /// A body reads no fallback when a source it reads is not declared, when the document
-    /// of a field is cast to anything other than the `jsonb` parse, and when a cast
-    /// renames a source's value.
+    /// of a field is cast to anything other than the `jsonb` parse, when a cast renames a
+    /// source's value, and when the `COALESCE` reads one source, which is the setting
+    /// reader above.
     #[test]
     fn a_fallback_body_with_a_part_it_cannot_read_is_no_fallback() {
         let both = sources([
@@ -729,6 +730,14 @@ mod tests {
                 "SELECT coalesce(nullif(current_setting('request.jwt.claim.role', true), ''), \
                  (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role')::integer)::text",
                 &both
+            ),
+            None
+        );
+        // A `COALESCE` of one source is that source, which is the setting reader above.
+        assert_eq!(
+            body_setting_fallback(
+                "SELECT coalesce(current_setting('request.jwt.claim.role', true))",
+                &sources([scalar("request.jwt.claim.role")])
             ),
             None
         );

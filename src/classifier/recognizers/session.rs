@@ -1470,4 +1470,54 @@ mod tests {
             );
         }
     }
+
+    /// The registry reading `auth.role` as the `Supabase` fallback across the two
+    /// sources, the way a registry file spells it.
+    fn fallback_registry(registry: &mut FunctionRegistry) {
+        registry
+            .load_from_json(
+                r#"{ "auth.role": { "kind": "setting_fallback", "sources": [
+                    { "key": "request.jwt.claim.role", "skips_empty": true },
+                    { "key": "request.jwt.claims", "path": ["role"], "skips_empty": true }
+                ] } }"#,
+            )
+            .expect("the registry parses");
+    }
+
+    /// A call the registry knows as a fallback reads the sources the registry names
+    /// against the deployment, so one whose first source the deployment does not declare
+    /// is not read as the fallback, and the comparison stays unclassified in either
+    /// operand order.
+    #[test]
+    fn a_registered_fallback_whose_first_source_is_not_declared_is_not_read() {
+        let mut registry = registry([json_field(
+            "request.jwt.claims",
+            &["role"],
+            SettingValue::Scalar(DataType::Text),
+        )]);
+        fallback_registry(&mut registry);
+        for clause in [
+            "auth.role() = 'authenticated'",
+            "'authenticated' = auth.role()",
+        ] {
+            assert!(
+                recognize_session_attribute(&parse_expr(clause), &registry).is_none(),
+                "`{clause}` stays unclassified, the first source is not declared"
+            );
+        }
+    }
+
+    /// The same refusal where the first source the deployment declares hands over and a
+    /// later one the deployment does not, since every source the fallback names has to be
+    /// declared.
+    #[test]
+    fn a_registered_fallback_whose_later_source_is_not_declared_is_not_read() {
+        let mut registry = registry([scalar("request.jwt.claim.role")]);
+        fallback_registry(&mut registry);
+        assert!(
+            recognize_session_attribute(&parse_expr("auth.role() = 'authenticated'"), &registry)
+                .is_none(),
+            "a later source the deployment does not declare"
+        );
+    }
 }
