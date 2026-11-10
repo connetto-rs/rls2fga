@@ -7,6 +7,9 @@ pub(crate) mod parity;
 #[cfg(not(target_os = "windows"))]
 pub(crate) mod containers;
 
+#[cfg(not(target_os = "windows"))]
+pub(crate) mod fixture_bootstrap;
+
 pub(crate) mod deployment;
 pub(crate) mod exact_support;
 pub(crate) mod footgun;
