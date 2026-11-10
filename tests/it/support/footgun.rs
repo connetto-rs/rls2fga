@@ -96,7 +96,7 @@ pub(crate) fn overlength_name_schema(role: Option<&str>) -> String {
          CREATE POLICY inherit_upd ON {long_table} FOR UPDATE{role_clause} USING (\n\
            EXISTS (SELECT 1 FROM {long_parent} p\n\
                    WHERE p.id = {long_table}.parent_ref AND p.owner_id = current_setting('app.user_id', true)));\n",
-        role_clause = role.map(|role| format!(" TO {role}")).unwrap_or_default()
+        role_clause = role.map_or_else(String::new, |role| format!(" TO {role}"))
     )
 }
 

@@ -76,8 +76,9 @@ pub(crate) fn without_column_type_casts<DB: DatabaseLike>(
     }
     let mut query = wrapping_query::<DB>(clause.clone(), table);
     // A scope the catalog cannot build proves no column's type, so every cast stays.
-    let marked = ColumnScope::from_query(&query, db, IdentifierCase::AsWritten)
-        .map(|scope| {
+    let marked = ColumnScope::from_query(&query, db, IdentifierCase::AsWritten).map_or_else(
+        |_| BTreeSet::new(),
+        |scope| {
             let mut finder = Finder {
                 scope: &scope,
                 selects: Vec::new(),
@@ -86,8 +87,8 @@ pub(crate) fn without_column_type_casts<DB: DatabaseLike>(
             let walk = Visit::visit(&query, &mut finder);
             debug_assert!(walk.is_continue(), "the search never breaks");
             finder.marked
-        })
-        .unwrap_or_default();
+        },
+    );
     if marked.is_empty() {
         return clause.clone();
     }
@@ -361,6 +362,33 @@ mod tests {
             rewritten.contains("m.joined_on > '2026-01-01'::DATE")
                 && rewritten.contains("docs.day_on > '2026-01-01'")
                 && !rewritten.contains("docs.day_on > '2026-01-01'::DATE"),
+            "{rewritten}"
+        );
+    }
+
+    /// The clause names a relation in three parts, which the two-part catalog
+    /// cannot hold, so its scope fails to build and the cast beside a stored
+    /// column of the type it names stays.
+    #[test]
+    fn a_cast_stays_when_the_scope_cannot_be_built() {
+        let db = parse_schema(
+            "CREATE TABLE docs (id INT PRIMARY KEY, day_on DATE);
+             CREATE POLICY p ON docs USING (day_on > '2026-01-01'::date
+               AND EXISTS (SELECT 1 FROM other.public.docs));",
+        )
+        .expect("the schema parses");
+        let policy = db.policies().next().expect("the schema declares p");
+        let clause = policy
+            .using_expression(&db)
+            .expect("the literals read")
+            .expect("p stores a USING clause");
+        let table = db
+            .resolve_target_table(TargetName::new("docs", false), IdentifierCase::AsWritten)
+            .expect("docs resolves")
+            .expect("docs exists");
+        let rewritten = without_column_type_casts(clause, table, &db).to_string();
+        assert!(
+            rewritten.contains("day_on > '2026-01-01'::DATE"),
             "{rewritten}"
         );
     }

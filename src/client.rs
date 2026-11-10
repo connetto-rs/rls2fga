@@ -1,7 +1,7 @@
 //! Put a generated model on a running `OpenFGA` server.
 //!
 //! The only thing here a consumer could not write for itself is the guarantee:
-//! that [`AuthorizationModel`](crate::generator::json_model::AuthorizationModel)
+//! that [`crate::generator::json_model::AuthorizationModel`]
 //! serializes into what the write call accepts. It is kept here so a rename in
 //! the emitted model breaks this crate's own tests rather than a consumer's.
 //!

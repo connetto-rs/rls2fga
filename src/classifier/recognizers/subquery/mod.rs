@@ -2248,9 +2248,9 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
     let mut fk_col_is_explicit = false; // true only when found via an explicit `join_col = outer_col` predicate
     let mut user_col: Option<(ColumnName, MemberMatch)> = None;
     let mut extras: Vec<ResidualPredicate> = Vec::new();
-    let unqualified_scope = db
-        .map(|db| build_unqualified_membership_scope(select, db, join_table, join_cols))
-        .unwrap_or_default();
+    let unqualified_scope = db.map_or_else(Default::default, |db| {
+        build_unqualified_membership_scope(select, db, join_table, join_cols)
+    });
     let session_zoned_columns = db
         .and_then(|db| lookup_table(db, join_table).map(|table| session_zoned_columns(table, db)))
         .unwrap_or_default();

@@ -144,16 +144,16 @@ fn fold_binary(first: Expr, exprs: impl IntoIterator<Item = Expr>, op: &BinaryOp
 /// The columns of the guarded table whose comparison with a literal the session `TimeZone`
 /// decides, none where the schema does not place the table.
 fn zoned_columns<DB: DatabaseLike>(db: &DB, table: &str) -> Vec<String> {
-    lookup_table(db, table)
-        .map(|guarded| recognizers::session_zoned_columns(guarded, db))
-        .unwrap_or_default()
+    lookup_table(db, table).map_or_else(Vec::new, |guarded| {
+        recognizers::session_zoned_columns(guarded, db)
+    })
 }
 
 /// The date and time columns of the guarded table, none where the schema does not place it.
 fn temporal_columns<DB: DatabaseLike>(db: &DB, table: &str) -> recognizers::TemporalColumns {
-    lookup_table(db, table)
-        .map(|guarded| recognizers::TemporalColumns::of(guarded, db))
-        .unwrap_or_default()
+    lookup_table(db, table).map_or_else(recognizers::TemporalColumns::default, |guarded| {
+        recognizers::TemporalColumns::of(guarded, db)
+    })
 }
 
 fn unknown_d(expr: &Expr, reason: impl Into<String>) -> ClassifiedExpr {

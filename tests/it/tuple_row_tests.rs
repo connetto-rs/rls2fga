@@ -287,19 +287,15 @@ fn every_record_a_row_yields_survives_the_trip_through_its_own_sql_row() {
         )
         .expect("a pure description answers from the row");
         for record in records {
-            let context_json = record
-                .context
-                .as_ref()
-                .map(|context| {
-                    let body = context
-                        .values
-                        .iter()
-                        .map(|(key, value)| format!(r#""{key}":"{value}""#))
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    format!("{{{body}}}")
-                })
-                .unwrap_or_default();
+            let context_json = record.context.as_ref().map_or_else(String::new, |context| {
+                let body = context
+                    .values
+                    .iter()
+                    .map(|(key, value)| format!(r#""{key}":"{value}""#))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("{{{body}}}")
+            });
             let back: Record = outputs
                 .record_from_tuple_row(TupleRow {
                     object: &record.object,

@@ -206,8 +206,7 @@ fn compared_operands<'e>(
         } => {
             return sole_projection(subquery)
                 .and_then(|projected| request_read(projected, registry))
-                .map(|read| vec![(tested.as_ref(), read)])
-                .unwrap_or_default();
+                .map_or_else(Vec::new, |read| vec![(tested.as_ref(), read)]);
         }
         _ => return Vec::new(),
     };

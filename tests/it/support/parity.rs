@@ -351,8 +351,10 @@ impl ParityCase {
                 .ok();
         case.settings =
             std::fs::read_to_string(super::fixture_dir(fixture).join("deployment.json"))
-                .map(|json| super::deployment::settings_from_json(&json))
-                .unwrap_or_default();
+                .map_or_else(
+                    |_| Vec::new(),
+                    |json| super::deployment::settings_from_json(&json),
+                );
         case
     }
 
