@@ -62,7 +62,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id',
     );
 
     let docs = &entries[0];
-    assert_eq!(docs.table.to_string(), "docs");
+    assert_eq!(docs.table.to_string(), "public.docs");
     assert_eq!(docs.key.parts(), [ValueSource::column("id")].as_slice());
     assert!(
         planned
@@ -85,7 +85,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id',
     let db: ParserDB = support::deployment::db(sql);
     let planned = translate(&db);
     let entries = planned.row_naming();
-    let docs = entry(entries, "docs");
+    let docs = entry(entries, "public.docs");
     let subject = row(&[("id", "a|b"), ("owner", "alice")]);
 
     let rendered = docs
@@ -101,7 +101,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id',
             matches!(
                 &shape.derivation,
                 RecordDerivation::FromRow { table, template, .. }
-                    if table.to_string() == "docs" && template.object_type == docs.type_name
+                    if table.to_string() == "public.docs" && template.object_type == docs.type_name
             )
         })
         .expect("the ownership shape names a docs object from a docs row");
@@ -121,7 +121,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner = current_setting('app.user_id',
     let db: ParserDB = support::deployment::db(sql);
     let planned = translate(&db);
     let entries = planned.row_naming();
-    let docs = entry(entries, "docs");
+    let docs = entry(entries, "public.docs");
     let subject = row(&[("id", "{a,b}"), ("owner", "alice")]);
 
     assert_eq!(
@@ -174,8 +174,8 @@ CREATE POLICY p ON docs FOR SELECT USING (
 CREATE POLICY q ON doc_acl FOR SELECT USING (grantee = current_setting('app.user_id', true));
 ",
     );
-    assert_eq!(entry(&entries, "doc_acl").type_name, "doc_acl");
-    assert_eq!(entry(&entries, "docs").type_name, "docs");
+    assert_eq!(entry(&entries, "public.doc_acl").type_name, "doc_acl");
+    assert_eq!(entry(&entries, "public.docs").type_name, "docs");
 }
 
 /// Assertion 5: a table the model grants nobody still has to be nameable, since naming
@@ -188,7 +188,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner LIKE '%x%');
 ",
     );
-    assert_eq!(entry(&entries, "docs").type_name, "docs");
+    assert_eq!(entry(&entries, "public.docs").type_name, "docs");
 }
 
 /// Assertion 6: a row the model cannot name has no entry rather than an empty one. The
@@ -224,8 +224,8 @@ CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = docs.project_id AND p.owner = {CALLER}));
 "
     ));
-    assert_eq!(entry(&entries, "projects").type_name, "projects");
-    assert_eq!(entry(&entries, "docs").type_name, "docs");
+    assert_eq!(entry(&entries, "public.projects").type_name, "projects");
+    assert_eq!(entry(&entries, "public.docs").type_name, "docs");
 }
 
 /// A parent reached through a membership table is named after the table the foreign key
@@ -241,11 +241,11 @@ CREATE POLICY p ON docs FOR SELECT USING (
   project_id IN (SELECT project_id FROM project_members WHERE user_id = {CALLER}));
 "
     ));
-    assert_eq!(entry(&entries, "projects").type_name, "projects");
+    assert_eq!(entry(&entries, "public.projects").type_name, "projects");
     assert!(
         entries
             .iter()
-            .all(|entry| entry.table.to_string() != "project_members"),
+            .all(|entry| entry.table.to_string() != "public.project_members"),
         "the membership table carries no type of its own here, got {entries:?}"
     );
 }
@@ -262,11 +262,11 @@ CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = {CALLER}));
 "
     ));
-    assert_eq!(entry(&entries, "docs").type_name, "docs");
+    assert_eq!(entry(&entries, "public.docs").type_name, "docs");
     assert!(
         entries
             .iter()
-            .all(|entry| entry.table.to_string() != "doc_members"
+            .all(|entry| entry.table.to_string() != "public.doc_members"
                 && entry.type_name.as_str() != "doc"),
         "a type named after a column names no table's rows, got {entries:?}"
     );
@@ -286,11 +286,11 @@ ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON events FOR SELECT USING (tenant = {CALLER});
 "
     ));
-    let partition = entry(&entries, "events_2026");
+    let partition = entry(&entries, "public.events_2026");
     assert_eq!(partition.type_name, "events");
     assert_eq!(
         partition.key.parts(),
-        entry(&entries, "events").key.parts(),
+        entry(&entries, "public.events").key.parts(),
         "the partition is keyed exactly as the root is"
     );
     assert_eq!(
@@ -314,7 +314,7 @@ ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON events FOR SELECT USING (tenant = {CALLER});
 "
     ));
-    assert_eq!(entry(&entries, "events_2026_h1").type_name, "events");
+    assert_eq!(entry(&entries, "public.events_2026_h1").type_name, "events");
 }
 
 /// A partition carrying its own policy already has a type, and its rows are named once.
@@ -337,7 +337,7 @@ CREATE POLICY p ON events_eu FOR SELECT USING (tenant = {CALLER});
     ));
     let named: Vec<&str> = entries
         .iter()
-        .filter(|entry| entry.table.to_string() == "events_eu")
+        .filter(|entry| entry.table.to_string() == "public.events_eu")
         .map(|entry| entry.type_name.as_str())
         .collect();
     assert_eq!(named, ["events_eu"], "one entry, its own");
@@ -354,11 +354,11 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner = {CALLER});
 "
     ));
-    assert_eq!(entry(&entries, "docs").type_name, "docs");
+    assert_eq!(entry(&entries, "public.docs").type_name, "docs");
     assert!(
         entries
             .iter()
-            .all(|entry| entry.table.to_string() != "secret_docs"),
+            .all(|entry| entry.table.to_string() != "public.secret_docs"),
         "a child of an inheritance parent carries no name, got {entries:?}"
     );
 }

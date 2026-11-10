@@ -319,7 +319,10 @@ where
     T: sql_traits::prelude::TableLike,
 {
     TableId::from_stored(
-        table.stored_table_schema().map(Into::into),
+        table
+            .stored_table_schema()
+            .filter(|schema| schema != "public")
+            .map(Into::into),
         table.stored_table_name().into(),
     )
 }
@@ -331,7 +334,7 @@ where
     lookup_table(db, name).map(table_identity)
 }
 
-/// The table an identity names, through the catalog's stored-identity index.
+/// Resolve an identity in its own schema, independently of the session search path.
 pub(crate) fn lookup_table_id<'db, DB>(
     db: &'db DB,
     identity: &TableId,
@@ -339,7 +342,13 @@ pub(crate) fn lookup_table_id<'db, DB>(
 where
     DB: sql_traits::prelude::DatabaseLike,
 {
-    db.table_by_stored_identity(identity.schema(), identity.name())
+    db.table_by_target(
+        sql_traits::structs::TargetName::new(identity.name(), true)
+            .with_schema(identity.schema().unwrap_or("public"), true),
+        sql_traits::prelude::IdentifierCase::AsWritten,
+    )
+    .ok()
+    .flatten()
 }
 
 pub(crate) fn table_id_has_column<DB>(db: &DB, table: &TableId, column: &str) -> bool
@@ -385,6 +394,31 @@ mod tests {
                 table.table_name().to_string(),
             )
         })
+    }
+
+    #[test]
+    fn default_schema_identity_ignores_the_session_search_path() {
+        for declaration in [
+            "CREATE TABLE docs(id INT PRIMARY KEY);",
+            "CREATE TABLE public.docs(id INT PRIMARY KEY);",
+        ] {
+            let db = parse_schema(&format!(
+                "CREATE SCHEMA other;
+                 CREATE TABLE other.docs(id INT PRIMARY KEY);
+                 {declaration}
+                 SET search_path = other, public;"
+            ))
+            .expect("schema");
+            let identity = TableId::from_stored(None, "docs".to_string());
+            let table = lookup_table_id(&db, &identity).expect("public table");
+            assert_eq!(
+                table.stored_table_schema().as_deref().unwrap_or("public"),
+                "public"
+            );
+            assert_eq!(table_identity(table), identity);
+            let rendered = lookup_table(&db, &identity.to_string()).expect("rendered identity");
+            assert_eq!(table_identity(rendered), identity);
+        }
     }
 
     #[test]

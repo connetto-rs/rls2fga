@@ -110,7 +110,7 @@ fn a_composite_key_membership_row_keys_its_object_on_every_join_column() {
         .filter_map(|shape| match &shape.derivation {
             RecordDerivation::FromRow {
                 table, template, ..
-            } if table.to_string() == "s2" => Some(template.object_key.parts().len()),
+            } if table.to_string() == "public.s2" => Some(template.object_key.parts().len()),
             _ => None,
         })
         .collect();
@@ -139,7 +139,7 @@ fn a_composite_key_membership_bound_query_binds_every_join_column() {
             _ => None,
         })
         .flatten()
-        .filter(|query| query.table().to_string() == "s2")
+        .filter(|query| query.table().to_string() == "public.s2")
         .map(|query| {
             query
                 .key_columns()

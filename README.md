@@ -114,7 +114,7 @@ AND "id" IS NOT NULL;
 -- documents admits requests acting as PostgreSQL role 'web_user', which the deployment decides rather than any row
 SELECT 'request_gate:documents' AS object, 'acting_web_user' AS relation, 'pg_role:web_user' || '#usage' AS subject;
 
--- Every documents row is judged by the scope documents
+-- Every public.documents row is judged by the scope documents
 SELECT 'documents:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:documents' AS subject
 FROM "public"."documents"
 WHERE "id" IS NOT NULL;

@@ -323,7 +323,7 @@ fn a_direct_ownership_relation_carries_one_shape_from_its_own_row() {
     else {
         panic!("ownership resolves from the row: {:#?}", owned.shapes[0]);
     };
-    assert_eq!(table.to_string(), "docs");
+    assert_eq!(table.to_string(), "public.docs");
     assert_eq!(template.object_type, owned.type_name);
     assert_eq!(template.relation, owned.relation);
     assert_eq!(template.object_key.parts(), [ValueSource::column("id")]);
@@ -368,7 +368,7 @@ fn a_compound_key_ownership_relation_is_decided_by_its_own_row() {
     else {
         panic!("ownership resolves from the row: {:#?}", owned.shapes[0]);
     };
-    assert_eq!(table.to_string(), "shares");
+    assert_eq!(table.to_string(), "public.shares");
     assert_eq!(
         template.object_key.parts(),
         [
@@ -1047,7 +1047,7 @@ fn a_holder_relation_carries_the_shapes_that_fill_it() {
     else {
         unreachable!("checked above");
     };
-    assert_eq!(table.to_string(), "docs");
+    assert_eq!(table.to_string(), "public.docs");
     assert_eq!(template.object_type, bridge.type_name);
     assert_eq!(template.relation, bridge.relation);
     assert_eq!(template.object_key.parts(), [ValueSource::column("id")]);
@@ -1075,7 +1075,7 @@ fn a_holder_relation_carries_the_shapes_that_fill_it() {
     else {
         panic!("a member list with no residual predicate follows from its own row");
     };
-    assert_eq!(table.to_string(), "staff");
+    assert_eq!(table.to_string(), "public.staff");
     assert_eq!(template.object_type, members.type_name);
     assert_eq!(template.relation, members.relation);
     assert_eq!(
@@ -1111,7 +1111,7 @@ fn a_holder_member_list_with_a_clock_conditions_its_member_tuple() {
         );
     };
     assert_eq!(queries.len(), 1, "one table carries the change");
-    assert_eq!(queries[0].table().to_string(), "reviewers");
+    assert_eq!(queries[0].table().to_string(), "public.reviewers");
     assert_eq!(queries[0].key_columns(), ["user_id"]);
     assert_eq!(
         queries[0].scope(),
@@ -1176,7 +1176,7 @@ CREATE POLICY memos_reviewers ON memos FOR SELECT USING (EXISTS (SELECT 1 FROM r
     else {
         panic!("the row decides the residual: {holder:?}");
     };
-    assert_eq!(table.to_string(), "reviewers");
+    assert_eq!(table.to_string(), "public.reviewers");
     assert_eq!(template.subject_key.part(), &ValueSource::column("user_id"));
     assert!(
         matches!(
@@ -1243,7 +1243,7 @@ CREATE POLICY memos_reviewers ON memos FOR SELECT USING (EXISTS (SELECT 1 FROM r
     else {
         panic!("one unique member row decides the holder member: {holder:?}");
     };
-    assert_eq!(table.to_string(), "reviewers");
+    assert_eq!(table.to_string(), "public.reviewers");
     assert_eq!(template.subject_key.part(), &ValueSource::column("user_id"));
     let context = template
         .context
@@ -2217,7 +2217,7 @@ fn a_policy_bound_to_a_ddl_time_role_undecides_what_it_would_have_widened() {
                 role,
                 commands,
                 ..
-            } if table.to_string() == "docs"
+            } if table.to_string() == "public.docs"
                 && role == "app_user"
                 && commands.iter().any(|command| *command == "SELECT")
         )),
@@ -2318,11 +2318,11 @@ fn every_declared_clause_reaches_the_summary_or_a_note_that_names_it() {
             .iter()
             .map(|note| note.subject().into_owned())
             .collect();
-        let looping: BTreeSet<String> = outputs
+        let looping: BTreeSet<TableId> = outputs
             .notes()
             .iter()
             .filter_map(|note| match note {
-                TranslationNote::PolicyReadRecursion { table, .. } => Some(table.to_string()),
+                TranslationNote::PolicyReadRecursion { table, .. } => Some(table.clone()),
                 _ => None,
             })
             .collect();
@@ -2330,6 +2330,12 @@ fn every_declared_clause_reaches_the_summary_or_a_note_that_names_it() {
         for policy in db.policies() {
             let name = policy.name().to_string();
             let table = policy.target_table_name().to_string();
+            let target = lookup_table(&db, &table).map(|found| {
+                TableId::from_stored(
+                    found.stored_table_schema().map(Into::into),
+                    found.stored_table_name().into(),
+                )
+            });
             for (label, stored) in [
                 (
                     "USING",
@@ -2357,7 +2363,9 @@ fn every_declared_clause_reaches_the_summary_or_a_note_that_names_it() {
                 };
                 if surviving.contains(survivor.as_str())
                     || named.contains(name.as_str())
-                    || looping.contains(table.as_str())
+                    || target
+                        .as_ref()
+                        .is_some_and(|identity| looping.contains(identity))
                 {
                     continue;
                 }
@@ -2557,7 +2565,7 @@ fn a_share_recorded_elsewhere_settles_from_the_share_row() {
             .iter()
             .map(ToString::to_string)
             .collect::<Vec<_>>(),
-        vec!["paper_shares".to_string()],
+        vec!["public.paper_shares".to_string()],
         "the deciding rows live on the sharing table"
     );
     let RecordDerivation::FromRow {
@@ -2571,7 +2579,7 @@ fn a_share_recorded_elsewhere_settles_from_the_share_row() {
             shape.derivation
         );
     };
-    assert_eq!(table.to_string(), "paper_shares");
+    assert_eq!(table.to_string(), "public.paper_shares");
     assert_eq!(template.object_type, "paper_shares_share");
     assert_eq!(
         template.object_key.parts(),
@@ -2719,7 +2727,7 @@ fn a_clock_gated_record_names_the_condition_its_context_carries() {
             shape.derivation
         );
     };
-    assert_eq!(table.to_string(), "readings");
+    assert_eq!(table.to_string(), "public.readings");
     assert_eq!(
         template.object_key.parts(),
         [
@@ -3252,7 +3260,7 @@ fn every_replay_declares_the_slice_its_result_determines() {
     for query in &joined {
         assert_eq!(
             query.table().to_string(),
-            "owner_grants",
+            "public.owner_grants",
             "only the grant table needs a replay here: {query:?}"
         );
         assert_eq!(
@@ -3693,7 +3701,7 @@ fn a_cross_row_residual_names_every_relation_it_reads() {
         .map(ToString::to_string)
         .collect();
     assert!(
-        tables.contains("paper_shares") && tables.contains("tiers"),
+        tables.contains("public.paper_shares") && tables.contains("public.tiers"),
         "the aggregate's relation belongs in the table list, got {tables:?}"
     );
 }
@@ -3755,7 +3763,7 @@ fn a_cross_row_residual_discloses_the_relations_its_proof_rests_on() {
         .expect("the exemption is disclosed");
     let named: BTreeSet<String> = disclosure.iter().map(ToString::to_string).collect();
     assert!(
-        named.contains("tiers"),
+        named.contains("public.tiers"),
         "the relation the proof rests on is named, got {named:?}"
     );
     assert!(
@@ -3811,7 +3819,7 @@ fn a_caller_set_membership_discloses_the_relations_its_proof_rests_on() {
         .expect("the exemption is disclosed on the caller-set route too");
     let named: BTreeSet<String> = disclosure.iter().map(ToString::to_string).collect();
     assert!(
-        named.contains("tiers"),
+        named.contains("public.tiers"),
         "the relation the proof rests on is named, got {named:?}"
     );
 }

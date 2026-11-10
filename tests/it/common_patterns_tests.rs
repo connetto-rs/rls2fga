@@ -181,7 +181,7 @@ fn in_subquery_membership() {
 
     match &classification.pattern {
         PatternClass::P4ExistsMembership(ExistsMembership { join_table, .. }) => {
-            assert_eq!(join_table.to_string(), "team_members");
+            assert_eq!(join_table.to_string(), "public.team_members");
             assert_eq!(classification.confidence, ConfidenceLevel::A);
         }
         other => {
@@ -218,7 +218,7 @@ fn fixture_wrapped_membership_predicate_translates_without_alias_leak() {
                 pairs,
                 user_column,
                 ..
-            }) if join_table.to_string() == "doc_members"
+            }) if join_table.to_string() == "public.doc_members"
                 && matches!(pairs.as_slice(), [pair] if pair.join_column == "doc_id")
                 && user_column == "user_id"
         ),

@@ -38,7 +38,7 @@ CREATE POLICY docs_tree ON docs FOR SELECT USING (
             matches!(
                 note,
                 TranslationNote::PolicyReadRecursion { table, role, commands, relation }
-                    if table.to_string() == "docs"
+                    if table.to_string() == "public.docs"
                         && role == "app_user"
                         && commands == &["SELECT".to_string()]
                         && relation == "docs"
@@ -183,7 +183,7 @@ fn a_read_cycle_across_two_tables_denies_both() {
                     commands,
                     relation,
                 }
-                    if spelling.to_string() == table
+                    if spelling.to_string() == format!("public.{table}")
                         && role == "app_user"
                         && commands == &["SELECT".to_string()]
                         && relation == table
@@ -320,7 +320,7 @@ CREATE POLICY px ON x FOR SELECT USING (owner_id = current_setting('app.user_id'
         outputs
             .notes()
             .iter()
-            .any(|note| { note.subject() == "x" && note.message().contains("recursion") }),
+            .any(|note| { note.subject() == "public.x" && note.message().contains("recursion") }),
         "the operator must be told why 'x' denies, got {:#?}",
         outputs.notes()
     );
@@ -387,9 +387,10 @@ CREATE POLICY pb ON b FOR SELECT USING (owner_id = current_user
             "every read of '{table}' raises infinite recursion:\n{dsl}"
         );
         assert!(
-            outputs.notes().iter().any(
-                |note| note.subject() == table && note.message().contains("infinite recursion")
-            ),
+            outputs.notes().iter().any(|note| {
+                note.subject() == format!("public.{table}")
+                    && note.message().contains("infinite recursion")
+            }),
             "no note walks the loop for '{table}', got {:#?}",
             outputs.notes()
         );
@@ -434,7 +435,7 @@ CREATE POLICY pdi_loop ON docs FOR INSERT WITH CHECK (
             matches!(
                 note,
                 TranslationNote::PolicyReadRecursion { table, role, commands, relation }
-                    if table.to_string() == "docs"
+                    if table.to_string() == "public.docs"
                         && role == "app_user"
                         && commands == &["INSERT".to_string()]
                         && relation == "m"
@@ -448,7 +449,7 @@ CREATE POLICY pdi_loop ON docs FOR INSERT WITH CHECK (
             matches!(
                 note,
                 TranslationNote::PolicyReadRecursion { table, commands, .. }
-                    if table.to_string() == "docs"
+                    if table.to_string() == "public.docs"
                         && commands.iter().any(|command| command == "SELECT")
             )
         }),
@@ -504,7 +505,7 @@ CREATE POLICY pdu ON docs FOR UPDATE USING (owner_id = current_setting('app.user
             matches!(
                 note,
                 TranslationNote::PolicyReadRecursion { table, role, commands, relation }
-                    if table.to_string() == "docs"
+                    if table.to_string() == "public.docs"
                         && role == "app_user"
                         && commands == &["UPDATE".to_string()]
                         && relation == "m"
@@ -520,7 +521,7 @@ CREATE POLICY pdu ON docs FOR UPDATE USING (owner_id = current_setting('app.user
             matches!(
                 note,
                 TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
-                    if join_table.to_string() == "m"
+                    if join_table.to_string() == "public.m"
             )
         }),
         "no membership row of 'm' is visible, so the note must say so, got {:#?}",
@@ -609,7 +610,7 @@ CREATE POLICY docs_tree ON docs FOR SELECT TO auditor USING (
             matches!(
                 note,
                 TranslationNote::RowSecurityRefused { table, role, commands, reason, .. }
-                    if table.to_string() == "docs"
+                    if table.to_string() == "public.docs"
                         && role == "app_user"
                         && commands == &["SELECT".to_string()]
                         && reason.contains("auditor")
@@ -842,7 +843,7 @@ fn assert_looping_membership_is_silent(db: &ParserDB, spelling: &str) {
             matches!(
                 note,
                 TranslationNote::PolicyReadRecursion { table, role, commands, relation }
-                    if table.to_string() == "docs"
+                    if table.to_string() == "public.docs"
                         && role == "app_user"
                         && commands == &["SELECT".to_string()]
                         && relation == "m"
@@ -856,7 +857,7 @@ fn assert_looping_membership_is_silent(db: &ParserDB, spelling: &str) {
             matches!(
                 note,
                 TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
-                    if join_table.to_string() == "m"
+                    if join_table.to_string() == "public.m"
             )
         }),
         "{spelling}: no membership row of 'm' is visible, so the note must say so, \

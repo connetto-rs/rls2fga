@@ -65,8 +65,8 @@ fn disambiguated_type_receives_tuples_under_its_own_type_name() {
     );
 
     for (from_clause, expected_type) in [
-        (r#"FROM "app"."docs""#, "docs"),
-        (r#"FROM "public"."docs""#, renamed.as_str()),
+        (r#"FROM "app"."docs""#, renamed.as_str()),
+        (r#"FROM "public"."docs""#, "docs"),
     ] {
         let matching = ownership
             .iter()
@@ -903,13 +903,23 @@ fn valid_extended_well_known_type_name_keeps_its_exact_spelling() {
 #[test]
 fn collision_suffixed_table_type_cannot_alias_a_configured_principal_type() {
     let db = db_of(COLLIDING_SCHEMAS);
-    let names = custom_well_known_types("team", "docs_83297e85");
+    let planned = translator(ConfidenceLevel::A)
+        .translate(&db)
+        .expect("translation should plan");
+    let renamed = planned
+        .row_naming()
+        .iter()
+        .find(|entry| entry.type_name.as_str() != "docs")
+        .expect("collision names a second type")
+        .type_name
+        .as_str();
+    let names = custom_well_known_types("team", renamed);
     let error = translator_with_types(names)
         .translate(&db)
         .expect_err("reserved suffixed type must be refused");
     let message = error.to_string();
     assert!(
-        message.contains("docs_83297e85") && message.contains("well-known type"),
+        message.contains(renamed) && message.contains("well-known type"),
         "reserved collision not reported: {message}"
     );
 }

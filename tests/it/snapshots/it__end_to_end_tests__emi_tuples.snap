@@ -12,18 +12,18 @@ FROM "public"."team_members"
 WHERE "team_id" IS NOT NULL
 AND "user_id" IS NOT NULL;
 
--- ownables to owner_grants_owner bridge for tuple-to-userset
+-- public.ownables to owner_grants_owner bridge for tuple-to-userset
 SELECT 'ownables:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_id' AS relation, 'owner_grants_owner:' || CASE WHEN "owner_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "owner_id"::text ELSE '~' || encode(convert_to("owner_id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."ownables"
 WHERE "id" IS NOT NULL
 AND "owner_id" IS NOT NULL;
 
--- Owner identities that are rows of users
+-- Owner identities that are rows of public.users
 SELECT 'owner_grants_owner:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_user' AS relation, 'user:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."users"
 WHERE "id" IS NOT NULL;
 
--- Owner identities that are rows of teams
+-- Owner identities that are rows of public.teams
 SELECT 'owner_grants_owner:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'owner_team' AS relation, 'team_members_team:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."teams"
 WHERE "id" IS NOT NULL;

@@ -118,7 +118,7 @@ fn unrestricted(sql: &str) -> Vec<String> {
 
 #[test]
 fn a_table_without_row_level_security_is_reported_unrestricted() {
-    assert_eq!(unrestricted(NO_ROW_LEVEL_SECURITY), vec!["orders"]);
+    assert_eq!(unrestricted(NO_ROW_LEVEL_SECURITY), vec!["public.orders"]);
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn the_open_table_and_the_closed_one_are_answered_by_different_surfaces() {
 
 #[test]
 fn only_the_open_table_of_a_mixed_schema_is_reported() {
-    assert_eq!(unrestricted(GUARDED_AND_OPEN), vec!["orders"]);
+    assert_eq!(unrestricted(GUARDED_AND_OPEN), vec!["public.orders"]);
 }
 
 /// A table the model gives a type to is still reported, so a consumer has one place to
@@ -159,7 +159,7 @@ fn only_the_open_table_of_a_mixed_schema_is_reported() {
 fn a_table_the_model_types_but_the_database_leaves_open_is_reported_too() {
     assert_eq!(
         unrestricted(UNRESTRICTED_PARENT),
-        vec!["project_members", "projects"]
+        vec!["public.project_members", "public.projects"]
     );
 }
 
@@ -227,7 +227,7 @@ fn a_table_no_key_names_rows_of_is_reported_unrestricted() {
             .iter()
             .map(|entry| entry.table.to_string())
             .collect::<Vec<String>>(),
-        vec!["audit"]
+        vec!["public.audit"]
     );
 }
 
@@ -244,7 +244,7 @@ fn a_partition_of_a_guarded_root_is_not_reported_unrestricted() {
 /// open root applies the partition's policy to nothing and returns both rows.
 #[test]
 fn an_open_root_over_a_guarded_partition_is_still_reported() {
-    assert_eq!(unrestricted(OPEN_PARTITION_ROOT), vec!["events"]);
+    assert_eq!(unrestricted(OPEN_PARTITION_ROOT), vec!["public.events"]);
 }
 
 /// Verified on `PostgreSQL` 18: reading the guarded parent applies its policy to the

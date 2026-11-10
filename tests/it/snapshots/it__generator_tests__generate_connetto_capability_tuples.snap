@@ -11,7 +11,7 @@ SELECT 'paper_shares:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9.
 FROM "public"."paper_shares"
 WHERE "paper_id" IS NOT NULL AND "viewer" IS NOT NULL AND length('paper_shares:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 256;
 
--- paper_shares to papers bridge for tuple-to-userset
+-- public.paper_shares to papers bridge for tuple-to-userset
 SELECT 'paper_shares:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'papers' AS relation, 'papers:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END AS subject
 FROM "public"."paper_shares"
 WHERE "paper_id" IS NOT NULL
@@ -29,12 +29,12 @@ AND "viewer" IS NOT NULL;
 -- paper_shares admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
 SELECT 'request_gate:paper_shares' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
 
--- Every paper_shares row is judged by the scope paper_shares
+-- Every public.paper_shares row is judged by the scope paper_shares
 SELECT 'paper_shares:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:paper_shares' AS subject
 FROM "public"."paper_shares"
 WHERE "paper_id" IS NOT NULL AND "viewer" IS NOT NULL AND length('paper_shares:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END) <= 256;
 
--- Caller-set share on paper_shares_share carrying paper_shares.viewer, evaluated by condition when_viewer_in_app_subjects_394712ea
+-- Caller-set share on paper_shares_share carrying public.paper_shares.viewer, evaluated by condition when_viewer_in_app_subjects_394712ea
 SELECT 'paper_shares_share:' || CASE WHEN "paper_id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "paper_id"::text ELSE '~' || encode(convert_to("paper_id"::text, 'UTF8'), 'hex') END || '|' || CASE WHEN "viewer"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "viewer"::text ELSE '~' || encode(convert_to("viewer"::text, 'UTF8'), 'hex') END AS object, 'gate_papers_p_3b273139' AS relation, 'user:*' AS subject,
   'when_viewer_in_app_subjects_394712ea' AS condition, jsonb_build_object('viewer', "viewer"::text) AS context
 FROM "public"."paper_shares"
@@ -58,7 +58,7 @@ AND octet_length('paper_shares_share:' || CASE WHEN "paper_id"::text COLLATE "C"
 -- papers admits requests acting as PostgreSQL role 'app_user', which the deployment decides rather than any row
 SELECT 'request_gate:papers' AS object, 'acting_app_user' AS relation, 'pg_role:app_user' || '#usage' AS subject;
 
--- Every papers row is judged by the scope papers
+-- Every public.papers row is judged by the scope papers
 SELECT 'papers:' || CASE WHEN "id"::text COLLATE "C" ~ '^[A-Za-z0-9._@-]+$' THEN "id"::text ELSE '~' || encode(convert_to("id"::text, 'UTF8'), 'hex') END AS object, 'request_gate' AS relation, 'request_gate:papers' AS subject
 FROM "public"."papers"
 WHERE "id" IS NOT NULL;

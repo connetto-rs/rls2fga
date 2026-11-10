@@ -13,7 +13,7 @@ use crate::classifier::recognizers::{
     diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_p4, recognize_p4_in_subquery,
     renaming_casts, unparenthesize,
 };
-use crate::parser::names::lookup_table_id;
+use crate::parser::names::{lookup_table_id, table_identity};
 use crate::parser::sql_parser::DatabaseLike;
 use crate::types::{ColumnName, TableId};
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
@@ -295,10 +295,7 @@ fn table_guarded_by_rls<DB: DatabaseLike>(db: &DB, table: &TableId) -> bool {
             .flatten()
             .chain(current.partition_root(db).ok().flatten())
         {
-            let identity = TableId::from_stored(
-                parent.stored_table_schema().map(Into::into),
-                parent.stored_table_name().into(),
-            );
+            let identity = table_identity(parent);
             if !seen.contains(&identity) {
                 frontier.push(identity);
             }

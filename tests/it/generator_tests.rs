@@ -465,7 +465,7 @@ fn generate_shared_owner_grants_model_and_tuples() {
     );
     assert_eq!(
         script
-            .matches("Owner identities that are rows of users")
+            .matches("Owner identities that are rows of public.users")
             .count(),
         1,
         "the identity facts load once for both tables:\n{script}"
