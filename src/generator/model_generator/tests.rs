@@ -790,17 +790,16 @@ fn build_schema_plan_denies_every_action_when_no_clause_translates() {
             "{relation} should deny when nothing translated"
         );
     }
-    let messages: Vec<String> = plan.notes.iter().map(TranslationNote::message).collect();
-    assert!(
-        messages.iter().any(|message| message
-            .contains("Every permissive policy on 'docs' covering SELECT fell below")),
-        "the schema has a SELECT policy, it did not translate: {messages:#?}"
-    );
-    assert!(
-        messages.iter().any(|message| message
-            .contains("No permissive policy on 'docs' covers INSERT, UPDATE, DELETE")),
-        "nothing covers the write commands: {messages:#?}"
-    );
+    assert!(plan.notes.iter().any(|note| matches!(
+        note,
+        TranslationNote::CoveringPoliciesBelowThreshold { table, commands }
+            if table.to_string() == "public.docs" && commands == &["SELECT"]
+    )));
+    assert!(plan.notes.iter().any(|note| matches!(
+        note,
+        TranslationNote::NoPermissivePolicy { table, commands }
+            if table.to_string() == "public.docs" && commands == &["INSERT", "UPDATE", "DELETE"]
+    )));
 }
 
 #[test]
@@ -1112,7 +1111,7 @@ CREATE TABLE accounts(account_id UUID PRIMARY KEY, email TEXT);
     );
     assert!(result.is_some());
     let pi = result.unwrap();
-    assert_eq!(pi.table.to_string(), "accounts");
+    assert_eq!(pi.table.to_string(), "public.accounts");
     assert_eq!(pi.identity_col, "account_id");
 }
 
@@ -1276,7 +1275,7 @@ fn resolve_principal_info_auto_resolves_pk_for_configured_table() {
     let result = resolve_principal_info(&db, Some("accounts"), None, &[]);
     assert!(result.is_some());
     let pi = result.unwrap();
-    assert_eq!(pi.table.to_string(), "accounts");
+    assert_eq!(pi.table.to_string(), "public.accounts");
     assert_eq!(pi.identity_col, "id");
 }
 
@@ -1800,7 +1799,7 @@ CREATE POLICY things_sel ON things FOR SELECT TO app_user USING (value > 0);
     assert!(
         plan.notes.iter().any(
             |note| matches!(note, TranslationNote::RowsCannotBeNamed { table, .. }
-                if table.to_string() == "things")
+                if table.to_string() == "public.things")
         ),
         "and the model says the grant cannot be filled: {:?}",
         plan.notes

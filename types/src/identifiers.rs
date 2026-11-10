@@ -166,15 +166,12 @@ macro_rules! compares_against_text {
 #[derive(Debug, Clone)]
 pub struct TableRef(String);
 
-/// A table's identity, as the schema stores it.
-///
-/// The schema and name folded the way `PostgreSQL` stores them, which is what makes two references
-/// to one table compare equal. Renders as the canonical key
-/// `lookup_table` resolves either way.
+/// A resolved table identity with `public` represented by an absent schema.
 #[derive(
     Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize,
 )]
 pub struct TableId {
+    #[serde(default, deserialize_with = "deserialize_table_schema")]
     schema: Option<String>,
     name: String,
 }
@@ -197,16 +194,16 @@ impl TableRef {
 }
 
 impl TableId {
-    /// Build an identity from names a schema stored.
-    ///
-    /// `pub(crate)` on purpose: outside this crate an identity comes from resolving a
-    /// [`TableRef`], never from assembling two strings.
+    /// Build an identity from stored names, treating an absent schema as `public`.
     #[doc(hidden)]
     pub fn from_stored(schema: Option<String>, name: String) -> Self {
-        Self { schema, name }
+        Self {
+            schema: schema.filter(|schema| schema != "public"),
+            name,
+        }
     }
 
-    /// The stored schema, absent where the table has none.
+    /// The stored schema, with `None` denoting `public`.
     #[must_use]
     pub fn schema(&self) -> Option<&str> {
         self.schema.as_deref()
@@ -232,37 +229,39 @@ impl TableId {
     }
 }
 
-/// The canonical key, which is the identity rendered so `lookup_table` resolves it either way.
-///
-/// One rendering, because two would be two answers to "which table is this", which is what the
-/// crate carried before: an identity built from raw names beside a key built from stored ones.
+/// The schema-qualified lookup key, independent of the session search path.
 impl fmt::Display for TableId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match &self.schema {
-            Some(schema) => write!(
-                f,
-                "{}.{}",
-                quoted_for_lookup(schema),
-                quoted_for_lookup(&self.name)
-            ),
-            None => write!(f, "{}", quoted_for_lookup(&self.name)),
-        }
+        write!(
+            f,
+            "{}.{}",
+            quoted_for_lookup(self.schema.as_deref().unwrap_or("public")),
+            quoted_for_lookup(&self.name)
+        )
     }
+}
+
+fn deserialize_table_schema<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    <Option<String> as serde::Deserialize>::deserialize(deserializer)
+        .map(|schema| schema.filter(|schema| schema != "public"))
 }
 
 /// Quote a part for a lookup key unless it is a bare lowercase identifier.
 ///
 /// `lookup_table` tries both spellings, so this form resolves either way.
-fn quoted_for_lookup(part: &str) -> String {
+fn quoted_for_lookup(part: &str) -> alloc::borrow::Cow<'_, str> {
     let bare = !part.is_empty()
         && !part.starts_with(|ch: char| ch.is_ascii_digit())
         && part
             .chars()
             .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_');
     if bare {
-        part.to_string()
+        alloc::borrow::Cow::Borrowed(part)
     } else {
-        format!("\"{}\"", part.replace('"', "\"\""))
+        alloc::borrow::Cow::Owned(format!("\"{}\"", part.replace('"', "\"\"")))
     }
 }
 
@@ -705,7 +704,7 @@ mod tests {
         assert_eq!(qualified.to_string(), "app.docs");
 
         let bare = TableId::from_stored(None, "docs".to_string());
-        assert_eq!(bare.to_string(), "docs");
+        assert_eq!(bare.to_string(), "public.docs");
     }
 
     /// A stored name needing quotes gets them back, and an interior quote is doubled rather than
@@ -713,10 +712,10 @@ mod tests {
     #[test]
     fn a_name_needing_quotes_is_requoted_and_escaped() {
         let mixed = TableId::from_stored(None, "Docs".to_string());
-        assert_eq!(mixed.to_string(), "\"Docs\"");
+        assert_eq!(mixed.to_string(), "public.\"Docs\"");
 
         let awkward = TableId::from_stored(None, "do\"cs".to_string());
-        assert_eq!(awkward.to_string(), "\"do\"\"cs\"");
+        assert_eq!(awkward.to_string(), "public.\"do\"\"cs\"");
     }
 
     /// Identity is the stored pair, so a schema distinguishes two tables sharing a name.
@@ -724,6 +723,7 @@ mod tests {
     fn two_schemas_holding_one_name_are_two_identities() {
         let app = TableId::from_stored(Some("app".to_string()), "docs".to_string());
         let public = TableId::from_stored(Some("public".to_string()), "docs".to_string());
+        assert_eq!(public, TableId::from_stored(None, "docs".to_string()));
         assert_ne!(app, public);
         assert_ne!(app, TableId::from_stored(None, "docs".to_string()));
     }

@@ -396,12 +396,11 @@ CREATE POLICY p ON tasks FOR SELECT
         "model should deny can_select via no_access, got:\n{model}"
     );
     let tuples = rls2fga::generator::tuple_generator::format_tuples(outputs.tuple_queries());
-    assert!(
-        tuples.contains(
-            "TODO [Level D]: skipped tuple generation for tasks (unsupported pattern Unknown)"
-        ),
-        "tuple SQL should carry the TODO marker naming the table and pattern, got:\n{tuples}"
-    );
+    assert!(outputs.tuple_queries().iter().any(|query| matches!(
+        &query.skipped,
+        Some(rls2fga::generator::tuple_generator::SkippedTuples::UnclassifiedExpression { table, .. })
+            if table.to_string() == "public.tasks"
+    )));
     assert!(
         tuples.contains("The rule inherited from 'projects' is not translatable"),
         "tuple SQL body should name the reason the inner predicate was refused, got:\n{tuples}"

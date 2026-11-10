@@ -268,7 +268,7 @@ fn a_folded_collision_plans_two_distinct_types() {
         // base or the suffix has to fail here.
         assert_eq!(
             types,
-            vec!["guarded".to_string(), "guarded_e788216f".to_string()],
+            vec!["guarded".to_string(), "guarded_9d480982".to_string()],
             "{}: the collision has to resolve to the canonical name and one suffixed",
             case.name
         );
@@ -288,7 +288,7 @@ fn a_long_key_case_seeds_a_key_near_the_cap() {
     assert!(!long.is_empty(), "no long-key text case to check");
     for case in long {
         let width = if case.name.contains("folded-collision") {
-            // `guarded_e788216f` and a separator.
+            // The suffixed type name and its separator.
             MAX_OBJECT_NAME_CHARS - 17
         } else {
             // `guarded` and a separator.
@@ -378,16 +378,15 @@ fn every_partition_of_a_depth_case_is_disclosed_against_its_root() {
             );
         }
         let planned = plan(&case.schema);
-        let disclosed: Vec<String> = planned
+        let disclosed: Vec<_> = planned
             .notes()
             .iter()
-            .filter(|note| {
-                matches!(
-                    note,
-                    TranslationNote::PartitionReadDirectlyIsUnfiltered { .. }
-                )
+            .filter_map(|note| match note {
+                TranslationNote::PartitionReadDirectlyIsUnfiltered { table, root } => {
+                    Some((table, root))
+                }
+                _ => None,
             })
-            .map(ToString::to_string)
             .collect();
         assert_eq!(
             disclosed.len(),
@@ -397,10 +396,10 @@ fn every_partition_of_a_depth_case_is_disclosed_against_its_root() {
         );
         for partition in &case.not_read_directly {
             assert!(
-                disclosed
-                    .iter()
-                    .any(|note| note
-                        .starts_with(&format!("'{partition}' is a partition of 'guarded',"))),
+                disclosed.iter().any(|(table, root)| {
+                    table.to_string() == format!("public.{partition}")
+                        && root.to_string() == "public.guarded"
+                }),
                 "{}: nothing discloses '{partition}' against the root that carries the policies",
                 case.name
             );

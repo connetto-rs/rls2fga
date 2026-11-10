@@ -731,7 +731,7 @@ CREATE POLICY docs_members ON docs FOR SELECT
 
 /// `docs.can_select`, whether it denies, and whether any query loads the membership
 /// table, for a schema whose membership table carries `policies`.
-fn membership_readability(policies: &str) -> (String, bool, bool, Vec<String>) {
+fn membership_readability(policies: &str) -> (String, bool, bool, Vec<TranslationNote>) {
     let sql = format!(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
@@ -756,11 +756,7 @@ CREATE POLICY pd ON docs FOR SELECT USING (
         .tuple_queries()
         .iter()
         .any(|query| query.sql.contains("FROM \"public\".\"m\""));
-    let notes = outputs
-        .notes()
-        .iter()
-        .map(|note| note.message().clone())
-        .collect();
+    let notes = outputs.notes().to_vec();
     (select, denies, loads_m, notes)
 }
 
@@ -800,10 +796,13 @@ fn assert_membership_table_denied(policies: &[&str]) {
         if loads_m {
             complaints.push(format!("`{policy}` still loads membership rows"));
         }
-        if !notes
-            .iter()
-            .any(|note| note.contains("'m' grants no reads"))
-        {
+        if !notes.iter().any(|note| {
+            matches!(
+                note,
+                TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
+                    if join_table.to_string() == "public.m"
+            )
+        }) {
             complaints.push(format!("`{policy}` reported no reason: {notes:?}"));
         }
     }

@@ -693,6 +693,40 @@ fn unsafe_exclusion_shapes_stay_below_the_threshold() {
 }
 
 #[test]
+fn an_inherited_blocklist_guard_resolves_its_public_parent_outside_the_search_path() {
+    for guarded in [false, true] {
+        let guard = if guarded {
+            "ALTER TABLE public.block_parents ENABLE ROW LEVEL SECURITY;"
+        } else {
+            ""
+        };
+        let sql = format!(
+            "CREATE TABLE public.docs(id TEXT PRIMARY KEY, owner TEXT NOT NULL);
+             CREATE TABLE public.block_parents();
+             CREATE TABLE public.blocks(
+                 doc TEXT NOT NULL REFERENCES public.docs(id), user_id TEXT NOT NULL,
+                 PRIMARY KEY(doc, user_id)) INHERITS (public.block_parents);
+             ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
+             {guard}
+             CREATE POLICY docs_read ON public.docs FOR SELECT USING (
+                 {OWNER} AND NOT EXISTS (
+                     SELECT 1 FROM public.blocks b WHERE b.doc = docs.id
+                     AND b.user_id = current_setting('app.user_id', true)));
+             CREATE SCHEMA app;
+             CREATE TABLE app.block_parents();
+             SET search_path = app;"
+        );
+        let translated = translate(&sql);
+        let model = translated.outputs_accepting_gaps().model();
+        assert_eq!(
+            support::footgun::relation_denies(&model, "docs", "can_select"),
+            guarded,
+            "{model}"
+        );
+    }
+}
+
+#[test]
 fn a_failed_blocklist_witness_denies_its_positive_grant() {
     let sql = format!(
         "CREATE TABLE docs(id TEXT PRIMARY KEY, owner TEXT NOT NULL);

@@ -625,7 +625,7 @@ fn recognize_p4_exists_supports_extra_predicates_and_negation() {
             user_column,
             extra_predicates,
             ..
-        }) if join_table.to_string() == "doc_members"
+        }) if join_table.to_string() == "public.doc_members"
             && matches!(pairs.as_slice(), [pair]
                 if pair.join_column == "doc_id" && pair.outer_column == "id")
             && user_column == "user_id"
@@ -683,7 +683,7 @@ fn recognize_p4_with_alias_and_the_caller_strips_correlated_predicates() {
             user_column,
             extra_predicates,
             ..
-        }) if join_table.to_string() == "doc_members"
+        }) if join_table.to_string() == "public.doc_members"
             && matches!(pairs.as_slice(), [pair] if pair.join_column == "doc_id")
             && user_column == "user_id"
             && extra_predicates
@@ -2940,7 +2940,7 @@ fn recognize_p4_multi_from_requires_user_predicate() {
         Some(ClassifiedExpr {
             pattern: PatternClass::P4ExistsMembership(ExistsMembership { ref join_table, .. }),
             ..
-        }) if join_table.to_string() == "doc_members"
+        }) if join_table.to_string() == "public.doc_members"
     ));
 }
 
@@ -3114,7 +3114,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(proj
     assert!(matches!(
         classified.pattern,
         PatternClass::P5ParentInheritance(ParentInheritance { ref parent_table, ref fk_column, .. })
-            if parent_table.to_string() == "projects" && fk_column == "project_id"
+            if parent_table.to_string() == "public.projects" && fk_column == "project_id"
     ));
 }
 
@@ -4011,7 +4011,7 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
         matches!(
             &classified.pattern,
             PatternClass::P5ParentInheritance(ParentInheritance { parent_table, fk_column, inner_pattern })
-                if parent_table.to_string() == "projects"
+                if parent_table.to_string() == "public.projects"
                     && fk_column == "project_id"
                     && matches!(
                         inner_pattern.pattern,
@@ -4084,7 +4084,7 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
             )
             .map(|classified| classified.pattern),
             Some(PatternClass::P5ParentInheritance(ParentInheritance { ref parent_table, .. }))
-                if parent_table.to_string() == "projects"
+                if parent_table.to_string() == "public.projects"
         ),
         "the policy states the join, so it is the evidence"
     );

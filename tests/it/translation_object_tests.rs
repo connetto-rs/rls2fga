@@ -377,6 +377,27 @@ fn translation_note_table_serializes_as_string() {
 }
 
 #[test]
+fn default_schema_identity_survives_deserialization() {
+    use rls2fga::types::TableId;
+
+    let implicit = TableId::from_stored(None, "docs".to_string());
+    for json in [
+        r#"{"schema":null,"name":"docs"}"#,
+        r#"{"schema":"public","name":"docs"}"#,
+        r#"{"name":"docs"}"#,
+    ] {
+        let decoded: TableId = serde_json::from_str(json).expect("table identity");
+        assert_eq!(decoded, implicit);
+        assert_eq!(
+            serde_json::to_value(decoded).unwrap(),
+            serde_json::to_value(&implicit).unwrap()
+        );
+    }
+    let quoted: TableId = serde_json::from_str(r#"{"schema":"Public","name":"docs"}"#).unwrap();
+    assert_ne!(quoted, implicit);
+}
+
+#[test]
 fn translation_note_roundtrips_from_baseline_string_table_json() {
     use rls2fga::types::TranslationNote;
     let baseline = r#"{"NoPermissivePolicy":{"table":"public.docs","commands":["SELECT"]}}"#;
@@ -385,7 +406,7 @@ fn translation_note_roundtrips_from_baseline_string_table_json() {
     let TranslationNote::NoPermissivePolicy { table, commands } = result.unwrap() else {
         panic!("wrong variant");
     };
-    assert_eq!(table.schema(), Some("public"));
+    assert_eq!(table.schema(), None);
     assert_eq!(table.name(), "docs");
     assert_eq!(commands, vec!["SELECT".to_string()]);
 }

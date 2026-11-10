@@ -156,19 +156,22 @@ CREATE POLICY docs_pub ON docs FOR SELECT USING (is_public = TRUE);
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
-    let messages: Vec<String> = model.notes().iter().map(TranslationNote::message).collect();
+    let notes = model.notes();
 
     assert!(
-        !messages
-            .iter()
-            .any(|message| message.contains("No permissive policy on 'docs' covers SELECT")),
-        "a permissive SELECT policy exists and was dropped: {messages:#?}"
+        !notes.iter().any(|note| matches!(
+            note,
+            TranslationNote::NoPermissivePolicy { table, commands }
+                if table.to_string() == "public.docs"
+                    && commands.iter().any(|command| command == "SELECT")
+        )),
+        "{notes:#?}"
     );
     assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("confidence threshold") && message.contains("SELECT")),
-        "the operator must be told the policy was dropped: {messages:#?}"
+        notes.iter().any(|note| {
+            note.message().contains("confidence threshold") && note.message().contains("SELECT")
+        }),
+        "{notes:#?}"
     );
 }
 
@@ -724,7 +727,7 @@ CREATE POLICY docs_opaque ON docs FOR SELECT USING (opaque_gate(id));
             *confidence
         ),
         (
-            "docs".to_string(),
+            "public.docs".to_string(),
             "docs_opaque",
             "PERMISSIVE",
             "USING",
@@ -860,7 +863,7 @@ CREATE POLICY shares_read ON shares FOR SELECT USING (viewer = current_setting('
         assert_eq!(
             (table.to_string(), sources.as_slice()),
             (
-                "shares".to_string(),
+                "public.shares".to_string(),
                 &[
                     "acting kind links".to_string(),
                     "ownership tuples".to_string(),
@@ -914,7 +917,7 @@ CREATE POLICY docs_barrier ON docs AS RESTRICTIVE USING (owner_id = current_sett
     assert_eq!(
         (table.to_string(), commands.as_slice()),
         (
-            "docs".to_string(),
+            "public.docs".to_string(),
             &[
                 "SELECT".to_string(),
                 "INSERT".to_string(),

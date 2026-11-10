@@ -52,9 +52,9 @@ CREATE POLICY docs_member ON docs FOR SELECT TO public
 fn a_membership_policy_reads_its_table_and_the_membership_table() {
     let translation = translate(MEMBERSHIP);
     let entry = entry(&translation, "docs_member");
-    assert_eq!(entry.table.to_string(), "docs");
+    assert_eq!(entry.table.to_string(), "public.docs");
     assert_eq!(entry.command, PolicyCommand::Select);
-    assert_eq!(reads(entry), ["docs", "members"]);
+    assert_eq!(reads(entry), ["public.docs", "public.members"]);
     assert!(
         entry.unresolved.is_empty(),
         "a built-in call reads no table, so nothing is left unknown: {:?}",
@@ -78,12 +78,12 @@ CREATE POLICY writers ON docs FOR INSERT
     );
     let readers = entry(&translation, "readers");
     assert_eq!(readers.command, PolicyCommand::Select);
-    assert_eq!(reads(readers), ["docs", "members"]);
+    assert_eq!(reads(readers), ["public.docs", "public.members"]);
     let writers = entry(&translation, "writers");
     assert_eq!(writers.command, PolicyCommand::Insert);
     assert_eq!(
         reads(writers),
-        ["docs", "editors"],
+        ["public.docs", "public.editors"],
         "the WITH CHECK clause is read as much as USING is"
     );
 }
@@ -124,7 +124,7 @@ CREATE POLICY d ON docs USING (lvl(owner_id) > 2);
 ",
     );
     let entry = entry(&translation, "d");
-    assert_eq!(reads(entry), ["docs", "roles"]);
+    assert_eq!(reads(entry), ["public.docs", "public.roles"]);
     assert!(entry.unresolved.is_empty(), "{:?}", entry.unresolved);
 }
 
@@ -142,7 +142,10 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY d ON docs USING (can_read(id));
 ",
     );
-    assert_eq!(reads(entry(&translation, "d")), ["docs", "members"]);
+    assert_eq!(
+        reads(entry(&translation, "d")),
+        ["public.docs", "public.members"]
+    );
 }
 
 #[test]
@@ -156,7 +159,7 @@ CREATE POLICY d ON docs USING (allowed(owner_id));
 ",
     );
     let entry = entry(&translation, "d");
-    assert_eq!(reads(entry), ["docs"]);
+    assert_eq!(reads(entry), ["public.docs"]);
     assert!(
         entry
             .unresolved
@@ -181,7 +184,7 @@ CREATE POLICY d ON docs USING (expires > '2026-01-01 09:00' AND EXISTS (
 ",
     );
     let entry = entry(&translation, "d");
-    assert_eq!(reads(entry), ["docs", "members"]);
+    assert_eq!(reads(entry), ["public.docs", "public.members"]);
     assert!(entry.unresolved.is_empty(), "{:?}", entry.unresolved);
 }
 
@@ -204,7 +207,10 @@ CREATE POLICY d ON docs
             .any(|note| note.severity() == NoteSeverity::BelowThreshold),
         "the clause falls below the confidence threshold and leaves the model"
     );
-    assert_eq!(reads(entry(&translation, "d")), ["audit", "docs"]);
+    assert_eq!(
+        reads(entry(&translation, "d")),
+        ["public.audit", "public.docs"]
+    );
 }
 
 #[test]
@@ -219,7 +225,10 @@ CREATE POLICY d ON docs
   USING (id IN (SELECT doc_id FROM active_members WHERE user_id = current_setting('app.user_id')));
 ",
     );
-    assert_eq!(reads(entry(&translation, "d")), ["docs", "members"]);
+    assert_eq!(
+        reads(entry(&translation, "d")),
+        ["public.docs", "public.members"]
+    );
 }
 
 /// The policy on a root filters its partitions' rows on every read through the root, and a
@@ -239,7 +248,12 @@ CREATE POLICY e ON events
     );
     assert_eq!(
         reads(entry(&translation, "e")),
-        ["events", "events_2026", "tenants", "vip_tenants"]
+        [
+            "public.events",
+            "public.events_2026",
+            "public.tenants",
+            "public.vip_tenants"
+        ]
     );
 }
 
@@ -258,7 +272,7 @@ CREATE POLICY e ON events USING (tenant = current_setting('app.user_id'));
 ",
     );
     let entry = entry(&translation, "e");
-    assert_eq!(reads(entry), ["events", "events_eu"]);
+    assert_eq!(reads(entry), ["public.events", "public.events_eu"]);
     assert!(entry.unresolved.is_empty(), "{:?}", entry.unresolved);
 }
 
@@ -277,7 +291,12 @@ CREATE POLICY d ON docs USING (owner = current_setting('app.user_id'));
     );
     assert_eq!(
         reads(entry(&translation, "d")),
-        ["docs", "drafts", "shared", "shared_drafts"]
+        [
+            "public.docs",
+            "public.drafts",
+            "public.shared",
+            "public.shared_drafts"
+        ]
     );
 }
 
@@ -292,7 +311,7 @@ CREATE POLICY d ON docs
 ",
     );
     let entry = entry(&translation, "d");
-    assert_eq!(reads(entry), ["docs"]);
+    assert_eq!(reads(entry), ["public.docs"]);
     assert!(
         entry
             .unresolved

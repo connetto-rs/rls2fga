@@ -878,7 +878,7 @@ fn an_inheritance_parents_tuples_read_only_its_own_rows() {
         outputs.notes().iter().any(|note| matches!(
             note,
             TranslationNote::InheritanceParentReadsOwnRowsOnly { table, children }
-                if table.to_string() == "docs" && children.iter().map(ToString::to_string).collect::<Vec<_>>() == vec!["secret_docs".to_string()]
+                if table.to_string() == "public.docs" && children.iter().map(ToString::to_string).collect::<Vec<_>>() == vec!["public.secret_docs".to_string()]
         )),
         "dropping child rows must be disclosed and name the child, got: {:#?}",
         outputs.notes()
@@ -970,7 +970,7 @@ CREATE TABLE deep_docs(reason TEXT) INHERITS (secret_docs);
             outputs.notes().iter().any(|note| matches!(
                 note,
                 TranslationNote::InheritanceParentReadsOwnRowsOnly { table: t, children }
-                    if t.to_string() == table && children.iter().map(ToString::to_string).collect::<Vec<_>>() == vec![child.to_string()]
+                    if t.to_string() == format!("public.{table}") && children.iter().map(ToString::to_string).collect::<Vec<_>>() == vec![format!("public.{child}")]
             )),
             "'{table}' must disclose dropping '{child}', got: {:#?}",
             outputs.notes()
@@ -1064,12 +1064,13 @@ CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_settin
         outputs.notes()
     );
     for partition in ["events_eu", "events_us"] {
-        // The partition first and the root second: swapping them would tell the operator to
-        // protect the table that already carries the policies.
         assert!(
-            disclosed.iter().any(|note| note
-                .to_string()
-                .starts_with(&format!("'{partition}' is a partition of 'events',"))),
+            disclosed.iter().any(|note| matches!(
+                note,
+                TranslationNote::PartitionReadDirectlyIsUnfiltered { table, root }
+                    if table.to_string() == format!("public.{partition}")
+                        && root.to_string() == "public.events"
+            )),
             "the note names the partition, then its root: {disclosed:#?}"
         );
     }
@@ -1108,7 +1109,7 @@ CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_settin
         .expect("translation should plan")
         .outputs_accepting_gaps();
 
-    let disclosed: Vec<String> = outputs
+    let disclosed: Vec<&TranslationNote> = outputs
         .notes()
         .iter()
         .filter(|note| {
@@ -1117,15 +1118,17 @@ CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_settin
                 TranslationNote::PartitionReadDirectlyIsUnfiltered { .. }
             )
         })
-        .map(ToString::to_string)
         .collect();
     // The middle table and the leaf are both readable by name, and the note names the
     // ancestor that carries the policies rather than the nearest one.
     for partition in ["events_eu", "events_eu_2026"] {
         assert!(
-            disclosed
-                .iter()
-                .any(|note| note.starts_with(&format!("'{partition}' is a partition of 'events',"))),
+            disclosed.iter().any(|note| matches!(
+                note,
+                TranslationNote::PartitionReadDirectlyIsUnfiltered { table, root }
+                    if table.to_string() == format!("public.{partition}")
+                        && root.to_string() == "public.events"
+            )),
             "nothing discloses the direct read of '{partition}': {disclosed:#?}"
         );
     }

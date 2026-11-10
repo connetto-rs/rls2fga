@@ -414,6 +414,6 @@ CREATE POLICY dp ON docs FOR SELECT USING (project_id IN (SELECT id FROM project
     assert_reports(
         "parent rule untranslated",
         &notes,
-        "Parent inheritance from 'projects' could not translate the parent-side rule",
+        "Parent inheritance from 'public.projects' could not translate the parent-side rule",
     );
 }

@@ -315,19 +315,21 @@ fn a_command_a_policy_names_without_the_clause_it_needs_is_reported_as_unpolicie
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
-    let messages: Vec<String> = model.notes().iter().map(TranslationNote::message).collect();
-
+    let notes = model.notes();
     assert!(
-        messages.iter().any(|message| {
-            message.contains("No permissive policy on 'docs' covers") && message.contains("UPDATE")
-        }),
-        "RLS denies the UPDATE outright and the report must say so: {messages:#?}"
+        notes.iter().any(|note| matches!(
+            note,
+            TranslationNote::NoPermissivePolicy { table, commands }
+                if table.to_string() == "public.docs"
+                    && commands.iter().any(|command| command == "UPDATE")
+        )),
+        "{notes:#?}"
     );
     assert!(
-        !messages
+        !notes
             .iter()
-            .any(|message| message.contains("confidence threshold")),
-        "nothing was dropped by confidence here: {messages:#?}"
+            .any(|note| note.message().contains("confidence threshold")),
+        "{notes:#?}"
     );
 }
 

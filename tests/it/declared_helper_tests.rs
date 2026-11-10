@@ -299,7 +299,7 @@ fn a_column_naming_other_rows_is_refused() {
     );
     let reason = refusal_of(&sql, BOTH, "orders_read");
     assert!(
-        reason.contains("'projects'") && reason.contains("'teams'"),
+        reason.contains("'public.projects'") && reason.contains("'public.teams'"),
         "{reason}"
     );
 }
@@ -451,7 +451,7 @@ fn every_unproven_call_is_refused() {
         (
             "projects_read",
             "team_id = ANY (ARRAY(SELECT authz.misparented('read')))",
-            "column 'team_id' names rows of 'teams'",
+            "column 'team_id' names rows of 'public.teams'",
         ),
         (
             "projects_read",

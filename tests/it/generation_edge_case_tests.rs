@@ -173,13 +173,11 @@ CREATE POLICY p ON items FOR SELECT USING (is_public = TRUE);
         &support::deployment::caller_deployment(),
     );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    let formatted = tuple_generator::format_tuples(tuples);
-
-    assert!(
-        formatted.contains("-- TODO [Level D]: skipped public-flag tuples for items (missing object identifier column)"),
-        "missing PK should emit exact skipped-tuple comment, got:\n{formatted}"
-    );
+    assert!(outputs.tuple_queries().iter().any(|query| matches!(
+        &query.skipped,
+        Some(tuple_generator::SkippedTuples::NoObjectIdentifier { table, what, .. })
+            if table.to_string() == "public.items" && what == "public-flag tuples"
+    )));
 }
 
 #[test]
@@ -202,13 +200,11 @@ CREATE POLICY p ON tasks FOR SELECT
         &support::deployment::caller_deployment(),
     );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    let formatted = tuple_generator::format_tuples(tuples);
-
-    assert!(
-        formatted.contains("-- tasks to projects bridge for tuple-to-userset"),
-        "expected tasks-to-projects bridge tuple in output, got:\n{formatted}"
-    );
+    assert!(outputs.tuple_queries().iter().any(|query| {
+        query.sql.contains(r#"FROM "public"."tasks""#)
+            && query.sql.contains("'projects' AS relation")
+            && query.sql.contains(r#""project_id"::text"#)
+    }));
 }
 
 #[test]
@@ -382,13 +378,11 @@ CREATE POLICY p ON docs FOR SELECT
         "docs should define can_select as no_access:\n{}",
         model.model()
     );
-    assert!(
-        model.notes().iter().any(|t| t.message().contains(
-            "Every permissive policy on 'docs' covering SELECT fell below the confidence threshold, so the model denies what RLS grants"
-        )),
-        "expected threshold note, got:\n{:?}",
-        model.notes().iter().map(TranslationNote::message).collect::<Vec<_>>()
-    );
+    assert!(model.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::CoveringPoliciesBelowThreshold { table, commands }
+            if table.to_string() == "public.docs" && commands == &["SELECT"]
+    )));
 }
 
 #[test]
@@ -412,22 +406,17 @@ CREATE POLICY p ON docs FOR SELECT
     );
 
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    let formatted = tuple_generator::format_tuples(tuples);
-
-    assert!(
-        formatted.contains(
-            "-- TODO [Level D]: skipped docs to orgs bridge (missing object identifier column)"
-        ),
-        "expected skipped-bridge comment, got:\n{formatted}"
-    );
-    assert!(
-        outputs.notes().iter().any(|t| t.message().contains(
-            "No tuple can name a row of 'docs' (missing object identifier column), so bridge tuples to 'orgs' cannot be loaded"
-        )),
-        "expected bridge note, got:\n{:?}",
-        outputs.notes().iter().map(TranslationNote::message).collect::<Vec<_>>()
-    );
+    assert!(outputs.tuple_queries().iter().any(|query| matches!(
+        &query.skipped,
+        Some(tuple_generator::SkippedTuples::NoBridge { table, parent_type, .. })
+            if table.to_string() == "public.docs" && parent_type == "orgs"
+    )));
+    assert!(outputs.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::RowsCannotBeNamed { table, sources, .. }
+            if table.to_string() == "public.docs"
+                && sources == &["bridge tuples to 'orgs'"]
+    )));
 }
 
 /// A constant conjunct leaves the parent's own rule as the whole requirement, so an
@@ -501,11 +490,9 @@ CREATE POLICY p ON items FOR SELECT USING (role_level(current_setting('app.user_
         &support::deployment::caller_deployment(),
     );
     let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    let formatted = tuple_generator::format_tuples(tuples);
-
-    assert!(
-        formatted.contains("-- TODO [Level D]: skipped items to object_grants_owner bridge (missing object identifier column)"),
-        "missing PK should emit exact grant-bridge comment, got:\n{formatted}"
-    );
+    assert!(outputs.tuple_queries().iter().any(|query| matches!(
+        &query.skipped,
+        Some(tuple_generator::SkippedTuples::NoBridge { table, parent_type, .. })
+            if table.to_string() == "public.items" && parent_type == "object_grants_owner"
+    )));
 }
