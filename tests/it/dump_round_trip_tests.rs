@@ -1,7 +1,6 @@
 #![cfg(not(target_os = "windows"))]
 //! `pg_dump` preserves model and tuple semantics under consistent source-relation renaming.
 
-use core::fmt::Write;
 use serde_json::Value;
 use std::collections::BTreeSet;
 
@@ -37,13 +36,6 @@ const DUMP_BLOCKED_ON_SQLPARSER: [(&str, &str); 2] = [
          the table target upstream, the unfiled owner-to-uneven finding",
     ),
 ];
-/// Roles fixtures name in `TO` clauses or create themselves, which must exist before a
-/// fixture names them and be absent before one creates them.
-const FIXTURE_ROLES: [&str; 5] = ["auditor", "contractor", "editors", "app", "editor"];
-
-/// Roles a fixture creates itself, which must be absent when it applies.
-const CREATES_ROLES: [(&str, &str); 2] =
-    [("schema_objects", "auditor"), ("pg_role_gate", "editor")];
 
 /// The model and tuple queries planned with the fixture's registry.
 fn artifacts(db: &ParserDB, fixture: &str) -> (Value, Vec<TupleQuery>) {
@@ -134,21 +126,6 @@ fn strip_meta_commands(dump: &str) -> String {
         .join("\n")
 }
 
-/// The role declarations the fixture side reads, matching the cluster a dump carries,
-/// the deployment's roles plus the fixture roles the fixture does not create itself.
-fn role_declarations(fixture: &str) -> String {
-    let mut declarations = support::deployment::ROLES.to_string();
-    for role in FIXTURE_ROLES {
-        let owned_by_fixture = CREATES_ROLES
-            .iter()
-            .any(|(name, owned)| *name == fixture && *owned == role);
-        if !owned_by_fixture {
-            let _ = writeln!(declarations, "CREATE ROLE {role};");
-        }
-    }
-    declarations
-}
-
 #[tokio::test]
 #[ignore = "requires Docker and the postgres:18 container"]
 async fn every_fixture_round_trips_through_pg_dump() {
@@ -163,25 +140,6 @@ async fn every_fixture_round_trips_through_pg_dump() {
     let mut failures = Vec::new();
     for fixture in support::fixture_names() {
         let fixture = fixture.as_str();
-        // A fixture that creates a role itself must find it absent, and every
-        // other fixture must find the shared roles present. Databases are
-        // dropped after use, so the drop below never has dependents.
-        for role in FIXTURE_ROLES {
-            let owned_by_fixture = CREATES_ROLES
-                .iter()
-                .any(|(name, owned)| *name == fixture && *owned == role);
-            let statement = if owned_by_fixture {
-                format!("DROP ROLE IF EXISTS {role}")
-            } else {
-                format!(
-                    "DO $$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = \
-                     '{role}') THEN CREATE ROLE {role}; END IF; END $$"
-                )
-            };
-            admin
-                .batch_execute(&statement)
-                .expect("Failed to prepare a fixture role");
-        }
         let database = format!("rt_{fixture}");
         admin
             .batch_execute(&format!("CREATE DATABASE {database}"))
@@ -189,10 +147,7 @@ async fn every_fixture_round_trips_through_pg_dump() {
         let fixture_url =
             format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{pg_port}/{database}");
         let mut conn = connect_postgres_with_retry(&fixture_url);
-        // The Supabase fixtures declare functions under `auth` without creating it,
-        // exactly as their deployments find it already present.
-        conn.batch_execute("CREATE SCHEMA IF NOT EXISTS auth")
-            .expect("Failed to create the auth schema");
+        support::fixture_bootstrap::prepare(&mut conn, fixture);
 
         if let Err(error) = conn.batch_execute(&support::read_fixture_sql(fixture)) {
             failures.push(format!(
@@ -224,7 +179,7 @@ async fn every_fixture_round_trips_through_pg_dump() {
                 Ok(dumped_db) => {
                     let fixture_db = parse_schema(&format!(
                         "{}{}",
-                        role_declarations(fixture),
+                        support::fixture_bootstrap::declarations(fixture),
                         support::read_fixture_sql(fixture),
                     ))
                     .expect("the fixture schema should parse");
