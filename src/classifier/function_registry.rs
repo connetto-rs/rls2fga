@@ -713,8 +713,7 @@ impl FunctionRegistry {
             }
             let return_type = function
                 .return_type_name(db)
-                .map(|name| name.to_string())
-                .unwrap_or_default();
+                .map_or_else(String::new, |name| name.to_string());
             if let Some(semantic) = FunctionSemantic::analyze_body_with_sources(
                 body,
                 &return_type,

@@ -4,12 +4,10 @@ use alloc::borrow::Cow;
 /// Subject id naming every principal of a type.
 pub const WILDCARD_SUBJECT_ID: &str = "*";
 
-/// Introduces an escaped value. Outside [`is_spelled_verbatim`], so no verbatim
-/// value can begin with it and the mapping stays injective.
+/// Prefix for encoded values, excluded from verbatim identifiers.
 pub const ESCAPE_MARKER: char = '~';
 
-/// Joins the parts of a compound identity. Outside [`is_spelled_verbatim`], so
-/// a part holding one escapes and two different splits cannot render alike.
+/// Separator for identity parts, excluded from verbatim identifiers.
 pub const PART_SEPARATOR: char = '|';
 
 /// Longest object name the target accepts, counted in **characters** over the

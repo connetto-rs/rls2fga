@@ -1969,12 +1969,11 @@ fn every_leaf_of_every_recipe_names_a_user_from_the_objects_own_row() {
 fn primary_key_of(table: &TableId, db: &ParserDB) -> Vec<String> {
     let columns: Vec<String> = lookup_table(db, &table.to_string())
         .and_then(|found| found.primary_key_columns(db).ok())
-        .map(|columns| {
+        .map_or_else(Vec::new, |columns| {
             columns
                 .map(|c| c.stored_column_name().into_owned())
                 .collect()
-        })
-        .unwrap_or_default();
+        });
     if columns.is_empty() {
         vec!["id".to_string()]
     } else {

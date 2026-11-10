@@ -229,8 +229,7 @@ pub(crate) fn settings_from_json(json: &str) -> Vec<SessionSetting> {
 /// `deployment.json` declares, none when it has no such file.
 pub(crate) fn fixture_deployment(fixture: &str) -> Deployment {
     let path = super::fixture_dir(fixture).join("deployment.json");
-    let settings = std::fs::read_to_string(path)
-        .map(|json| settings_from_json(&json))
-        .unwrap_or_default();
+    let settings =
+        std::fs::read_to_string(path).map_or_else(|_| Vec::new(), |json| settings_from_json(&json));
     caller_deployment_with(settings)
 }

@@ -149,6 +149,14 @@ macro_rules! compares_against_text {
             }
         }
 
+        impl core::str::FromStr for $name {
+            type Err = <$name as TryFrom<String>>::Error;
+
+            fn from_str(name: &str) -> Result<Self, Self::Err> {
+                Self::try_from(name)
+            }
+        }
+
         impl<'de> serde::Deserialize<'de> for $name {
             fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
                 let name = String::deserialize(deserializer)?;
