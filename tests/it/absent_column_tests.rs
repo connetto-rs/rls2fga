@@ -97,7 +97,8 @@ fn a_membership_term_never_compiles_against_an_absent_inner_column() {
     let term = parse_expr(&format!(
         "project_id IN (SELECT id FROM projects WHERE nonexistent = {CALLER})"
     ));
-    let Ok(shapes) = describe_membership_term(&term, &db, &registry, "docs", ConfidenceLevel::B)
+    let Ok(shapes) =
+        describe_membership_term(&term, &db, &registry, "docs", ConfidenceLevel::B, None)
     else {
         return;
     };

@@ -21,8 +21,11 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 
+use alloc::borrow::Cow;
+
 use sqlparser::ast::Expr;
 
+use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     filter_policies_for_output, AbacAnd, ClassifiedExpr, ClassifiedPolicy, Composite,
@@ -31,6 +34,7 @@ use crate::classifier::patterns::{
     UnclassifiedExpr,
 };
 use crate::classifier::policy_classifier::classify_expr;
+use crate::classifier::readability::{table_readability, TableReadability};
 use crate::generator::model_generator::{
     build_plan_typing, CallerSetCompletion, GeneratorSettings, PlanScope, SchemaPlan, UsersetExpr,
 };
@@ -127,6 +131,8 @@ pub struct TermRefusal {
 ///
 /// `guarded_table` needs no policy or row-level security, while row security on related tables still matters.
 ///
+/// `acting_role` settles related-table read rules for that role, while `None` refuses caller-side membership tables with row security.
+///
 /// # Errors
 ///
 /// Returns the reason the filter cannot be served by compiled records, which the caller
@@ -138,8 +144,17 @@ pub fn describe_membership_term<DB: DatabaseLike>(
     registry: &FunctionRegistry,
     guarded_table: &str,
     min_confidence: ConfidenceLevel,
+    acting_role: Option<&str>,
 ) -> Result<TermShapes, TermRefusal> {
-    let classified = classify_expr(expr, db, registry, guarded_table, PolicyCommand::Select);
+    let registry = match acting_role {
+        Some(role) if registry.classified_acting_role() != Some(role) => {
+            let mut registry = registry.clone();
+            registry.set_acting_role(Some(role));
+            Cow::Owned(registry)
+        }
+        _ => Cow::Borrowed(registry),
+    };
+    let classified = classify_expr(expr, db, &registry, guarded_table, PolicyCommand::Select);
     let refuse = |reason: String| TermRefusal {
         reason,
         classified: Box::new(classified.clone()),
@@ -162,7 +177,7 @@ pub fn describe_membership_term<DB: DatabaseLike>(
     let plan = build_plan_typing(
         &filter_policies_for_output(&[policy], min_confidence),
         db,
-        registry,
+        &registry,
         &settings,
         &bounds,
         PlanScope::ReadTerm(guarded_table),
@@ -187,7 +202,7 @@ pub fn describe_membership_term<DB: DatabaseLike>(
             .map(|chain| (entry.type_name, chain))
         });
 
-    // Related-table RLS can change the filter's SQL answer for exempt readers.
+    // Related-table RLS can change the filter's SQL answer for a reader it narrows.
     if let Ok((
         object_type,
         chain @ TermChain::Through {
@@ -199,13 +214,18 @@ pub fn describe_membership_term<DB: DatabaseLike>(
     {
         let named = chain_relations(&relations, object_type, chain);
         if let Some(table) = caller_side_table(&named, through_type, member) {
-            if lookup_table(db, &table)
-                .is_some_and(|found| found.has_row_level_security(db) != Ok(false))
-            {
-                return Err(refuse(format!(
-                    "'{table}' carries its own read rules, so the same filter run as SQL answers \
-                     differently for a reader exempt from them"
-                )));
+            let narrowed = match acting_role {
+                Some(_) => resolve_table_id(db, &table).is_some_and(|identity| {
+                    !matches!(
+                        table_readability(&identity, db, &registry, &ExpansionState::new()),
+                        TableReadability::Open
+                    )
+                }),
+                None => lookup_table(db, &table)
+                    .is_some_and(|found| found.has_row_level_security(db) != Ok(false)),
+            };
+            if narrowed {
+                return Err(refuse(read_rules_refusal(&table, acting_role)));
             }
         }
     }
@@ -220,11 +240,19 @@ pub fn describe_membership_term<DB: DatabaseLike>(
     }
 
     let (object_type, chain) = derived.map_err(|links| {
+        // A membership table the role reads no row of denies the chain outright, so the
+        // refusal names its rules rather than the chain they leave missing.
+        let unreadable = plan.notes.iter().find_map(|note| match note {
+            TranslationNote::MembershipTableGrantsNoReads { join_table, .. } => Some(join_table),
+            _ => None,
+        });
         refuse(if links > 1 {
             format!(
                 "a row of '{guarded_table}' satisfies this filter more than one way, and no single \
                  chain of records answers it"
             )
+        } else if let Some(table) = unreadable {
+            read_rules_refusal(table, acting_role)
         } else {
             format!(
                 "nothing about a row of '{guarded_table}' decides this filter, so no record can \
@@ -270,6 +298,20 @@ pub fn describe_membership_term<DB: DatabaseLike>(
         relations: named,
         notes: plan.notes,
     })
+}
+
+/// Describe the membership table's read-rule refusal for the optional acting role.
+fn read_rules_refusal(table: &impl core::fmt::Display, acting_role: Option<&str>) -> String {
+    match acting_role {
+        Some(role) => format!(
+            "'{table}' carries read rules for role {role}, so the same filter run as SQL \
+             answers differently for a reader they narrow"
+        ),
+        None => format!(
+            "'{table}' carries its own read rules, so the same filter run as SQL answers \
+             differently for a reader exempt from them"
+        ),
+    }
 }
 
 impl TermCaller {
