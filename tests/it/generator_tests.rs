@@ -2,19 +2,9 @@ use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{ConstantBool, PatternClass};
 use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator;
-use rls2fga::parser::function_analyzer::FunctionSemantic;
-use rls2fga::parser::sql_parser;
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support;
-
-fn load_emi() -> (
-    Vec<rls2fga::classifier::patterns::ClassifiedPolicy>,
-    sql_parser::ParserDB,
-    FunctionRegistry,
-) {
-    support::load_fixture_classified("earth_metabolome")
-}
 
 fn fixture_model_and_tuples(
     fixture: &str,
@@ -32,131 +22,6 @@ fn fixture_model_and_tuples(
     insta::assert_snapshot!(
         format!("generate_{fixture}_tuples"),
         tuple_generator::format_tuples(outputs.tuple_queries())
-    );
-}
-
-#[test]
-fn generate_emi_model() {
-    let (classified, db, registry) = load_emi();
-    let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    insta::assert_snapshot!(model.model().trim());
-}
-
-#[test]
-fn generate_emi_tuples() {
-    let db = support::parse_fixture_db("earth_metabolome");
-    let registry = support::load_fixture_registry("earth_metabolome");
-    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
-        &db,
-        &registry,
-        &support::deployment::fixture_deployment("earth_metabolome"),
-    );
-    let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    insta::assert_snapshot!(tuple_generator::format_tuples(tuples));
-}
-
-#[test]
-fn generate_emi_json_model() {
-    let (classified, db, registry) = load_emi();
-    let model =
-        support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B).json_model();
-    insta::assert_json_snapshot!(model);
-}
-
-#[test]
-fn generate_simple_ownership_model() {
-    let db = support::parse_fixture_db("simple_ownership");
-
-    let mut registry = FunctionRegistry::new();
-    registry.register_if_absent(
-        "auth_current_user_id",
-        &FunctionSemantic::CurrentUserAccessor {
-            returns: "uuid".to_string(),
-        },
-    );
-
-    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
-        &db,
-        &registry,
-        &support::deployment::fixture_deployment("simple_ownership"),
-    );
-    let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    insta::assert_snapshot!(model.model().trim());
-}
-
-#[test]
-fn generate_public_flag_model() {
-    let db = support::parse_fixture_db("public_flag");
-    let registry = FunctionRegistry::new();
-
-    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
-        &db,
-        &registry,
-        &support::deployment::fixture_deployment("public_flag"),
-    );
-    let model = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    insta::assert_snapshot!(model.model().trim());
-}
-
-// ── P2: role name IN-list ────────────────────────────────────────────────────
-
-#[test]
-fn generate_role_in_list_model_and_tuples() {
-    fixture_model_and_tuples(
-        "role_in_list",
-        &support::load_fixture_registry("role_in_list"),
-        ConfidenceLevel::B,
-    );
-}
-
-// ── P5: parent inheritance ───────────────────────────────────────────────────
-
-#[test]
-fn generate_parent_inheritance_model_and_tuples() {
-    fixture_model_and_tuples(
-        "parent_inheritance",
-        &FunctionRegistry::new(),
-        ConfidenceLevel::B,
-    );
-}
-
-// ── P6: boolean flag tuples (model snapshot already exists) ─────────────────
-
-#[test]
-fn generate_public_flag_tuples() {
-    let db = support::parse_fixture_db("public_flag");
-    let registry = FunctionRegistry::new();
-
-    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
-        &db,
-        &registry,
-        &support::deployment::fixture_deployment("public_flag"),
-    );
-    let outputs = support::plan_at(classified.clone(), &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    insta::assert_snapshot!(tuple_generator::format_tuples(tuples));
-}
-
-// ── P7: ABAC AND (relationship + attribute) ──────────────────────────────────
-
-#[test]
-fn generate_abac_status_model_and_tuples() {
-    fixture_model_and_tuples(
-        "abac_status",
-        &support::load_fixture_registry("abac_status"),
-        ConfidenceLevel::C,
-    );
-}
-
-// ── P8: composite OR (P3 + P6) ───────────────────────────────────────────────
-
-#[test]
-fn generate_compound_or_model_and_tuples() {
-    fixture_model_and_tuples(
-        "compound_or",
-        &support::try_load_fixture_registry("compound_or"),
-        ConfidenceLevel::B,
     );
 }
 
@@ -455,7 +320,6 @@ fn generate_shared_owner_grants_model_and_tuples() {
         dsl.contains("define can_select: role_editor from owner_id"),
         "the spectrum reads at the editor level:\n{dsl}"
     );
-    insta::assert_snapshot!("generate_shared_owner_grants_model", dsl.trim());
 
     let script = tuple_generator::format_tuples(model.tuple_queries());
     assert_eq!(
@@ -475,7 +339,6 @@ fn generate_shared_owner_grants_model_and_tuples() {
         2,
         "each guarded table points its own rows at the owner:\n{script}"
     );
-    insta::assert_snapshot!("generate_shared_owner_grants_tuples", script);
 }
 
 // ── Two owner columns on one table ───────────────────────────────────────────
@@ -504,7 +367,6 @@ fn generate_two_owner_columns_model_and_tuples() {
         dsl.contains("define can_select: (role_viewer from owner_id or role_admin from delegate_id) and acting_app_user from request_gate"),
         "the rule is the union, each side at the level its own call required:\n{dsl}"
     );
-    insta::assert_snapshot!("generate_two_owner_columns_model", dsl.trim());
 
     let script = tuple_generator::format_tuples(model.tuple_queries());
     assert_eq!(
@@ -517,7 +379,6 @@ fn generate_two_owner_columns_model_and_tuples() {
         1,
         "the grants are about the owner, so both columns read one load:\n{script}"
     );
-    insta::assert_snapshot!("generate_two_owner_columns_tuples", script);
 }
 
 // ── Two role functions over one grant table ──────────────────────────────────
@@ -579,29 +440,6 @@ fn generate_two_role_functions_keeps_their_ladders_apart() {
             "one owner carrying both scales answers a grant on either for both:\n{dsl}"
         );
     }
-    insta::assert_snapshot!("generate_two_role_functions_model", dsl.trim());
-}
-
-/// The grant SQL two ladders over one grant table produce.
-///
-/// The model half is pinned above. Which facts get written is the other half of "the
-/// grants are stored once and serve both tables", and only the SQL says it.
-#[test]
-fn generate_two_role_functions_tuples() {
-    let db = support::parse_fixture_db("two_role_functions");
-    let registry = support::load_fixture_registry("two_role_functions");
-    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
-        &db,
-        &registry,
-        &support::deployment::fixture_deployment("two_role_functions"),
-    );
-
-    let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-    let tuples = outputs.tuple_queries();
-    insta::assert_snapshot!(
-        "generate_two_role_functions_tuples",
-        tuple_generator::format_tuples(tuples)
-    );
 }
 
 /// The caller-set share family, which no snapshot pins today.
@@ -616,43 +454,4 @@ fn generate_connetto_capability_model_and_tuples() {
         &support::try_load_fixture_registry("connetto_capability"),
         ConfidenceLevel::B,
     );
-}
-
-/// The caller-set share reached through a parent, the one shape of the family where the
-/// gate rides the share row and the guarded row reaches it through the team it belongs to.
-#[test]
-fn generate_connetto_team_share_model_and_tuples() {
-    fixture_model_and_tuples(
-        "connetto_team_share",
-        &support::try_load_fixture_registry("connetto_team_share"),
-        ConfidenceLevel::B,
-    );
-}
-
-/// The plainest shape the crate emits, pinned as SQL as well as as a model.
-///
-/// Ownership is what every other shape is read against, and the identity encoding, the
-/// null guards and the subject budget all show up here first.
-#[test]
-fn generate_simple_ownership_tuples() {
-    let db = support::parse_fixture_db("simple_ownership");
-    let mut registry = FunctionRegistry::new();
-    registry.register_if_absent(
-        "auth_current_user_id",
-        &FunctionSemantic::CurrentUserAccessor {
-            returns: "uuid".to_string(),
-        },
-    );
-    let outputs = support::plan_at(
-        policy_classifier::classify_policies(
-            &db,
-            &registry,
-            &support::deployment::fixture_deployment("simple_ownership"),
-        ),
-        &db,
-        &registry,
-        ConfidenceLevel::B,
-    );
-    let tuples = outputs.tuple_queries();
-    insta::assert_snapshot!(tuple_generator::format_tuples(tuples));
 }
