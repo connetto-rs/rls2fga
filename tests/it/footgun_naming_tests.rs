@@ -890,14 +890,17 @@ fn valid_extended_well_known_type_name_keeps_its_exact_spelling() {
     .expect("the extended identifier should be valid");
     assert_eq!(names.user().as_str(), user);
 
-    let schema = reserved_type_collision_schema("docs");
-    let db = db_of(&schema);
+    // An ownership read stays judged, so its facts name the configured user type.
+    let schema = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));";
+    let db = db_of(schema);
     let outputs = translator_with_types(names)
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
     assert!(outputs.model().contains(&format!("type {user}\n")));
-    assert!(format_tuples(outputs.tuple_queries()).contains(&format!("'{user}:*'")));
+    assert!(format_tuples(outputs.tuple_queries()).contains(&format!("'{user}:")));
 }
 
 #[test]

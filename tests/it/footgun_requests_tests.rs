@@ -10,6 +10,7 @@ use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationShapes;
 use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, ActionStatement};
 use rls2fga::types::{ColumnName, RelationName};
 use rls2fga::types::{RecordDerivation, ValueSource};
 
@@ -18,7 +19,8 @@ use crate::support::deployment::{
     translator_builder,
 };
 use crate::support::footgun::{
-    db_of, relation_definition, relation_definitions, relation_denies, translation, translator,
+    action_answer, db_of, relation_definition, relation_definitions, relation_denies, translation,
+    translator,
 };
 
 /// The missing-key-tolerant `current_setting(key, true)` identifies the current
@@ -388,8 +390,9 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (uid(id));
         .outputs_accepting_gaps();
 
     assert_eq!(
-        relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("public_viewer and acting_app_user from request_gate")
+        action_answer(&model, "docs", ActionStatement::Select),
+        Some(&ActionAnswer::Unrestricted),
+        "the other function folds to true, so every acting role reads every row"
     );
 }
 

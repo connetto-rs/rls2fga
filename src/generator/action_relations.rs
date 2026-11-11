@@ -145,17 +145,24 @@ fn judgements(plan: &TypePlan) -> [(ActionStatement, Judgements); 8] {
     ]
 }
 
+/// Whether the type defines `relation` as granting nobody.
+fn grants_nothing(plan: &TypePlan, relation: &str) -> bool {
+    plan.computed_relations
+        .get_key_value(relation)
+        .is_some_and(|(relation, _)| relation_grants_nothing(plan, relation))
+}
+
 fn answer(
     request_gate: Option<&TypePlan>,
     plan: &TypePlan,
     required: Judgements,
     deployment: Option<&Deployment>,
 ) -> ActionAnswer {
-    if required.iter().flatten().any(|(relation, _)| {
-        plan.computed_relations
-            .get_key_value(*relation)
-            .is_some_and(|(relation, _)| relation_grants_nothing(plan, relation))
-    }) {
+    if required
+        .iter()
+        .flatten()
+        .any(|(relation, _)| grants_nothing(plan, relation))
+    {
         return ActionAnswer::Denied;
     }
     if required.iter().flatten().all(|(relation, _)| {
@@ -214,17 +221,15 @@ pub(crate) fn action_answers<'plan>(
         let mut asked: BTreeSet<RelationName> = BTreeSet::new();
         for (statement, required) in judgements(type_plan) {
             let answer = answer(request_gate, type_plan, required, deployment);
-            let read = if answer == ActionAnswer::Unrestricted {
-                &mut local
-            } else {
-                &mut asked
-            };
-            read.extend(
-                required
-                    .into_iter()
-                    .flatten()
-                    .map(|(relation, _)| RelationName::canonicalized(relation)),
-            );
+            // A refusal keeps the relation that refuses it, which a direct check answers alike.
+            for (relation, _) in required.into_iter().flatten() {
+                let read = match answer {
+                    ActionAnswer::Judged(_) => &mut asked,
+                    ActionAnswer::Denied if grants_nothing(type_plan, relation) => &mut asked,
+                    _ => &mut local,
+                };
+                read.insert(RelationName::canonicalized(relation));
+            }
             entries.push(ActionRelations::new(
                 type_plan.type_name.clone(),
                 statement,

@@ -62,6 +62,17 @@ fn dsl_of(db: &ParserDB, classified: &[ClassifiedPolicy], registry: &FunctionReg
     support::plan_at(classified.to_vec(), db, registry, ConfidenceLevel::B).model()
 }
 
+fn answers_of(
+    db: &ParserDB,
+    classified: &[ClassifiedPolicy],
+    registry: &FunctionRegistry,
+) -> Vec<rls2fga::types::ActionRelations> {
+    support::plan_at(classified.to_vec(), db, registry, ConfidenceLevel::B)
+        .translation()
+        .action_relations()
+        .to_vec()
+}
+
 fn tuples_of(
     db: &ParserDB,
     classified: &[ClassifiedPolicy],
@@ -315,10 +326,19 @@ fn an_answered_pattern_emits_what_the_crate_emits_for_it() {
     let native_db = support::deployment::db(native);
     let (recognized, native_registry) = translator().classify_with_effective_registry(&native_db);
     let native_model = dsl_of(&native_db, &recognized, &native_registry);
-    assert_ne!(
-        relation(&native_model, "can_select").expect("docs defines can_select"),
-        "no_access",
-        "the granted native clause must admit rows"
+    let native_answers = answers_of(&native_db, &recognized, &native_registry);
+    assert!(
+        native_answers
+            .iter()
+            .any(|entry| entry.type_name.as_str() == "docs"
+                && entry.statement == ActionStatement::Select
+                && entry.answer == ActionAnswer::Unrestricted),
+        "the granted native clause must admit rows: {native_answers:?}"
+    );
+    assert_eq!(
+        answers_of(&refused_db, &answered, &answered_registry),
+        native_answers,
+        "an answered pattern must produce the same answers"
     );
 
     assert_eq!(

@@ -7,11 +7,12 @@
 use rls2fga::parser::sql_parser::ParserDB;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
-use rls2fga::types::{NoteSeverity, TranslationNote};
+use rls2fga::types::{ActionAnswer, ActionStatement, NoteSeverity, TranslationNote};
 
 use crate::support::deployment::{caller, caller_deployment_acting_as, delimited_set};
 use crate::support::footgun::{
-    assert_model_is_internally_consistent, db_of, relation_definition, relation_denies, translator,
+    action_answer, assert_model_is_internally_consistent, db_of, relation_definition,
+    relation_denies, translator,
 };
 
 /// RLS is `(permissive OR ...) AND restrictive AND ...`, so dropping a
@@ -1047,12 +1048,10 @@ CREATE POLICY p ON docs FOR SELECT TO editor USING (pg_has_role('editor', 'MEMBE
         .translate(&db)
         .expect("translation should plan")
         .outputs_accepting_gaps();
-    let dsl = outputs.model();
-
     assert_eq!(
-        relation_definition(&dsl, "docs", "can_select").as_deref(),
-        Some("public_viewer and acting_app_user from request_gate"),
-        "the gate is a constant the schema answers, so the TO clause alone decides:\n{dsl}"
+        action_answer(&outputs, "docs", ActionStatement::Select),
+        Some(&ActionAnswer::Unrestricted),
+        "the gate is a constant the schema answers, so the TO clause alone decides"
     );
     assert!(
         !outputs

@@ -56,6 +56,13 @@ CREATE POLICY d ON docs USING (project_id IN (
   SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true)));
 ";
 
+/// Reads open to every acting role, and no policy for any write, the manual's `all_view`.
+const OPEN_READS: &str = "
+CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_read ON notes FOR SELECT USING (true);
+";
+
 /// Two tables canonicalizing to one type name, only one of them guarded.
 const COLLIDING_SPELLINGS: &str = "
 CREATE SCHEMA app;
@@ -206,6 +213,43 @@ fn an_open_table_loads_no_facts() {
         "the guarded table still links its rows to its gate: {:#?}",
         outputs.tuple_queries()
     );
+}
+
+/// A refusal is answered locally just as the local grant is, so a table whose reads are
+/// open and whose writes are refused loads no fact about its rows or its gate. Each refused
+/// write keeps its `no_access` relation, which a direct check answers as the refusal does.
+#[test]
+fn a_table_answered_by_grants_and_refusals_alone_loads_no_facts() {
+    let db = support::deployment::db(OPEN_READS);
+    let planned = translate(&db);
+    for statement in EVERY_STATEMENT {
+        let expected = if statement == ActionStatement::Select {
+            ActionAnswer::Unrestricted
+        } else {
+            ActionAnswer::Denied
+        };
+        assert_eq!(answer(&planned, "notes", statement), Some(&expected));
+    }
+    let outputs = outputs(&db);
+    for needle in [r#"FROM "public"."notes""#, "'request_gate:notes'"] {
+        assert!(
+            !any_fact_names(&outputs, needle),
+            "nothing asks about the table, yet a fact names {needle}: {:#?}",
+            outputs.tuple_queries()
+        );
+    }
+    let model = outputs.model();
+    for (relation, defined) in [
+        ("can_select", false),
+        ("can_insert", true),
+        ("can_update", true),
+    ] {
+        assert_eq!(
+            support::footgun::relation_definition(&model, "notes", relation).as_deref(),
+            defined.then_some("no_access"),
+            "{relation} in\n{model}"
+        );
+    }
 }
 
 /// The open tables a guarded policy reads keep the facts that policy needs, its membership
