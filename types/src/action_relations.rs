@@ -1,5 +1,6 @@
 use crate::prelude::*;
-use crate::{RelationName, TypeName};
+use crate::{ColumnName, RelationName, TypeName};
+use alloc::collections::BTreeMap;
 
 /// Which version of the row a relation judges.
 ///
@@ -49,6 +50,53 @@ pub enum ActionAnswer {
     /// model refusing is not the database refusing: a policy the classifier could not read
     /// falls closed to this and says so through a `BelowThreshold` note.
     Denied,
+    /// Some acting role may run the statement on some columns only, so the columns it
+    /// touches are asked beside its rows.
+    ByColumn(ColumnAnswer),
+}
+
+/// A command `PostgreSQL` grants on single columns.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ColumnCommand {
+    /// `SELECT`, needed on every column a statement reads.
+    Select,
+    /// `INSERT`, needed on every column an `INSERT` assigns.
+    Insert,
+    /// `UPDATE`, needed on every column an `UPDATE` sets.
+    Update,
+}
+
+/// The relations naming who holds one command on each column.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnRelations {
+    /// Command the relations hold.
+    pub command: ColumnCommand,
+    /// Relation per column some column grant names.
+    pub columns: BTreeMap<ColumnName, RelationName>,
+    /// Relation for every other column, held by the roles holding the command on the table.
+    pub on_table: RelationName,
+}
+
+impl ColumnRelations {
+    /// The relation to ask for `column`.
+    #[must_use]
+    pub fn relation(&self, column: &ColumnName) -> &RelationName {
+        self.columns.get(column).unwrap_or(&self.on_table)
+    }
+}
+
+/// A statement answered for its rows and for the columns it touches.
+///
+/// Granted only where `rows` grants and, for each command in `commands`, the relation of
+/// every column the statement touches with that command grants on `gate`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnAnswer {
+    /// The answer for the rows, never [`ActionAnswer::Denied`] or another `ByColumn`.
+    pub rows: Box<ActionAnswer>,
+    /// Object the column relations are asked on, `request_gate:<table>`.
+    pub gate: String,
+    /// The commands of the statement some acting role holds on some columns only.
+    pub commands: Vec<ColumnRelations>,
 }
 
 /// A statement shape the model answers for.
@@ -90,6 +138,25 @@ impl ActionStatement {
             Self::Insert | Self::InsertOnConflictUpdate | Self::InsertReturning => "INSERT",
             Self::Update | Self::UpdateWithoutWhere => "UPDATE",
             Self::Delete => "DELETE",
+        }
+    }
+
+    /// The commands whose column privileges this statement needs, as `PostgreSQL` checks
+    /// them. `DELETE` and the column a locking read updates are table-wide.
+    #[must_use]
+    pub fn column_commands(&self) -> &'static [ColumnCommand] {
+        match self {
+            Self::Select | Self::SelectForUpdate | Self::Delete => &[ColumnCommand::Select],
+            Self::Insert => &[ColumnCommand::Insert],
+            Self::InsertReturning => &[ColumnCommand::Insert, ColumnCommand::Select],
+            Self::Update | Self::UpdateWithoutWhere => {
+                &[ColumnCommand::Update, ColumnCommand::Select]
+            }
+            Self::InsertOnConflictUpdate => &[
+                ColumnCommand::Insert,
+                ColumnCommand::Update,
+                ColumnCommand::Select,
+            ],
         }
     }
 }

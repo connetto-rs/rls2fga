@@ -39,9 +39,9 @@ use crate::parser::sql_parser::{
     ColumnLike, DatabaseLike, ForeignKeyLike, IdentifierCase, PolicyLike, TableLike,
 };
 use crate::types::{
-    stable_hex_suffix, ColumnKind, ColumnName, ConditionName, ConditionParameterName,
-    ContextWitness, FallbackStep, RelationName, RequestComparison, TableId, TranslationNote,
-    TypeName,
+    stable_hex_suffix, ColumnCommand, ColumnKind, ColumnName, ColumnRelations, ConditionName,
+    ConditionParameterName, ContextWitness, FallbackStep, RelationName, RequestComparison, TableId,
+    TranslationNote, TypeName,
 };
 
 /// The kind a request acts as, joined to every row.
@@ -67,7 +67,7 @@ mod role_threshold;
 /// Whole-plan passes that run once every table is translated.
 mod simplify;
 
-use acting_kinds::acting_kind_walk;
+use acting_kinds::{acting_kind_walk, plant_column_relations};
 use actions::{
     action_relation_commands, clauses_lost_to_the_threshold, commands_a_permissive_policy_covers,
     commands_fed_by, compose_action, define_blanket_update_relations,
@@ -78,8 +78,8 @@ use actions::{
 };
 pub(crate) use actions::{action_relations, derived_action_relations};
 use branches::{
-    answer_supplied_policies, answer_targets, branch_expr, gate_on_table_privileges, ActingBranch,
-    PolicyPart, TargetAnswer,
+    answer_supplied_policies, answer_targets, branch_expr, gate_on_privileges, ActingBranch,
+    ColumnHolding, PolicyPart, TargetAnswer,
 };
 use dsl::render_dsl;
 use emit_membership::{
@@ -101,8 +101,8 @@ use request_formula::RequestFormula;
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
 use simplify::{
     drop_implied_insert_readback, grants_nothing, inline_synthetic_rule_aliases,
-    narrow_grant_sources_to_declared, prune_unreferenced_relations, reach_userset,
-    requires_read_access, simplify_redundant_select_gates,
+    narrow_grant_sources_to_declared, prune_unreferenced_relations, reach_column_relations,
+    reach_userset, requires_read_access, simplify_redundant_select_gates,
 };
 pub(crate) use simplify::{relation_grants_every_actor, relation_grants_nothing};
 
@@ -324,6 +324,9 @@ pub(crate) struct TypePlan {
     /// name is bound to the table, so nothing has to re-derive the association from
     /// the shapes, where two tables can key a row alike.
     pub source_table: Option<TableId>,
+    /// Per command some acting role holds on some columns only, the relations on this
+    /// table's gate object naming who holds it on each column.
+    pub column_relations: Vec<ColumnRelations>,
 }
 
 /// Subjects the generator's own structural relations hold, or `None` when the
@@ -381,6 +384,7 @@ impl TypePlan {
             reads_only_its_own_rows: false,
             narrowed_relations: BTreeSet::new(),
             source_table: None,
+            column_relations: Vec::new(),
         }
     }
 
@@ -1199,6 +1203,8 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     .then(|| lookup_table_id(db, &source_table))
                     .flatten();
                 let mut per_target: BTreeMap<ActionTarget, Vec<UsersetExpr>> = BTreeMap::new();
+                let mut column_holdings: BTreeMap<ColumnCommand, BTreeMap<String, ColumnHolding>> =
+                    BTreeMap::new();
                 let mut barrier_denied: BTreeSet<ActionTarget> = BTreeSet::new();
                 let mut refused_everywhere: BTreeMap<ActionTarget, bool> = BTreeMap::new();
                 // Only a catalog table is answered per role, so only there can a policy
@@ -1242,15 +1248,15 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                                 &mut notes,
                                 reached,
                             );
-                            gate_on_table_privileges(
-                                &mut answers,
-                                table,
-                                &source_table,
-                                branch,
-                                db,
-                                table_plan,
-                                &mut notes,
-                            );
+                            let held = gate_on_privileges(&mut answers, table, branch, db);
+                            if let Some((name, _)) = branch.role {
+                                for (command, holding) in held {
+                                    column_holdings
+                                        .entry(command)
+                                        .or_default()
+                                        .insert(name.to_string(), holding);
+                                }
+                            }
                             answers
                         }
                         _ => answer_supplied_policies(&table_policies, branch, parts),
@@ -1326,6 +1332,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 );
                 note_request_contracts(table_plan, &mut notes);
                 set_action_relations(table_plan, composed);
+                plant_column_relations(table_plan, other_types, &column_holdings);
 
                 if let Some(declared_permissive) = &declared_permissive {
                     // Undefined policy actions must deny rather than leave access to the consumer.
@@ -2113,6 +2120,7 @@ pub(crate) fn grantable_relations(types: &[TypePlan]) -> BTreeSet<(TypeName, Rel
             }
             reach_userset(expr, plan, &by_name, &mut reached);
         }
+        reach_column_relations(plan, &by_name, &mut reached);
     }
     reached
 }

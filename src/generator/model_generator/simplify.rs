@@ -245,7 +245,8 @@ pub(crate) fn repoint_inlined_aliases(
 /// Deliberately not [`grantable_relations`], which stops at a permission that grants
 /// nothing. A relation only a denial names still has to stay declared, or the model
 /// carries a reference to something it does not define. A relation only locally answered
-/// statements read is no root, since nothing asks about it.
+/// statements read is no root, since nothing asks about it. The column relations on a gate
+/// object are roots, since a check asks them there.
 pub(crate) fn referenced_relations(
     types: &[TypePlan],
     answered_locally: &BTreeMap<TypeName, BTreeSet<RelationName>>,
@@ -263,8 +264,27 @@ pub(crate) fn referenced_relations(
                 reach_userset(expr, plan, &by_name, &mut reached);
             }
         }
+        reach_column_relations(plan, &by_name, &mut reached);
     }
     reached
+}
+
+/// Reach the column relations a check asks on `plan`'s gate object.
+pub(crate) fn reach_column_relations(
+    plan: &TypePlan,
+    by_name: &BTreeMap<&TypeName, &TypePlan>,
+    reached: &mut BTreeSet<(TypeName, RelationName)>,
+) {
+    let Some(gate) = by_name.get(&plan.well_known.request_gate) else {
+        return;
+    };
+    for relations in &plan.column_relations {
+        for relation in relations.columns.values().chain([&relations.on_table]) {
+            if reached.insert((gate.type_name.clone(), relation.clone())) {
+                reach_direct_usersets(gate, relation, reached);
+            }
+        }
+    }
 }
 
 /// Drop relations no permission names. They are declared, no tuple query feeds them,
@@ -295,7 +315,8 @@ pub(crate) fn prune_unreferenced_relations(
 /// Drop the constants on a gate object no surviving row links to.
 ///
 /// A gate object is reached only through the link its rows carry, so once pruning removes
-/// every such link, the constants written on it can never answer a check.
+/// every such link, the constants written on it can never answer a check. The column
+/// relations are the exception, since a check asks them on the gate object itself.
 fn drop_unlinked_gate_entries(all_types: &mut BTreeMap<TypeName, TypePlan>) {
     let mut linked: BTreeMap<TypeName, BTreeSet<String>> = BTreeMap::new();
     for plan in all_types.values() {
@@ -322,7 +343,13 @@ fn drop_unlinked_gate_entries(all_types: &mut BTreeMap<TypeName, TypePlan>) {
         }
     }
     for plan in all_types.values_mut() {
+        let asked_on_gate: BTreeSet<&RelationName> = plan
+            .column_relations
+            .iter()
+            .flat_map(|relations| relations.columns.values().chain([&relations.on_table]))
+            .collect();
         plan.table_tuple_sources.retain(|source| match source {
+            TupleSource::ActingKind { relation, .. } if asked_on_gate.contains(relation) => true,
             TupleSource::ActingKind {
                 gate_type,
                 gate_object,

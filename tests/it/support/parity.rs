@@ -7,9 +7,10 @@
 //! The comparison is the full cross product of principal, object and statement, in both
 //! directions, so a case cannot check only the pairs its author thought of.
 
+use core::ops::ControlFlow;
 use core::time::Duration;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use diesel::connection::SimpleConnection;
@@ -17,14 +18,17 @@ use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::sql_types::Jsonb;
 use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
+use sqlparser::ast::{visit_expressions, AssignmentTarget, Expr, Ident, Statement};
+use sqlparser::dialect::PostgreSqlDialect;
+use sqlparser::parser::Parser;
 use testcontainers::{ContainerAsync, GenericImage};
 
 use rls2fga::classifier::function_registry::DeclaredSources;
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
-    records_from_row, ActionAnswer, ActionRelations, ActionStatement, ConfidenceLevel,
-    NoteSeverity, RequestAtom, RequestComparison, RequestPredicate, RowNaming, RowVersion, TableId,
-    TranslationNote, ValueSource,
+    records_from_row, ActionAnswer, ActionRelations, ActionStatement, ColumnCommand, ColumnName,
+    ConfidenceLevel, NoteSeverity, RequestAtom, RequestComparison, RequestPredicate, RowNaming,
+    RowVersion, TableId, TranslationNote, ValueSource,
 };
 
 use super::openfga;
@@ -836,7 +840,7 @@ async fn openfga_allows(
     context: &serde_json::Value,
     object: &Object,
     statement: ActionStatement,
-    check_neutral: bool,
+    mutations: Option<&Mutations>,
 ) -> Option<bool> {
     let Model {
         client,
@@ -848,9 +852,7 @@ async fn openfga_allows(
         .name
         .split_once(':')
         .map_or_else(|| object.name.as_str(), |(type_name, _)| type_name);
-    // A missing answer is not a pair to leave out. Skipping it kept the non-vacuity guard
-    // satisfied by the pairs that remained, so a whole table or statement could stop being
-    // compared with nothing to show it had.
+    // Skipping a missing answer would let the remaining pairs satisfy the non-vacuity guard.
     let entry = answers
         .iter()
         .find(|entry| entry.type_name == *type_name && entry.statement == statement)
@@ -861,26 +863,47 @@ async fn openfga_allows(
                 case.name
             )
         });
-    match &entry.answer {
+    let user = format!("user:{}", principal.subject);
+    let rows = match &entry.answer {
+        ActionAnswer::ByColumn(answer) => {
+            let touched = touched_columns(object, statement, mutations)?;
+            for relations in &answer.commands {
+                for column in touched.of(relations.command) {
+                    let granted = openfga::check_as(
+                        client,
+                        &principal.login_role,
+                        &user,
+                        relations.relation(column).as_str(),
+                        &answer.gate,
+                        context.clone(),
+                    )
+                    .await;
+                    if !granted {
+                        return Some(false);
+                    }
+                }
+            }
+            answer.rows.as_ref()
+        }
+        answer => answer,
+    };
+    match rows {
         ActionAnswer::Unrestricted => Some(true),
         ActionAnswer::Denied => Some(false),
         ActionAnswer::Judged(judgements) => {
+            // An upsert probe keeps the key and copies every column, so its resulting row is the existing one.
+            let settled = object.singleton
+                || mutations.is_some_and(|mutations| mutations.check_neutral)
+                || statement == ActionStatement::InsertOnConflictUpdate;
             for judgement in judgements {
-                // The tuples state facts about rows the database holds, so a judgement
-                // about the row a write would produce has nothing to read. Answering it
-                // needs that row's records, which is not this runner's job yet.
-                // An upsert probe copies every column and keeps the key, so its
-                // resulting row is the existing one and no claim is needed.
-                let settled = object.singleton
-                    || check_neutral
-                    || statement == ActionStatement::InsertOnConflictUpdate;
+                // The tuples hold no facts about a row a write has yet to produce.
                 if judgement.version == RowVersion::Resulting && !settled {
                     return None;
                 }
                 let granted = openfga::check_as(
                     client,
                     &principal.login_role,
-                    &format!("user:{}", principal.subject),
+                    &user,
                     judgement.relation.as_str(),
                     &object.name,
                     context.clone(),
@@ -892,14 +915,136 @@ async fn openfga_allows(
             }
             Some(true)
         }
-        // An answer the model learns to give has to be read deliberately: treating it as
-        // no answer would drop the pair the way a missing entry used to.
+        // Reading an unknown answer as no answer would drop the pair uncompared.
         other => panic!(
             "{}: the model answered {other:?} for {statement:?} on '{type_name}', which this \
              runner does not read yet",
             case.name
         ),
     }
+}
+
+/// The columns one probe statement touches, per command `PostgreSQL` checks on them.
+#[derive(Default)]
+struct Touched {
+    select: BTreeSet<ColumnName>,
+    insert: BTreeSet<ColumnName>,
+    update: BTreeSet<ColumnName>,
+}
+
+impl Touched {
+    /// The columns `command` is checked on.
+    fn of(&self, command: ColumnCommand) -> &BTreeSet<ColumnName> {
+        match command {
+            ColumnCommand::Select => &self.select,
+            ColumnCommand::Insert => &self.insert,
+            ColumnCommand::Update => &self.update,
+        }
+    }
+}
+
+/// The columns the probe for `statement` on `object` touches, [`None`] where no probe runs.
+fn touched_columns(
+    object: &Object,
+    statement: ActionStatement,
+    mutations: Option<&Mutations>,
+) -> Option<Touched> {
+    let keys = || object.keys.iter().map(ColumnName::from_stored);
+    let row = || {
+        object
+            .row
+            .as_object()
+            .into_iter()
+            .flat_map(serde_json::Map::keys)
+            .map(ColumnName::from_stored)
+    };
+    let mut touched = Touched::default();
+    match statement {
+        ActionStatement::Select | ActionStatement::SelectForUpdate | ActionStatement::Delete => {
+            touched.select.extend(keys());
+        }
+        ActionStatement::Update => {
+            (touched.update, touched.select) = set_columns(mutations?.update_set.as_deref()?);
+            touched.select.extend(keys());
+        }
+        ActionStatement::Insert => touched.insert.extend(row()),
+        ActionStatement::InsertReturning => {
+            // Both spellings read the whole key, the arbiter as much as `RETURNING`.
+            if object.keys.is_empty() {
+                touched
+                    .select
+                    .insert(ColumnName::from_stored(settable_column(object)?));
+            } else {
+                touched.select.extend(keys());
+            }
+            touched.insert.extend(row());
+        }
+        ActionStatement::InsertOnConflictUpdate => {
+            let settable = settable_column(object)?;
+            touched.insert.extend(row());
+            touched.update.insert(ColumnName::from_stored(settable));
+            // The arbiter and the `excluded` column the update assigns are both read.
+            touched.select.extend(keys());
+            touched.select.insert(ColumnName::from_stored(settable));
+        }
+        _ => return None,
+    }
+    Some(touched)
+}
+
+/// The first column outside the key, which an upsert probe assigns and a keyless
+/// `RETURNING` names.
+fn settable_column(object: &Object) -> Option<&str> {
+    object
+        .row
+        .as_object()?
+        .keys()
+        .map(String::as_str)
+        .find(|column| !object.keys.iter().any(|key| key == column))
+}
+
+/// The columns a `SET` clause assigns, and the columns its expressions read.
+fn set_columns(set: &str) -> (BTreeSet<ColumnName>, BTreeSet<ColumnName>) {
+    let sql = format!("UPDATE probe SET {set}");
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, &sql)
+        .unwrap_or_else(|error| panic!("the declared change `{set}` does not parse: {error}"));
+    let [Statement::Update(update)] = statements.as_slice() else {
+        panic!("the declared change `{set}` is not one SET clause");
+    };
+    let mut assigned = BTreeSet::new();
+    let mut read = BTreeSet::new();
+    for assignment in &update.assignments {
+        let targets = match &assignment.target {
+            AssignmentTarget::ColumnName(name) => core::slice::from_ref(name),
+            AssignmentTarget::Tuple(names) => names.as_slice(),
+        };
+        assigned.extend(
+            targets
+                .iter()
+                .filter_map(|name| name.0.last()?.as_ident())
+                .map(stored_column),
+        );
+        let _ = visit_expressions(&assignment.value, |expr| {
+            match expr {
+                Expr::Identifier(ident) => {
+                    read.insert(stored_column(ident));
+                }
+                Expr::CompoundIdentifier(parts) => read.extend(parts.last().map(stored_column)),
+                _ => {}
+            }
+            ControlFlow::<()>::Continue(())
+        });
+    }
+    (assigned, read)
+}
+
+/// The name `PostgreSQL` stores for `ident`, folded unless quoted.
+fn stored_column(ident: &Ident) -> ColumnName {
+    ColumnName::from_stored(if ident.quote_style.is_some() {
+        ident.value.clone()
+    } else {
+        ident.value.to_lowercase()
+    })
 }
 
 /// Which property a case is asserting.
@@ -1186,9 +1331,8 @@ fn plan_case(
 /// object the translation reads.
 fn is_do_block(sql: &str) -> bool {
     matches!(
-        sqlparser::parser::Parser::parse_sql(&sqlparser::dialect::PostgreSqlDialect {}, sql)
-            .as_deref(),
-        Ok([sqlparser::ast::Statement::Do(_)])
+        Parser::parse_sql(&PostgreSqlDialect {}, sql).as_deref(),
+        Ok([Statement::Do(_)])
     )
 }
 
@@ -1300,7 +1444,7 @@ async fn compare_every_pair(
                     &asked_context(principal, &clock, model.sources),
                     object,
                     statement,
-                    candidate.is_some_and(|mutations| mutations.check_neutral),
+                    candidate,
                 )
                 .await
                 else {
@@ -1623,7 +1767,7 @@ async fn compare_at_future_instant(
                 &context,
                 object,
                 ActionStatement::Select,
-                false,
+                None,
             )
             .await
             else {
@@ -1669,7 +1813,7 @@ fn tuples_replaying_pure_queries(
     case: &ParityCase,
     queries: &[rls2fga::generator::tuple_generator::TupleQuery],
 ) -> Vec<super::LoadedTuple> {
-    let mut loaded = std::collections::BTreeSet::new();
+    let mut loaded = BTreeSet::new();
     let mut rows_by_table = BTreeMap::new();
     let mut pure = 0usize;
     for query in queries {
@@ -1772,7 +1916,7 @@ fn postgres_allows_write_probe(
         .map(|key| format!("\"{key}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let settable = row.keys().find(|column| !keys.contains(column))?;
+    let settable = settable_column(object)?;
 
     let payload = if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
         object.row.to_string()
@@ -1798,10 +1942,7 @@ fn postgres_allows_write_probe(
             [source, alternative]
         }
         ActionStatement::InsertReturning => [
-            format!(
-                "WITH written AS ({source} RETURNING \"{}\") SELECT 1 FROM written",
-                keys[0]
-            ),
+            format!("WITH written AS ({source} RETURNING {arbiter}) SELECT 1 FROM written"),
             format!("{source} ON CONFLICT ({arbiter}) DO NOTHING"),
         ],
         ActionStatement::InsertOnConflictUpdate => {
@@ -2022,13 +2163,6 @@ fn licence_of(note: &TranslationNote) -> Disclosure {
         | TranslationNote::CoveringPoliciesBelowThreshold { table, commands } => Licence::Located {
             table: table.sql_name(),
             commands: commands.clone(),
-            direction: Direction::Narrower,
-        },
-
-        // A role holding a command on some columns only, which the model denies whole.
-        TranslationNote::TablePrivilegeColumnOnly { table, command, .. } => Licence::Located {
-            table: table.sql_name(),
-            commands: vec![command.clone()],
             direction: Direction::Narrower,
         },
 
