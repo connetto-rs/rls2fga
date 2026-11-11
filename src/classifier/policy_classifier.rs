@@ -58,8 +58,9 @@ fn classify_policies_with_registry<DB: DatabaseLike>(
     registry: &FunctionRegistry,
 ) -> Vec<ClassifiedPolicy> {
     db.policies()
-        .map(|policy| {
-            let mut classified = ClassifiedPolicy::from_policy(policy, db);
+        // A policy iterated out of `db` is in `db`, so its analysis never fails.
+        .filter_map(|policy| ClassifiedPolicy::from_policy(policy, db).ok())
+        .map(|mut classified| {
             classified.acting_role = registry.acting_role().map(str::to_string);
             let classify = |expr: &Expr| {
                 classify_clause(

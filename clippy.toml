@@ -1,0 +1,8 @@
+# A policy's rules are read through sql-traits' analyses, never its raw fields.
+disallowed-methods = [
+    { path = "sql_traits::traits::policy::PolicyLike::command", reason = "read the command through `PolicyLike::clause_analysis`" },
+    { path = "sql_traits::traits::policy::PolicyLike::policy_type", reason = "read the mode through `PolicyLike::clause_analysis`" },
+    { path = "sql_traits::traits::policy::PolicyLike::roles", reason = "read whom a policy reaches through `TableLike::row_security`" },
+    { path = "sql_traits::traits::policy::PolicyLike::applies_to_public", reason = "read whom a policy reaches through `TableLike::row_security`" },
+    { path = "sql_traits::traits::policy::PolicyLike::applies_to_role", reason = "read whom a policy reaches through `TableLike::row_security`" },
+]

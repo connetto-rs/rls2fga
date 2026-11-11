@@ -638,6 +638,14 @@ fn an_illegal_clause_refuses_the_policy() {
             "CREATE POLICY p ON docs FOR DELETE WITH CHECK (owner_id = current_setting('app.user_id'));",
             "WITH CHECK cannot be applied to SELECT or DELETE",
         ),
+        (
+            "CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id')) WITH CHECK (true);",
+            "WITH CHECK cannot be applied to SELECT or DELETE",
+        ),
+        (
+            "CREATE POLICY p ON docs FOR INSERT USING (true) WITH CHECK (owner_id = current_setting('app.user_id'));",
+            "only WITH CHECK expression allowed for INSERT",
+        ),
     ];
     for (policy_sql, rule) in cases {
         let db = db_of(&format!(
@@ -684,6 +692,15 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
             )),
             "an illegal clause is not an absent one, and saying both misleads \
              ({policy_sql}), got: {:#?}",
+            outputs.notes()
+        );
+        assert!(
+            !outputs
+                .notes()
+                .iter()
+                .any(|note| matches!(note, TranslationNote::CoveringPoliciesBelowThreshold { .. })),
+            "an impossible policy covers no command, so nothing it would have granted \
+             fell below the threshold ({policy_sql}), got: {:#?}",
             outputs.notes()
         );
     }

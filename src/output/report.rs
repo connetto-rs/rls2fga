@@ -431,7 +431,8 @@ CREATE POLICY {name} ON docs USING (TRUE);
         );
         let db = parse_schema(&sql).expect("schema should parse");
         let policy = db.policies().next().expect("expected a policy");
-        let mut result = ClassifiedPolicy::from_policy(policy, &db);
+        let mut result =
+            ClassifiedPolicy::from_policy(policy, &db).expect("the policy is in its database");
         result.using_classification = using.map(|pattern| ClassifiedExpr {
             pattern,
             confidence: ConfidenceLevel::A,

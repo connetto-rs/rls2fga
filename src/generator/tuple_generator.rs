@@ -2277,7 +2277,8 @@ CREATE POLICY docs_update ON docs FOR ALL
         .expect("schema should parse");
 
         let policy = db.policies().next().expect("policy should exist");
-        let mut classified = ClassifiedPolicy::from_policy(policy, &db);
+        let mut classified =
+            ClassifiedPolicy::from_policy(policy, &db).expect("the policy is in its database");
         classified.using_classification = Some(ClassifiedExpr {
             pattern: PatternClass::P3DirectOwnership(DirectOwnership {
                 column: ColumnName::from_stored("owner_id"),

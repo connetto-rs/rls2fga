@@ -62,7 +62,8 @@ fn classified_from_policy<DB: DatabaseLike>(
     using: Option<PatternClass>,
     with_check: Option<PatternClass>,
 ) -> ClassifiedPolicy {
-    let mut result = ClassifiedPolicy::from_policy(policy, db);
+    let mut result =
+        ClassifiedPolicy::from_policy(policy, db).expect("the policy is in its database");
     result.using_classification = using.map(|pattern| ClassifiedExpr {
         pattern,
         confidence: ConfidenceLevel::A,
@@ -109,6 +110,7 @@ fn routed_targets(
     for_each_policy_target_expr(&classified, |target, expr| {
         routed.push((target, expr.pattern.clone()));
     });
+    routed.sort_by_key(|(target, _)| *target);
     routed
 }
 
@@ -123,10 +125,10 @@ fn an_unreadable_barrier_denies_every_target_it_feeds_the_mirror_included() {
         routed,
         [
             ActionTarget::Select,
-            ActionTarget::UpdateUsing,
-            ActionTarget::Delete,
             ActionTarget::Insert,
+            ActionTarget::UpdateUsing,
             ActionTarget::UpdateCheck,
+            ActionTarget::Delete,
         ]
         .map(|target| (target, deny.clone()))
     );
@@ -1048,7 +1050,8 @@ fn confidence_filter_prevents_with_check_mirror_when_with_check_was_filtered() {
         column: ColumnName::from_stored("owner_id"),
     });
     // Construct a policy where WITH CHECK has low confidence (B) and USING has high (A).
-    let mut classified = ClassifiedPolicy::from_policy(policy, &db);
+    let mut classified =
+        ClassifiedPolicy::from_policy(policy, &db).expect("the policy is in its database");
     classified.using_classification = Some(ClassifiedExpr {
         pattern: p3.clone(),
         confidence: ConfidenceLevel::A,
@@ -1743,7 +1746,8 @@ CREATE POLICY items_sel2 ON public.items FOR SELECT USING (owner_id = current_us
     let mut policies = Vec::new();
     for policy in db.policies() {
         let table_name = policy.target_table_name().to_string();
-        let mut classified = ClassifiedPolicy::from_policy(policy, &db);
+        let mut classified =
+            ClassifiedPolicy::from_policy(policy, &db).expect("the policy is in its database");
         classified.using_classification = Some(ClassifiedExpr {
             pattern: PatternClass::P3DirectOwnership(DirectOwnership {
                 column: ColumnName::from_stored("owner_id"),
@@ -1804,7 +1808,8 @@ CREATE POLICY things_sel ON things FOR SELECT TO app_user USING (value > 0);
     .unwrap();
 
     let policy = db.policies().next().expect("policy should exist");
-    let mut classified = ClassifiedPolicy::from_policy(policy, &db);
+    let mut classified =
+        ClassifiedPolicy::from_policy(policy, &db).expect("the policy is in its database");
     classified.using_classification = Some(ClassifiedExpr {
         pattern: PatternClass::P3DirectOwnership(DirectOwnership {
             column: ColumnName::from_stored("name"),
