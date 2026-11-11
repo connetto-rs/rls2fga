@@ -33,6 +33,8 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM zzz.projects p
           WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
+GRANT SELECT ON zzz.projects TO app_user;
+GRANT SELECT ON tasks TO app_user;
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -120,6 +122,8 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_all ON tasks FOR ALL USING (
   EXISTS (SELECT 1 FROM projects p
           WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
+GRANT SELECT ON projects TO app_user;
+GRANT ALL PRIVILEGES ON tasks TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::A)
@@ -191,6 +195,7 @@ CREATE POLICY docs_owner ON docs FOR SELECT TO auditor USING (owner_id = current
 CREATE POLICY docs_tenant ON docs FOR SELECT USING (tenant_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
+GRANT SELECT ON docs TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -237,6 +242,8 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p
           WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
+GRANT SELECT ON projects TO app_user;
+GRANT SELECT ON tasks TO app_user;
 ",
     );
     // Level B keeps the parent's public-flag policy, which is the whole point.
@@ -291,6 +298,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 CREATE POLICY docs_del ON docs FOR DELETE USING (
   EXISTS (SELECT 1 FROM docs parent WHERE parent.id = docs.parent_id
           AND (parent.owner_id = current_setting('app.user_id', true) OR parent.is_public = TRUE)));
+GRANT SELECT, DELETE ON docs TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -328,6 +336,7 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_own_column ON tasks FOR SELECT USING (projects_id = current_setting('app.user_id', true));
 CREATE POLICY tasks_parent_link ON tasks FOR DELETE USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
+GRANT SELECT, DELETE ON tasks TO app_user;
 ",
     );
     let translator = translator(ConfidenceLevel::A);
@@ -392,7 +401,8 @@ fn an_inherited_parent_rule_is_named_after_the_rule_itself() {
              ALTER TABLE notes ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY notes_sel ON notes FOR SELECT USING (\n\
                EXISTS (SELECT 1 FROM projects p WHERE p.id = notes.project_id\n\
-                       AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));\n"
+                       AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));\n\
+             GRANT SELECT ON projects, tasks, notes TO app_user;\n"
         )
     };
     let inherited_relations = |dsl: &str| {
@@ -465,6 +475,8 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id
           AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));
+GRANT SELECT ON projects TO app_user;
+GRANT SELECT ON tasks TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -513,6 +525,8 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id
           AND (p.owner_id = current_setting('app.user_id', true) OR p.is_public = TRUE)));
+GRANT SELECT ON projects TO app_user;
+GRANT SELECT ON tasks TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -550,6 +564,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 CREATE POLICY docs_del ON docs FOR DELETE USING (
   EXISTS (SELECT 1 FROM docs parent WHERE parent.id = docs.parent_id
           AND (parent.owner_id = current_setting('app.user_id', true) OR parent.is_public = TRUE)));
+GRANT SELECT, DELETE ON docs TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -578,6 +593,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id))
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
   EXISTS (SELECT 1 FROM projects p WHERE p.id = tasks.project_id AND p.owner_id = current_setting('app.user_id', true)));
+GRANT SELECT ON tasks TO app_user;
 ",
     );
     let dsl = translator(ConfidenceLevel::B)
@@ -624,6 +640,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true))
 );
+GRANT SELECT ON doc_members, docs TO app_user;
 ",
     );
     let model = translator(ConfidenceLevel::B)
@@ -701,6 +718,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id))
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+GRANT SELECT ON projects, tasks TO app_user;
 ";
     let inherited = |clause: &str| {
         let db = db_of(&format!(
@@ -817,7 +835,8 @@ fn an_in_subquery_naming_the_parent_by_its_key_inherits_from_the_parent() {
          USING (owner_login = current_setting('app.user_id', true));\n\
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY doc_links_visible ON doc_links FOR SELECT \
-         USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_setting('app.user_id', true)));"
+         USING (parent_id IN (SELECT id FROM docs WHERE owner_login = current_setting('app.user_id', true)));\n\
+         GRANT SELECT ON docs, doc_links TO app_user;"
     ));
     let outputs = translator(ConfidenceLevel::B)
         .translate(&db)
@@ -846,6 +865,7 @@ CREATE TABLE docs(id INT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE secret_docs(classification TEXT) INHERITS (docs);
+GRANT SELECT ON docs TO app_user;
 ";
 
 /// `INHERITS` does not extend the parent's primary key over the child, so parent row 1
@@ -995,6 +1015,8 @@ ALTER TABLE paper_shares ENABLE ROW LEVEL SECURITY;
 CREATE POLICY papers_own ON papers FOR SELECT USING (owner = auth_uid());
 CREATE POLICY shares_insert ON paper_shares FOR INSERT WITH CHECK (
     EXISTS (SELECT 1 FROM papers p WHERE p.id = paper_id));
+GRANT SELECT ON papers TO app_user;
+GRANT INSERT ON paper_shares TO app_user;
 ";
     let db = db_of(sql);
     let (classified, registry) =
@@ -1145,6 +1167,7 @@ CREATE TABLE events_eu PARTITION OF events FOR VALUES IN ('eu');
 CREATE TABLE guarded(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE guarded ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON guarded FOR SELECT USING (owner_id = current_setting('app.user_id', true));
+GRANT SELECT ON events TO app_user;
 ",
     );
     let outputs = translator(ConfidenceLevel::B)
@@ -1229,6 +1252,7 @@ CREATE POLICY op ON orgs FOR SELECT USING (owner_id = current_setting('app.user_
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (SELECT 1 FROM orgs o WHERE o.id = docs.org_id));
+GRANT SELECT ON orgs, docs TO app_user;
 ",
     );
     let outputs = translator(ConfidenceLevel::B)

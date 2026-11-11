@@ -68,6 +68,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
+GRANT SELECT ON docs TO contractor;
 ";
 
 /// A RESTRICTIVE policy reaches only the acting roles its `TO` list names, so a
@@ -123,6 +124,7 @@ CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
 CREATE POLICY docs_approve ON docs AS RESTRICTIVE FOR SELECT TO auditor
   USING (approver_id = current_setting('app.user_id', true));
+GRANT SELECT ON docs TO contractor, auditor;
 ",
     );
     let model = translate_for(&["contractor", "auditor"], &db).model();
@@ -149,6 +151,7 @@ CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('a
 CREATE POLICY docs_edit ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR ALL TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
+GRANT SELECT, UPDATE ON docs TO contractor;
 ",
     );
     let dsl = translate_for(&["contractor"], &db).model();
@@ -182,6 +185,7 @@ CREATE POLICY docs_inherit ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM parents p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
   USING (reviewer_id = current_setting('app.user_id', true));
+GRANT SELECT ON parents, docs TO contractor;
 ",
     );
     let outputs = translate_for(&["app_user", "contractor"], &db);
@@ -240,6 +244,7 @@ CREATE POLICY dm_support ON doc_members FOR SELECT TO support USING (true);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
+GRANT SELECT ON docs, doc_members TO auditor, support;
 ";
     let model = translate_for(&["auditor", "support"], &db_of(sql)).model();
     let can_select =
@@ -271,6 +276,7 @@ CREATE TABLE docs (id TEXT PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY shared ON docs FOR SELECT
   USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
+GRANT SELECT ON docs, members TO anon, authenticated;
 ";
 
 /// Translate the membership cap for the deployment's acting roles.
@@ -455,7 +461,8 @@ fn a_role_that_bypasses_row_level_security_is_reported() {
                   CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   ALTER TABLE docs FORCE ROW LEVEL SECURITY;\n\
-                  CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n";
+                  CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
+                  GRANT SELECT ON docs TO reporting, plain_user;\n";
     let outputs = translate_for(&["reporting", "plain_user"], &db_of(schema));
 
     let exempt: Vec<&TranslationNote> = outputs
@@ -634,6 +641,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT TO contractor
     USING (secret = false);
+GRANT SELECT ON docs TO contractor;
 ",
     );
     let model = translate_for(&["app_user", "contractor"], &db).model();
@@ -675,6 +683,7 @@ GRANT editors TO nomember WITH INHERIT FALSE;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO editors USING (owner_id = current_setting('app.user_id', true));
+GRANT SELECT ON docs TO member;
 ",
     );
     let dsl = translate_for(&["member", "nomember"], &db).model();
@@ -709,6 +718,7 @@ CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (true);
 CREATE POLICY r ON docs AS RESTRICTIVE FOR SELECT TO editors USING (owner_id = current_setting('app.user_id', true));
+GRANT SELECT ON docs TO member, nomember;
 ",
     );
     let dsl = translate_for(&["member", "nomember"], &db).model();
@@ -746,6 +756,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))
 );
+GRANT SELECT ON docs TO auditor, plain;
+GRANT SELECT ON doc_members TO auditor;
 ",
     );
     let outputs = translate_for(&["auditor", "plain"], &db);
@@ -965,6 +977,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO auditor USING (TRUE);
 CREATE POLICY p ON memos FOR SELECT TO support USING (TRUE);
+GRANT SELECT ON docs TO auditor;
+GRANT SELECT ON memos TO support;
 ",
     );
     let model = translate_for(&["auditor", "support"], &db).model();
@@ -994,6 +1008,8 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO admin USING (TRUE);
 CREATE POLICY p ON memos FOR SELECT TO "Admin" USING (TRUE);
+GRANT SELECT ON docs TO admin;
+GRANT SELECT ON memos TO "Admin";
 "#,
     );
     let outputs = translate_for(&["admin", "Admin"], &db);

@@ -122,7 +122,8 @@ fn a_bypassing_acting_role_is_reported() {
         "CREATE ROLE auditor NOLOGIN BYPASSRLS;
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));",
+CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
+GRANT SELECT ON docs TO auditor;",
         &["auditor"],
         ConfidenceLevel::B,
     );

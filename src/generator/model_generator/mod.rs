@@ -78,7 +78,8 @@ use actions::{
 };
 pub(crate) use actions::{action_relations, derived_action_relations};
 use branches::{
-    answer_supplied_policies, answer_targets, branch_expr, ActingBranch, PolicyPart, TargetAnswer,
+    answer_supplied_policies, answer_targets, branch_expr, gate_on_table_privileges, ActingBranch,
+    PolicyPart, TargetAnswer,
 };
 use dsl::render_dsl;
 use emit_membership::{
@@ -1231,18 +1232,36 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                         }
                     }
                     let answers = match (catalog_table, reached.as_mut()) {
-                        (Some(table), Some(reached)) => answer_targets(
-                            table,
-                            &source_table,
-                            branch,
-                            &mut parts,
-                            db,
-                            &mut notes,
-                            reached,
-                        ),
+                        (Some(table), Some(reached)) => {
+                            let mut answers = answer_targets(
+                                table,
+                                &source_table,
+                                branch,
+                                &mut parts,
+                                db,
+                                &mut notes,
+                                reached,
+                            );
+                            gate_on_table_privileges(
+                                &mut answers,
+                                table,
+                                &source_table,
+                                branch,
+                                db,
+                                table_plan,
+                                &mut notes,
+                            );
+                            answers
+                        }
                         _ => answer_supplied_policies(&table_policies, branch, parts),
                     };
                     let walk = match branch.role {
+                        _ if answers
+                            .values()
+                            .all(|answer| matches!(answer, TargetAnswer::Refused)) =>
+                        {
+                            None
+                        }
                         Some((name, _)) => {
                             match acting_kind_walk(name, &source_table, db, table_plan, other_types)
                             {

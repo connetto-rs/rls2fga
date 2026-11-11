@@ -364,10 +364,9 @@ CREATE POLICY p ON docs FOR SELECT
     ));
 ";
     let db = support::deployment::db(sql);
-    let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
         &db,
-        &registry,
+        &FunctionRegistry::new(),
         &support::deployment::caller_deployment(),
     );
 

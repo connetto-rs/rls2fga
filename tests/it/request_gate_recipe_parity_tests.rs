@@ -219,9 +219,11 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
     )
     .with_settings([deployment::delimited_set("app.bot_list", ",")]);
 
-    // The deployment the harness checks with: acting as the caller's login role, whose
-    // role the seed declares.
-    let sql = format!("CREATE ROLE app_reader LOGIN;\n{schema}");
+    // The deployment acts as the caller's login role, whose role and grants the seed declares.
+    let sql = format!(
+        "CREATE ROLE app_reader LOGIN;\n{schema}\n\
+         GRANT SELECT, DELETE ON orders, capped, notes, flagged TO app_reader;"
+    );
     let deployment = deployment::caller_deployment_acting_as(
         &["app_reader"],
         [deployment::delimited_set("app.bot_list", ",")],

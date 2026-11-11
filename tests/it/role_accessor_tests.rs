@@ -170,7 +170,7 @@ fn a_declared_accessor_reading_a_setting_is_a_request_gate() {
     );
 
     let (classified, db, registry) = support::classify_with(
-        &format!("{ACTING_ROLES}{sql}"),
+        &format!("{ACTING_ROLES}{sql}\nGRANT SELECT ON docs TO reader;"),
         Some(DECLARED),
         &deployment::caller_deployment_acting_as(
             &["reader"],

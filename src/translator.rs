@@ -365,6 +365,7 @@ impl Translation {
     ///     "CREATE ROLE authenticator LOGIN;
     ///      CREATE ROLE web_user;
     ///      CREATE TABLE docs(id UUID PRIMARY KEY, expires_at TIMESTAMPTZ);
+    ///      GRANT SELECT ON docs TO web_user;
     ///      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     ///      CREATE POLICY docs_sel ON docs FOR SELECT
     ///          USING (expires_at > now() - interval '1 day');",

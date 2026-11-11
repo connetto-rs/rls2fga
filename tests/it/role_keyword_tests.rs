@@ -16,6 +16,7 @@ const DOCS: &str = "
 CREATE TABLE docs(id INT PRIMARY KEY, owner TEXT NOT NULL);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner = current_user);
+GRANT SELECT ON docs TO reader, writer;
 ";
 
 /// The owner check of [`DOCS`] spelled inside an invoker function the classifier inlines.
@@ -133,15 +134,13 @@ mod parity {
         let case = ParityCase::reading(
             "current-user-per-acting-role",
             DOCS,
-            &[
-                "INSERT INTO docs VALUES (1, 'reader'), (2, 'writer'), (3, 'someone')",
-                &format!("{ACTING_ROLES} GRANT SELECT ON docs TO reader, writer"),
-            ],
+            &["INSERT INTO docs VALUES (1, 'reader'), (2, 'writer'), (3, 'someone')"],
             vec![
                 Principal::as_role("alice", "reader"),
                 Principal::as_role("bob", "writer"),
             ],
-        );
+        )
+        .after(&[ACTING_ROLES]);
         let run = support::parity::run(&cluster, &case).await;
         for (subject, object, visible) in [
             ("alice", "docs:1", true),
