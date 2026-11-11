@@ -1,7 +1,7 @@
 //! Policies applied per acting role, as `row_security` answers for each role a request runs as.
 
 use rls2fga::translator::{Outputs, TranslatorBuilder};
-use rls2fga::types::{NoteSeverity, TranslationNote};
+use rls2fga::types::{ActionAnswer, ActionStatement, NoteSeverity, TranslationNote};
 
 use crate::support::deployment::{caller_deployment_acting_as, scalar};
 use crate::support::footgun::{db_of, relation_definition, relation_denies};
@@ -213,7 +213,8 @@ fn an_owning_acting_role_skips_the_policies_only_without_force() {
     assert_eq!(forced.model(), kinds("").model());
 }
 
-/// A superuser acting role skips every policy, and the report says why.
+/// A superuser acting role skips every policy, and the report says why. Its read is the
+/// local grant, so no relation in the model answers it.
 #[test]
 fn a_superuser_acting_role_skips_the_policies() {
     let outputs = acting_as(&["chief"], "CREATE ROLE chief SUPERUSER;");
@@ -226,9 +227,22 @@ fn a_superuser_acting_role_skips_the_policies() {
         "{:#?}",
         outputs.notes()
     );
+    assert!(
+        outputs
+            .translation()
+            .action_relations()
+            .iter()
+            .any(|entry| {
+                entry.type_name.as_str() == "docs"
+                    && entry.statement == ActionStatement::Select
+                    && entry.answer == ActionAnswer::Unrestricted
+            }),
+        "{:#?}",
+        outputs.translation().action_relations()
+    );
     assert_eq!(
-        relation_definition(&outputs.model(), "docs", "can_select").as_deref(),
-        Some("acting_chief from request_gate")
+        relation_definition(&outputs.model(), "docs", "can_select"),
+        None
     );
 }
 

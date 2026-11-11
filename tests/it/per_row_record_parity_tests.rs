@@ -1698,17 +1698,6 @@ INSERT INTO memos (id, owner_id, editor_id) VALUES
     ('m-neither',  NULL,    NULL);
 ";
 
-/// Which composition a recipe is, for the coverage count.
-fn recipe_kind(decision: &RowDecision) -> &'static str {
-    match decision {
-        RowDecision::Leaf { .. } => "leaf",
-        RowDecision::Any(_) => "any",
-        RowDecision::All(_) => "all",
-        RowDecision::RequestGated { .. } | RowDecision::Request { .. } => "request-gated",
-        RowDecision::Everyone { .. } => "everyone",
-    }
-}
-
 /// The first shape a recipe reaches, which names the table and object type every other
 /// leaf of the same recipe has to agree on.
 fn first_shape(decision: &RowDecision) -> &RecordDescription {
@@ -1928,7 +1917,7 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
         .map(|record| record.subject.clone())
         .collect();
 
-    let mut kinds: BTreeSet<&str> = BTreeSet::new();
+    let mut gated_intersections = 0usize;
     let mut compared = 0usize;
     let mut granting_rows = 0usize;
     let mut refusals = 0usize;
@@ -1939,7 +1928,14 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
         let Some(decision) = entry.decision.as_ref() else {
             continue;
         };
-        kinds.insert(recipe_kind(decision));
+        if let RowDecision::All(children) = decision {
+            gated_intersections += usize::from(children.iter().any(|child| {
+                matches!(
+                    child,
+                    RowDecision::Request { .. } | RowDecision::RequestGated { .. }
+                )
+            }));
+        }
         let table = first_shape(decision)
             .row_table()
             .expect("a leaf resolves from a row of one table");
@@ -2016,8 +2012,8 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
         failures.join("\n")
     );
     assert!(
-        kinds.contains("all") && kinds.contains("request-gated"),
-        "the schema has to exercise an intersection and the request gate, saw {kinds:?}"
+        gated_intersections > 0,
+        "the schema has to exercise an intersection with the request gate"
     );
     assert!(
         granting_rows > 0,
@@ -2273,6 +2269,15 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
         .map(|record| record.object)
         .collect();
 
+    let answered_locally = |type_name: &str| {
+        planned
+            .translation()
+            .action_relations()
+            .iter()
+            .filter(|entry| entry.type_name.as_str() == type_name)
+            .all(|entry| entry.answer == ActionAnswer::Unrestricted)
+    };
+    let mut judged_routes = 0usize;
     for entry in &naming {
         let prefix = format!("{}:", entry.type_name);
         let route_objects: BTreeSet<String> = written
@@ -2280,6 +2285,15 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
             .filter(|object| object.starts_with(&prefix))
             .cloned()
             .collect();
+        if answered_locally(entry.type_name.as_str()) {
+            assert!(
+                route_objects.is_empty(),
+                "nothing asks about the rows of {}, yet its route wrote {route_objects:?}",
+                entry.table
+            );
+            continue;
+        }
+        judged_routes += 1;
         assert!(
             !route_objects.is_empty(),
             "the route of {} wrote no object, so its naming is untested: {written:?}",
@@ -2300,6 +2314,10 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
             entry.table
         );
     }
+    assert!(
+        judged_routes > 0,
+        "the root's guarded route has to be compared: {naming:?}"
+    );
 }
 
 /// Two clauses spelled apart, which is the shape whose `UPDATE` the model answers with

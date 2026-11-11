@@ -15,8 +15,10 @@
 //! which is how this one came to look unreached.
 
 use rls2fga::generator::tuple_generator::SkippedTuples;
+use rls2fga::translator::Outputs;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use crate::support;
 use crate::support::deployment::{caller, caller_deployment_acting_as};
@@ -90,9 +92,13 @@ fn assert_reports(label: &str, haystack: &[String], fragment: &str) {
     );
 }
 
-/// The notes and the model one schema produces at one threshold, for a deployment acting
+/// The notes and the outputs one schema produces at one threshold, for a deployment acting
 /// as `acting`.
-fn reported_acting_as(sql: &str, acting: &[&str], level: ConfidenceLevel) -> (Vec<String>, String) {
+fn reported_acting_as(
+    sql: &str,
+    acting: &[&str],
+    level: ConfidenceLevel,
+) -> (Vec<String>, Outputs) {
     let (classified, db, reg) = support::classify_with(
         sql,
         None,
@@ -104,14 +110,15 @@ fn reported_acting_as(sql: &str, acting: &[&str], level: ConfidenceLevel) -> (Ve
         .iter()
         .map(TranslationNote::message)
         .collect::<Vec<_>>();
-    (notes, planned.model())
+    (notes, planned)
 }
 
 /// An acting role with `BYPASSRLS` skips every policy on the table, and no model can
-/// express the exemption, so the note names it and the read answers every row.
+/// express the exemption, so the note names it and the read is the local grant, which no
+/// relation in the model has to answer.
 #[test]
 fn a_bypassing_acting_role_is_reported() {
-    let (notes, model) = reported_acting_as(
+    let (notes, planned) = reported_acting_as(
         "CREATE ROLE auditor NOLOGIN BYPASSRLS;
 CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -121,10 +128,24 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
     );
     assert_reports("bypassing role", &notes, "'auditor'");
     assert_reports("bypassing role", &notes, "BYPASSRLS");
+    let select = planned
+        .translation()
+        .action_relations()
+        .iter()
+        .find(|entry| {
+            entry.type_name.as_str() == "docs" && entry.statement == ActionStatement::Select
+        })
+        .map(|entry| &entry.answer);
     assert_eq!(
-        relation_definition(&model, "docs", "can_select").as_deref(),
-        Some("acting_auditor from request_gate"),
-        "the exempt role reads every row:\n{model}"
+        select,
+        Some(&ActionAnswer::Unrestricted),
+        "the exempt role reads every row"
+    );
+    let model = planned.model();
+    assert_eq!(
+        relation_definition(&model, "docs", "can_select"),
+        None,
+        "no check asks about a read answered locally:\n{model}"
     );
 }
 

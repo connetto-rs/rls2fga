@@ -6,7 +6,7 @@
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::translator::TranslatorBuilder;
 use rls2fga::types::ConfidenceLevel;
-use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, TranslationNote};
 
 use crate::support::deployment::caller_deployment;
 
@@ -449,9 +449,19 @@ CREATE POLICY shares_read ON shares FOR SELECT {policy_tail};
             !dsl.contains("scope_"),
             "{what}: no tuple can fill a scope on 'shares', so none may be declared:\n{dsl}"
         );
+        let answered_locally = |type_name: &str| {
+            let mut answers = outputs
+                .translation()
+                .action_relations()
+                .iter()
+                .filter(|entry| entry.type_name.as_str() == type_name)
+                .peekable();
+            answers.peek().is_some()
+                && answers.all(|entry| entry.answer == ActionAnswer::Unrestricted)
+        };
         for empty in types_declaring_no_relation(&dsl) {
             assert!(
-                is_structural_type(&empty),
+                is_structural_type(&empty) || answered_locally(&empty),
                 "{what}: '{empty}' outlived the expression that minted it:\n{dsl}"
             );
         }

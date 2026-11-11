@@ -8,6 +8,7 @@ use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
 use crate::classifier::readability::{table_readability, ReadGate, TableReadability};
 use crate::clock::{cel_duration, ClockParameter, ClockReading, ClockThreshold};
+use crate::generator::action_relations::action_answers;
 use crate::generator::db_lookup::{
     column_is_nullable, column_kind, composite_primary_key_columns, resolve_row_identity,
     row_uniquely_keys, single_identity_column,
@@ -68,13 +69,14 @@ mod simplify;
 
 use acting_kinds::acting_kind_walk;
 use actions::{
-    action_relation_commands, action_relations, clauses_lost_to_the_threshold,
-    commands_a_permissive_policy_covers, commands_fed_by, compose_action,
-    define_blanket_update_relations, define_locking_read_relations, derived_action_relations,
-    dropped_attribute_guards, fill_uncovered_actions_with_deny, for_each_policy_target_expr,
-    mark_narrowed, narrowed_by, policies_missing_a_clause, targets_a_policy_feeds,
-    unreadable_clause_targets, ActionTarget, ModeBuckets, INHERITED_RELATION_PREFIX,
+    action_relation_commands, clauses_lost_to_the_threshold, commands_a_permissive_policy_covers,
+    commands_fed_by, compose_action, define_blanket_update_relations,
+    define_locking_read_relations, dropped_attribute_guards, fill_uncovered_actions_with_deny,
+    for_each_policy_target_expr, mark_narrowed, narrowed_by, policies_missing_a_clause,
+    targets_a_policy_feeds, unreadable_clause_targets, ActionTarget, ModeBuckets,
+    INHERITED_RELATION_PREFIX,
 };
+pub(crate) use actions::{action_relations, derived_action_relations};
 use branches::{
     answer_supplied_policies, answer_targets, branch_expr, ActingBranch, PolicyPart, TargetAnswer,
 };
@@ -658,6 +660,8 @@ pub(crate) struct SchemaPlan {
     /// The clock parameters those conditions read, ordered by name.
     pub clocks: Vec<ClockParameter>,
     pub well_known: WellKnownTypes,
+    /// Permission answers for modeled tables with a read gate, settled before pruning.
+    pub action_relations: Vec<crate::types::ActionRelations>,
 }
 
 /// Why a translation cannot be planned.
@@ -1347,7 +1351,13 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     define_locking_read_relations(&mut all_types);
     define_blanket_update_relations(&mut all_types);
     prune_plain_subjects_fed_only_by_gated_sources(&mut all_types, &settings.well_known);
-    prune_unreferenced_relations(&mut all_types);
+    // Settled before pruning, which drops the relations only local answers read.
+    let answers = action_answers(
+        all_types.values(),
+        &settings.well_known.request_gate,
+        registry.deployment(),
+    );
+    prune_unreferenced_relations(&mut all_types, &answers.answered_locally);
     narrow_grant_sources_to_declared(&mut all_types);
     // Every check states the kind it acts as, so the type it names is declared whether or
     // not a branch reads it.
@@ -1396,6 +1406,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         conditions,
         clocks,
         well_known: settings.well_known.clone(),
+        action_relations: answers.entries,
     };
     crate::generator::model_bounds::check(&crate::generator::json_model::json_model_from_plan(
         &plan,

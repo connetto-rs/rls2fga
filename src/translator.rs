@@ -9,7 +9,6 @@ use crate::classifier::function_registry::{FunctionRegistry, RegistryLoadError};
 use crate::classifier::patterns::{ClassifiedPolicy, ConfidenceLevel};
 use crate::classifier::policy_classifier::classify_policies_with_effective_registry;
 use crate::clock::{ClockContextError, ClockParameter};
-use crate::generator::action_relations::action_relations;
 use crate::generator::json_model::{json_model_from_plan, AuthorizationModel};
 use crate::generator::model_generator::{
     build_filtered_schema_plan, render_dsl_from_plan, GeneratorSettings, SchemaPlan,
@@ -220,7 +219,6 @@ struct DerivedOutputs {
     tuple_queries: Vec<TupleQuery>,
     relations: Vec<RelationShapes>,
     row_naming: Vec<RowNaming>,
-    action_relations: Vec<ActionRelations>,
     policy_reads: Vec<PolicyReads>,
 }
 
@@ -230,7 +228,6 @@ impl DerivedOutputs {
         policies: &[ClassifiedPolicy],
         bounds: &UnboundedColumns,
         db: &DB,
-        deployment: Option<&Deployment>,
     ) -> Self {
         let generated = generate_tuple_queries_from_plan(plan, bounds, db);
         let relations = relation_shapes(plan, &generated.descriptions, db);
@@ -238,7 +235,6 @@ impl DerivedOutputs {
             tuple_queries: generated.queries,
             relations,
             row_naming: row_naming(plan, db),
-            action_relations: action_relations(plan, deployment),
             policy_reads: policy_reads(policies, db),
         }
     }
@@ -271,8 +267,7 @@ impl Translation {
         let bounds = UnboundedColumns::resolve(db);
         let plan =
             build_filtered_schema_plan(&policies, db, registry, min_confidence, settings, &bounds)?;
-        let mut derived =
-            DerivedOutputs::build(&plan, &policies, &bounds, db, registry.deployment());
+        let mut derived = DerivedOutputs::build(&plan, &policies, &bounds, db);
         if let Some(locale) = registry.monetary_locale() {
             for query in &mut derived.tuple_queries {
                 query.monetary_locale = Some(locale.to_string());
@@ -327,7 +322,7 @@ impl Translation {
     /// this from the emitted model is the case analysis it exists to remove.
     #[must_use]
     pub fn action_relations(&self) -> &[ActionRelations] {
-        &self.derived.action_relations
+        &self.plan.action_relations
     }
 
     /// The tables each policy's clauses read, one entry per translated policy ordered by

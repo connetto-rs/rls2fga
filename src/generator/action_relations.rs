@@ -12,9 +12,11 @@
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 use crate::generator::model_generator::{
-    relation_grants_every_actor, relation_grants_nothing, SchemaPlan, TypePlan,
+    action_relations as action_relation_names, derived_action_relations,
+    relation_grants_every_actor, relation_grants_nothing, TypePlan,
 };
 use crate::generator::well_known::{
     CAN_DELETE_RELATION, CAN_INSERT_RELATION, CAN_INSERT_RETURNING_RELATION,
@@ -25,6 +27,7 @@ use crate::generator::well_known::{
 use crate::parser::sql_parser::Deployment;
 use crate::types::{
     ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, RelationName, RowVersion,
+    TypeName,
 };
 
 type Judgements = [Option<(&'static str, RowVersion)>; 3];
@@ -175,37 +178,67 @@ fn answer(
     )
 }
 
-/// Permission answers for modeled tables with a read gate, ordered by type and statement.
-pub(crate) fn action_relations(
-    plan: &SchemaPlan,
+/// Every statement's answer, and the relations only locally answered statements read.
+pub(crate) struct ActionAnswers {
+    /// Permission answers for modeled tables with a read gate, ordered by type and
+    /// statement.
+    pub(crate) entries: Vec<ActionRelations>,
+    /// Per type, the relations only statements answered without a check read. No consumer
+    /// asks the service about them, so neither the model nor its facts need them unless
+    /// another relation reaches them.
+    pub(crate) answered_locally: BTreeMap<TypeName, BTreeSet<RelationName>>,
+}
+
+/// Answer every statement of every modeled table with a read gate, from the relations the
+/// model defines before anything unreferenced is pruned.
+pub(crate) fn action_answers<'plan>(
+    types: impl IntoIterator<Item = &'plan TypePlan> + Clone,
+    request_gate: &TypeName,
     deployment: Option<&Deployment>,
-) -> Vec<ActionRelations> {
-    let request_gate = plan
-        .types
-        .iter()
-        .find(|target| target.type_name == plan.well_known.request_gate);
+) -> ActionAnswers {
+    let request_gate = types
+        .clone()
+        .into_iter()
+        .find(|target| target.type_name == *request_gate);
     let mut entries: Vec<ActionRelations> = Vec::new();
-    for type_plan in &plan.types {
-        if type_plan.source_table.is_none() {
-            continue;
-        }
-        if !type_plan
-            .computed_relations
-            .contains_key(CAN_SELECT_RELATION)
+    let mut answered_locally: BTreeMap<TypeName, BTreeSet<RelationName>> = BTreeMap::new();
+    for type_plan in types {
+        if type_plan.source_table.is_none()
+            || !type_plan
+                .computed_relations
+                .contains_key(CAN_SELECT_RELATION)
         {
             continue;
         }
-        entries.extend(
-            judgements(type_plan)
-                .into_iter()
-                .map(|(statement, required)| {
-                    ActionRelations::new(
-                        type_plan.type_name.clone(),
-                        statement,
-                        answer(request_gate, type_plan, required, deployment),
-                    )
-                }),
-        );
+        let mut local: BTreeSet<RelationName> = BTreeSet::new();
+        let mut asked: BTreeSet<RelationName> = BTreeSet::new();
+        for (statement, required) in judgements(type_plan) {
+            let answer = answer(request_gate, type_plan, required, deployment);
+            let read = if answer == ActionAnswer::Unrestricted {
+                &mut local
+            } else {
+                &mut asked
+            };
+            read.extend(
+                required
+                    .into_iter()
+                    .flatten()
+                    .map(|(relation, _)| RelationName::canonicalized(relation)),
+            );
+            entries.push(ActionRelations::new(
+                type_plan.type_name.clone(),
+                statement,
+                answer,
+            ));
+        }
+        // With nothing asked, even action relations no statement names are local.
+        if asked.is_empty() {
+            local.extend(action_relation_names().chain(derived_action_relations()));
+        }
+        local.retain(|relation| !asked.contains(relation));
+        if !local.is_empty() {
+            answered_locally.insert(type_plan.type_name.clone(), local);
+        }
     }
     entries.sort_by(|left, right| {
         left.type_name
@@ -213,5 +246,8 @@ pub(crate) fn action_relations(
             .cmp(right.type_name.as_str())
             .then(left.statement.cmp(&right.statement))
     });
-    entries
+    ActionAnswers {
+        entries,
+        answered_locally,
+    }
 }
