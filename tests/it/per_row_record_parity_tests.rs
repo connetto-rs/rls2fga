@@ -1869,6 +1869,28 @@ fn flattened_subjects(
     }
 }
 
+/// The candidates the model allows `relation` on `object` for, counting every check and
+/// every refusal.
+async fn allowed_candidates<'a>(
+    client: &OpenFgaClient<Channel>,
+    candidates: impl IntoIterator<Item = &'a String>,
+    relation: &str,
+    object: &str,
+    compared: &mut usize,
+    refusals: &mut usize,
+) -> BTreeSet<String> {
+    let mut allowed = BTreeSet::new();
+    for candidate in candidates {
+        *compared += 1;
+        if support::openfga::check_allowed(client, candidate, relation, object).await {
+            allowed.insert(candidate.clone());
+        } else {
+            *refusals += 1;
+        }
+    }
+    allowed
+}
+
 /// The recipe is the whole answer, so the subjects it yields for a row have to be the
 /// subjects the emitted model grants once the whole-table SQL has loaded it. Neither
 /// side is written by hand: the tuples come from the generated queries and the answers
@@ -1940,22 +1962,15 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
 
             match expected {
                 RecipeAnswer::Named(subjects) => {
-                    let mut allowed = BTreeSet::new();
-                    for candidate in universe.union(&subjects) {
-                        compared += 1;
-                        if support::openfga::check_allowed(
-                            &client,
-                            candidate,
-                            entry.relation.as_str(),
-                            &object,
-                        )
-                        .await
-                        {
-                            allowed.insert(candidate.clone());
-                        } else {
-                            refusals += 1;
-                        }
-                    }
+                    let allowed = allowed_candidates(
+                        &client,
+                        universe.union(&subjects),
+                        entry.relation.as_str(),
+                        &object,
+                        &mut compared,
+                        &mut refusals,
+                    )
+                    .await;
                     if allowed != subjects {
                         failures.push(format!(
                             "{object}#{}: the recipe grants {subjects:?}, the model grants \
@@ -1968,22 +1983,15 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
                     // The gate admits a user no tuple names, which a grant to the named
                     // users alone would refuse.
                     let stranger = "user:stranger".to_string();
-                    let mut allowed = BTreeSet::new();
-                    for candidate in universe.iter().chain(std::iter::once(&stranger)) {
-                        compared += 1;
-                        if support::openfga::check_allowed(
-                            &client,
-                            candidate,
-                            entry.relation.as_str(),
-                            &object,
-                        )
-                        .await
-                        {
-                            allowed.insert(candidate.clone());
-                        } else {
-                            refusals += 1;
-                        }
-                    }
+                    let allowed = allowed_candidates(
+                        &client,
+                        universe.iter().chain(std::iter::once(&stranger)),
+                        entry.relation.as_str(),
+                        &object,
+                        &mut compared,
+                        &mut refusals,
+                    )
+                    .await;
                     let refused: Vec<&str> = universe
                         .difference(&allowed)
                         .map(String::as_str)
