@@ -23,7 +23,8 @@ use alloc::borrow::Cow;
 
 use sql_traits::errors::DeploymentError;
 use sql_traits::structs::{
-    ActingRole, GateTerm, RowSecurity, RowSecurityExemption, RowStatement, RowVersion,
+    ActingRole, ColumnPrivilege, GateTerm, RowSecurity, RowSecurityExemption, RowStatement,
+    RowVersion, TablePrivileges,
 };
 
 /// What one policy's clause contributes to one target.
@@ -128,7 +129,12 @@ enum Asked {
 }
 
 /// The statements whose gates name every target once.
-const ASKED: [Asked; 4] = [Asked::Select, Asked::Insert, Asked::Update, Asked::Delete];
+const ASKED: [(Asked, &str); 4] = [
+    (Asked::Select, "SELECT"),
+    (Asked::Insert, "INSERT"),
+    (Asked::Update, "UPDATE"),
+    (Asked::Delete, "DELETE"),
+];
 
 impl Asked {
     /// The statement as `row_security` takes it.
@@ -138,6 +144,17 @@ impl Asked {
             Self::Insert => RowStatement::Insert { returning: false },
             Self::Update => RowStatement::Update { reads: false },
             Self::Delete => RowStatement::Delete { reads: false },
+        }
+    }
+
+    /// Where this command is held.
+    fn holding<C>(self, privileges: &TablePrivileges<'_, C>) -> PrivilegeHolding {
+        match self {
+            Self::Select => column_holding(&privileges.select),
+            Self::Insert => column_holding(&privileges.insert),
+            Self::Update => column_holding(&privileges.update),
+            Self::Delete if privileges.delete => PrivilegeHolding::Table,
+            Self::Delete => PrivilegeHolding::Absent,
         }
     }
 
@@ -166,6 +183,72 @@ impl Asked {
 /// The SQL commands these targets feed, for a note.
 fn commands_of(targets: &BTreeSet<ActionTarget>) -> Vec<String> {
     commands_fed_by(&targets.iter().copied().collect::<Vec<_>>())
+}
+
+/// Where a role holds one command on the table, as its privileges answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrivilegeHolding {
+    /// On the table, and so on every column.
+    Table,
+    /// On some columns only, never on the table.
+    Columns,
+    /// Nowhere.
+    Absent,
+}
+
+/// One column privilege's holding.
+fn column_holding<C>(privilege: &ColumnPrivilege<'_, C>) -> PrivilegeHolding {
+    match privilege {
+        ColumnPrivilege::Table => PrivilegeHolding::Table,
+        ColumnPrivilege::Columns(columns) if !columns.is_empty() => PrivilegeHolding::Columns,
+        ColumnPrivilege::Columns(_) => PrivilegeHolding::Absent,
+    }
+}
+
+/// Refuse commands without a table privilege and report column-only narrowing.
+pub(super) fn gate_on_table_privileges<DB: DatabaseLike>(
+    answers: &mut BTreeMap<ActionTarget, TargetAnswer>,
+    table: &DB::Table,
+    source_table: &TableId,
+    branch: &ActingBranch<'_, DB>,
+    db: &DB,
+    plan: &TypePlan,
+    notes: &mut Vec<TranslationNote>,
+) {
+    let privileges = table.privileges(branch.acting_role(), db).ok();
+    for (asked, command) in ASKED {
+        let holding = privileges
+            .as_ref()
+            .map_or(PrivilegeHolding::Absent, |privileges| {
+                asked.holding(privileges)
+            });
+        if holding == PrivilegeHolding::Table {
+            continue;
+        }
+        let admits = holding == PrivilegeHolding::Columns
+            && asked.targets().iter().any(|target| {
+                matches!(answers.get(target), Some(TargetAnswer::Exempt))
+                    || matches!(
+                        answers.get(target),
+                        Some(TargetAnswer::Gated(bucket))
+                            if bucket.permissive.iter().any(|expr| {
+                                !grants_nothing(expr, plan)
+                            }) && !bucket.restrictive.iter().any(|expr| {
+                                grants_nothing(expr, plan)
+                            })
+                    )
+            });
+        for target in asked.targets() {
+            answers.insert(*target, TargetAnswer::Refused);
+        }
+        if holding == PrivilegeHolding::Columns && admits {
+            notes.push(TranslationNote::TablePrivilegeColumnOnly {
+                table: source_table.clone(),
+                command: command.to_string(),
+                role: branch.name().to_string(),
+            });
+        }
+    }
 }
 
 /// Place one policy's part for one target in the bucket its mode makes it.
@@ -205,8 +288,7 @@ fn fill_bucket<P: PolicyLike>(
     }
 }
 
-/// How each target answers for `branch` on `table`, and the notes that answer raises.
-/// Every permissive policy a gate applies to the branch's role joins `reached`.
+/// Answer row-security targets and record the permissive policies reaching this role.
 pub(super) fn answer_targets<'db, DB: DatabaseLike>(
     table: &'db DB::Table,
     source_table: &TableId,
@@ -220,7 +302,7 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
     let mut exempt = None;
     let mut recursion: BTreeMap<String, BTreeSet<ActionTarget>> = BTreeMap::new();
     let mut refused: BTreeMap<String, BTreeSet<ActionTarget>> = BTreeMap::new();
-    for asked in ASKED {
+    for (asked, _) in ASKED {
         let targets = asked.targets();
         match table.row_security(asked.statement(), branch.acting_role(), db) {
             Ok(RowSecurity::Exempt(exemption)) => {

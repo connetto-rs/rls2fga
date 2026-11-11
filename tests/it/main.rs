@@ -77,6 +77,7 @@ mod row_naming_tests;
 mod row_security_tests;
 mod security_definer_tests;
 mod session_time_zone_tests;
+mod table_privileges_tests;
 mod translation_object_tests;
 mod translator_builder_tests;
 mod tuple_row_tests;

@@ -1133,6 +1133,7 @@ fn the_readme_example_blocks_match_the_output() {
     CREATE POLICY documents_owner ON documents
         FOR SELECT TO PUBLIC
         USING (owner_id = current_user_id());
+    GRANT SELECT ON documents TO web_user;
 ";
     let readme = read_module("README.md");
     assert!(

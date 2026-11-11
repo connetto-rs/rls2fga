@@ -20,6 +20,7 @@ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_p ON notes USING (
   owner = current_setting('app.user_id', true)
   OR owner = ANY(string_to_array(current_setting('app.subjects', true), ',')));
+GRANT SELECT, INSERT, UPDATE, DELETE ON notes TO app_user;
 ";
 
 /// The same table with the two clauses spelled out separately.
@@ -32,6 +33,7 @@ CREATE POLICY notes_s ON notes FOR SELECT USING (
 CREATE POLICY notes_u ON notes FOR UPDATE
   USING (owner = current_setting('app.user_id', true))
   WITH CHECK (owner = ANY(string_to_array(current_setting('app.subjects', true), ',')));
+GRANT SELECT, UPDATE ON notes TO app_user;
 ";
 
 /// Reads alone, so every writing action denies while the table is still restricted.
@@ -39,6 +41,7 @@ const READS_ONLY: &str = "
 CREATE TABLE notes(id INTEGER PRIMARY KEY, owner TEXT);
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_s ON notes FOR SELECT USING (owner = current_setting('app.user_id', true));
+GRANT SELECT ON notes TO app_user;
 ";
 
 /// Three rules that differ from each other, so an upsert asks more than an insert and
@@ -49,17 +52,20 @@ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_s ON notes FOR SELECT USING (owner = current_setting('app.user_id', true));
 CREATE POLICY notes_i ON notes FOR INSERT WITH CHECK (author = current_setting('app.user_id', true));
 CREATE POLICY notes_u ON notes FOR UPDATE USING (editor = current_setting('app.user_id', true));
+GRANT SELECT, INSERT, UPDATE ON notes TO app_user;
 ";
 
 /// A parent the model reaches only through a membership table, and which the database
-/// itself restricts not at all.
-const UNRESTRICTED_PARENT: &str = "
+/// itself restricts not at all. The acting role reads both tables through its own branch,
+/// so the open one is narrowed to the read it holds.
+const OPEN_PARENT: &str = "
 CREATE TABLE projects(id INTEGER PRIMARY KEY);
 CREATE TABLE docs(id INTEGER PRIMARY KEY, project_id INTEGER REFERENCES projects(id));
 CREATE TABLE project_members(project_id INTEGER REFERENCES projects(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY d ON docs USING (project_id IN (
   SELECT project_id FROM project_members WHERE user_id = current_setting('app.user_id', true)));
+REVOKE INSERT, UPDATE, DELETE ON projects, docs FROM app_user;
 ";
 
 /// Row-level security on with no policy at all, which `PostgreSQL` reads as nobody sees
@@ -78,6 +84,7 @@ CREATE POLICY notes_s ON notes FOR SELECT USING (owner = current_setting('app.us
 CREATE POLICY notes_u ON notes FOR UPDATE
   USING (owner = current_setting('app.user_id', true))
   WITH CHECK (false);
+GRANT SELECT, UPDATE ON notes TO app_user;
 ";
 
 /// Two clauses that both classify but differ, with a read policy beside them, so the
@@ -89,6 +96,7 @@ CREATE POLICY notes_s ON notes FOR SELECT USING (owner = current_setting('app.us
 CREATE POLICY notes_u ON notes FOR UPDATE
   USING (owner = current_setting('app.user_id', true))
   WITH CHECK (editor = current_setting('app.user_id', true));
+GRANT UPDATE ON notes TO app_user;
 ";
 
 /// An `UPDATE` policy alone: reads are denied, so every statement that names a row is
@@ -98,6 +106,7 @@ CREATE TABLE notes(id INTEGER PRIMARY KEY, editor TEXT);
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_u ON notes FOR UPDATE
   USING (editor = current_setting('app.user_id', true));
+GRANT UPDATE ON notes TO app_user;
 ";
 
 /// A restrictive policy with no permissive one to narrow, which `PostgreSQL` reads as
@@ -113,7 +122,7 @@ const EVERY_SCHEMA: [(&str, &str); 10] = [
     ("two conditions", TWO_CONDITIONS),
     ("reads only", READS_ONLY),
     ("insert and update", INSERT_AND_UPDATE),
-    ("unrestricted parent", UNRESTRICTED_PARENT),
+    ("open parent", OPEN_PARENT),
     ("denies everything", DENIES_EVERYTHING),
     ("check denies the result", CHECK_DENIES_THE_RESULT),
     ("blanket update only", BLANKET_UPDATE_ONLY),
@@ -507,17 +516,22 @@ fn an_action_granting_nobody_is_answered_with_the_refusal() {
     );
 }
 
-/// The database restricts nothing on it, and saying that is not the same as saying
-/// nothing.
+/// A read held by every acting role grants locally while unheld commands are refused.
 #[test]
-fn a_table_the_database_does_not_restrict_reports_every_action_unrestricted() {
-    let entries = report(UNRESTRICTED_PARENT);
-    for statement in every_statement() {
-        assert_eq!(
-            entry(&entries, "projects", statement).answer,
-            ActionAnswer::Unrestricted
-        );
-    }
+fn an_open_table_is_answered_by_the_acting_roles_branch() {
+    let entries = report(OPEN_PARENT);
+    assert_eq!(
+        entry(&entries, "projects", ActionStatement::Select).answer,
+        ActionAnswer::Unrestricted
+    );
+    assert_eq!(
+        refused(&entries, "projects"),
+        every_statement()
+            .into_iter()
+            .filter(|statement| *statement != ActionStatement::Select)
+            .collect::<Vec<ActionStatement>>(),
+        "and the commands the role does not hold are the refusal"
+    );
     assert!(
         matches!(
             entry(&entries, "docs", ActionStatement::Select).answer,
@@ -552,7 +566,7 @@ fn every_type_the_model_names_rows_of_answers_every_statement() {
 /// A type nothing keys on a row is not something a consumer asks about.
 #[test]
 fn a_type_that_is_no_table_has_no_entry() {
-    let entries = report(UNRESTRICTED_PARENT);
+    let entries = report(OPEN_PARENT);
     for type_name in ["user", "request_gate"] {
         assert!(
             !entries
@@ -778,18 +792,8 @@ fn every_fixture_refuses_exactly_the_statements_it_should() {
             "notes",
             vec![ActionStatement::Delete],
         ),
-        (
-            "unrestricted parent",
-            UNRESTRICTED_PARENT,
-            "docs",
-            Vec::new(),
-        ),
-        (
-            "unrestricted parent",
-            UNRESTRICTED_PARENT,
-            "projects",
-            Vec::new(),
-        ),
+        ("open parent", OPEN_PARENT, "docs", writes.clone()),
+        ("open parent", OPEN_PARENT, "projects", writes.clone()),
         ("denies everything", DENIES_EVERYTHING, "notes", all.clone()),
         (
             "check denies the result",

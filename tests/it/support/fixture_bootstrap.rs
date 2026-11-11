@@ -26,7 +26,7 @@ pub(crate) fn declarations(fixture: &str) -> String {
     declarations
 }
 
-/// Prepare fixture prerequisites in a cluster whose deployment roles already exist.
+/// Prepare fixture prerequisites in a new database of a cluster holding the deployment roles.
 pub(crate) fn prepare(connection: &mut PgConnection, fixture: &str) {
     for (role, creator) in FIXTURE_ROLES {
         let statement = if creator == Some(fixture) {
@@ -44,4 +44,7 @@ pub(crate) fn prepare(connection: &mut PgConnection, fixture: &str) {
     connection
         .batch_execute(AUTH_SCHEMA)
         .expect("Failed to create the auth schema");
+    connection
+        .batch_execute(deployment::DEFAULT_PRIVILEGES)
+        .expect("Failed to grant the default table privileges");
 }

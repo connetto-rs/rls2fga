@@ -149,8 +149,16 @@ fn with_settings_map(sources: &DeclaredSources, principal: &Principal) -> serde_
 /// harness checks with: acting as the caller's login role.
 fn select_recipe() -> RowDecision {
     let deployment = gate_deployment();
-    // The role the harness creates in its seed, so the deployment resolves against it.
-    let sql = format!("CREATE ROLE app_rw LOGIN;\n{}", gated_tables(TABLES));
+    // The role and grants the seed creates, so the deployment resolves against them.
+    let grant_targets = (0..TABLES)
+        .map(|index| format!("t{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "CREATE ROLE app_rw LOGIN;\n{}\n\
+         GRANT SELECT, INSERT, UPDATE, DELETE ON {grant_targets} TO app_rw;",
+        gated_tables(TABLES)
+    );
     let (classified, db, registry) = support::classify_with(&sql, None, &deployment);
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     planned

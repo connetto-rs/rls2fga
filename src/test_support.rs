@@ -13,11 +13,11 @@ pub(crate) const LOGIN_ROLE: &str = "app_login";
 /// The one role every test request acts as.
 pub(crate) const ACTING_ROLE: &str = "app_user";
 
-/// The statements declaring [`LOGIN_ROLE`] and [`ACTING_ROLE`], for a schema a translator
-/// resolves the deployment against.
+/// Roles and table privileges for unit fixtures isolating row security.
 pub(crate) const ROLES_SQL: &str = "CREATE ROLE app_login LOGIN NOINHERIT;
 CREATE ROLE app_user NOLOGIN;
 GRANT app_user TO app_login WITH INHERIT FALSE, SET TRUE;
+ALTER DEFAULT PRIVILEGES GRANT ALL PRIVILEGES ON TABLES TO app_user, PUBLIC;
 ";
 
 /// A deployment logging in as [`LOGIN_ROLE`], acting as [`ACTING_ROLE`] and declaring

@@ -37,6 +37,7 @@ let sql = "
     CREATE POLICY documents_owner ON documents
         FOR SELECT TO PUBLIC
         USING (owner_id = current_user_id());
+    GRANT SELECT ON documents TO web_user;
 ";
 
 let db = parse_schema(sql).expect("parse error");
@@ -197,6 +198,8 @@ Membership tuple relations are isolated by table, correlation, user column, pred
 ## Runtime data you have to supply
 
 Every check states the role the request acts as with the contextual tuple `(user:<subject>, usage, pg_role:<role>)`. Which policies reach that role, their `TO` lists, an owner or `BYPASSRLS` exemption and a recursion `PostgreSQL` raises on are answered per acting role by `sql_traits`' `row_security`, and every action relation is a union of one branch per acting role, joined as `acting_<role> from request_gate` through the table's `request_gate` object. The tuple queries write that object's constant `(request_gate:<table>, acting_<role>, pg_role:<role>#usage)`, so no role fact is loaded by hand. The relation report states that join as `RequestPredicate::ActsAs`, which the check's kind decides without any record.
+
+A branch exists only where its acting role holds the action's command on the whole table, as `sql_traits`' `privileges` answers, so a command no acting role holds is denied. A role holding a command on some columns only gets no branch for it, and where row security would admit rows a `TablePrivilegeColumnOnly` note names the role and the command.
 
 Every table enters the model, including tables with row-level security disabled. `ActionAnswer::Unrestricted` marks a statement whose simplified relation admits every deployment role without a row predicate or request condition, so a consumer grants it without asking `OpenFGA`, and `ActionAnswer::Denied` marks one the consumer refuses without asking. The model, its relation report and its tuple queries leave out the relations only such statements read, unless another relation reaches them, and keep the `no_access` relation behind each refusal, which carries no fact.
 

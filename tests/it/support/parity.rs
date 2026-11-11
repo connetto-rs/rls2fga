@@ -658,28 +658,6 @@ fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) ->
     out
 }
 
-#[derive(QueryableByName)]
-struct Granted {
-    #[diesel(sql_type = diesel::sql_types::Bool)]
-    granted: bool,
-}
-
-/// Whether `role` holds `privilege` on `table`.
-///
-/// A table privilege is not row-level security and the model says nothing about it, so a
-/// pair the caller cannot reach at all is not one to compare. Asked of `PostgreSQL` rather
-/// than inferred from an error, so a missing privilege on a table a *policy* reads still
-/// raises and is reported.
-fn holds_privilege(conn: &mut PgConnection, role: &str, table: &str, privilege: &str) -> bool {
-    let answered: Granted = diesel::sql_query("SELECT has_table_privilege($1, $2, $3) AS granted")
-        .bind::<diesel::sql_types::Text, _>(role)
-        .bind::<diesel::sql_types::Text, _>(table)
-        .bind::<diesel::sql_types::Text, _>(privilege)
-        .get_result(conn)
-        .unwrap_or_else(|error| panic!("asking whether {role} may {privilege} {table}: {error}"));
-    answered.granted
-}
-
 /// Switch to the caller's role and apply its session values, local to the transaction.
 fn become_principal(conn: &mut PgConnection, principal: &Principal) -> QueryResult<()> {
     diesel::sql_query(format!("SET LOCAL ROLE {}", principal.login_role)).execute(conn)?;
@@ -708,21 +686,6 @@ fn postgres_allows(
 ) -> Option<bool> {
     let table = &object.table;
     let predicate = &object.predicate;
-    let privileges: &[&str] = match statement {
-        ActionStatement::Select => &["SELECT"],
-        ActionStatement::SelectForUpdate | ActionStatement::Update => &["UPDATE"],
-        ActionStatement::Delete => &["DELETE"],
-        ActionStatement::Insert | ActionStatement::InsertReturning => &["INSERT"],
-        // An upsert may change the conflicting row, so it needs both.
-        ActionStatement::InsertOnConflictUpdate => &["INSERT", "UPDATE"],
-        _ => return None,
-    };
-    if !privileges
-        .iter()
-        .all(|privilege| holds_privilege(conn, &principal.login_role, table, privilege))
-    {
-        return None;
-    }
     if matches!(
         statement,
         ActionStatement::Insert
@@ -791,8 +754,11 @@ fn postgres_allows(
             *raised = true;
             Some(false)
         }
-        // Otherwise a plain read never raises, so an error is a case that granted no
-        // privilege or named no column, and calling it a denial would hide the mistake.
+        // A caller without the table's privilege raises `42501`, which is a denial, and the
+        // model has to deny too.
+        Err(error) if lacks_a_table_privilege(&error) => Some(false),
+        // Otherwise a plain read never raises, so an error is a case that named no column,
+        // and calling it a denial would hide the mistake.
         Err(error) if statement == ActionStatement::Select => panic!(
             "{}: reading {table} as {} raised, which row-level security never does: {error}",
             case.name, principal.login_role
@@ -822,6 +788,12 @@ fn reads_an_unset_setting(error: &diesel::result::Error) -> bool {
 fn reads_a_non_json_document(error: &diesel::result::Error) -> bool {
     matches!(error, diesel::result::Error::DatabaseError(_, info)
         if info.message().contains("invalid input syntax for type json"))
+}
+
+/// Match table-privilege denials without hiding column or function errors.
+fn lacks_a_table_privilege(error: &diesel::result::Error) -> bool {
+    matches!(error, diesel::result::Error::DatabaseError(_, info)
+        if info.message().contains("permission denied for table"))
 }
 
 /// The model under test, as the three things every question about it needs.
@@ -1885,6 +1857,8 @@ fn attempt_write(
             false
         }
         Err(error) if reads_as_a_policy_refusal(&error) => false,
+        // A caller without the table's privilege raises `42501`, which is a denial.
+        Err(error) if lacks_a_table_privilege(&error) => false,
         Err(error) => {
             let rendered = error.to_string();
             assert!(
@@ -2048,6 +2022,13 @@ fn licence_of(note: &TranslationNote) -> Disclosure {
         | TranslationNote::CoveringPoliciesBelowThreshold { table, commands } => Licence::Located {
             table: table.sql_name(),
             commands: commands.clone(),
+            direction: Direction::Narrower,
+        },
+
+        // A role holding a command on some columns only, which the model denies whole.
+        TranslationNote::TablePrivilegeColumnOnly { table, command, .. } => Licence::Located {
+            table: table.sql_name(),
+            commands: vec![command.clone()],
             direction: Direction::Narrower,
         },
 

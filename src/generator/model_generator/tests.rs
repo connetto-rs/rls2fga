@@ -41,13 +41,17 @@ fn role_registry(role_levels: &str, include_team: bool) -> FunctionRegistry {
     registry
 }
 
+/// `docs` with RLS enabled and one policy, parsed after the roles and table
+/// privileges the unit fixtures read for.
 fn docs_db_with_policy(policy_sql: &str) -> ParserDB {
     let sql = format!(
-        "
+        "{}
 CREATE TABLE docs(id uuid primary key, owner_id uuid, status text);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-{policy_sql}
-"
+{}
+",
+        crate::test_support::ROLES_SQL,
+        policy_sql
     );
     parse_schema(&sql).expect("schema should parse")
 }

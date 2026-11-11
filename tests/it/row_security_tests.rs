@@ -19,6 +19,7 @@ GRANT reviewers TO authenticated WITH INHERIT FALSE;
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner TEXT, status TEXT NOT NULL);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY own ON docs FOR SELECT USING (owner = current_setting('app.user_id', true));
+GRANT SELECT ON docs TO anon, authenticated;
 ";
 
 /// `policies` over [`KINDS`], translated for a deployment acting as `acting` that declares
@@ -88,11 +89,13 @@ fn a_membership_without_inheritance_does_not_reach() {
     let outputs = acting_as(
         &["anon", "quiet"],
         "CREATE ROLE quiet NOINHERIT; GRANT quiet TO authenticated; GRANT auditors TO quiet;
+         GRANT SELECT ON docs TO quiet;
          CREATE POLICY p ON docs FOR SELECT TO auditors USING (true);",
     );
     let without = acting_as(
         &["anon", "quiet"],
-        "CREATE ROLE quiet NOINHERIT; GRANT quiet TO authenticated; GRANT auditors TO quiet;",
+        "CREATE ROLE quiet NOINHERIT; GRANT quiet TO authenticated; GRANT auditors TO quiet;
+         GRANT SELECT ON docs TO quiet;",
     );
     assert_eq!(outputs.model(), without.model());
 }
@@ -124,6 +127,7 @@ fn membership(members_to: &str) -> String {
         "CREATE TABLE members (doc_id TEXT NOT NULL, user_id TEXT NOT NULL, PRIMARY KEY (doc_id, user_id));
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY members_read ON members FOR SELECT TO {members_to} USING (true);
+GRANT SELECT ON members TO anon, authenticated;
 CREATE POLICY shared ON docs FOR SELECT
   USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
 "
@@ -161,6 +165,7 @@ ALTER TABLE members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY members_open ON members FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY members_cap ON members AS RESTRICTIVE FOR SELECT TO anon
   USING (current_setting('app.read_caps', true) = 'members:read');
+GRANT SELECT ON members TO anon, authenticated;
 CREATE POLICY shared ON docs FOR SELECT
   USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
 ";
@@ -267,6 +272,7 @@ fn barred_membership(barrier: &str) -> String {
 ALTER TABLE members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY members_open ON members FOR SELECT USING (true);
 {barrier}
+GRANT SELECT ON members TO authenticated;
 CREATE POLICY shared ON docs FOR SELECT
   USING (id IN (SELECT doc_id FROM members WHERE user_id = current_setting('app.user_id', true)));
 "

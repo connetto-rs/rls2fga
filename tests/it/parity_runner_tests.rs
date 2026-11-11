@@ -145,9 +145,8 @@ async fn every_parity_case_agrees() {
             distinct_acl_tables_do_not_share_a_member_relation,
             distinct_team_membership_tables_do_not_share_access,
             a_plain_and_a_gated_read_of_the_same_join_table_do_not_share_access,
-            an_rls_off_table_answers_unrestricted,
-            a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one,
-            an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor,
+            a_command_revoked_from_the_owner_is_denied,
+            a_grant_to_a_quoted_public_reaches_every_role,
         ]
     ];
     let total = cases.len();
@@ -186,10 +185,313 @@ fn panic_message(joined: tokio::task::JoinError) -> String {
         .unwrap_or_else(|| "panicked with no message".to_string())
 }
 
-/// Every command on a table without row-level security grants locally.
-async fn an_rls_off_table_answers_unrestricted(cluster: Arc<Cluster>) {
+/// Compare table privileges on `PostgreSQL` 17 and 18.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn table_privileges_agree_on_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        a_withheld_privilege_refuses_what_the_policy_admits(&cluster, major).await;
+        a_kind_reaches_a_privilege_through_its_membership(&cluster, major).await;
+        every_grant_shape_gates_its_command(&cluster, major).await;
+        session_grantees_resolve_to_the_role_the_ddl_ran_as(&cluster, major).await;
+        a_keyless_table_keeps_role_scoped_permissions(&cluster, major).await;
+        a_column_only_grant_narrows_the_table_command(&cluster, major).await;
+        a_whole_table_grant_on_rls_off_answers_unrestricted(&cluster, major).await;
+        a_role_lacking_the_command_keeps_the_answer_judged(&cluster, major).await;
+        a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(&cluster, major).await;
+        an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(&cluster, major).await;
+    }
+}
+
+/// Missing privileges deny rows an ownership policy admits.
+async fn a_withheld_privilege_refuses_what_the_policy_admits(cluster: &Cluster, major: &str) {
     let case = ParityCase::reading(
-        "runner-rls-off-unrestricted",
+        &format!("privileges-withheld-{major}"),
+        "
+CREATE TABLE notes (id BIGINT PRIMARY KEY, owner TEXT NOT NULL, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_read ON notes FOR SELECT USING (true);
+CREATE POLICY notes_write ON notes FOR UPDATE
+    USING (owner = current_setting('app.user_id', true));
+GRANT SELECT ON notes TO kind_anon;
+GRANT SELECT, UPDATE ON notes TO kind_user;
+",
+        &["INSERT INTO notes(id, owner, body) VALUES (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', 'c')"],
+        vec![
+            Principal::with_setting("alice", "alice", "app.user_id", "alice"),
+            Principal::with_setting("bob", "kind_anon", "app.user_id", "bob"),
+            Principal::with_setting("carol", "kind_user", "app.user_id", "carol"),
+        ],
+    )
+    .after(&[
+        "CREATE ROLE kind_anon NOLOGIN;
+         CREATE ROLE kind_user NOLOGIN;
+         CREATE ROLE alice LOGIN IN ROLE kind_user",
+    ])
+    .writing(
+        "notes",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            // The policies read the owner, never the body.
+            check_neutral: true,
+        },
+    );
+
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // The update the policy admits on bob's own row, refused by the missing
+        // privilege.
+        ("bob", "notes:2", ActionStatement::Update, false),
+        // The read the policy admits, held by the role the caller runs as.
+        ("bob", "notes:1", ActionStatement::Select, true),
+        // `alice` reaches the `UPDATE` grant through the `kind_user` it inherits.
+        ("alice", "notes:1", ActionStatement::Update, true),
+        ("carol", "notes:3", ActionStatement::Update, true),
+        ("carol", "notes:3", ActionStatement::Delete, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// An acting role inherits privileges from its granted roles.
+async fn a_kind_reaches_a_privilege_through_its_membership(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-kind-membership-{major}"),
+        "
+CREATE TABLE notes (id BIGINT PRIMARY KEY, owner TEXT NOT NULL, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_read ON notes FOR SELECT USING (true);
+CREATE POLICY notes_write ON notes FOR UPDATE
+    USING (owner = current_setting('app.user_id', true));
+GRANT SELECT ON notes TO kind_anon, kind_user;
+GRANT UPDATE ON notes TO writers;
+",
+        &["INSERT INTO notes(id, owner, body) VALUES (1, 'bob', 'b'), (2, 'carol', 'c')"],
+        vec![
+            Principal::with_setting("bob", "kind_anon", "app.user_id", "bob"),
+            Principal::with_setting("carol", "kind_user", "app.user_id", "carol"),
+        ],
+    )
+    .after(&["CREATE ROLE kind_anon NOLOGIN;
+         CREATE ROLE kind_user NOLOGIN;
+         CREATE ROLE writers NOLOGIN;
+         GRANT writers TO kind_user"])
+    .writing(
+        "notes",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    );
+
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        ("bob", "notes:1", ActionStatement::Update, false),
+        ("bob", "notes:1", ActionStatement::Select, true),
+        ("carol", "notes:2", ActionStatement::Update, true),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// Public grants, all privileges and revokes apply independently.
+async fn every_grant_shape_gates_its_command(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-every-shape-{major}"),
+        r"
+CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_all ON docs USING (true) WITH CHECK (true);
+CREATE TABLE secrets (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE secrets ENABLE ROW LEVEL SECURITY;
+CREATE POLICY secrets_all ON secrets USING (true) WITH CHECK (true);
+GRANT SELECT ON docs TO PUBLIC;
+GRANT ALL PRIVILEGES ON docs, secrets TO admin;
+GRANT UPDATE, DELETE ON docs TO editor;
+REVOKE DELETE ON docs FROM editor;
+",
+        &[
+            "INSERT INTO docs(id, body) VALUES ('d1', 'one')",
+            "INSERT INTO secrets(id, body) VALUES ('s1', 'one')",
+        ],
+        vec![
+            Principal::as_role("admin", "admin"),
+            Principal::as_role("editor", "editor"),
+            Principal::as_role("stranger", "stranger"),
+        ],
+    )
+    .after(&["CREATE ROLE admin LOGIN;
+         CREATE ROLE editor LOGIN;
+         CREATE ROLE stranger LOGIN"])
+    .writing(
+        "docs",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    )
+    .writing(
+        "secrets",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    );
+
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // `PUBLIC` reads docs, and nobody else's grant is needed for it.
+        ("stranger", "docs:d1", ActionStatement::Select, true),
+        ("stranger", "docs:d1", ActionStatement::Update, false),
+        // `ALL PRIVILEGES` holds every command.
+        ("admin", "secrets:s1", ActionStatement::Delete, true),
+        ("admin", "docs:d1", ActionStatement::Insert, true),
+        // The revoke took `DELETE` and left `UPDATE`.
+        ("editor", "docs:d1", ActionStatement::Update, true),
+        ("editor", "docs:d1", ActionStatement::Delete, false),
+        // Nothing on secrets at all.
+        ("stranger", "secrets:s1", ActionStatement::Select, false),
+        ("editor", "secrets:s1", ActionStatement::Select, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// DDL session grantees bind to the role selected by `SET ROLE`.
+async fn session_grantees_resolve_to_the_role_the_ddl_ran_as(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-session-grantees-{major}"),
+        "
+CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE notes OWNER TO app_owner;
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE notes FORCE ROW LEVEL SECURITY;
+CREATE POLICY notes_all ON notes USING (true) WITH CHECK (true);
+REVOKE SELECT, UPDATE ON notes FROM app_owner;
+SET ROLE app_owner;
+GRANT SELECT, UPDATE ON notes TO CURRENT_USER;
+REVOKE UPDATE ON notes FROM CURRENT_ROLE;
+RESET ROLE;
+",
+        &["INSERT INTO notes(id, body) VALUES ('n1', 'one')"],
+        vec![Principal::as_role("reader", "reader")],
+    )
+    .after(&["CREATE ROLE app_owner NOLOGIN;
+         CREATE ROLE reader LOGIN;
+         GRANT app_owner TO reader"])
+    .writing(
+        "notes",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    );
+
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // The grant reached `app_owner` through `CURRENT_USER`.
+        ("reader", "notes:n1", ActionStatement::Select, true),
+        // The revoke took the `UPDATE` the grant had given the same role.
+        ("reader", "notes:n1", ActionStatement::Update, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+async fn a_keyless_table_keeps_role_scoped_permissions(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-keyless-{major}"),
+        "
+CREATE TABLE scratch(note TEXT);
+GRANT SELECT ON scratch TO reader;
+GRANT SELECT, INSERT, UPDATE, DELETE ON scratch TO writer;
+",
+        &["INSERT INTO scratch(note) VALUES ('left'), ('right')"],
+        vec![
+            Principal::as_role("reader", "reader"),
+            Principal::as_role("writer", "writer"),
+            Principal::as_role("stranger", "stranger"),
+        ],
+    )
+    .after(&["CREATE ROLE reader LOGIN; CREATE ROLE writer LOGIN; CREATE ROLE stranger LOGIN"])
+    .writing(
+        "scratch",
+        Mutations {
+            update_set: Some("note = 'changed'".to_string()),
+            check_neutral: true,
+        },
+    );
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, statement, allowed) in [
+        ("reader", ActionStatement::Select, true),
+        ("reader", ActionStatement::Update, false),
+        ("writer", ActionStatement::Insert, true),
+        ("writer", ActionStatement::InsertReturning, true),
+        ("writer", ActionStatement::Update, true),
+        ("writer", ActionStatement::Delete, true),
+        ("stranger", ActionStatement::Select, false),
+    ] {
+        let observed = run
+            .observations
+            .iter()
+            .find(|observed| observed.subject == subject && observed.statement == statement)
+            .expect("the keyless permission is compared");
+        assert_eq!(observed.postgres, allowed, "{subject} {statement:?}");
+    }
+    assert_agrees(&case, &run);
+}
+
+/// Column-only writes disclose precisely the statements the table-level model refuses.
+async fn a_column_only_grant_narrows_the_table_command(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-column-only-{major}"),
+        "
+CREATE TABLE docs(id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (true);
+CREATE POLICY docs_write ON docs FOR UPDATE USING (true);
+GRANT SELECT ON docs TO writer;
+GRANT UPDATE(body) ON docs TO writer;
+",
+        &["INSERT INTO docs VALUES ('d1', 'one')"],
+        vec![Principal::as_role("writer", "writer")],
+    )
+    .after(&["CREATE ROLE writer LOGIN"])
+    .writing(
+        "docs",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    );
+    let run = support::parity::run_disclosing(cluster, &case).await;
+    for statement in [
+        ActionStatement::Select,
+        ActionStatement::SelectForUpdate,
+        ActionStatement::Update,
+    ] {
+        support::parity::assert_postgres(&case, &run, "writer", "docs:d1", statement, true);
+    }
+    support::parity::assert_only_disagreements(
+        &case,
+        &run,
+        &[
+            ("writer", "docs:d1", ActionStatement::SelectForUpdate),
+            ("writer", "docs:d1", ActionStatement::Update),
+        ],
+    );
+    support::parity::assert_disclosed_where_noted(&case, &run);
+}
+
+/// Commands held by every acting role on an unguarded table grant locally.
+async fn a_whole_table_grant_on_rls_off_answers_unrestricted(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-unrestricted-{major}"),
         "
 CREATE TABLE ledger (id TEXT PRIMARY KEY, note TEXT);
 GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
@@ -209,21 +511,29 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
         },
     );
     let planned = translated(&case);
-    for statement in [
-        ActionStatement::Select,
-        ActionStatement::Insert,
-        ActionStatement::Update,
-        ActionStatement::Delete,
-    ] {
-        assert!(
-            unrestricted(&planned, "ledger", statement),
-            "row-level security is off, so no predicate survives for {statement:?}:\n{:?}",
-            planned.action_relations()
-        );
-    }
-    let run = support::parity::run(&cluster, &case).await;
+    assert!(
+        unrestricted(&planned, "ledger", ActionStatement::Select),
+        "every acting role holds `SELECT` and no predicate survives:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        unrestricted(&planned, "ledger", ActionStatement::Insert),
+        "every acting role holds `INSERT` and no predicate survives:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        unrestricted(&planned, "ledger", ActionStatement::Update),
+        "every acting role holds `UPDATE`:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        unrestricted(&planned, "ledger", ActionStatement::Delete),
+        "every acting role holds `DELETE`:\n{:?}",
+        planned.action_relations()
+    );
+    let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
-        // Row-level security is off, so every granted command reaches every row.
+        // Every command is held by every acting role, so every row answers for both.
         ("ledger_a", "ledger:l1", ActionStatement::Select, true),
         ("ledger_b", "ledger:l1", ActionStatement::Insert, true),
         ("ledger_a", "ledger:l2", ActionStatement::Update, true),
@@ -234,12 +544,58 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
     assert_agrees(&case, &run);
 }
 
+/// A role lacking the command keeps the answer judged, and a role holding no privilege anywhere still blocks the local grant.
+async fn a_role_lacking_the_command_keeps_the_answer_judged(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-one-lacks-{major}"),
+        "
+CREATE TABLE vault (id TEXT PRIMARY KEY, note TEXT);
+GRANT SELECT ON vault TO vault_keeper;
+",
+        &["INSERT INTO vault(id, note) VALUES ('v1', 'one'), ('v2', 'two')"],
+        vec![
+            Principal::as_role("keeper", "vault_keeper"),
+            Principal::as_role("outsider", "vault_outsider"),
+        ],
+    )
+    .after(&["CREATE ROLE vault_keeper LOGIN; CREATE ROLE vault_outsider LOGIN"]);
+    let planned = translated(&case);
+    assert!(
+        judged(&planned, "vault", ActionStatement::Select),
+        "`vault_outsider` holds `SELECT` on nothing:\n{:?}",
+        planned.action_relations()
+    );
+    for statement in [
+        ActionStatement::Insert,
+        ActionStatement::Update,
+        ActionStatement::Delete,
+    ] {
+        assert!(
+            denied(&planned, "vault", statement),
+            "no acting role holds the command:\n{:?}",
+            planned.action_relations()
+        );
+    }
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        ("keeper", "vault:v1", ActionStatement::Select, true),
+        ("keeper", "vault:v2", ActionStatement::Select, true),
+        // The grant never reached the other role, so it reads nothing the policy admits.
+        ("outsider", "vault:v1", ActionStatement::Select, false),
+        ("outsider", "vault:v2", ActionStatement::Select, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
 /// An all-roles `USING (true)` policy is the local grant, and a surviving row predicate or a clock condition is not.
 async fn a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(
-    cluster: Arc<Cluster>,
+    cluster: &Cluster,
+    major: &str,
 ) {
     let case = ParityCase::reading(
-        "runner-true-beside-restrictive",
+        &format!("privileges-true-beside-restrictive-{major}"),
         "
 CREATE TABLE open_memo (id TEXT PRIMARY KEY, note TEXT);
 ALTER TABLE open_memo ENABLE ROW LEVEL SECURITY;
@@ -282,14 +638,14 @@ GRANT SELECT ON open_memo, private_memo, windowed_memo TO memo_a, memo_b;
         "the clock condition survives:\n{:?}",
         planned.action_relations()
     );
-    for table in ["private_memo", "windowed_memo"] {
+    for table in ["open_memo", "private_memo", "windowed_memo"] {
         assert!(
             denied(&planned, table, ActionStatement::Update),
-            "no policy covers `UPDATE`:\n{:?}",
+            "no acting role holds `UPDATE`:\n{:?}",
             planned.action_relations()
         );
     }
-    let run = support::parity::run(&cluster, &case).await;
+    let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
         // The true policy admits both callers to every row.
         ("memo_a", "open_memo:o1", ActionStatement::Select, true),
@@ -325,9 +681,12 @@ GRANT SELECT ON open_memo, private_memo, windowed_memo TO memo_a, memo_b;
 }
 
 /// A direct partition route can grant locally while its root route filters rows.
-async fn an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(cluster: Arc<Cluster>) {
+async fn an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(
+    cluster: &Cluster,
+    major: &str,
+) {
     let case = ParityCase::reading(
-        "runner-partition-child",
+        &format!("privileges-partition-child-{major}"),
         "
 CREATE TABLE audit_events (
     id TEXT, owner_id TEXT, note TEXT, bucket TEXT NOT NULL DEFAULT 'recent',
@@ -360,12 +719,14 @@ GRANT SELECT ON audit_events, audit_events_recent TO event_a, event_b;
         "the child carries no policy and both acting roles hold `SELECT`:\n{:?}",
         planned.action_relations()
     );
-    assert!(
-        denied(&planned, "audit_events", ActionStatement::Update),
-        "no policy covers `UPDATE`:\n{:?}",
-        planned.action_relations()
-    );
-    let run = support::parity::run(&cluster, &case).await;
+    for table in ["audit_events", "audit_events_recent"] {
+        assert!(
+            denied(&planned, table, ActionStatement::Update),
+            "no acting role holds `UPDATE`:\n{:?}",
+            planned.action_relations()
+        );
+    }
+    let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
         // The ancestor's route filters its own rows by the policy.
         (
@@ -5085,6 +5446,88 @@ CREATE POLICY docs_delete ON docs FOR DELETE USING (
             statement,
             allowed,
         );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A `REVOKE` removes a command from the owner's privilege entry, and a member caller
+/// inherits exactly what remains.
+///
+/// `reader` holds `notes` through its membership in `app_owner`, which owns the table.
+/// The revoke took `UPDATE` from the owner and left `SELECT`, so the read the policy
+/// admits still lands and the update it admits does not.
+async fn a_command_revoked_from_the_owner_is_denied(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-privileged-revoked-command",
+        "
+CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE notes OWNER TO app_owner;
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_all ON notes USING (true) WITH CHECK (true);
+REVOKE UPDATE ON notes FROM app_owner;
+",
+        &["INSERT INTO notes(id, body) VALUES ('n1', 'one')"],
+        vec![Principal::as_role("reader", "reader")],
+    )
+    .after(&["CREATE ROLE app_owner NOLOGIN;
+         CREATE ROLE reader LOGIN;
+         GRANT app_owner TO reader"])
+    .writing(
+        "notes",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    );
+
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // The owner's `SELECT` survives a revoke that named only `UPDATE`.
+        ("reader", "notes:n1", ActionStatement::Select, true),
+        // The revoked command is refused however the policy reads.
+        ("reader", "notes:n1", ActionStatement::Update, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A grant to `PUBLIC` spelled as the quoted group name reaches every declared role.
+///
+/// `PostgreSQL` reads the quoted `public` as the pseudo-group, so both callers read the
+/// rows and neither holds `UPDATE`.
+async fn a_grant_to_a_quoted_public_reaches_every_role(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-privileged-public-spelling",
+        r#"
+CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_all ON notes USING (true) WITH CHECK (true);
+GRANT SELECT ON notes TO "public";
+"#,
+        &["INSERT INTO notes(id, body) VALUES ('n1', 'one')"],
+        vec![
+            Principal::as_role("reader", "reader"),
+            Principal::as_role("auditor", "auditor"),
+        ],
+    )
+    .after(&["CREATE ROLE reader LOGIN; CREATE ROLE auditor LOGIN"])
+    .writing(
+        "notes",
+        Mutations {
+            update_set: Some("body = body".to_string()),
+            check_neutral: true,
+        },
+    );
+
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        ("reader", "notes:n1", ActionStatement::Select, true),
+        ("auditor", "notes:n1", ActionStatement::Select, true),
+        // No `UPDATE` grant, so the policy's check is never reached.
+        ("reader", "notes:n1", ActionStatement::Update, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
     }
     assert_agrees(&case, &run);
 }

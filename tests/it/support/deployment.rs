@@ -17,12 +17,23 @@ pub(crate) const LOGIN_ROLE: &str = "app_login";
 /// The one role every test request acts as.
 pub(crate) const ACTING_ROLE: &str = "app_user";
 
-/// The statements declaring [`LOGIN_ROLE`] and [`ACTING_ROLE`], which a schema needs
-/// before a translator resolves a deployment against it.
-pub(crate) const ROLES: &str = "CREATE ROLE app_login LOGIN NOINHERIT;
-CREATE ROLE app_user NOLOGIN;
-GRANT app_user TO app_login WITH INHERIT FALSE, SET TRUE;
-";
+/// The default table privileges, spelled once for [`ROLES`] and [`DEFAULT_PRIVILEGES`].
+macro_rules! default_privileges {
+    () => {
+        "ALTER DEFAULT PRIVILEGES GRANT ALL PRIVILEGES ON TABLES TO app_user;\n"
+    };
+}
+
+/// Fixture roles holding every table privilege, so a test isolates row security.
+pub(crate) const ROLES: &str = concat!(
+    "CREATE ROLE app_login LOGIN NOINHERIT;\n",
+    "CREATE ROLE app_user NOLOGIN;\n",
+    "GRANT app_user TO app_login WITH INHERIT FALSE, SET TRUE;\n",
+    default_privileges!()
+);
+
+/// The default privileges of [`ROLES`], which every database created after them repeats.
+pub(crate) const DEFAULT_PRIVILEGES: &str = default_privileges!();
 
 /// The caller settings most of the suite reads, each holding the caller as text.
 const CALLER_SETTINGS: [&str; 3] = [
@@ -76,7 +87,7 @@ pub(crate) fn translator_builder() -> TranslatorBuilder {
     TranslatorBuilder::new(caller_deployment())
 }
 
-/// `sql` parsed after [`ROLES`], so a deployment of the suite's roles resolves against it.
+/// Parse `sql` with the fixture roles and their default table privileges.
 pub(crate) fn db(sql: &str) -> ParserDB {
     sql_parser::parse_schema(&format!("{ROLES}{sql}")).expect("schema should parse")
 }

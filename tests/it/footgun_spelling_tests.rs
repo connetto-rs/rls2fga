@@ -356,6 +356,7 @@ CREATE ROLE "current_user" NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_setting('app.user_id'));
+GRANT SELECT ON docs TO "current_user";
 "#,
     );
     let outputs = rls2fga::translator::TranslatorBuilder::new(caller_deployment_acting_as(
@@ -580,7 +581,8 @@ fn a_qualified_membership_spelling_keeps_the_membership_relation_name() {
              ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY members_read ON doc_members FOR SELECT TO auditor USING (true);\n\
              CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\n\
-               SELECT 1 FROM {members_ref} m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id')));\n"
+               SELECT 1 FROM {members_ref} m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id')));\n\
+             GRANT SELECT ON docs, doc_members TO auditor;\n"
         )
     };
     let model_for = |members_ref: &str| -> String {
