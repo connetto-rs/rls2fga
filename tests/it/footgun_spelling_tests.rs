@@ -4,14 +4,16 @@
 //! How an identifier is spelled, and the name `PostgreSQL` stores it under.
 
 use rls2fga::generator::tuple_generator::format_tuples;
+use rls2fga::translator::Outputs;
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use crate::support;
 use crate::support::deployment::{caller_deployment_acting_as, deployment, settings_from_json};
 
 use crate::support::footgun::{
-    db_of, docs_read_definition, relation_definition, translator, type_names,
+    action_answer, db_of, docs_read_definition, relation_definition, translator, type_names,
 };
 
 /// A quoted identifier may contain a dot. Treating it as a schema separator names
@@ -394,13 +396,13 @@ CREATE POLICY p ON docs FOR SELECT TO "current_user" USING (owner_id = current_s
     );
 }
 
-/// The model one schema translates to at `threshold`, with `settings` declared.
-fn model_at(
+/// What one schema translates to at `threshold`, with `settings` declared.
+fn outputs_at(
     sql: &str,
     registry_json: Option<&str>,
     settings: &str,
     threshold: ConfidenceLevel,
-) -> String {
+) -> Outputs {
     let mut builder =
         rls2fga::translator::TranslatorBuilder::new(deployment(settings_from_json(settings)))
             .with_min_confidence(threshold);
@@ -414,7 +416,16 @@ fn model_at(
         .translate(&db_of(sql))
         .expect("translation should plan")
         .outputs_accepting_gaps()
-        .model()
+}
+
+/// The model one schema translates to at `threshold`, with `settings` declared.
+fn model_at(
+    sql: &str,
+    registry_json: Option<&str>,
+    settings: &str,
+    threshold: ConfidenceLevel,
+) -> String {
+    outputs_at(sql, registry_json, settings, threshold).model()
 }
 
 /// The model one schema translates to at threshold B, with `settings` declared.
@@ -437,21 +448,33 @@ fn a_cast_role_literal_in_pg_has_role_classifies_as_the_plain_one() {
              CREATE POLICY docs_sel ON docs FOR SELECT USING ({using});\n"
         )
     };
-    let plain = model_with_settings(
+    let plain = outputs_at(
         &schema("pg_has_role(current_user, 'editor', 'MEMBER')"),
         None,
         "[]",
+        ConfidenceLevel::B,
     );
-    let dumped = model_with_settings(
+    let dumped = outputs_at(
         &schema("pg_has_role(CURRENT_USER, 'editor'::name, 'MEMBER'::text)"),
         None,
         "[]",
+        ConfidenceLevel::B,
     );
-    assert!(
-        plain.contains("public_viewer"),
-        "the grant the schema records decides the call, or this proves nothing:\n{plain}"
+    assert_eq!(
+        action_answer(&plain, "docs", ActionStatement::Select),
+        Some(&ActionAnswer::Unrestricted),
+        "the grant the schema records decides the call, or this proves nothing"
     );
-    assert_eq!(plain, dumped, "the cast literals are the same policy");
+    assert_eq!(
+        plain.translation().action_relations(),
+        dumped.translation().action_relations(),
+        "the cast literals are the same policy"
+    );
+    assert_eq!(
+        plain.model(),
+        dumped.model(),
+        "the cast literals are the same policy"
+    );
 }
 
 /// `pg_dump` deparses `IN (2, 3, 4)` as `= ANY (ARRAY[2, 3, 4])`, one

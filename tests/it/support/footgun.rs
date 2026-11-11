@@ -7,10 +7,11 @@ use rls2fga::classifier::patterns::{PatternClass, UnclassifiedExpr};
 use rls2fga::generator::tuple_generator::{format_tuples, TupleQuery};
 use rls2fga::generator::well_known::{NOBODY_TYPE, USER_TYPE};
 use rls2fga::parser::sql_parser::ParserDB;
-use rls2fga::translator::Translator;
+use rls2fga::translator::{Outputs, Translator};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::RelationName;
 use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use super::deployment;
 
@@ -127,6 +128,20 @@ pub(crate) fn relation_definition(dsl: &str, type_name: &str, relation: &str) ->
         .into_iter()
         .find(|(name, _)| *name == relation)
         .map(|(_, body)| body.to_string())
+}
+
+/// The answer `outputs` gives `statement` on `type_name`, as a consumer reads it.
+pub(crate) fn action_answer<'a>(
+    outputs: &'a Outputs,
+    type_name: &str,
+    statement: ActionStatement,
+) -> Option<&'a ActionAnswer> {
+    outputs
+        .translation()
+        .action_relations()
+        .iter()
+        .find(|entry| entry.type_name.as_str() == type_name && entry.statement == statement)
+        .map(|entry| &entry.answer)
 }
 
 /// The tupleset a `docs#can_delete` walks and the relation it reads, which `docs` must define.

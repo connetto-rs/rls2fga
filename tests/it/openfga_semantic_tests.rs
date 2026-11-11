@@ -249,31 +249,6 @@ async fn openfga_semantic_checks_all_patterns() {
                 ("user:nobody", "can_select", "documents:doc2", false),
             ],
         },
-        // P10: Constant bool intersection (permissive TRUE and restrictive FALSE)
-        Scenario {
-            name: "P10_constant_bool",
-            fixture: "constant_bool",
-            min_confidence: ConfidenceLevel::B,
-            tuples: vec![("docs:d1", "public_viewer", "user:*")],
-            rows: vec![],
-            checks: vec![
-                ("user:anyone", "can_select", "docs:d1", false),
-                ("user:alice", "can_select", "docs:d1", false),
-            ],
-        },
-        // P10: pg_has_role decided by the schema. The acting role is a member of editor,
-        // so every request reads every row, and the model grants the row to everyone.
-        Scenario {
-            name: "P10_pg_has_role_constant",
-            fixture: "pg_role_gate",
-            min_confidence: ConfidenceLevel::B,
-            tuples: vec![("docs:d1", "public_viewer", "user:*")],
-            rows: vec![],
-            checks: vec![
-                ("user:alice", "can_select", "docs:d1", true),
-                ("user:bob", "can_select", "docs:d1", true),
-            ],
-        },
     ];
 
     // ── Run all scenarios ───────────────────────────────────────────────────

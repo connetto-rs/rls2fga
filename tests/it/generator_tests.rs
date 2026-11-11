@@ -3,6 +3,7 @@ use rls2fga::classifier::patterns::{ConstantBool, PatternClass};
 use rls2fga::classifier::policy_classifier;
 use rls2fga::generator::tuple_generator;
 use rls2fga::types::ConfidenceLevel;
+use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use crate::support;
 
@@ -85,6 +86,25 @@ fn generate_constant_bool_model_and_tuples() {
     );
 }
 
+/// The constant fixtures are answered without a check. A permissive `TRUE` beside a
+/// restrictive `FALSE` refuses every read, and a `pg_has_role` the schema answers yes
+/// grants it.
+#[test]
+fn constant_fixtures_answer_their_reads_locally() {
+    for (fixture, expected) in [
+        ("constant_bool", ActionAnswer::Denied),
+        ("pg_role_gate", ActionAnswer::Unrestricted),
+    ] {
+        let (classified, db, registry) = support::try_load_fixture_classified(fixture);
+        let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+        assert_eq!(
+            support::footgun::action_answer(&outputs, "docs", ActionStatement::Select),
+            Some(&expected),
+            "{fixture}"
+        );
+    }
+}
+
 // ── Gap 1: the role gate, a constant for `pg_has_role` and a walked scope for
 // the role accessor ────────────────────────────────────────────────────────────
 
@@ -114,10 +134,9 @@ CREATE POLICY docs_select ON docs FOR SELECT
     );
     let model = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     assert_eq!(
-        support::footgun::relation_definition(&model.model(), "docs", "can_select").as_deref(),
-        Some("public_viewer and acting_app_user from request_gate"),
-        "the membership admits every row:\n{}",
-        model.model()
+        support::footgun::action_answer(&model, "docs", ActionStatement::Select),
+        Some(&ActionAnswer::Unrestricted),
+        "the membership admits every row"
     );
 }
 
