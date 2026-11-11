@@ -117,15 +117,15 @@ jobs:
 
       # The server-backed modules of the `it` test binary are gated on `client`, so without
       # the feature they would neither run nor count.
-      - name: Run the in-process suites
-        run: cargo llvm-cov --no-report --features client --lib --tests
+      - name: Collect in-process coverage for both workspace packages
+        run: cargo llvm-cov -p rls2fga -p rls2fga-types --no-report --features client --lib --tests
 
       # One thread because a fresh runner pulls both images cold.
       - name: Run the container-backed suites
-        run: cargo llvm-cov --no-report --features client --tests -- --ignored --test-threads=1
+        run: cargo llvm-cov -p rls2fga --no-report --features client --test it -- --ignored --test-threads=1
 
-      - name: Generate coverage report
-        run: cargo llvm-cov report --lcov --output-path lcov.info
+      - name: Report coverage for both workspace packages
+        run: cargo llvm-cov report -p rls2fga -p rls2fga-types --lcov --output-path lcov.info
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7
