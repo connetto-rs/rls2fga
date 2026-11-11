@@ -26,8 +26,8 @@ use crate::generator::well_known::{
 };
 use crate::parser::sql_parser::Deployment;
 use crate::types::{
-    ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, RelationName, RowVersion,
-    TypeName,
+    ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, ColumnAnswer, RelationName,
+    RowVersion, TypeName,
 };
 
 type Judgements = [Option<(&'static str, RowVersion)>; 3];
@@ -185,6 +185,33 @@ fn answer(
     )
 }
 
+/// `rows` with the column relations `statement` needs, where an acting role holds one of its
+/// commands on some columns only. A refusal needs no column, since no row passes.
+fn by_column(
+    rows: ActionAnswer,
+    statement: ActionStatement,
+    plan: &TypePlan,
+    gate_type: &TypeName,
+) -> ActionAnswer {
+    if rows == ActionAnswer::Denied {
+        return rows;
+    }
+    let commands: Vec<_> = plan
+        .column_relations
+        .iter()
+        .filter(|relations| statement.column_commands().contains(&relations.command))
+        .cloned()
+        .collect();
+    if commands.is_empty() {
+        return rows;
+    }
+    ActionAnswer::ByColumn(ColumnAnswer {
+        rows: Box::new(rows),
+        gate: format!("{gate_type}:{}", plan.type_name),
+        commands,
+    })
+}
+
 /// Every statement's answer, and the relations only locally answered statements read.
 pub(crate) struct ActionAnswers {
     /// Permission answers for modeled tables with a read gate, ordered by type and
@@ -203,10 +230,11 @@ pub(crate) fn action_answers<'plan>(
     request_gate: &TypeName,
     deployment: Option<&Deployment>,
 ) -> ActionAnswers {
+    let gate_type = request_gate;
     let request_gate = types
         .clone()
         .into_iter()
-        .find(|target| target.type_name == *request_gate);
+        .find(|target| target.type_name == *gate_type);
     let mut entries: Vec<ActionRelations> = Vec::new();
     let mut answered_locally: BTreeMap<TypeName, BTreeSet<RelationName>> = BTreeMap::new();
     for type_plan in types {
@@ -233,7 +261,7 @@ pub(crate) fn action_answers<'plan>(
             entries.push(ActionRelations::new(
                 type_plan.type_name.clone(),
                 statement,
-                answer,
+                by_column(answer, statement, type_plan, gate_type),
             ));
         }
         // With nothing asked, even action relations no statement names are local.

@@ -532,16 +532,6 @@ pub enum TranslationNote {
         #[serde(with = "table_id_as_str")]
         root: TableId,
     },
-    /// A role's column-only privilege narrows the command to a denied branch.
-    TablePrivilegeColumnOnly {
-        /// Table the column grant names.
-        #[serde(with = "table_id_as_str")]
-        table: TableId,
-        /// Command held on some columns only.
-        command: String,
-        /// Role holding it on some columns only.
-        role: String,
-    },
 }
 
 impl TranslationNote {
@@ -567,8 +557,7 @@ impl TranslationNote {
             | Self::NullableBooleanFlagNarrowed { .. }
             | Self::UnsetSettingReadAsEmpty { .. }
             | Self::AttributeNeedsRuntimeEnforcement { .. }
-            | Self::InheritanceParentReadsOwnRowsOnly { .. }
-            | Self::TablePrivilegeColumnOnly { .. } => NoteSeverity::Partial,
+            | Self::InheritanceParentReadsOwnRowsOnly { .. } => NoteSeverity::Partial,
             Self::ReadsDeniedSoWritesCannotName { .. }
             | Self::CallerSuppliesConditionParameter { .. }
             | Self::RowIdentifierBudget { .. }
@@ -623,9 +612,6 @@ impl TranslationNote {
                 table: spelling, ..
             }
             | Self::ReadsDeniedSoWritesCannotName {
-                table: spelling, ..
-            }
-            | Self::TablePrivilegeColumnOnly {
                 table: spelling, ..
             } => Cow::Owned(spelling.to_string()),
             Self::ClauseBelowThreshold { policy, .. }
@@ -924,15 +910,6 @@ impl fmt::Display for TranslationNote {
                 f,
                 "A direct read of partition `{table}` does not apply the row-security \
                  policies of `{root}`"
-            ),
-            Self::TablePrivilegeColumnOnly {
-                table,
-                command,
-                role,
-            } => write!(
-                f,
-                "Role `{role}` holds `{command}` only on some columns of `{table}`, \
-                 so its `{command}` branch is denied"
             ),
         }
     }

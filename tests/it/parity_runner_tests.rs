@@ -196,7 +196,8 @@ async fn table_privileges_agree_on_postgres_17_and_18() {
         every_grant_shape_gates_its_command(&cluster, major).await;
         session_grantees_resolve_to_the_role_the_ddl_ran_as(&cluster, major).await;
         a_keyless_table_keeps_role_scoped_permissions(&cluster, major).await;
-        a_column_only_grant_narrows_the_table_command(&cluster, major).await;
+        column_grants_answer_the_columns_a_statement_touches(&cluster, major).await;
+        a_statement_reading_no_column_needs_one_column_held(&cluster, major).await;
         a_whole_table_grant_on_rls_off_answers_unrestricted(&cluster, major).await;
         a_role_lacking_the_command_keeps_the_answer_judged(&cluster, major).await;
         a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(&cluster, major).await;
@@ -446,46 +447,138 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON scratch TO writer;
     assert_agrees(&case, &run);
 }
 
-/// Column-only writes disclose precisely the statements the table-level model refuses.
-async fn a_column_only_grant_narrows_the_table_command(cluster: &Cluster, major: &str) {
+/// Column grants allow a statement exactly where every column it touches is held.
+async fn column_grants_answer_the_columns_a_statement_touches(cluster: &Cluster, major: &str) {
     let case = ParityCase::reading(
-        &format!("privileges-column-only-{major}"),
+        &format!("privileges-columns-{major}"),
         "
-CREATE TABLE docs(id TEXT PRIMARY KEY, body TEXT);
+CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, title TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE POLICY docs_read ON docs FOR SELECT USING (true);
-CREATE POLICY docs_write ON docs FOR UPDATE USING (true);
-GRANT SELECT ON docs TO writer;
-GRANT UPDATE(body) ON docs TO writer;
+CREATE POLICY docs_all ON docs USING (true) WITH CHECK (true);
+CREATE TABLE memos (id TEXT PRIMARY KEY, body TEXT, title TEXT);
+ALTER TABLE memos ENABLE ROW LEVEL SECURITY;
+CREATE POLICY memos_all ON memos USING (true) WITH CHECK (true);
+GRANT SELECT (id), UPDATE (body) ON docs TO editor;
+GRANT SELECT (id), UPDATE (body) ON memos TO editor;
+GRANT SELECT (id), UPDATE (title) ON memos TO titler;
+GRANT SELECT (id, body), UPDATE (title) ON memos TO copier;
+GRANT SELECT (body), DELETE ON docs TO peeker;
+GRANT SELECT (id), DELETE ON docs TO remover;
+GRANT SELECT (id), INSERT (id, body) ON docs TO drafter;
+GRANT SELECT (id, body), INSERT, UPDATE (body) ON docs TO filer;
 ",
-        &["INSERT INTO docs VALUES ('d1', 'one')"],
-        vec![Principal::as_role("writer", "writer")],
+        &[
+            "INSERT INTO docs(id, body, title) VALUES ('d1', 'one', 'first')",
+            "INSERT INTO memos(id, body, title) VALUES ('m1', 'one', 'first')",
+        ],
+        [
+            "editor", "titler", "copier", "peeker", "remover", "drafter", "filer",
+        ]
+        .into_iter()
+        .map(|role| Principal::as_role(role, role))
+        .collect(),
     )
-    .after(&["CREATE ROLE writer LOGIN"])
+    .after(&["CREATE ROLE editor LOGIN;
+         CREATE ROLE titler LOGIN;
+         CREATE ROLE copier LOGIN;
+         CREATE ROLE peeker LOGIN;
+         CREATE ROLE remover LOGIN;
+         CREATE ROLE drafter LOGIN;
+         CREATE ROLE filer LOGIN"])
     .writing(
         "docs",
         Mutations {
-            update_set: Some("body = body".to_string()),
+            update_set: Some("body = 'changed'".to_string()),
+            check_neutral: true,
+        },
+    )
+    .writing(
+        "memos",
+        Mutations {
+            update_set: Some("title = body".to_string()),
             check_neutral: true,
         },
     );
-    let run = support::parity::run_disclosing(cluster, &case).await;
-    for statement in [
-        ActionStatement::Select,
-        ActionStatement::SelectForUpdate,
-        ActionStatement::Update,
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // `SELECT` on the key the probe reads is enough, and on another column is not.
+        ("editor", "docs:d1", ActionStatement::Select, true),
+        ("peeker", "docs:d1", ActionStatement::Select, false),
+        // `UPDATE` on the column set, with `SELECT` on the key it filters by.
+        ("editor", "docs:d1", ActionStatement::Update, true),
+        ("editor", "memos:m1", ActionStatement::Update, false),
+        // Setting `title` from `body` reads `body` as well.
+        ("titler", "memos:m1", ActionStatement::Update, false),
+        ("copier", "memos:m1", ActionStatement::Update, true),
+        // A locking read needs `UPDATE` on one column.
+        ("editor", "docs:d1", ActionStatement::SelectForUpdate, true),
+        (
+            "remover",
+            "docs:d1",
+            ActionStatement::SelectForUpdate,
+            false,
+        ),
+        // `DELETE` is table-wide, and its filter reads the key.
+        ("remover", "docs:d1", ActionStatement::Delete, true),
+        ("peeker", "docs:d1", ActionStatement::Delete, false),
+        // An insert assigns every column, and reading it back reads the key.
+        ("drafter", "docs:d1", ActionStatement::Insert, false),
+        ("filer", "docs:d1", ActionStatement::Insert, true),
+        ("filer", "docs:d1", ActionStatement::InsertReturning, true),
+        (
+            "filer",
+            "docs:d1",
+            ActionStatement::InsertOnConflictUpdate,
+            true,
+        ),
+        // No privilege on the table at all.
+        ("peeker", "memos:m1", ActionStatement::Select, false),
     ] {
-        support::parity::assert_postgres(&case, &run, "writer", "docs:d1", statement, true);
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
     }
-    support::parity::assert_only_disagreements(
-        &case,
-        &run,
-        &[
-            ("writer", "docs:d1", ActionStatement::SelectForUpdate),
-            ("writer", "docs:d1", ActionStatement::Update),
+    assert_agrees(&case, &run);
+}
+
+/// A statement reading no column needs `SELECT` on any one column.
+async fn a_statement_reading_no_column_needs_one_column_held(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-columns-keyless-{major}"),
+        "
+CREATE TABLE scratch (note TEXT, tag TEXT);
+GRANT SELECT (tag), UPDATE (note) ON scratch TO tagger;
+GRANT SELECT (tag), UPDATE (tag) ON scratch TO untagger;
+",
+        &["INSERT INTO scratch(note, tag) VALUES ('left', 'a')"],
+        vec![
+            Principal::as_role("tagger", "tagger"),
+            Principal::as_role("untagger", "untagger"),
+            Principal::as_role("stranger", "stranger"),
         ],
+    )
+    .after(&["CREATE ROLE tagger LOGIN; CREATE ROLE untagger LOGIN; CREATE ROLE stranger LOGIN"])
+    .writing(
+        "scratch",
+        Mutations {
+            update_set: Some("note = 'changed'".to_string()),
+            check_neutral: true,
+        },
     );
-    support::parity::assert_disclosed_where_noted(&case, &run);
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, statement, allowed) in [
+        ("tagger", ActionStatement::Select, true),
+        ("tagger", ActionStatement::Update, true),
+        ("untagger", ActionStatement::Select, true),
+        ("untagger", ActionStatement::Update, false),
+        ("stranger", ActionStatement::Select, false),
+    ] {
+        let observed = run
+            .observations
+            .iter()
+            .find(|observed| observed.subject == subject && observed.statement == statement)
+            .expect("the keyless permission is compared");
+        assert_eq!(observed.postgres, allowed, "{subject} {statement:?}");
+    }
+    assert_agrees(&case, &run);
 }
 
 /// Commands held by every acting role on an unguarded table grant locally.

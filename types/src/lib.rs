@@ -42,7 +42,8 @@ mod relations;
 mod row_naming;
 
 pub use action_relations::{
-    ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, RowVersion,
+    ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, ColumnAnswer, ColumnCommand,
+    ColumnRelations, RowVersion,
 };
 pub use identifiers::{
     stable_hex_suffix, ColumnName, ConditionName, ConditionNameError, ConditionParameterName,

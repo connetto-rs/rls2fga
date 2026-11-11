@@ -6,9 +6,14 @@
     reason = "Tests use panics to reject invalid fixtures."
 )]
 
+use std::collections::BTreeMap;
+
 use rls2fga::parser::sql_parser::{parse_schema, Deployment, SessionSetting, SettingValue};
-use rls2fga::translator::{Translation, TranslatorBuilder};
-use rls2fga::types::{ActionAnswer, ActionStatement, NoteSeverity, TableId, TranslationNote};
+use rls2fga::translator::{Outputs, Translation, TranslatorBuilder};
+use rls2fga::types::{
+    ActionAnswer, ActionStatement, ColumnAnswer, ColumnCommand, ColumnName, ColumnRelations,
+    RelationName, TableId, TranslationNote,
+};
 use sqlparser::ast::DataType;
 
 use crate::support::footgun::relation_definition;
@@ -76,13 +81,44 @@ fn kind_in(body: Option<&str>, role: &str) -> bool {
     body.is_some_and(|body| body.contains(&needle))
 }
 
-/// The column-only privilege narrowings the translation reports, in order.
-fn column_only_notes(planned: &Translation) -> Vec<&TranslationNote> {
-    planned
-        .notes()
+/// The column relations a statement's answer asks, failing where it asks none.
+fn by_column<'a>(
+    planned: &'a Translation,
+    type_name: &str,
+    statement: ActionStatement,
+) -> &'a ColumnAnswer {
+    match answer(planned, type_name, statement) {
+        ActionAnswer::ByColumn(columns) => columns,
+        other => panic!("{type_name} answers {statement:?} without columns: {other:?}"),
+    }
+}
+
+/// One command's relations on `table`'s gate, for `columns` and the rest.
+fn column_relations(command: ColumnCommand, verb: &str, columns: &[&str]) -> ColumnRelations {
+    ColumnRelations {
+        command,
+        columns: columns
+            .iter()
+            .map(|column| {
+                (
+                    ColumnName::from_stored(*column),
+                    RelationName::canonicalized(format!("can_{verb}_{column}")),
+                )
+            })
+            .collect::<BTreeMap<_, _>>(),
+        on_table: RelationName::canonicalized(format!("can_{verb}_on_table")),
+    }
+}
+
+/// Whether the tuple queries hold `relation` on `table`'s gate object for `role`.
+fn gate_holds(outputs: &Outputs, table: &str, relation: &str, role: &str) -> bool {
+    let needle = format!(
+        "'request_gate:{table}' AS object, '{relation}' AS relation, 'pg_role:{role}' || '#usage'"
+    );
+    outputs
+        .tuple_queries()
         .iter()
-        .filter(|note| matches!(note, TranslationNote::TablePrivilegeColumnOnly { .. }))
-        .collect()
+        .any(|query| query.sql.contains(&needle))
 }
 
 fn table(name: &str) -> TableId {
@@ -271,9 +307,10 @@ GRANT SELECT ON docs TO PUBLIC;
     }
 }
 
-/// Column-only privileges narrow admitted commands.
+/// A role holding `UPDATE` on one column gets its branch, and the column it may set is asked
+/// on the gate object beside the rows.
 #[test]
-fn a_column_grant_on_an_admitted_command_narrows_and_denies() {
+fn a_column_grant_answers_the_command_per_column() {
     let planned = acting(
         &["writer"],
         "
@@ -288,29 +325,41 @@ GRANT UPDATE (body) ON docs TO writer;
 GRANT INSERT (body) ON docs TO writer;
 ",
     );
-    let notes = column_only_notes(&planned);
     assert_eq!(
-        notes,
-        [&TranslationNote::TablePrivilegeColumnOnly {
-            table: table("docs"),
-            command: "UPDATE".to_string(),
-            role: "writer".to_string(),
-        }],
-        "the INSERT no policy feeds is not admitted, so nothing narrows there: {notes:#?}"
+        answer(&planned, "docs", ActionStatement::Select),
+        &ActionAnswer::Unrestricted,
+        "SELECT is held on the table, so no column is asked"
     );
-    assert_eq!(notes[0].severity(), NoteSeverity::Partial);
-    assert!(admits(&planned, "docs", ActionStatement::Select));
-    assert!(denies(&planned, "docs", ActionStatement::Update));
-    assert!(denies(&planned, "docs", ActionStatement::Insert));
+    let update = by_column(&planned, "docs", ActionStatement::Update);
+    assert_eq!(*update.rows, ActionAnswer::Unrestricted);
+    assert_eq!(update.gate, "request_gate:docs");
+    assert_eq!(
+        update.commands,
+        [column_relations(ColumnCommand::Update, "update", &["body"])]
+    );
+    assert_eq!(
+        answer(&planned, "docs", ActionStatement::SelectForUpdate),
+        &ActionAnswer::Unrestricted,
+        "UPDATE on one column is enough for a locking read"
+    );
     assert!(
-        planned.outputs().is_err(),
-        "the narrowing diverges from the database"
+        denies(&planned, "docs", ActionStatement::Insert),
+        "no policy admits an insert, so its column grant asks nothing"
+    );
+    let notes = planned.notes().to_vec();
+    let outputs = planned
+        .outputs()
+        .unwrap_or_else(|_| panic!("nothing diverges: {notes:#?}"));
+    assert!(gate_holds(&outputs, "docs", "can_update_body", "writer"));
+    assert!(
+        !gate_holds(&outputs, "docs", "can_update_on_table", "writer"),
+        "the writer holds UPDATE on no other column"
     );
 }
 
-/// A column grant on an admitted read narrows and denies the read.
+/// A read held on one column is asked per column read.
 #[test]
-fn a_column_grant_on_an_admitted_select_narrows_and_denies() {
+fn a_column_grant_on_a_read_answers_it_per_column() {
     let planned = acting(
         &["reader"],
         "
@@ -322,20 +371,11 @@ CREATE POLICY docs_read ON docs FOR SELECT USING (true);
 GRANT SELECT (body) ON docs TO reader;
 ",
     );
-    let notes = column_only_notes(&planned);
+    let select = by_column(&planned, "docs", ActionStatement::Select);
+    assert_eq!(*select.rows, ActionAnswer::Unrestricted);
     assert_eq!(
-        notes,
-        [&TranslationNote::TablePrivilegeColumnOnly {
-            table: table("docs"),
-            command: "SELECT".to_string(),
-            role: "reader".to_string(),
-        }],
-        "the read its policy admits narrows to the granted column: {notes:#?}"
-    );
-    assert_eq!(notes[0].severity(), NoteSeverity::Partial);
-    assert!(
-        denies(&planned, "docs", ActionStatement::Select),
-        "the column-only holding refuses the read for every row"
+        select.commands,
+        [column_relations(ColumnCommand::Select, "select", &["body"])]
     );
     for statement in [
         ActionStatement::Insert,
@@ -347,15 +387,14 @@ GRANT SELECT (body) ON docs TO reader;
             "the role holds no other command"
         );
     }
-    assert!(
-        planned.outputs().is_err(),
-        "the narrowing diverges from the database"
-    );
+    let outputs = planned.outputs().expect("nothing diverges");
+    assert!(gate_holds(&outputs, "docs", "can_select_body", "reader"));
 }
 
-/// A column grant on an admitted insert narrows and denies the insert.
+/// An insert held on one column is asked per column assigned, and reading it back needs
+/// `SELECT` the role does not hold.
 #[test]
-fn a_column_grant_on_an_admitted_insert_narrows_and_denies() {
+fn a_column_grant_on_an_insert_answers_it_per_column() {
     let planned = acting(
         &["writer"],
         "
@@ -367,40 +406,28 @@ CREATE POLICY docs_insert ON docs FOR INSERT WITH CHECK (true);
 GRANT INSERT (body) ON docs TO writer;
 ",
     );
-    let notes = column_only_notes(&planned);
+    let insert = by_column(&planned, "docs", ActionStatement::Insert);
+    assert_eq!(*insert.rows, ActionAnswer::Unrestricted);
     assert_eq!(
-        notes,
-        [&TranslationNote::TablePrivilegeColumnOnly {
-            table: table("docs"),
-            command: "INSERT".to_string(),
-            role: "writer".to_string(),
-        }],
-        "the insert its check admits narrows to the granted column: {notes:#?}"
-    );
-    assert_eq!(notes[0].severity(), NoteSeverity::Partial);
-    assert!(
-        denies(&planned, "docs", ActionStatement::Insert),
-        "the column-only holding refuses the insert for every row"
+        insert.commands,
+        [column_relations(ColumnCommand::Insert, "insert", &["body"])]
     );
     for statement in [
+        ActionStatement::InsertReturning,
         ActionStatement::Select,
         ActionStatement::Update,
         ActionStatement::Delete,
     ] {
         assert!(
             denies(&planned, "docs", statement),
-            "the role holds no other command"
+            "{statement:?} needs a command the role does not hold"
         );
     }
-    assert!(
-        planned.outputs().is_err(),
-        "the narrowing diverges from the database"
-    );
 }
 
-/// A denied policy needs no column-privilege narrowing.
+/// Rows no gate admits stay a refusal, whatever the columns hold.
 #[test]
-fn a_column_grant_beside_a_gate_admitting_no_row_narrows_nothing() {
+fn a_column_grant_beside_a_gate_admitting_no_row_stays_a_refusal() {
     for (label, policies) in [
         (
             "a permissive gate constant false",
@@ -430,15 +457,13 @@ GRANT UPDATE (body) ON docs TO writer;
             ),
         );
         assert!(
-            column_only_notes(&planned).is_empty(),
-            "{label}: nothing is admitted, so nothing narrows: {:#?}",
-            planned.notes()
-        );
-        assert!(
             denies(&planned, "docs", ActionStatement::Select),
             "{label}: the gate admits no row"
         );
-        assert!(denies(&planned, "docs", ActionStatement::Update));
+        assert!(
+            denies(&planned, "docs", ActionStatement::Update),
+            "{label}: no row passes, so no column is asked"
+        );
         assert!(
             planned.outputs().is_ok(),
             "{label}: a gate admitting no row diverges nothing"
@@ -585,9 +610,9 @@ GRANT DELETE ON docs TO Reader;
     assert!(denies(&other, "docs", ActionStatement::Delete));
 }
 
-/// A column grant to public narrows the named acting role.
+/// A column grant to `PUBLIC` holds the gate relation for the acting role it reaches.
 #[test]
-fn a_column_grant_to_public_denies_and_names_the_acting_role() {
+fn a_column_grant_to_public_holds_the_acting_role() {
     let planned = acting(
         &["app_user"],
         "
@@ -601,20 +626,15 @@ GRANT SELECT ON docs TO PUBLIC;
 GRANT UPDATE (body) ON docs TO PUBLIC;
 ",
     );
-    let note = TranslationNote::TablePrivilegeColumnOnly {
-        table: table("docs"),
-        command: "UPDATE".to_string(),
-        role: "app_user".to_string(),
-    };
-    assert!(
-        planned.notes().contains(&note),
-        "the note names the acting role, not the PUBLIC the grant spelled: {:#?}",
-        planned.notes()
+    assert_eq!(
+        by_column(&planned, "docs", ActionStatement::Update).commands,
+        [column_relations(ColumnCommand::Update, "update", &["body"])]
     );
-    assert_eq!(note.severity(), NoteSeverity::Partial);
-    assert!(admits(&planned, "docs", ActionStatement::Select));
-    assert!(denies(&planned, "docs", ActionStatement::Update));
-    assert!(planned.outputs().is_err());
+    let outputs = planned.outputs().expect("nothing diverges");
+    assert!(
+        gate_holds(&outputs, "docs", "can_update_body", "app_user"),
+        "the gate names the acting role, never the PUBLIC the grant spelled"
+    );
 }
 
 /// Owner exemptions cannot restore a revoked privilege.
@@ -748,7 +768,6 @@ GRANT SELECT ON docs TO members;
         denies(&planned, "docs", ActionStatement::Insert),
         "no acting role holds INSERT"
     );
-    assert_eq!(column_only_notes(&planned), [] as [&TranslationNote; 0]);
 }
 
 /// A holder outside the acting roles grants no command.
