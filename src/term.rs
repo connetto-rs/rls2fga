@@ -23,6 +23,7 @@ use crate::no_std_prelude::*;
 
 use alloc::borrow::Cow;
 
+use sql_traits::structs::PolicyTarget;
 use sqlparser::ast::Expr;
 
 use crate::classifier::expansion::ExpansionState;
@@ -421,6 +422,9 @@ fn synthetic_policy<DB: DatabaseLike>(
         with_check_classification: None,
         using_filtered_at: None,
         with_check_filtered_at: None,
+        using_targets: vec![PolicyTarget::Select],
+        with_check_targets: Vec::new(),
+        illegal_clause: None,
     }
 }
 

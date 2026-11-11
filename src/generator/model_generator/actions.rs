@@ -6,6 +6,7 @@
 //! collect, and fills what no policy covered with a denial.
 
 use super::*;
+use sql_traits::structs::{GatedCommand, PolicyClause, PolicyTarget};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum ActionTarget {
@@ -16,6 +17,18 @@ pub(crate) enum ActionTarget {
     Delete,
 }
 
+impl From<PolicyTarget> for ActionTarget {
+    fn from(target: PolicyTarget) -> Self {
+        match target {
+            PolicyTarget::Select => Self::Select,
+            PolicyTarget::Insert => Self::Insert,
+            PolicyTarget::UpdateUsing => Self::UpdateUsing,
+            PolicyTarget::UpdateCheck => Self::UpdateCheck,
+            PolicyTarget::Delete => Self::Delete,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct ModeBuckets {
     pub(crate) permissive: Vec<UsersetExpr>,
@@ -23,38 +36,17 @@ pub(crate) struct ModeBuckets {
     pub(crate) subtractions: Vec<UsersetExpr>,
 }
 
-pub(crate) fn using_targets(command: PolicyCommand) -> Vec<ActionTarget> {
-    match command {
-        PolicyCommand::Select => vec![ActionTarget::Select],
-        PolicyCommand::Insert => vec![],
-        PolicyCommand::Update => vec![ActionTarget::UpdateUsing],
-        PolicyCommand::Delete => vec![ActionTarget::Delete],
-        PolicyCommand::All => vec![
-            ActionTarget::Select,
-            ActionTarget::UpdateUsing,
-            ActionTarget::Delete,
-        ],
-    }
+/// Targets the stored `USING` feeds, those a missing `WITH CHECK` leaves to it included.
+pub(crate) fn using_targets(cp: &ClassifiedPolicy) -> impl Iterator<Item = ActionTarget> + '_ {
+    cp.using_targets.iter().copied().map(ActionTarget::from)
 }
 
-pub(crate) fn with_check_targets(command: PolicyCommand) -> Vec<ActionTarget> {
-    match command {
-        PolicyCommand::Insert => vec![ActionTarget::Insert],
-        PolicyCommand::Update => vec![ActionTarget::UpdateCheck],
-        PolicyCommand::Select | PolicyCommand::Delete => vec![],
-        PolicyCommand::All => vec![ActionTarget::Insert, ActionTarget::UpdateCheck],
-    }
-}
-
-/// Targets the `USING` feeds, the mirror included: a command that mirrors and stores
-/// no `WITH CHECK` of its own has its check side answered by this clause too. The one
-/// place that rule is spelled outside the translator itself.
-pub(crate) fn using_targets_with_mirror(cp: &ClassifiedPolicy) -> Vec<ActionTarget> {
-    let mut targets = using_targets(cp.command());
-    if cp.with_check.is_none() && policy_uses_using_for_missing_with_check(cp.command()) {
-        targets.extend(with_check_targets(cp.command()));
-    }
-    targets
+/// Targets the stored `WITH CHECK` feeds.
+pub(crate) fn with_check_targets(cp: &ClassifiedPolicy) -> impl Iterator<Item = ActionTarget> + '_ {
+    cp.with_check_targets
+        .iter()
+        .copied()
+        .map(ActionTarget::from)
 }
 
 /// Each clause the threshold dropped, the grade it held, and the targets it fed.
@@ -66,10 +58,10 @@ pub(crate) fn clauses_lost_to_the_threshold(
 ) -> Vec<(&'static str, ConfidenceLevel, Vec<ActionTarget>)> {
     let mut lost = Vec::new();
     if let Some(confidence) = cp.using_filtered_at {
-        lost.push(("USING", confidence, using_targets_with_mirror(cp)));
+        lost.push(("USING", confidence, using_targets(cp).collect()));
     }
     if let Some(confidence) = cp.with_check_filtered_at {
-        lost.push(("WITH CHECK", confidence, with_check_targets(cp.command())));
+        lost.push(("WITH CHECK", confidence, with_check_targets(cp).collect()));
     }
     lost
 }
@@ -78,24 +70,17 @@ pub(crate) fn clauses_lost_to_the_threshold(
 pub(crate) fn unreadable_clause_targets(cp: &ClassifiedPolicy) -> Vec<(&str, Vec<ActionTarget>)> {
     let mut unreadable = Vec::new();
     if let Some(reason) = cp.using_unreadable() {
-        unreadable.push((reason, using_targets_with_mirror(cp)));
+        unreadable.push((reason, using_targets(cp).collect()));
     }
     if let Some(reason) = cp.with_check_unreadable() {
-        unreadable.push((reason, with_check_targets(cp.command())));
+        unreadable.push((reason, with_check_targets(cp).collect()));
     }
     unreadable
 }
 
 /// Every target this policy's stored clauses feed, for one dropped whole.
 pub(crate) fn targets_a_policy_feeds(cp: &ClassifiedPolicy) -> Vec<ActionTarget> {
-    let mut targets = Vec::new();
-    if cp.using.is_some() {
-        targets.extend(using_targets_with_mirror(cp));
-    }
-    if cp.with_check.is_some() {
-        targets.extend(with_check_targets(cp.command()));
-    }
-    targets
+    using_targets(cp).chain(with_check_targets(cp)).collect()
 }
 
 /// Action relations that read this bucket, so losing it diverges them.
@@ -127,13 +112,6 @@ pub(crate) fn narrowed_by(targets: &[ActionTarget]) -> BTreeSet<RelationName> {
 /// Record that the rule these targets feed no longer answers as the database does.
 pub(crate) fn mark_narrowed(plan: &mut TypePlan, targets: &[ActionTarget]) {
     plan.narrowed_relations.extend(narrowed_by(targets));
-}
-
-/// Whether a missing `WITH CHECK` reads the `USING` instead, which is what `PostgreSQL`
-/// does for the commands that may store both. A bare `INSERT` policy cannot store a
-/// `USING` at all, so it has no arm here.
-pub(crate) fn policy_uses_using_for_missing_with_check(command: PolicyCommand) -> bool {
-    matches!(command, PolicyCommand::All | PolicyCommand::Update)
 }
 
 /// Stand-in expression for a RESTRICTIVE clause dropped by confidence filtering:
@@ -188,33 +166,21 @@ where
         && (cp.using_filtered_at.is_some() || cp.using_unreadable().is_some()))
     .then(dropped_restrictive_expr);
     if let Some(using) = cp.using_classification.as_ref().or(dropped_using.as_ref()) {
-        for target in using_targets(cp.command()) {
+        for target in using_targets(cp) {
             f(target, using);
         }
     }
 
-    // Mirror USING → WITH CHECK only when the SQL had no WITH CHECK at all, a dropped
-    // barrier included. A filtered or unreadable check falls closed instead.
+    // A stored check, filtered or unreadable included, is never answered by the `USING`.
     let dropped_with_check = (restrictive
         && (cp.with_check_filtered_at.is_some() || cp.with_check_unreadable().is_some()))
     .then(dropped_restrictive_expr);
-    let with_check_pattern = cp
+    if let Some(with_check) = cp
         .with_check_classification
         .as_ref()
         .or(dropped_with_check.as_ref())
-        .or_else(|| {
-            if cp.with_check.is_none()
-                && cp.with_check_filtered_at.is_none()
-                && policy_uses_using_for_missing_with_check(cp.command())
-            {
-                cp.using_classification.as_ref().or(dropped_using.as_ref())
-            } else {
-                None
-            }
-        });
-
-    if let Some(with_check) = with_check_pattern {
-        for target in with_check_targets(cp.command()) {
+    {
+        for target in with_check_targets(cp) {
             f(target, with_check);
         }
     }
@@ -289,27 +255,21 @@ pub(crate) fn derived_action_relations() -> [RelationName; 6] {
     ]
 }
 
-/// Action targets a policy's stored clauses reach, which is the routing
-/// `for_each_policy_target_expr` performs once those clauses are classified. A command
-/// whose `WITH CHECK` is absent is checked by the `USING` expression, so that clause
-/// reaches those targets too.
+/// Action targets a policy's stored clauses reach, as `for_each_policy_target_expr` routes
+/// them once classified.
 pub(crate) fn policy_clause_targets<P: PolicyLike>(
     policy: &P,
     db: &P::DB,
 ) -> BTreeSet<ActionTarget> {
-    let command = policy_command(policy.command());
-    let has_check = check_shape(policy, db).is_some();
-    let mut targets = BTreeSet::new();
-    if using_shape(policy, db).is_some() {
-        targets.extend(using_targets(command));
-        if !has_check && policy_uses_using_for_missing_with_check(command) {
-            targets.extend(with_check_targets(command));
-        }
-    }
-    if has_check {
-        targets.extend(with_check_targets(command));
-    }
-    targets
+    // A policy iterated out of `db` is in `db`, so its analysis never fails.
+    let Ok(analysis) = policy.clause_analysis(db) else {
+        return BTreeSet::new();
+    };
+    analysis
+        .targets(PolicyClause::Using)
+        .chain(analysis.targets(PolicyClause::WithCheck))
+        .map(ActionTarget::from)
+        .collect()
 }
 
 /// Commands the schema's permissive policies on one table cover, whatever their
@@ -341,50 +301,30 @@ pub(crate) fn policies_missing_a_clause<P: PolicyLike>(
 ) -> Vec<(String, String, &'static str)> {
     let mut missing = Vec::new();
     for policy in declared {
-        let command = policy_command(policy.command());
-        // An illegal clause gets its own note, and an absent-clause line beside it
-        // would send the operator hunting for a legal policy that never existed.
-        let has_using = using_shape(*policy, db).is_some();
-        let has_check = check_shape(*policy, db).is_some();
-        if clause_illegal_for_command(command, has_using, has_check).is_some() {
+        // A policy iterated out of `db` is in `db`, so its analysis never fails.
+        let Ok(analysis) = policy.clause_analysis(db) else {
             continue;
-        }
-        if has_using {
-            continue;
-        }
-        let checks: BTreeSet<ActionTarget> = with_check_targets(command).into_iter().collect();
-        let applies: BTreeSet<ActionTarget> = using_targets(command)
-            .into_iter()
-            .chain(checks.iter().copied())
-            .collect();
-
-        let mut needs_using = Vec::new();
-        let mut needs_check = Vec::new();
-        for (_, named, targets) in action_relation_commands() {
-            if !targets.iter().any(|target| applies.contains(target)) {
-                continue;
-            }
-            // A command every one of whose targets a WITH CHECK feeds, which is the
-            // INSERT, survives a missing USING.
-            if targets.iter().all(|target| checks.contains(target)) {
-                needs_check.push(named);
-            } else {
-                needs_using.push(named);
-            }
-        }
-
-        if !needs_using.is_empty() {
-            missing.push((policy.name().to_string(), needs_using.join(", "), "USING"));
-        }
-        if !needs_check.is_empty() && !has_check {
-            missing.push((
-                policy.name().to_string(),
-                needs_check.join(", "),
-                "WITH CHECK",
-            ));
+        };
+        for absent in analysis.missing_clauses() {
+            let commands: Vec<&str> = absent.commands().map(gated_command_name).collect();
+            let clause = match absent.clause() {
+                PolicyClause::Using => "USING",
+                PolicyClause::WithCheck => "WITH CHECK",
+            };
+            missing.push((policy.name().to_string(), commands.join(", "), clause));
         }
     }
     missing
+}
+
+/// The SQL command whose policies `command` gates.
+fn gated_command_name(command: GatedCommand) -> &'static str {
+    match command {
+        GatedCommand::Select => "SELECT",
+        GatedCommand::Insert => "INSERT",
+        GatedCommand::Update => "UPDATE",
+        GatedCommand::Delete => "DELETE",
+    }
 }
 
 /// Deny every action relation no policy produced, returning the denied commands.

@@ -213,7 +213,8 @@ mod tests {
         )
         .expect("parses");
         let policy = elsewhere.policies().next().expect("the policy");
-        let classified = ClassifiedPolicy::from_policy(policy, &elsewhere);
+        let classified = ClassifiedPolicy::from_policy(policy, &elsewhere)
+            .expect("the policy is in its database");
         let guarded = db.tables().next().expect("docs");
         let entry = read_set(&classified, guarded, policy, &db);
         assert!(

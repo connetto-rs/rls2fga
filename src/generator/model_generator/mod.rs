@@ -1001,7 +1001,11 @@ fn group_policies_by_table<'a, DB: DatabaseLike>(
 fn declared_permissive_policies<DB: DatabaseLike>(db: &DB) -> BTreeMap<String, Vec<&DB::Policy>> {
     let mut declared: BTreeMap<String, Vec<&DB::Policy>> = BTreeMap::new();
     for policy in db.policies() {
-        if derive_policy_mode(policy) != PolicyMode::Permissive {
+        // A policy iterated out of `db` is in `db`, so its analysis never fails.
+        let Ok(analysis) = policy.clause_analysis(db) else {
+            continue;
+        };
+        if PolicyMode::from(analysis.mode()) != PolicyMode::Permissive {
             continue;
         }
         let target = policy.target_table_name();
@@ -1492,12 +1496,8 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
         {
             return parts;
         }
-        // A clause PostgreSQL refuses to store never came out of a database, so nothing
-        // downstream may read it as one. The INSERT spelling would otherwise mint a grant
-        // through the USING-to-check mirror.
-        if let Some(rule) =
-            clause_illegal_for_command(cp.command(), cp.using.is_some(), cp.with_check.is_some())
-        {
+        // A clause PostgreSQL refuses to store never came out of a database.
+        if let Some(rule) = cp.illegal_clause {
             let note = TranslationNote::PolicyClauseIllegal {
                 policy: cp.name().to_string(),
                 rule: rule.to_string(),

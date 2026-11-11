@@ -3,7 +3,8 @@ use crate::no_std_prelude::*;
 use alloc::collections::BTreeSet;
 use core::fmt;
 use serde::{Deserialize, Serialize};
-use sql_traits::errors::LookupError;
+use sql_traits::errors::{LookupError, PolicyClauseError};
+use sql_traits::structs::{PolicyClause, PolicyExpression, PolicyTarget};
 use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr};
 
 use crate::classifier::function_registry::DeclaredSource;
@@ -796,29 +797,6 @@ pub(crate) fn policy_command(command: CreatePolicyCommand) -> PolicyCommand {
     }
 }
 
-/// Policy mode as declared, `PERMISSIVE` when the policy omits it.
-pub fn derive_policy_mode<P: PolicyLike>(policy: &P) -> PolicyMode {
-    PolicyMode::from(policy.policy_type())
-}
-
-/// The stored `USING` clause for a walk of its relations, subqueries and calls, read or not.
-pub(crate) fn using_shape<'p, P: PolicyLike>(policy: &'p P, db: &'p P::DB) -> Option<&'p Expr> {
-    policy
-        .using_clause(db)
-        .ok()
-        .flatten()
-        .map(|clause| clause.expression())
-}
-
-/// The stored `WITH CHECK` clause for a walk of its shape, as [`using_shape`].
-pub(crate) fn check_shape<'p, P: PolicyLike>(policy: &'p P, db: &'p P::DB) -> Option<&'p Expr> {
-    policy
-        .check_clause(db)
-        .ok()
-        .flatten()
-        .map(|clause| clause.expression())
-}
-
 /// A clause a policy stores, as the catalog reads it.
 #[derive(Debug, Clone)]
 #[expect(
@@ -833,21 +811,21 @@ pub(crate) enum StoredClause {
 }
 
 impl StoredClause {
-    /// The clause as `catalog` answers it on `table`, `None` when the policy stores none.
+    /// The clause as the catalog answers it on `table`, `None` when the policy stores none.
     fn of<DB: DatabaseLike>(
-        catalog: Result<Option<&Expr>, LookupError>,
+        clause: Option<&PolicyExpression<'_>>,
         table: Option<&DB::Table>,
         db: &DB,
     ) -> Option<Self> {
-        match catalog {
-            Ok(expr) => expr.map(|expr| {
-                Self::Read(match table {
-                    Some(table) => without_column_type_casts(expr, table, db),
-                    None => expr.clone(),
-                })
+        clause.map(|clause| match clause {
+            PolicyExpression::Stored(expr) => Self::Read(match table {
+                Some(table) => without_column_type_casts(expr, table, db),
+                None => (*expr).clone(),
             }),
-            Err(error) => Some(Self::Unreadable(error.to_string())),
-        }
+            PolicyExpression::Written { unreadable, .. } => {
+                Self::Unreadable(unreadable.to_string())
+            }
+        })
     }
 
     /// The expression, when its value is known.
@@ -864,26 +842,6 @@ impl StoredClause {
             Self::Read(_) => None,
             Self::Unreadable(reason) => Some(reason),
         }
-    }
-}
-
-/// The refusal `PostgreSQL` answers a policy storing `clause` for `command`, if any.
-///
-/// `CREATE POLICY` refuses a `USING` on `FOR INSERT` and a `WITH CHECK` on `FOR
-/// SELECT` or `FOR DELETE`, so a policy carrying one never came out of a database and
-/// nothing may translate it as if it had.
-#[must_use]
-pub fn clause_illegal_for_command(
-    command: PolicyCommand,
-    has_using: bool,
-    has_with_check: bool,
-) -> Option<&'static str> {
-    match command {
-        PolicyCommand::Insert if has_using => Some("only WITH CHECK expression allowed for INSERT"),
-        PolicyCommand::Select | PolicyCommand::Delete if has_with_check => {
-            Some("WITH CHECK cannot be applied to SELECT or DELETE")
-        }
-        _ => None,
     }
 }
 
@@ -944,6 +902,12 @@ pub struct ClassifiedPolicy {
     /// Grade the `WITH CHECK` classification held when it was dropped. While this is set
     /// the USING to WITH CHECK mirror must not be applied.
     pub(crate) with_check_filtered_at: Option<ConfidenceLevel>,
+    /// Targets the stored `USING` feeds, those a missing `WITH CHECK` leaves to it included.
+    pub(crate) using_targets: Vec<PolicyTarget>,
+    /// Targets the stored `WITH CHECK` feeds.
+    pub(crate) with_check_targets: Vec<PolicyTarget>,
+    /// The refusal `PostgreSQL` answers a clause this policy's command cannot store with.
+    pub(crate) illegal_clause: Option<PolicyClauseError>,
 }
 
 impl ClassifiedPolicy {
@@ -952,26 +916,34 @@ impl ClassifiedPolicy {
     /// The single place a catalog's own policy becomes one of these, so nothing
     /// downstream has to know what the catalog stores. The table is resolved here, where
     /// the catalog is in hand, so no later stage re-reads the spelling as text.
-    pub fn from_policy<P: PolicyLike>(policy: &P, db: &P::DB) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns the catalog's [`LookupError`] when `db` does not hold `policy`.
+    pub fn from_policy<P: PolicyLike>(policy: &P, db: &P::DB) -> Result<Self, LookupError> {
+        let analysis = policy.clause_analysis(db)?;
         let target = policy.target_table_name();
         let table = db
             .resolve_target_table(target, IdentifierCase::AsWritten)
             .ok()
             .flatten();
-        Self {
+        Ok(Self {
             name: policy.name().to_string(),
             table: policy.target_table_name().to_string(),
             resolved_table: table.map(table_identity),
-            command: policy_command(policy.command()),
-            mode: derive_policy_mode(policy),
+            command: policy_command(analysis.command()),
+            mode: PolicyMode::from(analysis.mode()),
             acting_role: None,
-            using: StoredClause::of(policy.using_expression(db), table, db),
-            with_check: StoredClause::of(policy.check_expression(db), table, db),
+            using: StoredClause::of(analysis.clause(PolicyClause::Using), table, db),
+            with_check: StoredClause::of(analysis.clause(PolicyClause::WithCheck), table, db),
             using_classification: None,
             with_check_classification: None,
             using_filtered_at: None,
             with_check_filtered_at: None,
-        }
+            using_targets: analysis.targets(PolicyClause::Using).collect(),
+            with_check_targets: analysis.targets(PolicyClause::WithCheck).collect(),
+            illegal_clause: analysis.invalid_clause(),
+        })
     }
 
     /// The same policy guarding a table spelling the catalog cannot place.
@@ -1212,7 +1184,7 @@ mod tests {
     fn first_classified(sql: &str) -> ClassifiedPolicy {
         let db = parse_schema(sql).expect("schema should parse");
         let policy = db.policies().next().expect("expected one policy");
-        ClassifiedPolicy::from_policy(policy, &db)
+        ClassifiedPolicy::from_policy(policy, &db).expect("the policy is in its database")
     }
 
     #[test]
