@@ -969,13 +969,15 @@ fn touched_columns(
         }
         ActionStatement::Insert => touched.insert.extend(row()),
         ActionStatement::InsertReturning => {
-            let returned = object
-                .keys
-                .first()
-                .map(String::as_str)
-                .or_else(|| settable_column(object))?;
+            // Both spellings read the whole key, the arbiter as much as `RETURNING`.
+            if object.keys.is_empty() {
+                touched
+                    .select
+                    .insert(ColumnName::from_stored(settable_column(object)?));
+            } else {
+                touched.select.extend(keys());
+            }
             touched.insert.extend(row());
-            touched.select.insert(ColumnName::from_stored(returned));
         }
         ActionStatement::InsertOnConflictUpdate => {
             let settable = settable_column(object)?;
@@ -1940,10 +1942,7 @@ fn postgres_allows_write_probe(
             [source, alternative]
         }
         ActionStatement::InsertReturning => [
-            format!(
-                "WITH written AS ({source} RETURNING \"{}\") SELECT 1 FROM written",
-                keys[0]
-            ),
+            format!("WITH written AS ({source} RETURNING {arbiter}) SELECT 1 FROM written"),
             format!("{source} ON CONFLICT ({arbiter}) DO NOTHING"),
         ],
         ActionStatement::InsertOnConflictUpdate => {

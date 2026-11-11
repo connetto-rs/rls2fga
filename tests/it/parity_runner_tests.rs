@@ -198,6 +198,7 @@ async fn table_privileges_agree_on_postgres_17_and_18() {
         a_keyless_table_keeps_role_scoped_permissions(&cluster, major).await;
         column_grants_answer_the_columns_a_statement_touches(&cluster, major).await;
         a_statement_reading_no_column_needs_one_column_held(&cluster, major).await;
+        a_composite_key_read_back_needs_every_key_column(&cluster, major).await;
         a_whole_table_grant_on_rls_off_answers_unrestricted(&cluster, major).await;
         a_role_lacking_the_command_keeps_the_answer_judged(&cluster, major).await;
         a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(&cluster, major).await;
@@ -576,6 +577,40 @@ GRANT SELECT (tag), UPDATE (tag) ON scratch TO untagger;
             .iter()
             .find(|observed| observed.subject == subject && observed.statement == statement)
             .expect("the keyless permission is compared");
+        assert_eq!(observed.postgres, allowed, "{subject} {statement:?}");
+    }
+    assert_agrees(&case, &run);
+}
+
+/// Reading a written row back by a composite key reads every key column.
+async fn a_composite_key_read_back_needs_every_key_column(cluster: &Cluster, major: &str) {
+    let case = ParityCase::reading(
+        &format!("privileges-columns-composite-{major}"),
+        "
+CREATE TABLE pairs (a TEXT, b TEXT, note TEXT, PRIMARY KEY (a, b));
+ALTER TABLE pairs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY pairs_all ON pairs USING (true) WITH CHECK (true);
+GRANT INSERT, SELECT (a) ON pairs TO half;
+GRANT INSERT, SELECT (a, b) ON pairs TO whole;
+",
+        &["INSERT INTO pairs(a, b, note) VALUES ('x', 'y', 'one')"],
+        vec![
+            Principal::as_role("half", "half"),
+            Principal::as_role("whole", "whole"),
+        ],
+    )
+    .after(&["CREATE ROLE half LOGIN; CREATE ROLE whole LOGIN"]);
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, statement, allowed) in [
+        ("half", ActionStatement::Insert, true),
+        ("half", ActionStatement::InsertReturning, false),
+        ("whole", ActionStatement::InsertReturning, true),
+    ] {
+        let observed = run
+            .observations
+            .iter()
+            .find(|observed| observed.subject == subject && observed.statement == statement)
+            .expect("the composite-key write is compared");
         assert_eq!(observed.postgres, allowed, "{subject} {statement:?}");
     }
     assert_agrees(&case, &run);
