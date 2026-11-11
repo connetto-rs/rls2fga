@@ -1,17 +1,10 @@
-//! Which tables the database restricts nothing on.
+//! Whether the database filters none of a table's rows, by any route a read can take.
 //!
-//! A table with row-level security off shows every row to everybody, and a table nobody
-//! translated says nothing about what it shows. Reading the first as the second withholds
-//! rows the database grants, reading the second as the first grants rows it may not, and a
-//! consumer holding one empty report for both cannot choose.
-//!
-//! Reported by table rather than by type, because the emitted model defines no type for
-//! such a table and canonicalizing one would reach another table's: two spellings can
-//! canonicalize alike, and a consumer keying answers by type name would then read a
-//! guarded table as open.
-//!
-//! Row filters only. Table privileges are outside everything this crate reads, so a
-//! `REVOKE` that leaves nobody able to read the table is not what this reports on.
+//! A read naming a table with row-level security off is unfiltered, but a read reaching
+//! the same rows through a guarded ancestor applies that ancestor's policies, and that
+//! is the read an application makes, so the ancestor decides with the table. Only a
+//! definite no counts: an unreadable answer must not become a claim that nothing is
+//! enforced.
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
@@ -19,7 +12,7 @@ use alloc::collections::BTreeSet;
 
 use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, TableLike};
-use crate::types::{TableId, UnrestrictedTable};
+use crate::types::TableId;
 
 /// Whether row-level security is positively known to be off on this table.
 ///
@@ -32,9 +25,9 @@ pub(crate) fn row_level_security_is_off<DB: DatabaseLike>(table: &DB::Table, db:
 
 /// Whether the database filters none of this table's rows, by any route a reader can take.
 ///
-/// The one predicate both this report and
-/// [`action_relations`](crate::types::ActionRelations) read, since
-/// deciding openness twice lets one surface call a table open while the other does not.
+/// The one predicate for the question, so the classifier deciding whether a read of the
+/// table is filtered and the membership emission deciding whether a join table's rows are
+/// readable ask alike and cannot disagree.
 pub(crate) fn restricts_nothing_by_any_route<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> bool {
     row_level_security_is_off(table, db) && !restricted_through_an_ancestor(table, db)
 }
@@ -71,18 +64,4 @@ fn restricted_through_an_ancestor<DB: DatabaseLike>(table: &DB::Table, db: &DB) 
         };
         current = next;
     }
-}
-
-/// One entry per table row-level security is off on, in table order.
-///
-/// Read from the schema rather than from the plan, so a table the model gives a type to
-/// and one it never reaches are both here.
-pub(crate) fn unrestricted_tables<DB: DatabaseLike>(db: &DB) -> Vec<UnrestrictedTable> {
-    let mut entries: Vec<UnrestrictedTable> = db
-        .tables()
-        .filter(|table| restricts_nothing_by_any_route(*table, db))
-        .map(|table| UnrestrictedTable::new(table_identity(table)))
-        .collect();
-    entries.sort_by(|left, right| left.table.cmp(&right.table));
-    entries
 }

@@ -124,6 +124,8 @@ CREATE POLICY p ON tasks FOR SELECT USING (EXISTS (
         !dsl.contains("project_members_share"),
         "a uniquely keyed row needs no witness object:\n{dsl}"
     );
+    // `member` is a reserved structural name, so the source relation yields from it and
+    // takes a disambiguated name; the relation is recognized by its conditional subject.
     let (_, member) = relation_definitions(&dsl, "projects")
         .into_iter()
         .find(|(_, body)| body.starts_with("[user"))

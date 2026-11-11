@@ -205,8 +205,7 @@ fn expr_decision<DB: DatabaseLike>(
     }
 }
 
-/// Every record `tupleset` holds links a row of `type_name` to its own request-gate
-/// object, which every row with a key carries.
+/// Whether `tupleset` links this type's permission objects to its request gate.
 fn links_to_request_gates(
     type_name: &TypeName,
     tupleset: &RelationName,
@@ -221,6 +220,7 @@ fn links_to_request_gates(
                     matches!(
                         indexed.source,
                         TupleSource::PolicyScope { scope_type, scope_object, .. }
+                            | TupleSource::SingletonScope { scope_type, scope_object, .. }
                             if *scope_type == plan.well_known.request_gate
                                 && scope_object.as_str() == type_name.as_str()
                     )

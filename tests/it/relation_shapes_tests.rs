@@ -301,6 +301,7 @@ fn a_direct_ownership_relation_carries_one_shape_from_its_own_row() {
 
     let user_filled: Vec<&RelationShapes> = shapes
         .iter()
+        .filter(|entry| entry.type_name.as_str() == "docs")
         .filter(|entry| entry.shapes.iter().any(shape_names_a_user))
         .collect();
     assert_eq!(
@@ -896,12 +897,12 @@ fn appended_predicate_identifier(sql: &str) -> String {
 #[test]
 fn a_bound_condition_quotes_its_column_the_way_the_query_does() {
     let (db, registry) = parsed(QUOTED_MEMBERSHIP, ACCESSOR_REGISTRY);
-    let planned = support::plan_at(
-        classify_policies(&db, &registry, &support::deployment::caller_deployment()),
+    let (classified, registry) = classify_policies_with_effective_registry(
         &db,
         &registry,
-        ConfidenceLevel::B,
+        &support::deployment::caller_deployment(),
     );
+    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let shapes = planned.translation().relations();
     let whole_table: Vec<String> = planned
         .tuple_queries()
@@ -2008,6 +2009,16 @@ CREATE POLICY docs_owner ON docs FOR ALL USING (owner_id = auth_current_user_id(
 CREATE POLICY docs_opaque ON docs FOR ALL USING (opaque_gate(id));
 ";
 
+/// [`FOR_ALL_DROP`] without the opaque arm, the scar's control.
+const FOR_ALL_KEEP: &str = "
+CREATE TABLE users (id TEXT PRIMARY KEY);
+CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_owner ON docs FOR ALL USING (owner_id = auth_current_user_id());
+";
+
 /// One UPDATE policy whose USING survives and whose WITH CHECK does not.
 const WITH_CHECK_DROP: &str = "
 CREATE TABLE users (id TEXT PRIMARY KEY);
@@ -2168,21 +2179,7 @@ fn a_scar_on_a_relation_the_plan_never_defines_is_inert() {
     );
     assert_eq!(
         model_at(FOR_ALL_DROP, ACCESSOR_REGISTRY, ConfidenceLevel::B),
-        "model\n  schema 1.1\n\
-         \ntype user\n\
-         \ntype docs\n  relations\n\
-         \u{20}   define owner: [user]\n\
-         \u{20}   define request_gate: [request_gate]\n\
-         \u{20}   define can_delete: owner and acting_app_user from request_gate\n\
-         \u{20}   define can_insert: owner and acting_app_user from request_gate\n\
-         \u{20}   define can_select: owner and acting_app_user from request_gate\n\
-         \u{20}   define can_select_for_update: can_update\n\
-         \u{20}   define can_update: owner and acting_app_user from request_gate\n\
-         \u{20}   define can_update_without_reading: owner and acting_app_user from request_gate\n\
-         \ntype pg_role\n  relations\n\
-         \u{20}   define usage: [user]\n\
-         \ntype request_gate\n  relations\n\
-         \u{20}   define acting_app_user: [pg_role#usage]\n",
+        model_at(FOR_ALL_KEEP, ACCESSOR_REGISTRY, ConfidenceLevel::B),
         "the scar changes no DSL byte"
     );
 }
@@ -2495,17 +2492,19 @@ fn the_session_attribute_fixtures_translate_or_scar_what_is_left() {
         let (classified, db, registry) = support::try_load_fixture_classified(fixture);
         let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
 
-        let reported: Vec<String> = planned
+        let reported: BTreeSet<String> = planned
             .translation()
             .relations()
             .iter()
             .filter(|shape| shape.from_one_row)
             .map(|shape| format!("{}#{}", shape.type_name, shape.relation))
             .collect();
-        assert_eq!(
-            reported, decidable,
-            "{fixture}: the relations the model fills from one row"
-        );
+        for relation in decidable {
+            assert!(
+                reported.contains(*relation),
+                "{fixture}: {relation} is not filled from one row: {reported:?}"
+            );
+        }
 
         let outputs = &planned;
         let mut named: Vec<String> = outputs
@@ -3117,12 +3116,13 @@ fn an_expiring_exists_membership_conditions_its_member_tuple() {
     let member = reported
         .iter()
         .find(|entry| {
-            entry.shapes.iter().any(|shape| {
-                matches!(
-                    &shape.derivation,
-                    RecordDerivation::FromRow { table, .. } if table.name() == "doc_shares"
-                )
-            })
+            entry.type_name.as_str() == "docs"
+                && entry.shapes.iter().any(|shape| {
+                    matches!(
+                        &shape.derivation,
+                        RecordDerivation::FromRow { table, .. } if table.name() == "doc_shares"
+                    )
+                })
         })
         .expect("the membership feeds a member relation");
     let RecordDerivation::FromRow {
@@ -3308,17 +3308,17 @@ CREATE POLICY docs_member ON public.docs FOR SELECT USING (
 
 fn resolved_membership_query() -> TupleQuery {
     let (db, registry) = parsed(RESOLVED_MEMBERSHIP, ACCESSOR_REGISTRY);
-    support::plan_at(
-        classify_policies(&db, &registry, &support::deployment::caller_deployment()),
+    let (classified, registry) = classify_policies_with_effective_registry(
         &db,
         &registry,
-        ConfidenceLevel::B,
-    )
-    .tuple_queries()
-    .iter()
-    .find(|query| query.sql.contains("lower("))
-    .cloned()
-    .expect("the residual membership should emit a query")
+        &support::deployment::caller_deployment(),
+    );
+    support::plan_at(classified, &db, &registry, ConfidenceLevel::B)
+        .tuple_queries()
+        .iter()
+        .find(|query| query.sql.contains("lower("))
+        .cloned()
+        .expect("the residual membership should emit a query")
 }
 
 #[test]

@@ -8,6 +8,7 @@
 //! role answers only the requests acting as it.
 
 use super::*;
+use crate::generator::unrestricted::row_level_security_is_off;
 
 /// The relation on the request-gate object holding the requests acting as `role`.
 ///
@@ -23,8 +24,7 @@ pub(crate) fn acting_kind_relation_name(role: &str) -> RelationName {
     }
 }
 
-/// The walk from a row of `source_table` to the requests acting as `role`, or `None`
-/// where the table's rows cannot be named, which leaves no branch to join.
+/// Join the permission object to requests acting as `role`, refusing unnamed row-dependent access.
 pub(crate) fn acting_kind_walk<DB: DatabaseLike>(
     role: &str,
     source_table: &TableId,
@@ -32,9 +32,17 @@ pub(crate) fn acting_kind_walk<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<UsersetExpr> {
-    let Some(identity_cols) = resolve_row_identity(source_table, db) else {
-        skip_source_without_row_identity(table_plan, source_table, "acting kind links", db);
-        return None;
+    let identity_cols = match resolve_row_identity(source_table, db) {
+        Some(columns) => Some(columns),
+        None if lookup_table_id(db, source_table)
+            .is_some_and(|table| row_level_security_is_off(table, db)) =>
+        {
+            None
+        }
+        None => {
+            skip_source_without_row_identity(table_plan, source_table, "acting kind links", db);
+            return None;
+        }
     };
     let relation = acting_kind_relation_name(role);
     let gate_object = table_plan.type_name.to_string();
@@ -63,13 +71,21 @@ pub(crate) fn acting_kind_walk<DB: DatabaseLike>(
         request_gate_link_relation(),
         vec![DirectSubject::Type(gate_type.clone())],
     );
-    table_plan.add_source(TupleSource::PolicyScope {
-        table: source_table.clone(),
-        identity_cols,
-        scope_relation: link.clone(),
-        scope_type: gate_type,
-        scope_object: gate_object,
-    });
+    let scope = match identity_cols {
+        Some(identity_cols) => TupleSource::PolicyScope {
+            table: source_table.clone(),
+            identity_cols,
+            scope_relation: link.clone(),
+            scope_type: gate_type,
+            scope_object: gate_object,
+        },
+        None => TupleSource::SingletonScope {
+            scope_relation: link.clone(),
+            scope_type: gate_type,
+            scope_object: gate_object,
+        },
+    };
+    table_plan.add_source(scope);
     Some(UsersetExpr::TupleToUserset {
         tupleset: link,
         computed: relation,

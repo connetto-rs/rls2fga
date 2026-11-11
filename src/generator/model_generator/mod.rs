@@ -96,12 +96,12 @@ use emit_roles::{emit_numeric_threshold, emit_role_name_in_list, OwnerScope};
 pub(crate) use request_formula::GateAtom;
 use request_formula::RequestFormula;
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
-pub(crate) use simplify::relation_grants_nothing;
 use simplify::{
     drop_implied_insert_readback, grants_nothing, inline_synthetic_rule_aliases,
     narrow_grant_sources_to_declared, prune_unreferenced_relations, reach_userset,
     requires_read_access, simplify_redundant_select_gates,
 };
+pub(crate) use simplify::{relation_grants_every_actor, relation_grants_nothing};
 
 /// `OpenFGA` authorization model schema version.
 pub(crate) const OPENFGA_SCHEMA_VERSION: &str = "1.1";
@@ -953,7 +953,7 @@ pub(crate) enum PlanScope<'a> {
     ReadTerm(&'a str),
 }
 
-/// Group supplied policies by resolved table and seed uncovered RLS tables for policy plans.
+/// Group supplied policies by table and seed every catalog table in policy plans.
 fn group_policies_by_table<'a, DB: DatabaseLike>(
     policies: &'a [ClassifiedPolicy],
     db: &DB,
@@ -970,18 +970,14 @@ fn group_policies_by_table<'a, DB: DatabaseLike>(
         return by_table;
     }
 
-    // An RLS-enabled table with no policy denies every row, so seed it and let
-    // the deny fill downstream cover its commands.
+    // A table without policies still answers through its exemption or deny branches.
     let covered: BTreeSet<TableId> = by_table
         .keys()
         .filter_map(|name| lookup_table(db, name))
         .map(table_identity)
         .collect();
     for table in db.tables() {
-        // A table whose RLS state cannot be read must still be deny-filled: a table
-        // absent from the model reads as unconstrained.
-        if table.has_row_level_security(db) == Ok(false) || covered.contains(&table_identity(table))
-        {
+        if covered.contains(&table_identity(table)) {
             continue;
         }
         by_table.entry(qualified_table_name(table)).or_default();
@@ -1094,8 +1090,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     let mut unresolved_losses: BTreeMap<TypeName, BTreeSet<RelationName>> = BTreeMap::new();
 
     for (source_table_name, table_policies) in by_table {
-        // Only RLS-enabled tables that resolve against the schema get a type. A name
-        // the schema cannot resolve carries the policy nowhere, so say so.
+        // A name the catalog cannot resolve carries its policies nowhere.
         //
         // `parse_schema` refuses such a schema (`TableNotFoundForPolicy`), for an absent
         // name and an ambiguous unqualified one alike, so this answers a consumer's own
@@ -2083,7 +2078,7 @@ pub(crate) fn grantable_relations(types: &[TypePlan]) -> BTreeSet<(TypeName, Rel
             let Some(expr) = plan.computed_relations.get(&action) else {
                 continue;
             };
-            if grants_nothing(expr, plan, &mut BTreeSet::new()) {
+            if grants_nothing(expr, plan) {
                 continue;
             }
             reach_userset(expr, plan, &by_name, &mut reached);
@@ -2215,7 +2210,8 @@ impl TableTypes {
         let mut names: Vec<(bool, TableId)> = db
             .tables()
             .filter(|table| {
-                table.has_row_level_security(db) != Ok(false)
+                matches!(scope, PlanScope::Policies)
+                    || table.has_row_level_security(db) != Ok(false)
                     || forced.as_ref() == Some(&table_identity(table))
             })
             .map(|table| {
@@ -2275,7 +2271,7 @@ impl TableTypes {
         Ok(types)
     }
 
-    /// Type of `table`, or `None` when it has no type (unresolvable or RLS off).
+    /// Type assigned to `table`, or `None` when the scope excludes it.
     fn get(&self, table: &TableId) -> Option<&TypeName> {
         self.by_identity.get(table)
     }

@@ -30,6 +30,8 @@ fn outputs(schema: &str, policies: &str) -> Outputs {
         .outputs_accepting_gaps()
 }
 
+/// The records a policy reads from `table_name`'s rows, excluding the records that
+/// name the table's own type.
 fn row_records(outputs: &Outputs, table_name: &str, row: &serde_json::Value) -> Vec<Record> {
     outputs
         .tuple_queries()
@@ -42,6 +44,7 @@ fn row_records(outputs: &Outputs, table_name: &str, row: &serde_json::Value) -> 
         .flat_map(|description| {
             records_from_row(description, &support::JsonRowValues(row)).unwrap()
         })
+        .filter(|record| record.object.split(':').next() != Some(table_name))
         .collect()
 }
 
@@ -455,7 +458,16 @@ async fn indirect_membership_witnesses_never_mix_rows() {
              WHERE m.trial_ends > $1::timestamptz AND m.support_ends > $1::timestamptz
              UNION ALL
              SELECT p.id AS subject, 'owners:' || o.id AS object
-             FROM owners o CROSS JOIN principals p",
+             FROM owners o CROSS JOIN principals p
+             UNION ALL
+             SELECT p.id, helper.object
+             FROM principals p
+             CROSS JOIN (
+               SELECT 'memberships:' || id AS object FROM memberships
+               UNION ALL SELECT 'ownable_ancestors:' || ownable || '|' || owner FROM ownable_ancestors
+               UNION ALL SELECT 'ownables:' || id FROM ownables
+               UNION ALL SELECT 'principals:' || id FROM principals
+             ) AS helper",
         );
         case.loading_from_rows = from_rows;
         let run =

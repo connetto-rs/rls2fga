@@ -523,12 +523,7 @@ pub enum TranslationNote {
         /// Function called.
         function: String,
     },
-    /// A partition whose rows a direct read leaves unfiltered.
-    ///
-    /// `PostgreSQL` applies a parent's policies to rows reached through the parent, so a
-    /// partition queried by name is filtered by its own policies alone, and a partition of
-    /// a protected root has none. The model answers for the row, so it answers for the read
-    /// through the root and not for this one.
+    /// A direct partition read does not apply its root's row-security policies.
     PartitionReadDirectlyIsUnfiltered {
         /// Partition a reader can name.
         #[serde(with = "table_id_as_str")]
@@ -913,10 +908,8 @@ impl fmt::Display for TranslationNote {
             ),
             Self::PartitionReadDirectlyIsUnfiltered { table, root } => write!(
                 f,
-                "'{table}' is a partition of '{root}', which carries the policies, so a read \
-                 naming '{table}' is filtered by nothing. The model answers for a read \
-                 through '{root}'. ALTER TABLE '{table}' ENABLE ROW LEVEL SECURITY and give \
-                 it the same policies, or revoke access to it"
+                "A direct read of partition `{table}` does not apply the row-security \
+                 policies of `{root}`"
             ),
         }
     }

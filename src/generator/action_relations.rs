@@ -13,39 +13,29 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 
-use crate::generator::model_generator::{relation_grants_nothing, SchemaPlan, TypePlan};
-use crate::generator::unrestricted;
-use crate::generator::well_known::{
-    can_delete_relation, can_insert_relation, can_insert_returning_relation,
-    can_select_for_update_relation, can_select_relation, can_update_check_relation,
-    can_update_relation, can_update_using_relation, can_update_without_reading_check_relation,
-    can_update_without_reading_relation,
+use crate::generator::model_generator::{
+    relation_grants_every_actor, relation_grants_nothing, SchemaPlan, TypePlan,
 };
-use crate::parser::names::lookup_table_id;
-use crate::parser::sql_parser::DatabaseLike;
+use crate::generator::well_known::{
+    CAN_DELETE_RELATION, CAN_INSERT_RELATION, CAN_INSERT_RETURNING_RELATION,
+    CAN_SELECT_FOR_UPDATE_RELATION, CAN_SELECT_RELATION, CAN_UPDATE_CHECK_RELATION,
+    CAN_UPDATE_RELATION, CAN_UPDATE_USING_RELATION, CAN_UPDATE_WITHOUT_READING_CHECK_RELATION,
+    CAN_UPDATE_WITHOUT_READING_RELATION,
+};
+use crate::parser::sql_parser::Deployment;
 use crate::types::{
     ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, RelationName, RowVersion,
-    TableId,
 };
 
-const EVERY_STATEMENT: [ActionStatement; 8] = [
-    ActionStatement::Select,
-    ActionStatement::Insert,
-    ActionStatement::Update,
-    ActionStatement::Delete,
-    ActionStatement::SelectForUpdate,
-    ActionStatement::InsertOnConflictUpdate,
-    ActionStatement::InsertReturning,
-    ActionStatement::UpdateWithoutWhere,
-];
+type Judgements = [Option<(&'static str, RowVersion)>; 3];
 
-fn judge(relation: RelationName, version: RowVersion) -> ActionJudgement {
-    ActionJudgement::new(relation, version)
+fn judge(relation: &'static str, version: RowVersion) -> (&'static str, RowVersion) {
+    (relation, version)
 }
 
 /// The relation the type defines, or the one the model falls back to where it does not.
-fn defined_or(plan: &TypePlan, wanted: RelationName, fallback: RelationName) -> RelationName {
-    if plan.computed_relations.contains_key(&wanted) {
+fn defined_or(plan: &TypePlan, wanted: &'static str, fallback: &'static str) -> &'static str {
+    if plan.computed_relations.contains_key(wanted) {
         wanted
     } else {
         fallback
@@ -57,21 +47,21 @@ fn defined_or(plan: &TypePlan, wanted: RelationName, fallback: RelationName) -> 
 /// could disagree with the first.
 fn clauses_answered_apart(plan: &TypePlan) -> bool {
     plan.computed_relations
-        .contains_key(&can_update_using_relation())
+        .contains_key(CAN_UPDATE_USING_RELATION)
 }
 
 /// What a replacement has to satisfy: the two halves where the policy's clauses differ,
 /// and the one relation twice where a lone `USING` is mirrored onto the result.
-fn update_judgements(plan: &TypePlan) -> Vec<ActionJudgement> {
+fn update_judgements(plan: &TypePlan) -> [(&'static str, RowVersion); 2] {
     if clauses_answered_apart(plan) {
-        vec![
-            judge(can_update_using_relation(), RowVersion::Existing),
-            judge(can_update_check_relation(), RowVersion::Resulting),
+        [
+            judge(CAN_UPDATE_USING_RELATION, RowVersion::Existing),
+            judge(CAN_UPDATE_CHECK_RELATION, RowVersion::Resulting),
         ]
     } else {
-        vec![
-            judge(can_update_relation(), RowVersion::Existing),
-            judge(can_update_relation(), RowVersion::Resulting),
+        [
+            judge(CAN_UPDATE_RELATION, RowVersion::Existing),
+            judge(CAN_UPDATE_RELATION, RowVersion::Resulting),
         ]
     }
 }
@@ -79,121 +69,141 @@ fn update_judgements(plan: &TypePlan) -> Vec<ActionJudgement> {
 /// A blind update applies both clauses without the read gate. The unread relation is
 /// the `USING` half against the row as it is, and the unread check half, defined where
 /// the clauses differ, judges the result.
-fn blind_update_answer(plan: &TypePlan) -> ActionAnswer {
-    let relation = can_update_without_reading_relation();
-    if !plan.computed_relations.contains_key(&relation) {
-        return ActionAnswer::Judged(update_judgements(plan));
-    }
-    ActionAnswer::Judged(vec![
-        judge(relation.clone(), RowVersion::Existing),
+fn blind_update_judgements(plan: &TypePlan) -> [(&'static str, RowVersion); 2] {
+    let relation = CAN_UPDATE_WITHOUT_READING_RELATION;
+    [
+        judge(relation, RowVersion::Existing),
         judge(
-            defined_or(plan, can_update_without_reading_check_relation(), relation),
+            defined_or(plan, CAN_UPDATE_WITHOUT_READING_CHECK_RELATION, relation),
             RowVersion::Resulting,
         ),
-    ])
+    ]
 }
 
-fn answer(plan: &TypePlan, statement: ActionStatement) -> ActionAnswer {
-    match statement {
-        ActionStatement::Select => {
-            ActionAnswer::Judged(vec![judge(can_select_relation(), RowVersion::Existing)])
-        }
-        ActionStatement::Insert => {
-            ActionAnswer::Judged(vec![judge(can_insert_relation(), RowVersion::Resulting)])
-        }
-        ActionStatement::Update => ActionAnswer::Judged(update_judgements(plan)),
-        ActionStatement::Delete => {
-            ActionAnswer::Judged(vec![judge(can_delete_relation(), RowVersion::Existing)])
-        }
-        // The relation named for a locking read carries only what the UPDATE policies
-        // add, so the read gate is named beside it rather than assumed.
-        ActionStatement::SelectForUpdate => ActionAnswer::Judged(vec![
-            judge(can_select_relation(), RowVersion::Existing),
-            judge(
-                defined_or(
-                    plan,
-                    can_select_for_update_relation(),
-                    can_update_relation(),
-                ),
-                RowVersion::Existing,
-            ),
-        ]),
-        // The inserted row is read back, then the conflicting row is read and updated, so
-        // the readback and both update halves are named. Where PostgreSQL filters a row
-        // failing an update half, an upsert raises instead, which a check answers alike.
-        ActionStatement::InsertOnConflictUpdate => {
-            let mut required = vec![judge(
-                defined_or(plan, can_insert_returning_relation(), can_insert_relation()),
-                RowVersion::Resulting,
-            )];
-            required.extend(update_judgements(plan));
-            ActionAnswer::Judged(required)
-        }
-        // Absent exactly where nothing admits an insert, and the denial answers then.
-        ActionStatement::InsertReturning => ActionAnswer::Judged(vec![judge(
-            defined_or(plan, can_insert_returning_relation(), can_insert_relation()),
-            RowVersion::Resulting,
-        )]),
-        ActionStatement::UpdateWithoutWhere => blind_update_answer(plan),
-        _ => ActionAnswer::Denied,
+fn judgements(plan: &TypePlan) -> [(ActionStatement, Judgements); 8] {
+    let [existing, resulting] = update_judgements(plan);
+    let [unread, unread_check] = blind_update_judgements(plan);
+    let returning = judge(
+        defined_or(plan, CAN_INSERT_RETURNING_RELATION, CAN_INSERT_RELATION),
+        RowVersion::Resulting,
+    );
+    [
+        (
+            ActionStatement::Select,
+            [
+                Some(judge(CAN_SELECT_RELATION, RowVersion::Existing)),
+                None,
+                None,
+            ],
+        ),
+        (
+            ActionStatement::Insert,
+            [
+                Some(judge(CAN_INSERT_RELATION, RowVersion::Resulting)),
+                None,
+                None,
+            ],
+        ),
+        (
+            ActionStatement::Update,
+            [Some(existing), Some(resulting), None],
+        ),
+        (
+            ActionStatement::Delete,
+            [
+                Some(judge(CAN_DELETE_RELATION, RowVersion::Existing)),
+                None,
+                None,
+            ],
+        ),
+        (
+            ActionStatement::SelectForUpdate,
+            [
+                Some(judge(CAN_SELECT_RELATION, RowVersion::Existing)),
+                Some(judge(
+                    defined_or(plan, CAN_SELECT_FOR_UPDATE_RELATION, CAN_UPDATE_RELATION),
+                    RowVersion::Existing,
+                )),
+                None,
+            ],
+        ),
+        (
+            ActionStatement::InsertOnConflictUpdate,
+            [Some(returning), Some(existing), Some(resulting)],
+        ),
+        (
+            ActionStatement::InsertReturning,
+            [Some(returning), None, None],
+        ),
+        (
+            ActionStatement::UpdateWithoutWhere,
+            [Some(unread), Some(unread_check), None],
+        ),
+    ]
+}
+
+fn answer(
+    request_gate: Option<&TypePlan>,
+    plan: &TypePlan,
+    required: Judgements,
+    deployment: Option<&Deployment>,
+) -> ActionAnswer {
+    if required.iter().flatten().any(|(relation, _)| {
+        plan.computed_relations
+            .get_key_value(*relation)
+            .is_some_and(|(relation, _)| relation_grants_nothing(plan, relation))
+    }) {
+        return ActionAnswer::Denied;
     }
-}
-
-/// Whether the database filters none of this table's rows, by any route.
-fn restricts_nothing<DB: DatabaseLike>(table: &TableId, db: &DB) -> bool {
-    lookup_table_id(db, table)
-        .is_some_and(|table| unrestricted::restricts_nothing_by_any_route(table, db))
-}
-
-/// Whether the model answers no to this statement for every row.
-///
-/// Reads [`relation_grants_nothing`], which is the simplifier's own walk, so the report
-/// and the pruner cannot disagree about which relation is a denial.
-fn answer_grants_nobody(plan: &TypePlan, answer: &ActionAnswer) -> bool {
-    match answer {
-        // Every judgement has to grant, so one that grants nobody refuses the statement.
-        ActionAnswer::Judged(judges) => judges
-            .iter()
-            .any(|judge| relation_grants_nothing(plan, &judge.relation)),
-        _ => false,
+    if required.iter().flatten().all(|(relation, _)| {
+        plan.computed_relations
+            .get_key_value(*relation)
+            .is_some_and(|(relation, _)| {
+                relation_grants_every_actor(request_gate, plan, relation, deployment)
+            })
+    }) {
+        return ActionAnswer::Unrestricted;
     }
+    ActionAnswer::Judged(
+        required
+            .into_iter()
+            .flatten()
+            .map(|(relation, version)| {
+                ActionJudgement::new(RelationName::canonicalized(relation), version)
+            })
+            .collect(),
+    )
 }
 
-/// One entry per type and statement the model answers, by type name then statement.
-///
-/// A type nothing keys on a row has no entry, since a consumer never names one of its
-/// objects.
-pub(crate) fn action_relations<DB: DatabaseLike>(
+/// Permission answers for modeled tables with a read gate, ordered by type and statement.
+pub(crate) fn action_relations(
     plan: &SchemaPlan,
-    db: &DB,
+    deployment: Option<&Deployment>,
 ) -> Vec<ActionRelations> {
+    let request_gate = plan
+        .types
+        .iter()
+        .find(|target| target.type_name == plan.well_known.request_gate);
     let mut entries: Vec<ActionRelations> = Vec::new();
     for type_plan in &plan.types {
-        let Some(table) = type_plan.source_table.as_ref() else {
-            continue;
-        };
-        let restricted = type_plan
-            .computed_relations
-            .contains_key(&can_select_relation());
-        if !restricted && !restricts_nothing(table, db) {
+        if type_plan.source_table.is_none() {
             continue;
         }
-        let answers = if restricted {
-            EVERY_STATEMENT.map(|statement| answer(type_plan, statement))
-        } else {
-            EVERY_STATEMENT.map(|_| ActionAnswer::Unrestricted)
-        };
+        if !type_plan
+            .computed_relations
+            .contains_key(CAN_SELECT_RELATION)
+        {
+            continue;
+        }
         entries.extend(
-            EVERY_STATEMENT
+            judgements(type_plan)
                 .into_iter()
-                .zip(answers)
-                .map(|(statement, answer)| {
-                    let answer = if answer_grants_nobody(type_plan, &answer) {
-                        ActionAnswer::Denied
-                    } else {
-                        answer
-                    };
-                    ActionRelations::new(type_plan.type_name.clone(), statement, answer)
+                .map(|(statement, required)| {
+                    ActionRelations::new(
+                        type_plan.type_name.clone(),
+                        statement,
+                        answer(request_gate, type_plan, required, deployment),
+                    )
                 }),
         );
     }

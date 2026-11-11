@@ -552,6 +552,8 @@ struct Object {
     row: serde_json::Value,
     /// The columns its key is spelled from.
     keys: Vec<String>,
+    /// One permission object shared by every row.
+    singleton: bool,
 }
 
 /// The key columns a table's objects are named from, or [`None`] where a column does not
@@ -595,14 +597,43 @@ fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) ->
         if skipped.iter().any(|table| entry.table.name() == table) {
             continue;
         }
-        let Some(columns) = key_columns(entry) else {
-            continue;
+        let singleton = !entry.key.parts().is_empty()
+            && entry
+                .key
+                .parts()
+                .iter()
+                .all(|part| matches!(part, ValueSource::Literal(_)));
+        let columns = match key_columns(entry) {
+            Some(columns) => columns,
+            None if singleton => Vec::new(),
+            None => continue,
         };
         let table = entry.table.sql_name();
+        let limit = if singleton { " LIMIT 1" } else { "" };
+        // Case tables and columns are defined at runtime.
         let rows: Vec<JsonRow> =
-            diesel::sql_query(format!("SELECT to_jsonb(t) AS row FROM {table} t"))
+            diesel::sql_query(format!("SELECT to_jsonb(t) AS row FROM {table} t{limit}"))
                 .load(conn)
                 .unwrap_or_else(|error| panic!("reading {table} as its owner: {error}"));
+        if singleton {
+            let row = rows
+                .into_iter()
+                .next()
+                .map_or_else(|| serde_json::json!({}), |value| value.row);
+            let name = entry
+                .render(&super::JsonRowValues(&row))
+                .expect("the fixed object name is valid")
+                .expect("a literal key names the permission object");
+            out.push(Object {
+                name,
+                table,
+                predicate: "TRUE".to_string(),
+                row,
+                keys: Vec::new(),
+                singleton,
+            });
+            continue;
+        }
         for JsonRow { row } in rows {
             // A name the renderer refuses is the row-naming divergence this suite exists to
             // find, so it fails here rather than removing the row and passing on the rest.
@@ -620,6 +651,7 @@ fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) ->
                 predicate,
                 row,
                 keys: columns.iter().map(|column| (*column).to_string()).collect(),
+                singleton,
             });
         }
     }
@@ -731,7 +763,7 @@ fn postgres_allows(
     let answered = match conn.transaction::<(), diesel::result::Error, _>(|conn| {
         become_principal(conn, principal)?;
         let counted: Counted = diesel::sql_query(&sql).get_result(conn)?;
-        granted = counted.rows == 1;
+        granted = object.singleton || counted.rows == 1;
         Err(diesel::result::Error::RollbackTransaction)
     }) {
         Err(diesel::result::Error::RollbackTransaction) => Ok(granted),
@@ -867,7 +899,9 @@ async fn openfga_allows(
                 // needs that row's records, which is not this runner's job yet.
                 // An upsert probe copies every column and keeps the key, so its
                 // resulting row is the existing one and no claim is needed.
-                let settled = check_neutral || statement == ActionStatement::InsertOnConflictUpdate;
+                let settled = object.singleton
+                    || check_neutral
+                    || statement == ActionStatement::InsertOnConflictUpdate;
                 if judgement.version == RowVersion::Resulting && !settled {
                     return None;
                 }
@@ -1735,8 +1769,9 @@ struct Attempt<'ask> {
 /// Whether the caller may write a row copied from `object` onto a fresh key.
 ///
 /// A write is about a row that does not exist yet, so the probe is the existing row with
-/// its key replaced, which keeps every column a policy reads. The statement is always
-/// rolled back, so nothing the runner compares afterwards sees the probe.
+/// its key replaced, which keeps every column a policy reads. A keyless table's probe is
+/// the existing row itself. The statement is always rolled back, so nothing the runner
+/// compares afterwards sees the probe.
 ///
 /// Two spellings of each statement are measured and required to agree, which is what makes
 /// one relation cover both: naming a conflict arbiter reads the new row back exactly as
@@ -1757,6 +1792,9 @@ fn postgres_allows_write_probe(
     let table = &object.table;
     let row = object.row.as_object()?;
     let keys = &object.keys;
+    if keys.is_empty() && statement == ActionStatement::InsertOnConflictUpdate {
+        return None;
+    }
     let arbiter = keys
         .iter()
         .map(|key| format!("\"{key}\""))
@@ -1764,18 +1802,29 @@ fn postgres_allows_write_probe(
         .join(", ");
     let settable = row.keys().find(|column| !keys.contains(column))?;
 
-    let mut probe = row.clone();
-    if statement != ActionStatement::InsertOnConflictUpdate {
+    let payload = if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
+        object.row.to_string()
+    } else {
+        let mut probe = row.clone();
         for key in keys {
             let fresh = fresh_key(conn, table, key, row.get(key)?)?;
             probe.insert(key.clone(), fresh);
         }
-    }
+        serde_json::Value::Object(probe).to_string()
+    };
     let source = format!(
         "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1::jsonb)"
     );
+    if keys.is_empty() && statement == ActionStatement::InsertReturning {
+        let sql =
+            format!("WITH written AS ({source} RETURNING \"{settable}\") SELECT 1 FROM written");
+        return Some(attempt_write(conn, attempt, &sql, &payload, raised));
+    }
     let spellings = match statement {
-        ActionStatement::Insert => [source.clone(), format!("{source} ON CONFLICT DO NOTHING")],
+        ActionStatement::Insert => {
+            let alternative = format!("{source} ON CONFLICT DO NOTHING");
+            [source, alternative]
+        }
         ActionStatement::InsertReturning => [
             format!(
                 "WITH written AS ({source} RETURNING \"{}\") SELECT 1 FROM written",
@@ -1787,12 +1836,11 @@ fn postgres_allows_write_probe(
             let update = format!(
                 "{source} ON CONFLICT ({arbiter}) DO UPDATE SET \"{settable}\" = excluded.\"{settable}\""
             );
-            [update.clone(), update]
+            return Some(attempt_write(conn, attempt, &update, &payload, raised));
         }
         _ => return None,
     };
 
-    let payload = serde_json::Value::Object(probe).to_string();
     let answers: Vec<bool> = spellings
         .iter()
         .map(|sql| attempt_write(conn, attempt, sql, &payload, raised))
@@ -1836,6 +1884,7 @@ fn attempt_write(
             *raised = true;
             false
         }
+        Err(error) if reads_as_a_policy_refusal(&error) => false,
         Err(error) => {
             let rendered = error.to_string();
             assert!(

@@ -49,6 +49,7 @@ mod joined_inner_rule_tests;
 mod membership_term_tests;
 mod model_equivalence_tests;
 mod money_literal_tests;
+mod open_tables_tests;
 #[cfg(feature = "client")]
 mod openfga_client_tests;
 #[cfg(feature = "client")]
@@ -79,7 +80,6 @@ mod session_time_zone_tests;
 mod translation_object_tests;
 mod translator_builder_tests;
 mod tuple_row_tests;
-mod unrestricted_tables_tests;
 mod unset_setting_tests;
 mod web_examples_tests;
 mod zoned_literal_tests;

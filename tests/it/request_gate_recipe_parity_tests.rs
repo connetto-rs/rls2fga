@@ -297,6 +297,7 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
                 })
                 .map(|entry| &entry.answer);
             let local = match answer {
+                Some(ActionAnswer::Unrestricted) => true,
                 Some(ActionAnswer::Judged(judges)) if !judges.is_empty() => {
                     judges.iter().all(|judge| {
                         let (context, acting_role) = &contexts[&observation.subject];

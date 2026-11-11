@@ -7,7 +7,7 @@ use rls2fga_types::{
     RecordDerivation, RecordDescription, RecordError, RecordTemplate, RelationName,
     RelationNameError, RelationShapes, ReplayScope, RequestComparison, RolePrivilege, RowCell,
     RowDecision, RowList, RowNaming, RowValues, RowVersion, SubjectKey, TableId, TableRef,
-    TranslationNote, TypeName, TypeNameError, UnrestrictedTable, ValueSource,
+    TranslationNote, TypeName, TypeNameError, ValueSource,
 };
 
 struct EmptyRow;
@@ -76,7 +76,6 @@ fn every_contract_is_flat() {
     assert_type::<TranslationNote>();
     assert_type::<TypeName>();
     assert_type::<TypeNameError>();
-    assert_type::<UnrestrictedTable>();
     assert_type::<ValueSource>();
     let _ = records_from_row::<EmptyRow>;
 }

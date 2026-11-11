@@ -11,7 +11,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use rls2fga::parser::sql_parser::SessionSetting;
+use rls2fga::parser::sql_parser::{parse_schema, SessionSetting};
+use rls2fga::translator::{Translation, TranslatorBuilder};
 use rls2fga::types::{ActionAnswer, ActionStatement};
 
 use crate::support;
@@ -144,6 +145,9 @@ async fn every_parity_case_agrees() {
             distinct_acl_tables_do_not_share_a_member_relation,
             distinct_team_membership_tables_do_not_share_access,
             a_plain_and_a_gated_read_of_the_same_join_table_do_not_share_access,
+            an_rls_off_table_answers_unrestricted,
+            a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one,
+            an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor,
         ]
     ];
     let total = cases.len();
@@ -180,6 +184,298 @@ fn panic_message(joined: tokio::task::JoinError) -> String {
                 .map(|text| (*text).to_string())
         })
         .unwrap_or_else(|| "panicked with no message".to_string())
+}
+
+/// Every command on a table without row-level security grants locally.
+async fn an_rls_off_table_answers_unrestricted(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-rls-off-unrestricted",
+        "
+CREATE TABLE ledger (id TEXT PRIMARY KEY, note TEXT);
+GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
+",
+        &["INSERT INTO ledger(id, note) VALUES ('l1', 'one'), ('l2', 'two')"],
+        vec![
+            Principal::as_role("ledger_a", "ledger_a"),
+            Principal::as_role("ledger_b", "ledger_b"),
+        ],
+    )
+    .after(&["CREATE ROLE ledger_a LOGIN; CREATE ROLE ledger_b LOGIN"])
+    .writing(
+        "ledger",
+        Mutations {
+            update_set: Some("note = note".to_string()),
+            check_neutral: true,
+        },
+    );
+    let planned = translated(&case);
+    for statement in [
+        ActionStatement::Select,
+        ActionStatement::Insert,
+        ActionStatement::Update,
+        ActionStatement::Delete,
+    ] {
+        assert!(
+            unrestricted(&planned, "ledger", statement),
+            "row-level security is off, so no predicate survives for {statement:?}:\n{:?}",
+            planned.action_relations()
+        );
+    }
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // Row-level security is off, so every granted command reaches every row.
+        ("ledger_a", "ledger:l1", ActionStatement::Select, true),
+        ("ledger_b", "ledger:l1", ActionStatement::Insert, true),
+        ("ledger_a", "ledger:l2", ActionStatement::Update, true),
+        ("ledger_b", "ledger:l2", ActionStatement::Delete, true),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// An all-roles `USING (true)` policy is the local grant, and a surviving row predicate or a clock condition is not.
+async fn a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(
+    cluster: Arc<Cluster>,
+) {
+    let case = ParityCase::reading(
+        "runner-true-beside-restrictive",
+        "
+CREATE TABLE open_memo (id TEXT PRIMARY KEY, note TEXT);
+ALTER TABLE open_memo ENABLE ROW LEVEL SECURITY;
+CREATE POLICY open_memo_all ON open_memo USING (true) WITH CHECK (true);
+CREATE TABLE private_memo (id TEXT PRIMARY KEY, owner_id TEXT, note TEXT);
+ALTER TABLE private_memo ENABLE ROW LEVEL SECURITY;
+CREATE POLICY private_memo_all ON private_memo FOR SELECT USING (true);
+CREATE POLICY private_memo_read ON private_memo AS RESTRICTIVE FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
+CREATE TABLE windowed_memo (id TEXT PRIMARY KEY, posted_at TIMESTAMPTZ, note TEXT);
+ALTER TABLE windowed_memo ENABLE ROW LEVEL SECURITY;
+CREATE POLICY windowed_memo_recent ON windowed_memo FOR SELECT
+    USING (posted_at > now() - interval '1 day');
+GRANT SELECT ON open_memo, private_memo, windowed_memo TO memo_a, memo_b;
+",
+        &[
+            "INSERT INTO open_memo(id, note) VALUES ('o1', 'one'), ('o2', 'two')",
+            "INSERT INTO private_memo(id, owner_id, note) VALUES ('p1', 'memo_a', 'one'), ('p2', 'memo_b', 'two')",
+            "INSERT INTO windowed_memo(id, posted_at, note) VALUES ('w-in', now() - interval '1 hour', 'recent'), ('w-out', now() - interval '2 days', 'old')",
+        ],
+        vec![
+            Principal::with_setting("memo_a", "memo_a", "app.user_id", "memo_a").with_clock(),
+            Principal::with_setting("memo_b", "memo_b", "app.user_id", "memo_b").with_clock(),
+        ],
+    )
+    .after(&["CREATE ROLE memo_a LOGIN; CREATE ROLE memo_b LOGIN"]);
+    let planned = translated(&case);
+    assert!(
+        unrestricted(&planned, "open_memo", ActionStatement::Select),
+        "`USING (true)` admits every acting role with no row or request condition:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        judged(&planned, "private_memo", ActionStatement::Select),
+        "the ownership predicate survives:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        judged(&planned, "windowed_memo", ActionStatement::Select),
+        "the clock condition survives:\n{:?}",
+        planned.action_relations()
+    );
+    for table in ["private_memo", "windowed_memo"] {
+        assert!(
+            denied(&planned, table, ActionStatement::Update),
+            "no policy covers `UPDATE`:\n{:?}",
+            planned.action_relations()
+        );
+    }
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // The true policy admits both callers to every row.
+        ("memo_a", "open_memo:o1", ActionStatement::Select, true),
+        ("memo_b", "open_memo:o2", ActionStatement::Select, true),
+        // The ownership predicate admits only the owner.
+        ("memo_a", "private_memo:p1", ActionStatement::Select, true),
+        ("memo_a", "private_memo:p2", ActionStatement::Select, false),
+        ("memo_b", "private_memo:p2", ActionStatement::Select, true),
+        ("memo_b", "private_memo:p1", ActionStatement::Select, false),
+        // The clock condition admits the recent row at the request instant.
+        (
+            "memo_a",
+            "windowed_memo:w-in",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "memo_a",
+            "windowed_memo:w-out",
+            ActionStatement::Select,
+            false,
+        ),
+        (
+            "memo_b",
+            "windowed_memo:w-out",
+            ActionStatement::Select,
+            false,
+        ),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A direct partition route can grant locally while its root route filters rows.
+async fn an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-partition-child",
+        "
+CREATE TABLE audit_events (
+    id TEXT, owner_id TEXT, note TEXT, bucket TEXT NOT NULL DEFAULT 'recent',
+    PRIMARY KEY (id, bucket)
+) PARTITION BY LIST (bucket);
+ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY audit_events_read ON audit_events FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
+CREATE TABLE audit_events_recent PARTITION OF audit_events FOR VALUES IN ('recent');
+GRANT SELECT ON audit_events, audit_events_recent TO event_a, event_b;
+",
+        &[
+            "INSERT INTO audit_events(id, owner_id, note) VALUES ('e1', 'event_a', 'first'), ('e2', 'event_b', 'second')",
+            "INSERT INTO audit_events_recent(id, owner_id, note) VALUES ('e3', 'event_b', 'recent one'), ('e4', 'event_a', 'recent two')",
+        ],
+        vec![
+            Principal::with_setting("event_a", "event_a", "app.user_id", "event_a"),
+            Principal::with_setting("event_b", "event_b", "app.user_id", "event_b"),
+        ],
+    )
+    .after(&["CREATE ROLE event_a LOGIN; CREATE ROLE event_b LOGIN"]);
+    let planned = translated(&case);
+    assert!(
+        judged(&planned, "audit_events", ActionStatement::Select),
+        "the ownership predicate survives on the ancestor:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        unrestricted(&planned, "audit_events_recent", ActionStatement::Select),
+        "the child carries no policy and both acting roles hold `SELECT`:\n{:?}",
+        planned.action_relations()
+    );
+    assert!(
+        denied(&planned, "audit_events", ActionStatement::Update),
+        "no policy covers `UPDATE`:\n{:?}",
+        planned.action_relations()
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        // The ancestor's route filters its own rows by the policy.
+        (
+            "event_a",
+            "audit_events:e1|recent",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "event_a",
+            "audit_events:e2|recent",
+            ActionStatement::Select,
+            false,
+        ),
+        (
+            "event_b",
+            "audit_events:e2|recent",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "event_b",
+            "audit_events:e1|recent",
+            ActionStatement::Select,
+            false,
+        ),
+        // The child's route is unfiltered, however the ancestor's route reads.
+        (
+            "event_a",
+            "audit_events_recent:e3|recent",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "event_b",
+            "audit_events_recent:e3|recent",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "event_a",
+            "audit_events_recent:e4|recent",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "event_b",
+            "audit_events_recent:e4|recent",
+            ActionStatement::Select,
+            true,
+        ),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// The same translation the runner plans for the case, read through the public API.
+fn translated(case: &ParityCase) -> Translation {
+    let mut source = format!(
+        "CREATE ROLE {} LOGIN NOINHERIT;\n",
+        support::deployment::LOGIN_ROLE
+    );
+    for sql in case.prelude.iter().chain([&case.schema]).chain(&case.seed) {
+        source.push_str(sql.trim().trim_end_matches(';'));
+        source.push_str(";\n");
+    }
+    let db = parse_schema(&source).expect("the case schema parses");
+    let deployment = support::deployment::caller_deployment_acting_as(
+        &case.acting_roles(),
+        case.settings.iter().cloned(),
+    );
+    TranslatorBuilder::new(deployment)
+        .build()
+        .translate(&db)
+        .expect("the case translation plans")
+}
+
+/// The answer a type gives one statement, as the consumer reads it.
+fn answer<'a>(
+    planned: &'a Translation,
+    type_name: &str,
+    statement: ActionStatement,
+) -> &'a ActionAnswer {
+    planned
+        .action_relations()
+        .iter()
+        .find(|entry| entry.type_name.as_str() == type_name && entry.statement == statement)
+        .map_or_else(
+            || panic!("{type_name} answers {statement:?}"),
+            |entry| &entry.answer,
+        )
+}
+
+/// Whether the answer is the local grant, which no row or request condition can take away.
+fn unrestricted(planned: &Translation, type_name: &str, statement: ActionStatement) -> bool {
+    answer(planned, type_name, statement) == &ActionAnswer::Unrestricted
+}
+
+/// Whether the answer stays a relation a request can satisfy.
+fn judged(planned: &Translation, type_name: &str, statement: ActionStatement) -> bool {
+    match answer(planned, type_name, statement) {
+        ActionAnswer::Judged(_) => true,
+        other => panic!("{type_name} answers {statement:?} as {other:?}, not judged"),
+    }
+}
+
+/// Whether the model refuses the statement for every row.
+fn denied(planned: &Translation, type_name: &str, statement: ActionStatement) -> bool {
+    answer(planned, type_name, statement) == &ActionAnswer::Denied
 }
 
 const OWNERSHIP: &str = "
@@ -2886,7 +3182,11 @@ async fn an_expiring_share_leaves_the_owner_arm_alone(cluster: Arc<Cluster>) {
                 SELECT 1 FROM paper_shares s
                 WHERE s.paper_id = p.id
                   AND s.viewer = ANY(string_to_array(c.keys, ','))
-                  AND s.expires_at > $1::timestamptz)",
+                  AND s.expires_at > $1::timestamptz)
+         UNION ALL
+         SELECT c.subject, 'paper_shares:' || s.paper_id || '|' || s.viewer
+         FROM paper_shares s
+         CROSS JOIN (VALUES ('alice'), ('carol')) AS c(subject)",
     );
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
@@ -2955,7 +3255,11 @@ async fn an_expiring_share_keeps_its_grace_period(cluster: Arc<Cluster>) {
                 SELECT 1 FROM paper_shares s
                 WHERE s.paper_id = p.id
                   AND s.viewer = ANY(string_to_array(c.keys, ','))
-                  AND s.expires_at > $1::timestamptz - interval '720 hours')",
+                  AND s.expires_at > $1::timestamptz - interval '720 hours')
+         UNION ALL
+         SELECT c.subject, 'paper_shares:' || s.paper_id || '|' || s.viewer
+         FROM paper_shares s
+         CROSS JOIN (VALUES ('alice'), ('carol')) AS c(subject)",
     );
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
@@ -3018,7 +3322,11 @@ CREATE POLICY docs_p ON docs FOR SELECT USING (
         "1 year",
         "SELECT s.user_id AS subject, 'docs:' || d.id AS object
          FROM docs d JOIN doc_shares s ON s.doc_id = d.id
-         WHERE s.expires_at > $1::timestamptz",
+         WHERE s.expires_at > $1::timestamptz
+         UNION ALL
+         SELECT c.subject, 'doc_shares:' || s.doc_id || '|' || s.user_id
+         FROM doc_shares s
+         CROSS JOIN (VALUES ('alice'), ('bob')) AS c(subject)",
     );
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
@@ -3077,7 +3385,10 @@ CREATE POLICY memos_p ON memos FOR SELECT USING (
         "1 year",
         "SELECT r.user_id AS subject, 'memos:' || m.id AS object
          FROM memos m CROSS JOIN reviewers r
-         WHERE r.vetted_at > $1::timestamptz",
+         WHERE r.vetted_at > $1::timestamptz
+         UNION ALL
+         SELECT c.subject, 'reviewers:table'
+         FROM (VALUES ('alice'), ('bob')) AS c(subject)",
     );
     let run = support::parity::run(&cluster, &case).await;
     for (subject, object, visible) in [
@@ -4528,7 +4839,7 @@ CREATE POLICY refused_insert ON refused FOR INSERT
                 if entry.type_name.as_str() == "refused"
                     && entry.statement == ActionStatement::Select
                 {
-                    entry.answer = ActionAnswer::Unrestricted;
+                    entry.answer = ActionAnswer::Judged(Vec::new());
                 }
                 entry
             })

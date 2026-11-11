@@ -1139,7 +1139,7 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
             readability,
             MembershipRoute::Parent(MembershipPolarity::Block),
         );
-        if grants_nothing(&set, table_plan, &mut BTreeSet::new())
+        if grants_nothing(&set, table_plan)
             || notes
                 .iter()
                 .skip(before)

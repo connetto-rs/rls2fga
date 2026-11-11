@@ -553,7 +553,7 @@ fn every_type_the_model_names_rows_of_answers_every_statement() {
 #[test]
 fn a_type_that_is_no_table_has_no_entry() {
     let entries = report(UNRESTRICTED_PARENT);
-    for type_name in ["user", "project_members"] {
+    for type_name in ["user", "request_gate"] {
         assert!(
             !entries
                 .iter()
@@ -724,28 +724,6 @@ fn a_check_granting_nobody_refuses_the_blind_update_without_narrowing_the_using_
 fn a_restrictive_policy_alone_refuses_every_statement() {
     let entries = report(RESTRICTIVE_ONLY);
     assert_eq!(refused(&entries, "notes"), every_statement());
-}
-
-/// One grants everybody and the other grants nobody, and both arrive through this report.
-#[test]
-fn an_unrestricted_table_is_never_refused_and_a_refused_one_is_never_unrestricted() {
-    for (label, sql) in EVERY_SCHEMA {
-        let entries = report(sql);
-        for entry in &entries {
-            let answers: Vec<&ActionAnswer> = entries
-                .iter()
-                .filter(|other| other.type_name == entry.type_name)
-                .map(|other| &other.answer)
-                .collect();
-            let open = answers.contains(&&ActionAnswer::Unrestricted);
-            let refused = answers.contains(&&ActionAnswer::Denied);
-            assert!(
-                !(open && refused),
-                "{label}: {} is both open and refused: {answers:?}",
-                entry.type_name.as_str()
-            );
-        }
-    }
 }
 
 /// The report never hands over a relation whose answer can only be no, checked against

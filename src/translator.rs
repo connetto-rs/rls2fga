@@ -21,7 +21,6 @@ use crate::generator::tuple_generator::{
     generate_tuple_queries_from_plan, record_from_tuple_row, TupleQuery, TupleRow, TupleRowError,
     UnboundedColumns,
 };
-use crate::generator::unrestricted::unrestricted_tables;
 use crate::generator::well_known::{WellKnownTypes, SETTINGS_PARAMETER};
 #[cfg(feature = "std")]
 use crate::output::formatter::{write_output, WriteError};
@@ -30,8 +29,7 @@ use crate::parser::sql_parser::{DatabaseLike, Deployment};
 use crate::types::{
     ActionRelations, NoteSeverity, Record, RelationShapes, RowNaming, TranslationNote,
 };
-use crate::types::{ConditionParameterName, ConditionParameterNameError};
-use crate::types::{PolicyReads, UnrestrictedTable};
+use crate::types::{ConditionParameterName, ConditionParameterNameError, PolicyReads};
 use sql_values::{PgTimeZone, PgTimestampTz};
 
 pub use crate::generator::model_generator::PlanningError;
@@ -223,7 +221,6 @@ struct DerivedOutputs {
     relations: Vec<RelationShapes>,
     row_naming: Vec<RowNaming>,
     action_relations: Vec<ActionRelations>,
-    unrestricted_tables: Vec<UnrestrictedTable>,
     policy_reads: Vec<PolicyReads>,
 }
 
@@ -233,6 +230,7 @@ impl DerivedOutputs {
         policies: &[ClassifiedPolicy],
         bounds: &UnboundedColumns,
         db: &DB,
+        deployment: Option<&Deployment>,
     ) -> Self {
         let generated = generate_tuple_queries_from_plan(plan, bounds, db);
         let relations = relation_shapes(plan, &generated.descriptions, db);
@@ -240,8 +238,7 @@ impl DerivedOutputs {
             tuple_queries: generated.queries,
             relations,
             row_naming: row_naming(plan, db),
-            action_relations: action_relations(plan, db),
-            unrestricted_tables: unrestricted_tables(db),
+            action_relations: action_relations(plan, deployment),
             policy_reads: policy_reads(policies, db),
         }
     }
@@ -274,7 +271,8 @@ impl Translation {
         let bounds = UnboundedColumns::resolve(db);
         let plan =
             build_filtered_schema_plan(&policies, db, registry, min_confidence, settings, &bounds)?;
-        let mut derived = DerivedOutputs::build(&plan, &policies, &bounds, db);
+        let mut derived =
+            DerivedOutputs::build(&plan, &policies, &bounds, db, registry.deployment());
         if let Some(locale) = registry.monetary_locale() {
             for query in &mut derived.tuple_queries {
                 query.monetary_locale = Some(locale.to_string());
@@ -330,21 +328,6 @@ impl Translation {
     #[must_use]
     pub fn action_relations(&self) -> &[ActionRelations] {
         &self.derived.action_relations
-    }
-
-    /// Every table the database restricts nothing on: row-level security is off on it, and
-    /// off on every table it is a partition or an `INHERITS` child of, since a read through
-    /// one of those applies that table's policies to these rows.
-    ///
-    /// Read beside [`Translation::action_relations`], and read positively: a table here
-    /// shows every row to everybody, so a question about one of its rows is granted with
-    /// nothing asked. A table absent from both this and the action report is one nothing
-    /// covered, which says nothing about what the database allows.
-    ///
-    /// Reported by table because the emitted model defines no type for such a table.
-    #[must_use]
-    pub fn unrestricted_tables(&self) -> &[UnrestrictedTable] {
-        &self.derived.unrestricted_tables
     }
 
     /// The tables each policy's clauses read, one entry per translated policy ordered by
@@ -463,9 +446,8 @@ pub struct Outputs(Translation);
 impl Outputs {
     /// The translation these outputs were rendered from, for the analysis
     /// surface ([`Translation::relations`], [`Translation::row_naming`],
-    /// [`Translation::action_relations`], [`Translation::unrestricted_tables`],
-    /// [`Translation::policy_reads`]) without cloning before
-    /// [`Translation::outputs`] consumes it.
+    /// [`Translation::action_relations`], [`Translation::policy_reads`]) without cloning
+    /// before [`Translation::outputs`] consumes it.
     #[must_use]
     pub fn translation(&self) -> &Translation {
         &self.0

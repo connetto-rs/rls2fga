@@ -1137,7 +1137,15 @@ mod parity {
                        SELECT 1 FROM shares s WHERE s.doc = d.id AND s.user_id = c.subject))
                      AND NOT EXISTS (
                        SELECT 1 FROM timed_blocks b WHERE b.doc = d.id AND b.user_id = c.subject
-                       AND b.starts_at <= $1::timestamptz AND b.expires_at > $1::timestamptz)",
+                       AND b.starts_at <= $1::timestamptz AND b.expires_at > $1::timestamptz)
+                     UNION ALL
+                     SELECT c.subject, helper.object
+                     FROM (VALUES ('alice'), ('bob'), ('carol')) AS c(subject)
+                     CROSS JOIN (
+                       SELECT 'blocks:' || doc || '|' || user_id AS object FROM blocks
+                       UNION ALL SELECT 'shares:' || doc || '|' || user_id FROM shares
+                       UNION ALL SELECT 'timed_blocks:' || id FROM timed_blocks
+                     ) AS helper",
                 );
                 for principal in &mut case.principals {
                     principal.carries_request_time = true;

@@ -15,7 +15,7 @@ use crate::classifier::patterns::{
 };
 use crate::generator::db_lookup::{column_compares_bytewise, column_kind, list_element_kind};
 use crate::generator::identity::encode_part;
-use crate::generator::ir::TupleSource;
+use crate::generator::ir::{TupleSource, SINGLETON_OBJECT_KEY};
 use crate::generator::tuple_generator::{quote_sql_identifier, resolve_bridge_columns, TupleQuery};
 use crate::generator::well_known::{member_relation, WellKnownTypes, HOLDER_OBJECT_ID};
 use crate::parser::sql_parser::DatabaseLike;
@@ -614,6 +614,22 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             ValueSource::Literal(scope_object.clone()),
             Vec::new(),
         )),
+
+        TupleSource::SingletonScope {
+            scope_relation,
+            scope_type,
+            scope_object,
+        } => Some(RecordDescription {
+            tables: Vec::new(),
+            derivation: RecordDerivation::Constant {
+                record: Record {
+                    object: format!("{owner_type}:{SINGLETON_OBJECT_KEY}"),
+                    relation: scope_relation.clone(),
+                    subject: format!("{scope_type}:{}", encode_part(scope_object)),
+                    context: None,
+                },
+            },
+        }),
 
         // Which role a kind stands for follows from the deployment, so the fact is the whole
         // description: no row is read, no table is named, and a consumer replaying a

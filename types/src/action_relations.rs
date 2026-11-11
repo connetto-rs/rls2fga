@@ -40,8 +40,7 @@ impl ActionJudgement {
 pub enum ActionAnswer {
     /// Every judgement must grant. All of them, never any of them.
     Judged(Vec<ActionJudgement>),
-    /// The table carries no row-level security, so the database restricts nothing here
-    /// and there is nothing to ask.
+    /// The simplified action grants every acting role without a row or request condition.
     Unrestricted,
     /// The model refuses this statement for every row of the table, so nothing has to be
     /// named or asked.
