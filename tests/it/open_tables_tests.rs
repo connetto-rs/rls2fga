@@ -6,7 +6,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use rls2fga::parser::sql_parser::ParserDB;
-use rls2fga::translator::Translation;
+use rls2fga::translator::{Outputs, Translation};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{ActionAnswer, ActionStatement, TranslationNote};
 
@@ -132,6 +132,21 @@ fn judged_everywhere(planned: &Translation, type_name: &str) -> bool {
     })
 }
 
+/// The outputs a translation loads its facts from.
+fn outputs(db: &ParserDB) -> Outputs {
+    translate(db)
+        .outputs()
+        .expect("every clause should translate")
+}
+
+/// Whether any fact query's SQL contains `needle`.
+fn any_fact_names(outputs: &Outputs, needle: &str) -> bool {
+    outputs
+        .tuple_queries()
+        .iter()
+        .any(|query| query.sql.contains(needle))
+}
+
 #[test]
 fn an_open_table_answers_every_statement_locally() {
     let db: ParserDB = support::deployment::db(NO_ROW_LEVEL_SECURITY);
@@ -172,6 +187,44 @@ fn the_open_table_and_the_guarded_one_are_answered_apart() {
         "and the guarded table beside it is still judged: {:?}",
         planned.action_relations()
     );
+}
+
+/// A table whose every statement is answered locally is never asked about, so no fact
+/// about its rows or its gate is loaded, while the guarded table beside it keeps its own.
+#[test]
+fn an_open_table_loads_no_facts() {
+    let outputs = outputs(&support::deployment::db(GUARDED_AND_OPEN));
+    for needle in [r#"FROM "public"."orders""#, "'request_gate:orders'"] {
+        assert!(
+            !any_fact_names(&outputs, needle),
+            "nothing asks about the open table, yet a fact names {needle}: {:#?}",
+            outputs.tuple_queries()
+        );
+    }
+    assert!(
+        any_fact_names(&outputs, "'request_gate:docs'"),
+        "the guarded table still links its rows to its gate: {:#?}",
+        outputs.tuple_queries()
+    );
+}
+
+/// The open tables a guarded policy reads keep the facts that policy needs, its membership
+/// rows, and lose the gate links only their own local answers would read.
+#[test]
+fn an_open_table_a_policy_reads_loads_only_what_the_policy_needs() {
+    let outputs = outputs(&support::deployment::db(OPEN_PARENT));
+    assert!(
+        any_fact_names(&outputs, r#"FROM "public"."project_members""#),
+        "the membership the guarded policy reads is loaded: {:#?}",
+        outputs.tuple_queries()
+    );
+    for gate in ["'request_gate:projects'", "'request_gate:project_members'"] {
+        assert!(
+            !any_fact_names(&outputs, gate),
+            "no check reaches {gate}: {:#?}",
+            outputs.tuple_queries()
+        );
+    }
 }
 
 /// A table the model reaches through another table's policy is answered by its own route.

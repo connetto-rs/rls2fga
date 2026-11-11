@@ -2079,7 +2079,7 @@ fn a_relation_reached_only_through_a_conditional_tupleset_subject_is_not_pruned(
         (TypeName::canonicalized("docs"), docs),
         (TypeName::canonicalized("groups"), groups),
     ]);
-    prune_unreferenced_relations(&mut all_types);
+    prune_unreferenced_relations(&mut all_types, &BTreeMap::new());
 
     assert!(
         all_types["groups"]

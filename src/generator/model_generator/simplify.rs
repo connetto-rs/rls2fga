@@ -244,13 +244,21 @@ pub(crate) fn repoint_inlined_aliases(
 ///
 /// Deliberately not [`grantable_relations`], which stops at a permission that grants
 /// nothing. A relation only a denial names still has to stay declared, or the model
-/// carries a reference to something it does not define.
-pub(crate) fn referenced_relations(types: &[TypePlan]) -> BTreeSet<(TypeName, RelationName)> {
+/// carries a reference to something it does not define. A relation only locally answered
+/// statements read is no root, since nothing asks about it.
+pub(crate) fn referenced_relations(
+    types: &[TypePlan],
+    answered_locally: &BTreeMap<TypeName, BTreeSet<RelationName>>,
+) -> BTreeSet<(TypeName, RelationName)> {
     let by_name: BTreeMap<&TypeName, &TypePlan> =
         types.iter().map(|plan| (&plan.type_name, plan)).collect();
     let mut reached: BTreeSet<(TypeName, RelationName)> = BTreeSet::new();
     for plan in types {
+        let local = answered_locally.get(&plan.type_name);
         for action in action_relations().chain(derived_action_relations()) {
+            if local.is_some_and(|local| local.contains(&action)) {
+                continue;
+            }
             if let Some(expr) = plan.computed_relations.get(&action) {
                 reach_userset(expr, plan, &by_name, &mut reached);
             }
@@ -263,16 +271,71 @@ pub(crate) fn referenced_relations(types: &[TypePlan]) -> BTreeSet<(TypeName, Re
 /// and nothing can consult them, so the model advertises access it can never grant.
 ///
 /// An operator hand-writing their own facts for such a relation will no longer find it
-/// in the model, which is the point: it never did anything.
-pub(crate) fn prune_unreferenced_relations(all_types: &mut BTreeMap<TypeName, TypePlan>) {
+/// in the model, which is the point: it never did anything. The same holds for an action
+/// relation only locally answered statements read, unless another relation reaches it.
+pub(crate) fn prune_unreferenced_relations(
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+    answered_locally: &BTreeMap<TypeName, BTreeSet<RelationName>>,
+) {
     let types: Vec<TypePlan> = all_types.values().cloned().collect();
-    let referenced = referenced_relations(&types);
+    let referenced = referenced_relations(&types, answered_locally);
     for plan in all_types.values_mut() {
         let owner = plan.type_name.clone();
+        let local = answered_locally.get(&owner);
         plan.direct_relations
             .retain(|name, _| referenced.contains(&(owner.clone(), name.clone())));
         plan.computed_relations.retain(|name, _| {
-            generator_defines(name) || referenced.contains(&(owner.clone(), name.clone()))
+            referenced.contains(&(owner.clone(), name.clone()))
+                || (generator_defines(name) && !local.is_some_and(|local| local.contains(name)))
+        });
+    }
+    drop_unlinked_gate_entries(all_types);
+}
+
+/// Drop the constants on a gate object no surviving row links to.
+///
+/// A gate object is reached only through the link its rows carry, so once pruning removes
+/// every such link, the constants written on it can never answer a check.
+fn drop_unlinked_gate_entries(all_types: &mut BTreeMap<TypeName, TypePlan>) {
+    let mut linked: BTreeMap<TypeName, BTreeSet<String>> = BTreeMap::new();
+    for plan in all_types.values() {
+        for source in &plan.table_tuple_sources {
+            if let TupleSource::PolicyScope {
+                scope_relation,
+                scope_type,
+                scope_object,
+                ..
+            }
+            | TupleSource::SingletonScope {
+                scope_relation,
+                scope_type,
+                scope_object,
+            } = source
+            {
+                if plan.direct_relations.contains_key(scope_relation) {
+                    linked
+                        .entry(scope_type.clone())
+                        .or_default()
+                        .insert(scope_object.clone());
+                }
+            }
+        }
+    }
+    for plan in all_types.values_mut() {
+        plan.table_tuple_sources.retain(|source| match source {
+            TupleSource::ActingKind {
+                gate_type,
+                gate_object,
+                ..
+            }
+            | TupleSource::RequestGateEntry {
+                gate_type,
+                gate_object,
+                ..
+            } => linked
+                .get(gate_type)
+                .is_some_and(|objects| objects.contains(gate_object)),
+            _ => true,
         });
     }
 }
@@ -598,6 +661,7 @@ mod tests {
             conditions: BTreeMap::new(),
             clocks: Vec::new(),
             well_known,
+            action_relations: Vec::new(),
         }
     }
 
