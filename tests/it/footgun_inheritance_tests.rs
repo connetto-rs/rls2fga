@@ -3,14 +3,14 @@
 //!
 //! Parent rules through a foreign key, `INHERITS` children, and partitions.
 
-use rls2fga::types::ConfidenceLevel;
-use rls2fga::types::TranslationNote;
+use rls2fga::types::{ActionAnswer, ActionStatement, ConfidenceLevel, TranslationNote};
 
 use crate::support;
 
 use crate::support::footgun::{
     assert_model_is_internally_consistent, can_delete_walk, db_of, membership_translation,
-    relation_definition, translation, translator, tuples_reading_from, type_names,
+    relation_definition, relation_definitions, translation, translator, tuples_reading_from,
+    type_names,
 };
 
 /// A parent table also has to be resolved through the disambiguated names: a
@@ -71,8 +71,8 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
     }
 }
 
-/// A parent without RLS gets no type of its own, so its name is derived on
-/// demand. That derivation must still avoid a name another table already owns.
+/// A parent without RLS keeps its own type, so its rows are filed under its own name,
+/// which the derivation must still keep apart from a name another table already owns.
 #[test]
 fn untyped_parent_does_not_borrow_another_tables_type() {
     let db = db_of(
@@ -1060,7 +1060,7 @@ CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_settin
     assert_eq!(
         disclosed.len(),
         2,
-        "each partition is a route the model does not answer for, got {:#?}",
+        "each partition has its own query route, got {:#?}",
         outputs.notes()
     );
     for partition in ["events_eu", "events_us"] {
@@ -1119,8 +1119,6 @@ CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_settin
             )
         })
         .collect();
-    // The middle table and the leaf are both readable by name, and the note names the
-    // ancestor that carries the policies rather than the nearest one.
     for partition in ["events_eu", "events_eu_2026"] {
         assert!(
             disclosed.iter().any(|note| matches!(
@@ -1134,10 +1132,11 @@ CREATE POLICY events_visible ON events FOR SELECT USING (tenant = current_settin
     }
 }
 
-/// A partition of a root that restricts nothing is already reported as unrestricted, so it
-/// needs no second note.
+/// A partition of a root whose read the acting role holds is answered by the same
+/// role-gated branch, and a root that carries no policies leaves nothing for a
+/// partition note to disclose.
 #[test]
-fn a_partition_of_an_open_root_is_not_disclosed_twice() {
+fn a_partition_of_an_open_root_is_answered_through_the_root_route() {
     let db = db_of(
         "
 CREATE TABLE events (id TEXT, region TEXT NOT NULL, PRIMARY KEY (id, region))
@@ -1158,22 +1157,28 @@ CREATE POLICY p ON guarded FOR SELECT USING (owner_id = current_setting('app.use
             note,
             TranslationNote::PartitionReadDirectlyIsUnfiltered { .. }
         )),
-        "nothing restricts these rows by any route, which the unrestricted report covers"
+        "the root carries no policies, so a direct read of the partition discloses nothing"
     );
+
+    let planned = outputs.translation();
+    let select = planned
+        .action_relations()
+        .iter()
+        .find(|entry| {
+            entry.type_name.as_str() == "events" && entry.statement == ActionStatement::Select
+        })
+        .map(|entry| &entry.answer);
     assert!(
-        outputs
-            .translation()
-            .unrestricted_tables()
-            .iter()
-            .any(|entry| entry.table.name() == "events_eu"),
-        "the partition of an open root is an unrestricted table"
+        matches!(select, Some(ActionAnswer::Unrestricted)),
+        "every acting role can read without a row predicate: {:?}",
+        planned.action_relations()
     );
 }
 
-/// A bare parent-existence rule has no gate to delegate to when the parent restricts
-/// nothing, and delegating anyway names a type the model never declares.
+/// A bare parent-existence rule has no gate to delegate to when the parent enforces
+/// nothing, so it falls closed beside the parent's own route, which the model declares.
 #[test]
-fn a_bare_delegation_to_an_unrestricted_parent_falls_closed() {
+fn a_bare_delegation_to_an_unprotected_parent_falls_closed() {
     let db = db_of(
         r"
 CREATE TABLE orgs(id UUID PRIMARY KEY);
@@ -1194,8 +1199,14 @@ CREATE POLICY p ON docs FOR SELECT
         "a delegation with no gate behind it must fall closed:\n{dsl}"
     );
     assert!(
-        !type_names(&dsl).iter().any(|name| name == "orgs"),
-        "nothing should reference the unrestricted parent:\n{dsl}"
+        relation_definitions(&dsl, "docs")
+            .iter()
+            .all(|(_, body)| !body.contains("orgs")),
+        "the docs type answers by its own refusal, never by the parent's gate:\n{dsl}"
+    );
+    assert!(
+        type_names(&dsl).iter().any(|name| name == "orgs"),
+        "the parent's own route declares its type:\n{dsl}"
     );
     assert_model_is_internally_consistent(&outputs.json_model());
     let report = outputs.report();

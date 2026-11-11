@@ -87,7 +87,7 @@ CREATE POLICY p ON docs FOR SELECT USING (role_level(current_setting('app.user_i
         )
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
         &db,
         &registry,
         &support::deployment::caller_deployment(),
@@ -143,7 +143,7 @@ CREATE POLICY p ON docs FOR SELECT USING (role_level(current_setting('app.user_i
         )
         .unwrap();
 
-    let classified = policy_classifier::classify_policies(
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
         &db,
         &registry,
         &support::deployment::caller_deployment(),
@@ -194,7 +194,7 @@ CREATE POLICY p ON tasks FOR SELECT
 ";
     let db = support::deployment::db(sql);
     let registry = FunctionRegistry::new();
-    let classified = policy_classifier::classify_policies(
+    let (classified, registry) = policy_classifier::classify_policies_with_effective_registry(
         &db,
         &registry,
         &support::deployment::caller_deployment(),

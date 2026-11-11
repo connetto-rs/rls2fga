@@ -540,10 +540,18 @@ pub(crate) fn shaped_membership_subquery_complaints(clause: &str, shaping: &str)
             "`{clause}` must fall closed, can_select is {can_select:?}"
         ));
     }
-    let membership_tuples = tuples_reading_from(outputs.tuple_queries(), "doc_members");
+    // The shaped clause must not mint a record for the guarded table's rows. The
+    // request-gate and scope records an open table emits for itself name that table's
+    // own objects, never a guarded row's, so they are no complaint here.
+    let membership_tuples: Vec<String> = outputs
+        .tuple_queries()
+        .iter()
+        .filter(|query| query.sql.contains("'docs:'"))
+        .map(|query| query.sql.clone())
+        .collect();
     if !membership_tuples.is_empty() {
         complaints.push(format!(
-            "`{clause}` must emit no membership tuples, got {membership_tuples:?}"
+            "`{clause}` must not mint records for the guarded rows, got {membership_tuples:?}"
         ));
     }
     let denial_disclosed = outputs

@@ -162,10 +162,12 @@ pub fn request_gate_link_relation() -> RelationName {
     RelationName::canonicalized("request_gate")
 }
 
+pub(crate) const DENY_RELATION: &str = "no_access";
+
 /// Relation that grants nobody, used wherever a policy must fail closed.
 #[must_use]
 pub fn deny_relation() -> RelationName {
-    RelationName::canonicalized("no_access")
+    RelationName::canonicalized(DENY_RELATION)
 }
 
 /// Relation that grants everyone, used wherever a policy is unconditionally open.
@@ -240,40 +242,52 @@ pub const HOLDER_OBJECT_ID: &str = "all";
 /// `*` still encodes, or it would grant everybody.
 pub use crate::types::identity::WILDCARD_SUBJECT_ID;
 
+pub(crate) const CAN_SELECT_RELATION: &str = "can_select";
+pub(crate) const CAN_INSERT_RELATION: &str = "can_insert";
+pub(crate) const CAN_UPDATE_RELATION: &str = "can_update";
+pub(crate) const CAN_DELETE_RELATION: &str = "can_delete";
+pub(crate) const CAN_UPDATE_USING_RELATION: &str = "can_update_using";
+pub(crate) const CAN_UPDATE_CHECK_RELATION: &str = "can_update_check";
+pub(crate) const CAN_UPDATE_WITHOUT_READING_RELATION: &str = "can_update_without_reading";
+pub(crate) const CAN_UPDATE_WITHOUT_READING_CHECK_RELATION: &str =
+    "can_update_without_reading_check";
+pub(crate) const CAN_INSERT_RETURNING_RELATION: &str = "can_insert_returning";
+pub(crate) const CAN_SELECT_FOR_UPDATE_RELATION: &str = "can_select_for_update";
+
 /// Action relation answering for a SQL `SELECT`.
 #[must_use]
 pub fn can_select_relation() -> RelationName {
-    RelationName::canonicalized("can_select")
+    RelationName::canonicalized(CAN_SELECT_RELATION)
 }
 
 /// Action relation answering for a SQL `INSERT`.
 #[must_use]
 pub fn can_insert_relation() -> RelationName {
-    RelationName::canonicalized("can_insert")
+    RelationName::canonicalized(CAN_INSERT_RELATION)
 }
 
 /// Action relation answering for a SQL `UPDATE`.
 #[must_use]
 pub fn can_update_relation() -> RelationName {
-    RelationName::canonicalized("can_update")
+    RelationName::canonicalized(CAN_UPDATE_RELATION)
 }
 
 /// Action relation answering for a SQL `DELETE`.
 #[must_use]
 pub fn can_delete_relation() -> RelationName {
-    RelationName::canonicalized("can_delete")
+    RelationName::canonicalized(CAN_DELETE_RELATION)
 }
 
 /// The `USING` half of an `UPDATE`, which picks the rows the statement may touch.
 #[must_use]
 pub fn can_update_using_relation() -> RelationName {
-    RelationName::canonicalized("can_update_using")
+    RelationName::canonicalized(CAN_UPDATE_USING_RELATION)
 }
 
 /// The `WITH CHECK` half of an `UPDATE`, which admits the new row.
 #[must_use]
 pub fn can_update_check_relation() -> RelationName {
-    RelationName::canonicalized("can_update_check")
+    RelationName::canonicalized(CAN_UPDATE_CHECK_RELATION)
 }
 
 /// The `UPDATE` `USING` half without the read gate, which is what filters an update
@@ -281,21 +295,21 @@ pub fn can_update_check_relation() -> RelationName {
 /// half is judged beside it against the result, never fused into it.
 #[must_use]
 pub fn can_update_without_reading_relation() -> RelationName {
-    RelationName::canonicalized("can_update_without_reading")
+    RelationName::canonicalized(CAN_UPDATE_WITHOUT_READING_RELATION)
 }
 
 /// The `UPDATE` `WITH CHECK` half without the read gate, which judges the row an update
 /// naming no row writes. Defined only where it differs from the `USING` half.
 #[must_use]
 pub fn can_update_without_reading_check_relation() -> RelationName {
-    RelationName::canonicalized("can_update_without_reading_check")
+    RelationName::canonicalized(CAN_UPDATE_WITHOUT_READING_CHECK_RELATION)
 }
 
 /// Inserting a row and reading it back, which returning a table column or naming
 /// an `ON CONFLICT` target both do, so the `SELECT` policies apply to the new row.
 #[must_use]
 pub fn can_insert_returning_relation() -> RelationName {
-    RelationName::canonicalized("can_insert_returning")
+    RelationName::canonicalized(CAN_INSERT_RETURNING_RELATION)
 }
 
 /// Reading a row under a locking clause (`FOR UPDATE`, `FOR NO KEY UPDATE`,
@@ -303,5 +317,5 @@ pub fn can_insert_returning_relation() -> RelationName {
 /// policies' `USING` clause on top of the `SELECT` policies.
 #[must_use]
 pub fn can_select_for_update_relation() -> RelationName {
-    RelationName::canonicalized("can_select_for_update")
+    RelationName::canonicalized(CAN_SELECT_FOR_UPDATE_RELATION)
 }

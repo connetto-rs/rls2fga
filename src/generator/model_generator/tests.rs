@@ -185,7 +185,7 @@ fn grants_nothing_reads_only_the_base_of_an_exclusion() {
         subtract: Box::new(UsersetExpr::Computed(RelationName::canonicalized("owner"))),
     };
     assert!(
-        grants_nothing(&from_nothing, &plan, &mut BTreeSet::new()),
+        grants_nothing(&from_nothing, &plan),
         "subtracting from a relation that grants nobody still grants nobody"
     );
 
@@ -194,9 +194,55 @@ fn grants_nothing_reads_only_the_base_of_an_exclusion() {
         subtract: Box::new(UsersetExpr::Computed(deny_relation())),
     };
     assert!(
-        !grants_nothing(&from_owner, &plan, &mut BTreeSet::new()),
+        !grants_nothing(&from_owner, &plan),
         "how much a subtraction removes is unknowable, so the base decides"
     );
+}
+
+#[test]
+fn a_computed_cycle_is_neither_a_denial_nor_a_local_grant() {
+    let (_, mut owner) = plan_from_policy_sql(
+        "CREATE POLICY p ON docs FOR SELECT USING (true);",
+        Some(PatternClass::P10ConstantBool(ConstantBool { value: true })),
+        None,
+    );
+    owner.set_computed(
+        can_select_relation(),
+        UsersetExpr::Computed(can_select_relation()),
+    );
+    assert!(!relation_grants_nothing(&owner, &can_select_relation()));
+    assert!(!relation_grants_every_actor(
+        None,
+        &owner,
+        &can_select_relation(),
+        None,
+    ));
+}
+
+#[test]
+fn subtracting_an_empty_difference_keeps_a_local_grant() {
+    let (_, mut owner) = plan_from_policy_sql(
+        "CREATE POLICY p ON docs FOR SELECT USING (true);",
+        Some(PatternClass::P10ConstantBool(ConstantBool { value: true })),
+        None,
+    );
+    let everyone = UsersetExpr::Computed(public_relation());
+    owner.set_computed(
+        can_select_relation(),
+        UsersetExpr::Exclusion {
+            base: Box::new(everyone.clone()),
+            subtract: Box::new(UsersetExpr::Exclusion {
+                base: Box::new(everyone.clone()),
+                subtract: Box::new(everyone),
+            }),
+        },
+    );
+    assert!(relation_grants_every_actor(
+        None,
+        &owner,
+        &can_select_relation(),
+        None,
+    ));
 }
 
 /// `rule_implies` treats equal keys as the same rule, so an exclusion that ignored a
@@ -729,7 +775,7 @@ fn combine_helpers_cover_empty_and_multi_intersection() {
 }
 
 #[test]
-fn build_schema_plan_skips_unknown_and_non_rls_tables() {
+fn build_schema_plan_models_non_rls_tables_and_skips_unknown_ones() {
     let db = parse_schema(
         r"
 CREATE TABLE docs(id uuid primary key, owner_id uuid);
@@ -769,8 +815,15 @@ CREATE POLICY rls_docs_select ON rls_docs USING (owner_id = current_user);
         "RLS-enabled table should be translated"
     );
     assert!(
-        !plan.types.iter().any(|t| t.type_name.as_str() == "docs"),
-        "non-RLS table should be skipped"
+        plan.types.iter().any(|t| t.type_name.as_str() == "docs"),
+        "every table carries a type, RLS enabled or not"
+    );
+    assert!(
+        !plan
+            .types
+            .iter()
+            .any(|t| t.type_name.as_str() == "ghost_docs"),
+        "a policy naming a table no catalog holds carries no type"
     );
 }
 

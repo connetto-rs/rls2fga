@@ -9,7 +9,7 @@ use crate::generator::identity::{
     typed_name_literal, typed_name_sql, wildcard_subject_literal, MAX_OBJECT_NAME_CHARS,
     MAX_SUBJECT_NAME_BYTES,
 };
-use crate::generator::ir::{MembershipGate, TupleSource, TupleSourceKey};
+use crate::generator::ir::{MembershipGate, TupleSource, TupleSourceKey, SINGLETON_OBJECT_KEY};
 use crate::generator::model_generator::{DirectSubject, SchemaPlan};
 pub use crate::generator::notes::SkippedTuples;
 use crate::generator::well_known::{
@@ -1762,6 +1762,30 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                      {subject_sql} AS subject\n\
                      FROM {table_sql}\n\
                      WHERE {key_not_null};"
+                ),
+                description: None,
+                condition: None,
+                skipped: None,
+                monetary_locale: None,
+            })
+        }
+
+        TupleSource::SingletonScope {
+            scope_relation,
+            scope_type,
+            scope_object,
+        } => {
+            let object_sql = typed_name_literal(owner_type, SINGLETON_OBJECT_KEY);
+            let subject_sql = typed_name_literal(scope_type, scope_object);
+            Some(TupleQuery {
+                comment: format!(
+                    "-- The keyless table's rows share the one object, judged by the scope \
+                     {scope_object}"
+                ),
+                sql: format!(
+                    "SELECT {object_sql} AS object, \
+                     '{scope_relation}' AS relation, \
+                     {subject_sql} AS subject;"
                 ),
                 description: None,
                 condition: None,

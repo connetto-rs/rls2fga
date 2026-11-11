@@ -245,8 +245,11 @@ CREATE POLICY p ON docs FOR SELECT USING (
     assert!(
         entries
             .iter()
-            .all(|entry| entry.table.to_string() != "public.project_members"),
-        "the membership table carries no type of its own here, got {entries:?}"
+            .all(|entry| entry.table.to_string() != "public.project_members"
+                || entry.type_name.as_str() == "projects"
+                || entry.type_name.as_str() == "project_members"),
+        "a row of the membership table names the parent or its own type, nothing else, \
+         got {entries:?}"
     );
 }
 
@@ -266,18 +269,16 @@ CREATE POLICY p ON docs FOR SELECT USING (
     assert!(
         entries
             .iter()
-            .all(|entry| entry.table.to_string() != "public.doc_members"
-                && entry.type_name.as_str() != "doc"),
+            .all(|entry| entry.type_name.as_str() != "doc"),
         "a type named after a column names no table's rows, got {entries:?}"
     );
 }
 
-/// A partition holds the root's rows, and the query minting the root's objects reads
-/// every partition, so a row of a partition is named after the root and keyed by the
-/// root's key. `PostgreSQL` requires that key to span the partitioning columns, which is
-/// why it is composite here.
+/// A partition's own route names its rows after its own type, keyed by the key
+/// `PostgreSQL` requires to span the partitioning columns, which is why it is composite
+/// here.
 #[test]
-fn a_partition_is_named_after_its_root() {
+fn a_partition_is_named_after_its_own_type() {
     let entries = naming(&format!(
         "CREATE TABLE events(id TEXT, tenant TEXT, at DATE, PRIMARY KEY (id, at))
   PARTITION BY RANGE (at);
@@ -287,7 +288,7 @@ CREATE POLICY p ON events FOR SELECT USING (tenant = {CALLER});
 "
     ));
     let partition = entry(&entries, "public.events_2026");
-    assert_eq!(partition.type_name, "events");
+    assert_eq!(partition.type_name, "events_2026");
     assert_eq!(
         partition.key.parts(),
         entry(&entries, "public.events").key.parts(),
@@ -295,14 +296,14 @@ CREATE POLICY p ON events FOR SELECT USING (tenant = {CALLER});
     );
     assert_eq!(
         partition.render(&row(&[("id", "e-1"), ("at", "2026-05-01")])),
-        Ok(Some("events:e-1|2026-05-01".to_string())),
-        "the rendered name is the root's object"
+        Ok(Some("events_2026:e-1|2026-05-01".to_string())),
+        "the rendered name is the partition's own object"
     );
 }
 
 /// Two levels down, with nothing guarding the middle one.
 #[test]
-fn a_subpartition_is_named_after_the_root_that_carries_the_policy() {
+fn a_subpartition_is_named_after_its_own_type() {
     let entries = naming(&format!(
         "CREATE TABLE events(id TEXT, tenant TEXT, at DATE, PRIMARY KEY (id, at))
   PARTITION BY RANGE (at);
@@ -314,7 +315,10 @@ ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON events FOR SELECT USING (tenant = {CALLER});
 "
     ));
-    assert_eq!(entry(&entries, "public.events_2026_h1").type_name, "events");
+    assert_eq!(
+        entry(&entries, "public.events_2026_h1").type_name,
+        "events_2026_h1"
+    );
 }
 
 /// A partition carrying its own policy already has a type, and its rows are named once.
@@ -343,8 +347,9 @@ CREATE POLICY p ON events_eu FOR SELECT USING (tenant = {CALLER});
     assert_eq!(named, ["events_eu"], "one entry, its own");
 }
 
-/// An `INHERITS` child is not named after its parent: those queries read `FROM ONLY`, so
-/// no tuple names a child row, and naming one would point at an object nothing grants.
+/// An `INHERITS` child is not named after its parent: the parent's queries read
+/// `FROM ONLY`, so the parent's objects name none of the child's rows, and the child's
+/// own route names them after its own type.
 #[test]
 fn an_inheritance_child_is_not_named_after_its_parent() {
     let entries = naming(&format!(
@@ -355,10 +360,9 @@ CREATE POLICY p ON docs FOR SELECT USING (owner = {CALLER});
 "
     ));
     assert_eq!(entry(&entries, "public.docs").type_name, "docs");
-    assert!(
-        entries
-            .iter()
-            .all(|entry| entry.table.to_string() != "public.secret_docs"),
-        "a child of an inheritance parent carries no name, got {entries:?}"
+    assert_eq!(
+        entry(&entries, "public.secret_docs").type_name,
+        "secret_docs",
+        "the child's rows are named after its own type, got {entries:?}"
     );
 }

@@ -1095,12 +1095,12 @@ CREATE POLICY p ON docs FOR SELECT USING (
         outputs.notes()
     );
     assert!(
-        !outputs.notes().iter().any(|note| matches!(
+        outputs.notes().iter().any(|note| matches!(
             note,
             TranslationNote::InheritanceParentReadsOwnRowsOnly { table, .. }
                 if table.name() == "doc_members"
         )),
-        "doc_members has no type, so no note names it, got: {:#?}",
+        "doc_members' own route narrows to its rows and says so, got: {:#?}",
         outputs.notes()
     );
 }
@@ -1556,7 +1556,7 @@ fn distinct_team_membership_tables_do_not_share_a_team_type() {
     let dsl = model.model();
     let team_types: Vec<String> = type_names(&dsl)
         .into_iter()
-        .filter(|name| name.contains("team"))
+        .filter(|name| name.contains("_team"))
         .collect();
     assert_eq!(
         team_types.len(),
@@ -1633,7 +1633,7 @@ CREATE POLICY docs_b_select ON docs_b FOR SELECT TO PUBLIC
     let dsl = model.model();
     let team_types: Vec<String> = type_names(&dsl)
         .into_iter()
-        .filter(|name| name.contains("team"))
+        .filter(|name| name.contains("_team"))
         .collect();
     assert_eq!(
         team_types.len(),

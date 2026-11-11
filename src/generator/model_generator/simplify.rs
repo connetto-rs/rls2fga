@@ -6,6 +6,8 @@
 //! running is on the trap list twice.
 
 use super::*;
+use crate::generator::well_known::DENY_RELATION;
+use crate::parser::sql_parser::Deployment;
 
 /// The rule a `can_select` gate wraps, if this expression is such a gate.
 pub(crate) fn select_gate_rule(expr: &UsersetExpr) -> Option<&UsersetExpr> {
@@ -321,36 +323,193 @@ pub(crate) fn narrow_grant_sources_to_declared(all_types: &mut BTreeMap<TypeName
 pub(crate) fn relation_grants_nothing(plan: &TypePlan, relation: &RelationName) -> bool {
     plan.computed_relations
         .get(relation)
-        .is_some_and(|expr| grants_nothing(expr, plan, &mut BTreeSet::new()))
+        .is_some_and(|expr| grants_nothing(expr, plan))
 }
 
 /// Whether an expression can never grant. Only certainty is reported.
-pub(crate) fn grants_nothing(
-    expr: &UsersetExpr,
-    plan: &TypePlan,
-    seen: &mut BTreeSet<RelationName>,
+pub(crate) fn grants_nothing(expr: &UsersetExpr, plan: &TypePlan) -> bool {
+    constant_expr(expr, plan, None, &mut Vec::new()) == Some(false)
+}
+
+/// Whether every deployment role passes without row or request-dependent data.
+pub(crate) fn relation_grants_every_actor(
+    request_gate: Option<&TypePlan>,
+    owner: &TypePlan,
+    relation: &RelationName,
+    deployment: Option<&Deployment>,
 ) -> bool {
-    match expr {
-        UsersetExpr::Computed(name) if *name == deny_relation() => true,
-        UsersetExpr::Computed(name) => {
-            seen.insert(name.clone())
-                && plan
-                    .computed_relations
-                    .get(name)
-                    .is_some_and(|expr| grants_nothing(expr, plan, seen))
-        }
-        // One conjunct that never holds denies the whole intersection.
-        UsersetExpr::Intersection(children) => children
-            .iter()
-            .any(|child| grants_nothing(child, plan, seen)),
-        UsersetExpr::Union(children) => children
-            .iter()
-            .all(|child| grants_nothing(child, plan, seen)),
-        // Subtracting from nothing still grants nothing, and how much a subtraction
-        // removes is unknowable here.
-        UsersetExpr::Exclusion { base, .. } => grants_nothing(base, plan, seen),
-        UsersetExpr::TupleToUserset { .. } => false,
+    let mut path = Vec::new();
+    let mut grants = |role| {
+        let context = ConstantContext {
+            request_gate,
+            owner,
+            role,
+        };
+        constant_relation(owner, relation, Some(&context), &mut path) == Some(true)
+    };
+    match deployment {
+        Some(deployment) => deployment.acting_roles().all(|role| grants(Some(role))),
+        None => grants(None),
     }
+}
+
+struct ConstantContext<'a> {
+    request_gate: Option<&'a TypePlan>,
+    owner: &'a TypePlan,
+    role: Option<&'a str>,
+}
+
+/// Resolve aliases with a type-qualified recursion path.
+fn constant_relation<'a>(
+    plan: &'a TypePlan,
+    relation: &'a RelationName,
+    context: Option<&ConstantContext<'a>>,
+    path: &mut Vec<(&'a TypeName, &'a RelationName)>,
+) -> Option<bool> {
+    if relation.as_str() == DENY_RELATION {
+        return Some(false);
+    }
+    let key = (&plan.type_name, relation);
+    if path.contains(&key) {
+        return None;
+    }
+    let Some(expr) = plan.computed_relations.get(relation) else {
+        return context.and_then(|context| constant_leaf(plan, relation, context));
+    };
+    path.push(key);
+    let value = constant_expr(expr, plan, context, path);
+    path.pop();
+    value
+}
+
+/// Fold only values independent of row contents and request conditions.
+fn constant_expr<'a>(
+    expr: &'a UsersetExpr,
+    plan: &'a TypePlan,
+    context: Option<&ConstantContext<'a>>,
+    path: &mut Vec<(&'a TypeName, &'a RelationName)>,
+) -> Option<bool> {
+    match expr {
+        UsersetExpr::Computed(name) => constant_relation(plan, name, context, path),
+        UsersetExpr::Intersection(children) | UsersetExpr::Union(children) => {
+            let intersection = matches!(expr, UsersetExpr::Intersection(_));
+            let mut known = true;
+            for child in children {
+                match constant_expr(child, plan, context, path) {
+                    Some(value) if value != intersection => return Some(value),
+                    Some(_) => {}
+                    None => known = false,
+                }
+            }
+            known.then_some(intersection)
+        }
+        UsersetExpr::Exclusion { base, subtract } => {
+            let base = constant_expr(base, plan, context, path);
+            if base == Some(false) {
+                return base;
+            }
+            match constant_expr(subtract, plan, context, path) {
+                Some(true) => Some(false),
+                Some(false) => base,
+                None => None,
+            }
+        }
+        UsersetExpr::TupleToUserset { tupleset, computed } => {
+            let context = context?;
+            let target = constant_scope(plan, tupleset, context)?;
+            constant_relation(target, computed, Some(context), path)
+        }
+    }
+}
+
+/// The fixed request-gate object linked from every row of the owning table.
+fn constant_scope<'a>(
+    plan: &TypePlan,
+    tupleset: &RelationName,
+    context: &ConstantContext<'a>,
+) -> Option<&'a TypePlan> {
+    if plan.type_name != context.owner.type_name {
+        return None;
+    }
+    let mut linked = false;
+    for source in &plan.table_tuple_sources {
+        match source {
+            TupleSource::PolicyScope {
+                scope_relation,
+                scope_type,
+                scope_object,
+                ..
+            }
+            | TupleSource::SingletonScope {
+                scope_relation,
+                scope_type,
+                scope_object,
+            } if scope_relation == tupleset => {
+                if *scope_type != context.owner.well_known.request_gate
+                    || scope_object.as_str() != plan.type_name.as_str()
+                {
+                    return None;
+                }
+                linked = true;
+            }
+            _ => {}
+        }
+    }
+    linked.then_some(context.request_gate).flatten()
+}
+
+/// Constant wildcard facts and acting-role facts are independent of row values.
+fn constant_leaf(
+    plan: &TypePlan,
+    relation: &RelationName,
+    context: &ConstantContext<'_>,
+) -> Option<bool> {
+    if plan.table_tuple_sources.iter().any(|source| {
+        matches!(
+            source,
+            TupleSource::ConstantTrue { table, relation: held, .. }
+                if held == relation && plan.source_table.as_ref() == Some(table)
+        )
+    }) {
+        return Some(true);
+    }
+    if plan.type_name != context.owner.well_known.request_gate {
+        return None;
+    }
+    let role = context.role?;
+    let mut known = false;
+    let mut conditional = false;
+    for source in &context.owner.table_tuple_sources {
+        match source {
+            TupleSource::ActingKind {
+                gate_type,
+                gate_object,
+                relation: held,
+                pg_role,
+            } if *gate_type == plan.type_name
+                && gate_object.as_str() == context.owner.type_name.as_str()
+                && held == relation =>
+            {
+                if pg_role == role {
+                    return Some(true);
+                }
+                known = true;
+            }
+            TupleSource::RequestGateEntry {
+                gate_type,
+                gate_object,
+                relation: held,
+                ..
+            } if *gate_type == plan.type_name
+                && gate_object.as_str() == context.owner.type_name.as_str()
+                && held == relation =>
+            {
+                conditional = true;
+            }
+            _ => {}
+        }
+    }
+    (known && !conditional).then_some(false)
 }
 
 /// The relations a direct relation's userset subjects name, which a tuple of it reaches.
@@ -416,5 +575,70 @@ pub(crate) fn reach_userset(
             reach_userset(base, plan, by_name, reached);
             reach_userset(subtract, plan, by_name, reached);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scoped_schema(scope_type: TypeName, scope_object: &str) -> SchemaPlan {
+        let well_known = WellKnownTypes::default();
+        let mut owner = TypePlan::new(TypeName::canonicalized("docs"));
+        owner.add_source(TupleSource::SingletonScope {
+            scope_relation: request_gate_link_relation(),
+            scope_type,
+            scope_object: scope_object.to_string(),
+        });
+        let gate = TypePlan::new(well_known.request_gate.clone());
+        SchemaPlan {
+            types: vec![owner, gate],
+            notes: Vec::new(),
+            confidence_summary: Vec::new(),
+            conditions: BTreeMap::new(),
+            clocks: Vec::new(),
+            well_known,
+        }
+    }
+
+    #[test]
+    fn only_the_owners_fixed_gate_is_row_independent() {
+        let gate_type = WellKnownTypes::default().request_gate;
+        for (scope_type, scope_object, independent) in [
+            (gate_type.clone(), "docs", true),
+            (TypeName::canonicalized("other_gate"), "docs", false),
+            (gate_type, "other", false),
+        ] {
+            let schema = scoped_schema(scope_type, scope_object);
+            let owner = &schema.types[0];
+            let context = ConstantContext {
+                request_gate: Some(&schema.types[1]),
+                owner,
+                role: None,
+            };
+            assert_eq!(
+                constant_scope(owner, &request_gate_link_relation(), &context).is_some(),
+                independent,
+                "{scope_object}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_foreign_scope_does_not_borrow_the_owners_gate() {
+        let gate_type = WellKnownTypes::default().request_gate;
+        let schema = scoped_schema(gate_type.clone(), "docs");
+        let context = ConstantContext {
+            request_gate: Some(&schema.types[1]),
+            owner: &schema.types[0],
+            role: None,
+        };
+        let mut foreign = TypePlan::new(TypeName::canonicalized("other"));
+        foreign.add_source(TupleSource::SingletonScope {
+            scope_relation: request_gate_link_relation(),
+            scope_type: gate_type,
+            scope_object: "other".to_string(),
+        });
+        assert!(constant_scope(&foreign, &request_gate_link_relation(), &context).is_none());
     }
 }

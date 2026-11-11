@@ -476,10 +476,18 @@ fn refused_teams_policy_complaints(clause: &str, reason_names: &str) -> Vec<Stri
             "`{clause}` must fall closed, can_select is {can_select:?}"
         ));
     }
-    let membership_tuples = tuples_reading_from(outputs.tuple_queries(), "\"members\"");
+    // The shaped clause must not mint a record for the guarded table's rows. The
+    // request-gate and scope records the open `members` table emits for itself name its
+    // own objects, never a guarded row's, so they are no complaint here.
+    let membership_tuples: Vec<String> = outputs
+        .tuple_queries()
+        .iter()
+        .filter(|query| query.sql.contains("'teams:'"))
+        .map(|query| query.sql.clone())
+        .collect();
     if !membership_tuples.is_empty() {
         complaints.push(format!(
-            "`{clause}` must emit no membership tuples, got {membership_tuples:?}"
+            "`{clause}` must not mint records for the guarded rows, got {membership_tuples:?}"
         ));
     }
     // A type named after the projected column is the shape the phantom holder takes. The

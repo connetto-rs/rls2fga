@@ -7,14 +7,11 @@ use crate::{ObjectKey, RecordError, RowValues, TableId, TypeName};
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct RowNaming {
-    /// Table as the schema spells it. For a table the model types, this is the spelling
-    /// [`RecordDerivation::FromRow::table`](crate::RecordDerivation)
-    /// carries. A partition has no type and no derivation of its own, and carries its
-    /// own spelling with its root's type.
+    /// Table whose query route this object naming describes.
     pub table: TableId,
     /// The type the model assigned it, after any collision suffix.
     pub type_name: TypeName,
-    /// How the row's key is built.
+    /// Row identity, or a constant key for row-independent permissions.
     pub key: ObjectKey,
 }
 impl RowNaming {

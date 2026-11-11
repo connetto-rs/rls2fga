@@ -9,14 +9,14 @@
 //! and by a shape describing its parent from its rows, so `doc_acl` rows are named both
 //! `doc_acl:4` and `docs:4` and nothing in a shape says which is the row's own.
 //!
-//! A partition is named after its root, which is where its rows already are: the query
-//! minting the root's objects reads every partition and the root's key spans them.
+//! A covered partition uses its direct query route, while an uncovered partition can use a planned root whose tuple queries include its rows.
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeMap;
 
 use crate::generator::db_lookup::{column_kind, resolve_row_identity};
+use crate::generator::ir::{TupleSource, SINGLETON_OBJECT_KEY};
 use crate::generator::model_generator::{SchemaPlan, TypePlan};
 use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, TableLike};
@@ -30,6 +30,20 @@ fn named_by<DB: DatabaseLike>(
     let table = type_plan.source_table.as_ref()?;
     let columns = resolve_row_identity(table, db)?;
     Some((type_plan.type_name.clone(), columns))
+}
+
+/// Name the shared object only when the plan emits its constant scope link.
+fn singleton_key(type_plan: &TypePlan) -> Option<(TypeName, ObjectKey)> {
+    type_plan
+        .table_tuple_sources
+        .iter()
+        .any(|source| matches!(source, TupleSource::SingletonScope { .. }))
+        .then(|| {
+            (
+                type_plan.type_name.clone(),
+                ObjectKey::new(vec![ValueSource::Literal(SINGLETON_OBJECT_KEY.to_string())]),
+            )
+        })
 }
 
 /// The plan whose objects a partition's rows are named as, walking up until one is
@@ -54,23 +68,17 @@ fn planned_partition_root<'plan, DB: DatabaseLike>(
     }
 }
 
-/// One entry per table whose rows the model names, in table order.
-///
-/// A table the model cannot name rows of is absent rather than present with an empty key.
-/// That is not a silent loss: the translation reports it as unhandled, and
-/// [`Translation::outputs`](crate::translator::Translation::outputs) refuses on it.
+/// Name covered rows by their key or the plan's row-independent singleton, omitting unnamed tables.
 pub(crate) fn row_naming<DB: DatabaseLike>(plan: &SchemaPlan, db: &DB) -> Vec<RowNaming> {
     let mut entries: Vec<RowNaming> = plan
         .types
         .iter()
         .filter_map(|type_plan| {
             let table = type_plan.source_table.as_ref()?;
-            let (type_name, columns) = named_by(type_plan, db)?;
-            Some(RowNaming::new(
-                table.clone(),
-                type_name,
-                object_key(table, columns, db),
-            ))
+            let (type_name, key) = named_by(type_plan, db)
+                .map(|(type_name, columns)| (type_name, object_key(table, columns, db)))
+                .or_else(|| singleton_key(type_plan))?;
+            Some(RowNaming::new(table.clone(), type_name, key))
         })
         .collect();
     let planned: BTreeMap<TableId, &TypePlan> = plan

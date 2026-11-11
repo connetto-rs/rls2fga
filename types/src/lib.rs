@@ -40,7 +40,6 @@ mod policy_reads;
 mod records;
 mod relations;
 mod row_naming;
-mod unrestricted;
 
 pub use action_relations::{
     ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, RowVersion,
@@ -66,7 +65,6 @@ pub use relations::{
     FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestPredicate, RowDecision,
 };
 pub use row_naming::RowNaming;
-pub use unrestricted::UnrestrictedTable;
 
 pub(crate) mod prelude {
     pub(crate) use alloc::{

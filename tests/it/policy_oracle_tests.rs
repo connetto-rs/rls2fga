@@ -1,6 +1,6 @@
 //! The seam a consumer uses to classify what this crate refuses.
 
-use rls2fga::classifier::function_registry::DeclaredSource;
+use rls2fga::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use rls2fga::classifier::oracle::{
     consult_oracle, OracleAnswer, PolicyClause, PolicyOracle, RefusedExpr,
 };
@@ -11,7 +11,9 @@ use rls2fga::classifier::patterns::{
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::parser::sql_parser::{parse_schema, ParserDB};
 use rls2fga::translator::{Translator, TranslatorBuilder};
-use rls2fga::types::{ColumnName, ConfidenceLevel, TableId, TranslationNote};
+use rls2fga::types::{
+    ActionAnswer, ActionStatement, ColumnName, ConfidenceLevel, TableId, TranslationNote,
+};
 
 use crate::support;
 
@@ -56,25 +58,17 @@ fn translator() -> Translator {
         .build()
 }
 
-fn dsl_of(db: &ParserDB, classified: &[ClassifiedPolicy]) -> String {
-    support::plan_at(
-        classified.to_vec(),
-        db,
-        translator().registry(),
-        ConfidenceLevel::B,
-    )
-    .model()
+fn dsl_of(db: &ParserDB, classified: &[ClassifiedPolicy], registry: &FunctionRegistry) -> String {
+    support::plan_at(classified.to_vec(), db, registry, ConfidenceLevel::B).model()
 }
 
-fn tuples_of(db: &ParserDB, classified: &[ClassifiedPolicy]) -> String {
+fn tuples_of(
+    db: &ParserDB,
+    classified: &[ClassifiedPolicy],
+    registry: &FunctionRegistry,
+) -> String {
     format_tuples(
-        support::plan_at(
-            classified.to_vec(),
-            db,
-            translator().registry(),
-            ConfidenceLevel::B,
-        )
-        .tuple_queries(),
+        support::plan_at(classified.to_vec(), db, registry, ConfidenceLevel::B).tuple_queries(),
     )
 }
 
@@ -98,9 +92,9 @@ const BIT_FLAG_SCHEMA: &str = "CREATE TABLE folders(id UUID PRIMARY KEY, owner_i
 /// composites never reaches it, and nothing says so: the model just denies.
 #[test]
 fn a_refusal_nested_under_a_parent_join_reaches_the_oracle() {
-    let db = parse_schema(BIT_FLAG_SCHEMA).expect("schema parses");
+    let db = support::deployment::db(BIT_FLAG_SCHEMA);
 
-    let mut classified = translator().classify(&db);
+    let (mut classified, registry) = translator().classify_with_effective_registry(&db);
     let answered = consult_oracle(&mut classified, &BitFlagIsPublic);
 
     assert_eq!(
@@ -114,7 +108,7 @@ fn a_refusal_nested_under_a_parent_join_reaches_the_oracle() {
 
     // And the answer has to survive the confidence filter, which means every pattern
     // enclosing the refusal was regraded.
-    let dsl = dsl_of(&db, &classified);
+    let dsl = dsl_of(&db, &classified, &registry);
     let select = relation(&dsl, "can_select").expect("docs defines can_select");
     assert_ne!(
         select, "no_access",
@@ -179,9 +173,9 @@ fn an_oracle_answer_below_the_threshold_is_still_dropped() {
         }
     }
 
-    let db = parse_schema(BIT_FLAG_SCHEMA).expect("schema parses");
+    let db = support::deployment::db(BIT_FLAG_SCHEMA);
 
-    let mut classified = translator().classify(&db);
+    let (mut classified, registry) = translator().classify_with_effective_registry(&db);
     let answered = consult_oracle(&mut classified, &Unsure);
     assert_eq!(answered.len(), 1, "the oracle did answer");
     assert_eq!(answered[0].confidence(), ConfidenceLevel::C);
@@ -196,7 +190,7 @@ fn an_oracle_answer_below_the_threshold_is_still_dropped() {
         "the claimed grade must reach the outermost pattern"
     );
 
-    let dsl = dsl_of(&db, &classified);
+    let dsl = dsl_of(&db, &classified, &registry);
     assert_eq!(
         relation(&dsl, "can_select").as_deref(),
         Some("no_access"),
@@ -211,10 +205,10 @@ fn an_oracle_that_bails_changes_nothing() {
     let schema = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT USING ((bits & 2) = 2);\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = support::deployment::db(schema);
 
     let untouched = translator().classify(&db);
-    let mut classified = translator().classify(&db);
+    let (mut classified, registry) = translator().classify_with_effective_registry(&db);
     let answered = consult_oracle(&mut classified, &Silent);
 
     assert!(answered.is_empty(), "a bail records nothing");
@@ -223,14 +217,14 @@ fn an_oracle_that_bails_changes_nothing() {
         untouched[0].using_classification(),
         "a bail leaves the classification exactly as it was"
     );
-    let dsl = dsl_of(&db, &classified);
+    let dsl = dsl_of(&db, &classified, &registry);
     assert_eq!(
         relation(&dsl, "can_select").as_deref(),
         Some("no_access"),
         "the refusal still denies:\n{dsl}"
     );
     assert!(
-        claims_the_model_is_narrower_than_rls(&db, &classified),
+        claims_the_model_is_narrower_than_rls(&db, &classified, &registry),
         "a bail leaves the gap reported"
     );
 }
@@ -243,36 +237,42 @@ fn an_oracle_that_denies_deliberately_reports_no_gap() {
     let schema = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT USING ((bits & 2) = 2);\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = support::deployment::db(schema);
 
-    let mut classified = translator().classify(&db);
+    let (mut classified, registry) = translator().classify_with_effective_registry(&db);
     let answered = consult_oracle(&mut classified, &BitFlagGrantsNobody);
 
     assert_eq!(answered.len(), 1, "the oracle took responsibility for it");
-    let dsl = dsl_of(&db, &classified);
-    assert_eq!(
-        relation(&dsl, "can_select").as_deref(),
-        Some("no_access"),
-        "a deliberate denial denies:\n{dsl}"
-    );
+    let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    assert!(outputs
+        .translation()
+        .action_relations()
+        .iter()
+        .any(|entry| {
+            entry.type_name.as_str() == "docs"
+                && entry.statement == ActionStatement::Select
+                && entry.answer == ActionAnswer::Denied
+        }));
     assert!(
-        !claims_the_model_is_narrower_than_rls(&db, &classified),
+        !outputs
+            .notes()
+            .iter()
+            .any(|note| note.message().contains("the model denies what RLS grants")),
         "an answered expression is not a translation gap"
     );
 }
 
 /// Whether the report still claims the model is narrower than the database, which is
 /// the sentence a deliberate denial makes untrue.
-fn claims_the_model_is_narrower_than_rls(db: &ParserDB, classified: &[ClassifiedPolicy]) -> bool {
-    support::plan_at(
-        classified.to_vec(),
-        db,
-        translator().registry(),
-        ConfidenceLevel::B,
-    )
-    .notes()
-    .iter()
-    .any(|note| note.message().contains("the model denies what RLS grants"))
+fn claims_the_model_is_narrower_than_rls(
+    db: &ParserDB,
+    classified: &[ClassifiedPolicy],
+    registry: &FunctionRegistry,
+) -> bool {
+    support::plan_at(classified.to_vec(), db, registry, ConfidenceLevel::B)
+        .notes()
+        .iter()
+        .any(|note| note.message().contains("the model denies what RLS grants"))
 }
 
 /// `WITH CHECK` is a second clause, and a refusal there is just as closed.
@@ -281,14 +281,14 @@ fn a_refusal_in_with_check_reaches_the_oracle() {
     let schema = "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, bits INT);\n\
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK ((bits & 2) = 2);\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = support::deployment::db(schema);
 
-    let mut classified = translator().classify(&db);
+    let (mut classified, registry) = translator().classify_with_effective_registry(&db);
     let answered = consult_oracle(&mut classified, &BitFlagIsPublic);
 
     assert_eq!(answered.len(), 1, "got {answered:?}");
     assert_eq!(answered[0].clause(), PolicyClause::WithCheck);
-    let dsl = dsl_of(&db, &classified);
+    let dsl = dsl_of(&db, &classified, &registry);
     assert_ne!(
         relation(&dsl, "can_insert").as_deref(),
         Some("no_access"),
@@ -307,21 +307,28 @@ fn an_answered_pattern_emits_what_the_crate_emits_for_it() {
                   ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY docs_sel ON docs FOR SELECT USING (TRUE);\n";
 
-    let refused_db = parse_schema(refused).expect("schema parses");
-    let mut answered = translator().classify(&refused_db);
+    let refused_db = support::deployment::db(refused);
+    let (mut answered, answered_registry) =
+        translator().classify_with_effective_registry(&refused_db);
     consult_oracle(&mut answered, &BitFlagIsPublic);
 
-    let native_db = parse_schema(native).expect("schema parses");
-    let recognized = translator().classify(&native_db);
+    let native_db = support::deployment::db(native);
+    let (recognized, native_registry) = translator().classify_with_effective_registry(&native_db);
+    let native_model = dsl_of(&native_db, &recognized, &native_registry);
+    assert_ne!(
+        relation(&native_model, "can_select").expect("docs defines can_select"),
+        "no_access",
+        "the granted native clause must admit rows"
+    );
 
     assert_eq!(
-        dsl_of(&refused_db, &answered),
-        dsl_of(&native_db, &recognized),
+        dsl_of(&refused_db, &answered, &answered_registry),
+        native_model,
         "an answered pattern must produce the same model"
     );
     assert_eq!(
-        tuples_of(&refused_db, &answered),
-        tuples_of(&native_db, &recognized),
+        tuples_of(&refused_db, &answered, &answered_registry),
+        tuples_of(&native_db, &recognized, &native_registry),
         "an answered pattern must produce the same tuples"
     );
 }
@@ -390,19 +397,22 @@ fn an_oracle_supplied_membership_obeys_the_pairing_rules() {
                   CREATE TABLE shares(id INT PRIMARY KEY, paper_batch TEXT, paper_lane TEXT, viewer TEXT);\n\
                   ALTER TABLE papers ENABLE ROW LEVEL SECURITY;\n\
                   CREATE POLICY papers_p ON papers FOR SELECT USING ((bits & 2) = 2);\n";
-    let db = parse_schema(schema).expect("schema parses");
+    let db = support::deployment::db(schema);
 
-    let mut classified = translator().classify(&db);
+    let (mut classified, registry) = translator().classify_with_effective_registry(&db);
     let answered = consult_oracle(&mut classified, &UnkeyedShare);
     assert_eq!(answered.len(), 1, "the oracle took responsibility for it");
 
-    let outputs = support::plan_at(classified, &db, translator().registry(), ConfidenceLevel::B);
-    let dsl = outputs.model();
-    assert_eq!(
-        relation(&dsl, "can_select").as_deref(),
-        Some("no_access"),
-        "an unkeyed pairing falls closed:\n{dsl}"
-    );
+    let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+    assert!(outputs
+        .translation()
+        .action_relations()
+        .iter()
+        .any(|entry| {
+            entry.type_name.as_str() == "papers"
+                && entry.statement == ActionStatement::Select
+                && entry.answer == ActionAnswer::Denied
+        }));
     assert!(
         outputs.notes().iter().any(|note| matches!(
             note,
@@ -500,21 +510,26 @@ fn oracle_indirect_memberships_cannot_bypass_key_and_scope_validation() {
     invalid.extra_predicates = invalid.memberships[0].extra_predicates.clone();
     cases.push(("request-dependent closure", invalid));
 
-    let db = parse_schema(&format!(
+    let db = support::deployment::db(&format!(
         "{schema} CREATE POLICY docs_read ON docs FOR SELECT USING ((bits & 2) = 2);"
-    ))
-    .unwrap();
+    ));
     for (case, membership) in cases {
-        let mut classified = translator().classify(&db);
+        let (mut classified, registry) = translator().classify_with_effective_registry(&db);
         assert_eq!(
             consult_oracle(&mut classified, &Answer(membership)).len(),
             1
         );
-        let outputs =
-            support::plan_at(classified, &db, translator().registry(), ConfidenceLevel::B);
-        assert_eq!(
-            relation(&outputs.model(), "can_select").as_deref(),
-            Some("no_access"),
+        let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
+        assert!(
+            outputs
+                .translation()
+                .action_relations()
+                .iter()
+                .any(|entry| {
+                    entry.type_name.as_str() == "docs"
+                        && entry.statement == ActionStatement::Select
+                        && entry.answer == ActionAnswer::Denied
+                }),
             "{case}"
         );
         assert!(

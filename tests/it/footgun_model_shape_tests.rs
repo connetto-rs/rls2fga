@@ -256,14 +256,13 @@ CREATE POLICY docs_auditor ON docs AS RESTRICTIVE FOR SELECT TO auditor
     ]
 }
 
-/// Does `relation`'s transitive expansion on `type_name` cross a type boundary or
-/// subtract anything? Both make a relation undecidable from one row, and both are
-/// visible in the emitted model without consulting the analysis under test.
+/// Whether a relation depends on another database row or uses subtraction.
 fn expansion_leaves_the_row(
     json: &rls2fga::generator::json_model::AuthorizationModel,
     type_name: &str,
     relation: &str,
     seen: &mut std::collections::BTreeSet<String>,
+    request_scopes: &std::collections::BTreeSet<(&str, &str)>,
 ) -> bool {
     use rls2fga::generator::json_model::Userset;
 
@@ -272,21 +271,29 @@ fn expansion_leaves_the_row(
         type_name: &str,
         userset: &Userset,
         seen: &mut std::collections::BTreeSet<String>,
+        request_scopes: &std::collections::BTreeSet<(&str, &str)>,
     ) -> bool {
         match userset {
             Userset::This { .. } => false,
-            Userset::ComputedUserset { computed_userset } => {
-                expansion_leaves_the_row(json, type_name, computed_userset.relation.as_str(), seen)
+            Userset::ComputedUserset { computed_userset } => expansion_leaves_the_row(
+                json,
+                type_name,
+                computed_userset.relation.as_str(),
+                seen,
+                request_scopes,
+            ),
+            Userset::TupleToUserset { tuple_to_userset } => {
+                !request_scopes.contains(&(type_name, tuple_to_userset.tupleset.relation.as_str()))
             }
-            Userset::TupleToUserset { .. } | Userset::Difference { .. } => true,
+            Userset::Difference { .. } => true,
             Userset::Union { union } => union
                 .child
                 .iter()
-                .any(|child| walk(json, type_name, child, seen)),
+                .any(|child| walk(json, type_name, child, seen, request_scopes)),
             Userset::Intersection { intersection } => intersection
                 .child
                 .iter()
-                .any(|child| walk(json, type_name, child, seen)),
+                .any(|child| walk(json, type_name, child, seen, request_scopes)),
         }
     }
 
@@ -299,12 +306,10 @@ fn expansion_leaves_the_row(
         .filter(|definition| definition.type_name.as_str() == type_name)
         .filter_map(|definition| definition.relations.as_ref())
         .filter_map(|relations| relations.get(relation))
-        .any(|userset| walk(json, type_name, userset, seen))
+        .any(|userset| walk(json, type_name, userset, seen, request_scopes))
 }
 
-/// A wrongly true flag grants access no policy granted, so the test asserts that
-/// direction: nothing flagged decidable may cross a type boundary, subtract, or take
-/// its records from a table other than the one keying the object.
+/// A row-decidable relation needs no other database row.
 #[test]
 fn no_relation_is_flagged_decidable_that_leaves_its_own_row() {
     use rls2fga::types::{RecordDerivation, ValueSource};
@@ -323,6 +328,48 @@ fn no_relation_is_flagged_decidable_that_leaves_its_own_row() {
         let shapes = planned.translation().relations();
         let json = planned.json_model();
         let queries = planned.tuple_queries();
+        let constant_types: std::collections::BTreeSet<&str> = queries
+            .iter()
+            .filter_map(|query| query.description.as_ref())
+            .filter_map(|description| match &description.derivation {
+                RecordDerivation::Constant { record } => {
+                    record.object.split_once(':').map(|(kind, _)| kind)
+                }
+                _ => None,
+            })
+            .filter(|kind| {
+                !planned
+                    .translation()
+                    .row_naming()
+                    .iter()
+                    .any(|row| row.type_name.as_str() == *kind)
+            })
+            .collect();
+        let request_scopes: std::collections::BTreeSet<(&str, &str)> = queries
+            .iter()
+            .filter_map(|query| query.description.as_ref())
+            .filter_map(|description| match &description.derivation {
+                RecordDerivation::FromRow { template, .. }
+                    if constant_types.contains(template.subject_type.as_str())
+                        && matches!(template.subject_key.part(), ValueSource::Literal(key)
+                            if key == template.object_type.as_str()) =>
+                {
+                    Some((template.object_type.as_str(), template.relation.as_str()))
+                }
+                RecordDerivation::Constant { record }
+                    if record
+                        .subject
+                        .split_once(':')
+                        .is_some_and(|(kind, _)| constant_types.contains(kind)) =>
+                {
+                    record
+                        .object
+                        .split_once(':')
+                        .map(|(kind, _)| (kind, record.relation.as_str()))
+                }
+                _ => None,
+            })
+            .collect();
         for row in shapes {
             if !row.from_one_row {
                 falses += 1;
@@ -336,10 +383,10 @@ fn no_relation_is_flagged_decidable_that_leaves_its_own_row() {
                     &json,
                     row.type_name.as_str(),
                     row.relation.as_str(),
-                    &mut seen
+                    &mut seen,
+                    &request_scopes
                 ),
-                "{}#{} is flagged decidable yet its expansion crosses a type boundary \
-                 or subtracts",
+                "{}#{} needs another database row or uses subtraction",
                 row.type_name,
                 row.relation
             );
@@ -430,11 +477,12 @@ fn support_classify(
     registry
         .load_from_json(registry_json)
         .expect("the registry parses");
-    let classified = rls2fga::classifier::policy_classifier::classify_policies(
-        &db,
-        &registry,
-        &caller_deployment(),
-    );
+    let (classified, registry) =
+        rls2fga::classifier::policy_classifier::classify_policies_with_effective_registry(
+            &db,
+            &registry,
+            &caller_deployment(),
+        );
     (classified, db, registry)
 }
 

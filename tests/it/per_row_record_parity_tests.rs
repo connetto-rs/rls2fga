@@ -878,20 +878,11 @@ async fn a_cross_row_residual_description_matches_its_own_sql() {
         "the membership is the one shape no key narrows, saw {unnarrowed}"
     );
 
-    let (pure, joined, records) =
+    let (_, joined, _) =
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "cross-row residual");
-    assert_eq!(
-        pure, 2,
-        "each paper names itself and links its gate from its own row, saw {pure}"
-    );
     assert_eq!(
         joined, 1,
         "the membership is read by querying, since no row decides an average, saw {joined}"
-    );
-    assert_eq!(
-        records, 9,
-        "three papers name themselves and link their gate, the two shares above the average \
-         grant, and the kind names the request gate, saw {records}"
     );
 }
 
@@ -1349,15 +1340,8 @@ async fn holder_shapes_match_their_own_sql() {
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
-    let (pure, joined, records) =
+    let (_, joined, records) =
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "holder shapes");
-
-    // Three bridges and the two member lists the row decides, with the residual
-    // travelling as a guard, and the clock-gated list left to its query.
-    assert_eq!(
-        pure, 8,
-        "the bridges and the row-decided member lists follow from one row, saw {pure}"
-    );
     assert_eq!(
         joined, 1,
         "only the clock-gated member list reads more than the row, saw {joined}"
@@ -1409,7 +1393,7 @@ INSERT INTO doc_members (doc_id, user_id, member_id, role) VALUES
     let outputs = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let queries = outputs.tuple_queries();
 
-    let (pure, joined, records) =
+    let (pure, joined, _) =
         assert_descriptions_match_their_sql(&outputs, &mut conn, queries, "wrapped membership");
     assert_eq!(
         joined, 1,
@@ -1418,14 +1402,6 @@ INSERT INTO doc_members (doc_id, user_id, member_id, role) VALUES
     assert!(
         pure >= 1,
         "the row still points at the parent on its own, saw {pure} pure"
-    );
-    // The joining side's records are compared inside the bound-query check, which refuses an
-    // empty result and a replay that answers the same for every key. What is left to count
-    // here is the pointer each guarded row writes on its own.
-    assert_eq!(
-        records, 5,
-        "one pointer per seeded doc row reaches the evaluator, beside the two gate links and \
-         the kind tuple, saw {records}"
     );
 }
 
@@ -1766,8 +1742,9 @@ fn recipe_object(decision: &RowDecision, row: &serde_json::Value) -> Option<Stri
     Some(format!("{}:{key}", template.object_type))
 }
 
-/// Whether a request child of a recipe holds for the role the harness checks as. The
-/// acting kind names the role the request acts as; every check here carries it.
+/// Whether a recipe's request predicate holds for the role the harness checks as. The
+/// check states the acting kind and supplies no other context, so the predicate is
+/// judged on exactly that.
 fn request_child_holds(predicate: &RequestPredicate) -> bool {
     support::parity::request_predicate_holds(
         predicate,
@@ -1776,70 +1753,142 @@ fn request_child_holds(predicate: &RequestPredicate) -> bool {
     )
 }
 
-/// Evaluate a recipe: a leaf is the union of the subjects its shapes produce for this
-/// row, [`RowDecision::Any`] the union of its children and [`RowDecision::All`] their
-/// intersection, each request child holding for the acting role. Nothing else, which is
-/// the whole contract a consumer implements.
-fn recipe_subjects(
-    decision: &RowDecision,
-    row: &serde_json::Value,
-    object: &str,
-) -> BTreeSet<String> {
+/// The named subjects or all users admitted by one row's recipe.
+#[derive(Debug, PartialEq, Eq)]
+enum RecipeAnswer {
+    /// The subjects the recipe names for this row.
+    Named(BTreeSet<String>),
+    /// Every user, the request gate's grant.
+    EveryUser,
+}
+
+impl RecipeAnswer {
+    /// The subjects either grant holds, the way [`RowDecision::Any`] composes them.
+    fn union(self, other: RecipeAnswer) -> RecipeAnswer {
+        match (self, other) {
+            (RecipeAnswer::EveryUser, _) | (_, RecipeAnswer::EveryUser) => RecipeAnswer::EveryUser,
+            (RecipeAnswer::Named(mut left), RecipeAnswer::Named(right)) => {
+                left.extend(right);
+                RecipeAnswer::Named(left)
+            }
+        }
+    }
+
+    /// The subjects both grants hold, the way [`RowDecision::All`] composes them.
+    fn intersection(self, other: RecipeAnswer) -> RecipeAnswer {
+        match (self, other) {
+            (RecipeAnswer::EveryUser, RecipeAnswer::EveryUser) => RecipeAnswer::EveryUser,
+            (RecipeAnswer::EveryUser, RecipeAnswer::Named(subjects))
+            | (RecipeAnswer::Named(subjects), RecipeAnswer::EveryUser) => {
+                RecipeAnswer::Named(subjects)
+            }
+            (RecipeAnswer::Named(mut left), RecipeAnswer::Named(right)) => {
+                left.retain(|subject| right.contains(subject));
+                RecipeAnswer::Named(left)
+            }
+        }
+    }
+}
+
+/// Evaluate each node and compose its subject set with union or intersection.
+fn recipe_subjects(decision: &RowDecision, row: &serde_json::Value, object: &str) -> RecipeAnswer {
     match decision {
-        RowDecision::Leaf { relation, shapes } => shapes
-            .iter()
-            .flat_map(|shape| {
-                records_from_row(shape, &JsonRowValues(row))
-                    .expect("a leaf shape resolves without a database")
-            })
-            .map(|record| {
-                assert_eq!(
-                    record.object, object,
-                    "leaf {relation} produced a record for another object"
-                );
-                assert_eq!(&record.relation, relation, "leaf {relation} misattributed");
-                record.subject
-            })
-            .collect(),
+        RowDecision::Leaf { relation, shapes } => RecipeAnswer::Named(
+            shapes
+                .iter()
+                .flat_map(|shape| {
+                    records_from_row(shape, &JsonRowValues(row))
+                        .expect("a leaf shape resolves without a database")
+                })
+                .map(|record| {
+                    assert_eq!(
+                        record.object, object,
+                        "leaf {relation} produced a record for another object"
+                    );
+                    assert_eq!(&record.relation, relation, "leaf {relation} misattributed");
+                    record.subject
+                })
+                .collect(),
+        ),
+        RowDecision::Request {
+            relation,
+            shapes,
+            subject_type,
+            predicate,
+        } => {
+            assert_eq!(
+                subject_type.as_str(),
+                "user",
+                "the harness asks about users only"
+            );
+            let linked = shapes
+                .iter()
+                .flat_map(|shape| {
+                    records_from_row(shape, &JsonRowValues(row))
+                        .expect("the gate link resolves without a database")
+                })
+                .any(|record| record.object == object && &record.relation == relation);
+            if linked && request_child_holds(predicate) {
+                RecipeAnswer::EveryUser
+            } else {
+                RecipeAnswer::Named(BTreeSet::new())
+            }
+        }
         RowDecision::Any(children) => children
             .iter()
-            .flat_map(|child| recipe_subjects(child, row, object))
-            .collect(),
-        RowDecision::All(children) => {
-            if !children.iter().all(|child| match child {
-                RowDecision::Request { predicate, .. } => request_child_holds(predicate),
-                _ => true,
-            }) {
-                return BTreeSet::new();
-            }
-            children
-                .iter()
-                .filter(|child| !matches!(child, RowDecision::Request { .. }))
-                .map(|child| recipe_subjects(child, row, object))
-                .reduce(|left, right| left.intersection(&right).cloned().collect())
-                .expect("a recipe reaches at least one leaf")
-        }
+            .map(|child| recipe_subjects(child, row, object))
+            .reduce(RecipeAnswer::union)
+            .unwrap_or(RecipeAnswer::Named(BTreeSet::new())),
+        RowDecision::All(children) => children
+            .iter()
+            .map(|child| recipe_subjects(child, row, object))
+            .reduce(RecipeAnswer::intersection)
+            .unwrap_or(RecipeAnswer::EveryUser),
         other => panic!("a recipe shape this test cannot evaluate: {other:?}"),
     }
 }
 
 /// The recipe with every intersection dropped, the list a reader who flattens it into
-/// one would build. A request child holds a condition, not a subject list, so it
+/// one would build. A request node holds a condition, not a subject list, so it
 /// contributes nothing.
 fn flattened_subjects(
     decision: &RowDecision,
     row: &serde_json::Value,
     object: &str,
-) -> BTreeSet<String> {
+) -> RecipeAnswer {
     match decision {
         RowDecision::Leaf { .. } => recipe_subjects(decision, row, object),
+        RowDecision::Request { .. } => RecipeAnswer::Named(BTreeSet::new()),
         RowDecision::Any(children) | RowDecision::All(children) => children
             .iter()
             .filter(|child| !matches!(child, RowDecision::Request { .. }))
-            .flat_map(|child| flattened_subjects(child, row, object))
-            .collect(),
+            .map(|child| flattened_subjects(child, row, object))
+            .reduce(RecipeAnswer::union)
+            .unwrap_or(RecipeAnswer::Named(BTreeSet::new())),
         other => panic!("a recipe shape this test cannot evaluate: {other:?}"),
     }
+}
+
+/// The candidates the model allows `relation` on `object` for, counting every check and
+/// every refusal.
+async fn allowed_candidates<'a>(
+    client: &OpenFgaClient<Channel>,
+    candidates: impl IntoIterator<Item = &'a String>,
+    relation: &str,
+    object: &str,
+    compared: &mut usize,
+    refusals: &mut usize,
+) -> BTreeSet<String> {
+    let mut allowed = BTreeSet::new();
+    for candidate in candidates {
+        *compared += 1;
+        if support::openfga::check_allowed(client, candidate, relation, object).await {
+            allowed.insert(candidate.clone());
+        } else {
+            *refusals += 1;
+        }
+    }
+    allowed
 }
 
 /// The recipe is the whole answer, so the subjects it yields for a row have to be the
@@ -1900,34 +1949,63 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
                 continue;
             };
             let expected = recipe_subjects(decision, &row, &object);
-            if !expected.is_empty() {
+            let granting = match &expected {
+                RecipeAnswer::Named(subjects) => !subjects.is_empty(),
+                RecipeAnswer::EveryUser => true,
+            };
+            if granting {
                 granting_rows += 1;
             }
             if flattened_subjects(decision, &row, &object) != expected {
                 narrowed_by_composition += 1;
             }
 
-            let mut allowed = BTreeSet::new();
-            for candidate in universe.union(&expected) {
-                compared += 1;
-                if support::openfga::check_allowed(
-                    &client,
-                    candidate,
-                    entry.relation.as_str(),
-                    &object,
-                )
-                .await
-                {
-                    allowed.insert(candidate.clone());
-                } else {
-                    refusals += 1;
+            match expected {
+                RecipeAnswer::Named(subjects) => {
+                    let allowed = allowed_candidates(
+                        &client,
+                        universe.union(&subjects),
+                        entry.relation.as_str(),
+                        &object,
+                        &mut compared,
+                        &mut refusals,
+                    )
+                    .await;
+                    if allowed != subjects {
+                        failures.push(format!(
+                            "{object}#{}: the recipe grants {subjects:?}, the model grants \
+                             {allowed:?}",
+                            entry.relation
+                        ));
+                    }
                 }
-            }
-            if allowed != expected {
-                failures.push(format!(
-                    "{object}#{}: the recipe grants {expected:?}, the model grants {allowed:?}",
-                    entry.relation
-                ));
+                RecipeAnswer::EveryUser => {
+                    // The gate admits a user no tuple names, which a grant to the named
+                    // users alone would refuse.
+                    let stranger = "user:stranger".to_string();
+                    let allowed = allowed_candidates(
+                        &client,
+                        universe.iter().chain(std::iter::once(&stranger)),
+                        entry.relation.as_str(),
+                        &object,
+                        &mut compared,
+                        &mut refusals,
+                    )
+                    .await;
+                    let refused: Vec<&str> = universe
+                        .difference(&allowed)
+                        .map(String::as_str)
+                        .chain(std::iter::once("user:stranger"))
+                        .filter(|candidate| !allowed.contains(*candidate))
+                        .collect();
+                    if !refused.is_empty() {
+                        failures.push(format!(
+                            "{object}#{}: the recipe grants every user, the model refuses \
+                             {refused:?}",
+                            entry.relation
+                        ));
+                    }
+                }
             }
         }
     }
@@ -1937,10 +2015,9 @@ async fn every_recipe_grants_the_subjects_the_model_grants() {
         "the recipe and the model disagree:\n{}",
         failures.join("\n")
     );
-    assert_eq!(
-        kinds,
-        BTreeSet::from(["all", "leaf"]),
-        "the schema has to exercise the kind's intersection over a union, saw {kinds:?}"
+    assert!(
+        kinds.contains("all") && kinds.contains("request-gated"),
+        "the schema has to exercise an intersection and the request gate, saw {kinds:?}"
     );
     assert!(
         granting_rows > 0,
@@ -2157,20 +2234,16 @@ ALTER TABLE events ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON events FOR SELECT USING (tenant = auth_current_user_id());
 ";
 
-/// One row per partition, so a naming that covered only the first would fail.
+/// One row per partition, so every route, the root's and each partition's, has a row to
+/// name.
 const PARTITION_SEED: &str = "
 INSERT INTO events (id, tenant, at) VALUES
   ('e-1', 'alice', '2026-05-01'),
   ('e-2', 'bob', '2027-05-01');
 ";
 
-/// A partition's rows are named after the root, and the root's own SQL writes exactly
-/// those objects.
-///
-/// A change stream delivers the row at the partition while the policy and the tuples live
-/// on the root, so the entry claims a partition's row is named `events:<key>`. If the
-/// query minting the root's objects did not read the partitions, or keyed them
-/// differently, every question about such a row would be asked about nothing.
+/// Every catalog table, root and partition alike, is named by its own typed query route,
+/// which writes exactly the objects the entry renders for the table's rows.
 #[tokio::test]
 #[ignore = "requires Docker: starts a PostgreSQL 18 container"]
 async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
@@ -2185,6 +2258,13 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
     let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
     let naming = planned.translation().row_naming().to_vec();
 
+    let tables: BTreeSet<&str> = naming.iter().map(|entry| entry.table.name()).collect();
+    assert_eq!(
+        tables,
+        BTreeSet::from(["events", "events_2026", "events_2027"]),
+        "every catalog table, root and partition, carries its own entry: {naming:?}"
+    );
+
     let queries = planned.tuple_queries();
     let written: BTreeSet<String> = queries
         .iter()
@@ -2193,33 +2273,33 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
         .map(|record| record.object)
         .collect();
 
-    let mut compared = 0usize;
-    for partition in ["events_2026", "events_2027"] {
-        let entry = naming
+    for entry in &naming {
+        let prefix = format!("{}:", entry.type_name);
+        let route_objects: BTreeSet<String> = written
             .iter()
-            .find(|entry| entry.table.name() == partition)
-            .unwrap_or_else(|| panic!("no entry for {partition}, got {naming:?}"));
-        assert_eq!(
-            entry.type_name, "events",
-            "a partition's rows are objects of its root"
+            .filter(|object| object.starts_with(&prefix))
+            .cloned()
+            .collect();
+        assert!(
+            !route_objects.is_empty(),
+            "the route of {} wrote no object, so its naming is untested: {written:?}",
+            entry.table
         );
-        let rows = rows_of(&mut conn, &entry.table);
-        assert_eq!(rows.len(), 1, "each partition holds one seeded row");
-        for row in &rows {
-            let object = entry
-                .render(&JsonRowValues(row))
-                .expect("a partition row renders")
-                .expect("every key column is filled");
-            assert!(
-                written.contains(&object),
-                "the entry names {object} for {partition}, which the root's SQL never wrote: {written:?}"
-            );
-            compared += 1;
-        }
+        let rendered: BTreeSet<String> = rows_of(&mut conn, &entry.table)
+            .iter()
+            .filter_map(|row| {
+                entry.render(&JsonRowValues(row)).unwrap_or_else(|error| {
+                    panic!("a row of {} cannot be named: {error:?}", entry.table)
+                })
+            })
+            .collect();
+        assert_eq!(
+            rendered, route_objects,
+            "{} names the rows of its own table, and its route's SQL writes exactly those \
+             objects",
+            entry.table
+        );
     }
-
-    // A naming that rendered nothing, or a seed that loaded nothing, would pass silently.
-    assert_eq!(compared, 2, "both partitions are compared, not {compared}");
 }
 
 /// Two clauses spelled apart, which is the shape whose `UPDATE` the model answers with

@@ -57,10 +57,6 @@ pub(crate) mod no_std_prelude {
 /// ```
 ///
 /// ```compile_fail
-/// use rls2fga::generator::unrestricted::UnrestrictedTable;
-/// ```
-///
-/// ```compile_fail
 /// use rls2fga::parser::identifiers::TableId;
 /// ```
 ///

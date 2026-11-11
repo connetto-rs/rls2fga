@@ -14,6 +14,9 @@ use crate::types::{
     ColumnName, ConditionName, ContextWitness, RelationName, RequestComparison, TableId, TypeName,
 };
 
+/// The shared object identifier of a keyless table.
+pub(crate) const SINGLETON_OBJECT_KEY: &str = "table";
+
 /// Principal table (users or teams) named by a role-threshold function.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct PrincipalInfo {
@@ -369,6 +372,15 @@ pub(crate) enum TupleSource {
         scope_object: String,
     },
 
+    /// A constant link from a keyless table's shared object to its scope.
+    SingletonScope {
+        scope_relation: RelationName,
+        /// Synthetic type the scope objects belong to.
+        scope_type: TypeName,
+        /// Object id standing for this scope.
+        scope_object: String,
+    },
+
     /// Every row of `table` pointing at the one holder object, so a member of the
     /// holder reaches all of them.
     HolderBridge {
@@ -640,6 +652,11 @@ pub(crate) enum TupleSourceKey<'a> {
         scope_type: &'a TypeName,
         scope_object: &'a str,
     },
+    SingletonScope {
+        scope_relation: &'a RelationName,
+        scope_type: &'a TypeName,
+        scope_object: &'a str,
+    },
     HolderBridge {
         table: &'a TableId,
         identity_cols: &'a [ColumnName],
@@ -679,6 +696,7 @@ impl TupleSource {
             | Self::SessionAttributeGate { .. }
             | Self::ConstantTrue { .. }
             | Self::PolicyScope { .. }
+            | Self::SingletonScope { .. }
             | Self::HolderBridge { .. } => true,
             Self::ShareBridge { .. }
             | Self::ClosureBridge { .. }
@@ -767,7 +785,8 @@ impl TupleSource {
             } => {
                 vec![(holder_type.clone(), relation.clone())]
             }
-            Self::PolicyScope { scope_relation, .. } => own(scope_relation),
+            Self::PolicyScope { scope_relation, .. }
+            | Self::SingletonScope { scope_relation, .. } => own(scope_relation),
             Self::RequestGateEntry {
                 gate_type,
                 relation,
@@ -1101,6 +1120,15 @@ impl TupleSource {
             } => TupleSourceKey::PolicyScope {
                 table,
                 identity_cols,
+                scope_relation,
+                scope_type,
+                scope_object,
+            },
+            Self::SingletonScope {
+                scope_relation,
+                scope_type,
+                scope_object,
+            } => TupleSourceKey::SingletonScope {
                 scope_relation,
                 scope_type,
                 scope_object,
