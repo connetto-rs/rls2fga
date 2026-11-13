@@ -29,7 +29,7 @@ use crate::types::{
     ActionRelations, NoteSeverity, Record, RelationShapes, RowNaming, TranslationNote,
 };
 use crate::types::{ConditionParameterName, ConditionParameterNameError, PolicyReads};
-use sql_values::{PgTimeZone, PgTimestampTz};
+use sql_values::postgres::{PgTimeZone, PgTimestampTz};
 
 pub use crate::generator::model_generator::PlanningError;
 
@@ -359,7 +359,7 @@ impl Translation {
     /// use rls2fga::parser::sql_parser::{parse_schema, Deployment};
     /// use rls2fga::translator::TranslatorBuilder;
     /// use rls2fga::types::ConfidenceLevel;
-    /// use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
+    /// use sql_values::postgres::{InputContext, PgTimeZone, PgTimestampTz};
     ///
     /// let db = parse_schema(
     ///     "CREATE ROLE authenticator LOGIN;

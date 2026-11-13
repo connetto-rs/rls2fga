@@ -9,7 +9,7 @@
 use rls2fga::clock::{ClockError, ClockOffset, ClockReading};
 use rls2fga::translator::Translation;
 use rls2fga::types::{ConfidenceLevel, TranslationNote};
-use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
+use sql_values::postgres::{InputContext, PgTimeZone, PgTimestampTz};
 
 use crate::support::deployment;
 use crate::support::footgun::{db_of, relation_definition, translation, translator};

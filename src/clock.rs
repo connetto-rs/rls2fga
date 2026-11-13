@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 
-use sql_values::{
+use sql_values::postgres::{
     DateTimeError, PgInterval, PgTime, PgTimeZone, PgTimestamp, PgTimestampTz, ShiftError,
 };
 
@@ -103,7 +103,7 @@ impl ClockThreshold {
     ///
     /// ```
     /// use rls2fga::clock::{ClockOffset, ClockReading, ClockThreshold};
-    /// use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
+    /// use sql_values::postgres::{InputContext, PgTimeZone, PgTimestampTz};
     ///
     /// let rome = PgTimeZone::parse("Europe/Rome").unwrap();
     /// let at = PgTimestampTz::parse("2026-03-29 12:00+02", InputContext::new()).unwrap();

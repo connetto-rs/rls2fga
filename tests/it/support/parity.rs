@@ -17,7 +17,7 @@ use diesel::connection::SimpleConnection;
 use diesel::pg::PgConnection;
 use diesel::prelude::*;
 use diesel::sql_types::Jsonb;
-use sql_values::{InputContext, PgTimeZone, PgTimestampTz};
+use sql_values::postgres::{InputContext, PgTimeZone, PgTimestampTz};
 use sqlparser::ast::{visit_expressions, AssignmentTarget, Expr, Ident, Statement};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;

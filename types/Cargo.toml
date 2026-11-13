@@ -11,7 +11,7 @@ std = ["serde/std"]
 
 [dependencies]
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
-sql-values = { version = "0.5", default-features = false }
+sql-values = { version = "0.6", default-features = false }
 thiserror = { version = "2", default-features = false }
 
 [lints.rust]
