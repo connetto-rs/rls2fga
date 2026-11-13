@@ -4,7 +4,7 @@ use crate::parser::expr::{cast_type_name, element_type, peel_noting_casts};
 use crate::parser::sql_parser::DataTypeLike;
 use crate::types::TemporalKind;
 use sql_traits::utils::scalar_family::ScalarFamily;
-use sql_values::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
+use sql_values::postgres::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
 use sqlparser::ast::{self, DataType, DateTimeField, Interval, TimezoneInfo, ValueWithSpan};
 
 /// The guard as structure when the compared value is one only the request knows.
@@ -278,7 +278,7 @@ fn clock_threshold(shift: &ClockShift<'_>) -> Result<ClockThreshold, ClockRefusa
 
 /// The interval as `PostgreSQL` stores it, from `interval '…'` or from a quoted string
 /// cast once to an interval type, which `PostgreSQL` reads alike.
-fn interval_value(written: &Expr) -> Result<sql_values::PgInterval, ClockRefusal> {
+fn interval_value(written: &Expr) -> Result<sql_values::postgres::PgInterval, ClockRefusal> {
     let mut casts: Vec<&DataType> = Vec::new();
     let peeled = peel_noting_casts(written, |data_type| casts.push(data_type));
     let interval = || written.to_string();
@@ -814,10 +814,10 @@ pub(crate) enum LocalLiteralRefusal {
         /// The literal's text.
         text: String,
         /// The type the literal is cast to.
-        pg_type: sql_values::PgType,
+        pg_type: sql_values::postgres::PgType,
         /// Why the cast has no value.
         #[source]
-        source: sql_values::CastError,
+        source: sql_values::postgres::CastError,
     },
 }
 
@@ -1029,7 +1029,7 @@ pub(crate) fn temporal_literal_comparison(
 /// `timestamptz`, a precision applied as `PostgreSQL` applies it. `None` for any other
 /// literal, and for one the cast has no value for, which every other reading refuses.
 fn temporal_literal(expr: &Expr) -> Option<(TemporalKind, String)> {
-    use sql_values::CastTarget;
+    use sql_values::postgres::CastTarget;
     let (text, data_type) = cast_once(expr)?;
     let (target, kind) = match cast_target(data_type)? {
         target @ CastTarget::Date => (target, TemporalKind::Date),
@@ -1037,7 +1037,9 @@ fn temporal_literal(expr: &Expr) -> Option<(TemporalKind, String)> {
         target @ CastTarget::TimestampTz(_) => (target, TemporalKind::TimestampTz),
         _ => return None,
     };
-    let value = sql_values::cast_literal(sql_values::Literal::Quoted(text), target).ok()?;
+    let value =
+        sql_values::postgres::cast_literal(sql_values::postgres::Literal::Quoted(text), target)
+            .ok()?;
     Some((kind, value.to_string()))
 }
 
@@ -1073,14 +1075,19 @@ fn bare_column(expr: &Expr) -> Option<ColumnName> {
 /// The local time a quoted literal cast once to `date` or `timestamp` names, a date as its
 /// midnight, or why it has none. `None` for any other literal, and for an infinity, which
 /// every zone converts alike.
-fn local_literal(expr: &Expr) -> Option<Result<sql_values::PgTimestamp, LocalLiteralRefusal>> {
-    use sql_values::{CastError, CastTarget, CastValue, PgTime, PgTimestamp};
+fn local_literal(
+    expr: &Expr,
+) -> Option<Result<sql_values::postgres::PgTimestamp, LocalLiteralRefusal>> {
+    use sql_values::postgres::{CastError, CastTarget, CastValue, PgTime, PgTimestamp};
     let (text, data_type) = cast_once(expr)?;
     let target = cast_target(data_type)
         .filter(|target| matches!(target, CastTarget::Date | CastTarget::Timestamp(_)))?;
     let read = || -> Result<Option<PgTimestamp>, CastError> {
         Ok(
-            match sql_values::cast_literal(sql_values::Literal::Quoted(text), target)? {
+            match sql_values::postgres::cast_literal(
+                sql_values::postgres::Literal::Quoted(text),
+                target,
+            )? {
                 CastValue::Date(date) if date.is_finite() => Some(
                     PgTimestamp::new(date, PgTime::MIDNIGHT)
                         .ok_or(CastError::DateOutOfRangeForTimestamp)?,
@@ -1234,9 +1241,9 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         return None;
     };
     let literal = match value {
-        Value::SingleQuotedString(text) => sql_values::Literal::Quoted(text),
-        Value::DollarQuotedString(quoted) => sql_values::Literal::Quoted(&quoted.value),
-        Value::Number(number, _) => sql_values::Literal::Number(number),
+        Value::SingleQuotedString(text) => sql_values::postgres::Literal::Quoted(text),
+        Value::DollarQuotedString(quoted) => sql_values::postgres::Literal::Quoted(&quoted.value),
+        Value::Number(number, _) => sql_values::postgres::Literal::Number(number),
         _ => return None,
     };
     if let Some((_, inner)) = targets
@@ -1246,11 +1253,13 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         return money_literal(literal, inner);
     }
     match folded_cast(literal, &targets)? {
-        sql_values::CastValue::Boolean(flag) => Some(AttributeLiteral::Boolean(flag)),
-        number @ (sql_values::CastValue::Smallint(_)
-        | sql_values::CastValue::Integer(_)
-        | sql_values::CastValue::Bigint(_)) => Some(AttributeLiteral::Number(number.to_string())),
-        sql_values::CastValue::Numeric(number) => {
+        sql_values::postgres::CastValue::Boolean(flag) => Some(AttributeLiteral::Boolean(flag)),
+        number @ (sql_values::postgres::CastValue::Smallint(_)
+        | sql_values::postgres::CastValue::Integer(_)
+        | sql_values::postgres::CastValue::Bigint(_)) => {
+            Some(AttributeLiteral::Number(number.to_string()))
+        }
+        sql_values::postgres::CastValue::Numeric(number) => {
             // `NaN` and the infinities print as words no bare SQL number spells.
             let printed = number.to_string();
             printed
@@ -1258,48 +1267,48 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
                 .all(|byte| byte.is_ascii_digit() || matches!(byte, b'-' | b'.'))
                 .then_some(AttributeLiteral::Number(printed))
         }
-        sql_values::CastValue::Text(text) => Some(AttributeLiteral::Text(text)),
-        sql_values::CastValue::Bpchar(text) => {
+        sql_values::postgres::CastValue::Text(text) => Some(AttributeLiteral::Text(text)),
+        sql_values::postgres::CastValue::Bpchar(text) => {
             Some(AttributeLiteral::Text(text.as_text().to_string()))
         }
-        sql_values::CastValue::Date(_)
-        | sql_values::CastValue::Timestamp(_)
-        | sql_values::CastValue::TimestampTz(_) => None,
+        sql_values::postgres::CastValue::Date(_)
+        | sql_values::postgres::CastValue::Timestamp(_)
+        | sql_values::postgres::CastValue::TimestampTz(_) => None,
     }
 }
 
 /// The value a literal takes through `targets`, listed outermost first and applied
 /// innermost first, or `None` where `sql-values` computes no step.
 fn folded_cast(
-    literal: sql_values::Literal<'_>,
+    literal: sql_values::postgres::Literal<'_>,
     targets: &[&DataType],
-) -> Option<sql_values::CastValue> {
+) -> Option<sql_values::postgres::CastValue> {
     let mut targets = targets.iter().rev();
-    let first = sql_values::cast_literal(literal, cast_target(targets.next()?)?).ok()?;
+    let first = sql_values::postgres::cast_literal(literal, cast_target(targets.next()?)?).ok()?;
     targets.try_fold(first, |value, data_type| {
-        sql_values::cast_value(value, cast_target(data_type)?).ok()
+        sql_values::postgres::cast_value(value, cast_target(data_type)?).ok()
     })
 }
 
 /// A literal whose last cast is to `money`, spelled for the database with what the casts
 /// inside it made of it, since only `PostgreSQL` knows the `lc_monetary` it reads it by.
 fn money_literal(
-    literal: sql_values::Literal<'_>,
+    literal: sql_values::postgres::Literal<'_>,
     inner: &[&DataType],
 ) -> Option<AttributeLiteral> {
     let quoted = |text: &str| format!("'{}'", text.replace('\'', "''"));
     let operand = if inner.is_empty() {
         match literal {
-            sql_values::Literal::Quoted(text) => quoted(text),
-            sql_values::Literal::Number(number) => number.to_string(),
+            sql_values::postgres::Literal::Quoted(text) => quoted(text),
+            sql_values::postgres::Literal::Number(number) => number.to_string(),
         }
     } else {
         match folded_cast(literal, inner)? {
-            sql_values::CastValue::Text(text) => quoted(&text),
-            number @ (sql_values::CastValue::Smallint(_)
-            | sql_values::CastValue::Integer(_)
-            | sql_values::CastValue::Bigint(_)
-            | sql_values::CastValue::Numeric(_)) => {
+            sql_values::postgres::CastValue::Text(text) => quoted(&text),
+            number @ (sql_values::postgres::CastValue::Smallint(_)
+            | sql_values::postgres::CastValue::Integer(_)
+            | sql_values::postgres::CastValue::Bigint(_)
+            | sql_values::postgres::CastValue::Numeric(_)) => {
                 let printed = number.to_string();
                 printed
                     .bytes()
@@ -1314,8 +1323,8 @@ fn money_literal(
 
 /// The cast `sql-values` computes for a cast to `data_type`, or `None` for a type it does
 /// not model or a modifier `PostgreSQL` refuses.
-fn cast_target(data_type: &DataType) -> Option<sql_values::CastTarget> {
-    use sql_values::{CastTarget, CharLength, NumericTypmod};
+fn cast_target(data_type: &DataType) -> Option<sql_values::postgres::CastTarget> {
+    use sql_values::postgres::{CastTarget, CharLength, NumericTypmod};
     let length = |length: &Option<ast::CharacterLength>| match length {
         None => Some(None),
         Some(ast::CharacterLength::IntegerLength { length, unit: None }) => {

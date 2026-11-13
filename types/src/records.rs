@@ -17,7 +17,7 @@ use crate::identity::{
 use crate::{AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest};
 use crate::{ColumnName, ConditionName, RelationName, TableId, TypeName};
 use serde::{Deserialize, Serialize};
-use sql_values::PgBpchar;
+use sql_values::postgres::PgBpchar;
 
 /// One `(object, relation, subject)` fact, rendered exactly as the whole-table
 /// SQL renders it.
