@@ -6,10 +6,10 @@ use rls2fga::types::{records_from_row, ConfidenceLevel, RecordDerivation, Record
 use crate::support::footgun::{db_of, translator};
 use crate::support::row;
 
-/// The record description of the gate `clause` opens on a `char(4)` column.
-fn gate_description(clause: &str) -> RecordDescription {
+/// The record description of the gate `clause` opens on a `code` column of `column_type`.
+fn gate_description_on(column_type: &str, clause: &str) -> RecordDescription {
     let schema = format!(
-        "CREATE TABLE public.docs(id TEXT PRIMARY KEY, code CHAR(4));\n\
+        "CREATE TABLE public.docs(id TEXT PRIMARY KEY, code {column_type});\n\
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY docs_sel ON docs FOR SELECT USING ({clause});\n"
     );
@@ -22,23 +22,30 @@ fn gate_description(clause: &str) -> RecordDescription {
         .iter()
         .find(|query| query.sql.contains("\"code\""))
         .and_then(|query| query.description.clone())
-        .unwrap_or_else(|| panic!("`{clause}` opens a described gate"));
+        .unwrap_or_else(|| panic!("`{clause}` on {column_type} opens a described gate"));
     assert!(
         matches!(description.derivation, RecordDerivation::FromRow { .. }),
-        "the row alone decides `{clause}`"
+        "the row alone decides `{clause}` on {column_type}"
     );
     description
 }
 
 /// Which of the padded cells `clause` admits, each as `to_jsonb` prints a `char(4)` value.
 fn admitted(clause: &str, cells: &[&'static str]) -> Vec<&'static str> {
-    let description = gate_description(clause);
+    admitted_on("CHAR(4)", clause, cells)
+}
+
+/// Which of `cells` the gate `clause` on a `code` column of `column_type` admits.
+fn admitted_on(column_type: &str, clause: &str, cells: &[&'static str]) -> Vec<&'static str> {
+    let description = gate_description_on(column_type, clause);
     cells
         .iter()
         .copied()
         .filter(|cell| {
             let records = records_from_row(&description, &row(&[("id", "d"), ("code", cell)]))
-                .unwrap_or_else(|error| panic!("`{clause}` on `{cell:?}`: {error:?}"));
+                .unwrap_or_else(|error| {
+                    panic!("`{clause}` on {column_type} `{cell:?}`: {error:?}")
+                });
             !records.is_empty()
         })
         .collect()
@@ -161,4 +168,33 @@ fn a_literal_printed_as_bpchar_compares_as_char() {
         admitted("code = 'ab '::pg_catalog.bpchar(3)", CELLS),
         ["ab  "]
     );
+}
+
+/// The national spellings are `char(n)` and `varchar(n)` under another name, so the fixed
+/// ones drop their padding and the varying ones keep every blank, as on `PostgreSQL` 18.6.
+#[test]
+fn the_national_spellings_compare_as_char_and_varchar() {
+    for column_type in ["NATIONAL CHARACTER(4)", "NATIONAL CHAR(4)", "NCHAR(4)"] {
+        assert_eq!(
+            admitted_on(column_type, "code = 'ab '", CELLS),
+            ["ab  "],
+            "{column_type} pads"
+        );
+        assert_eq!(
+            admitted_on(column_type, "code <> 'ab '", CELLS),
+            [" ab ", "ab\t ", "    "],
+            "{column_type} pads"
+        );
+    }
+    for column_type in [
+        "NATIONAL CHARACTER VARYING(4)",
+        "NATIONAL CHAR VARYING(4)",
+        "NCHAR VARYING(4)",
+    ] {
+        assert_eq!(
+            admitted_on(column_type, "code = 'ab '", &["ab", " ab", "ab "]),
+            ["ab "],
+            "{column_type} keeps every blank"
+        );
+    }
 }

@@ -125,6 +125,7 @@ async fn every_parity_case_agrees() {
             a_clock_gated_record_replays_from_its_own_row,
             a_share_record_replays_onto_another_types_object,
             a_char_column_compares_without_its_padding,
+            the_national_spellings_compare_like_char_and_varchar,
             a_deadline_is_fixed_in_the_creating_sessions_zone,
             a_nondeterministic_collation_is_compared_by_the_database,
             a_case_insensitive_owner_falls_closed_and_says_so,
@@ -4418,6 +4419,57 @@ CREATE POLICY docs_code ON docs FOR SELECT USING ({clause});
         .loading_from_rows();
         let run = support::parity::run(&cluster, &case).await;
         for id in ["d1", "d2", "d3", "d4"] {
+            support::parity::assert_postgres(
+                &case,
+                &run,
+                "app_user",
+                &format!("docs:{id}"),
+                ActionStatement::Select,
+                visible.contains(&id),
+            );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+/// The national spellings store as `char(4)` and `varchar(4)`, so the fixed ones replay
+/// from the row without their padding and the varying ones with every blank, agreeing
+/// with the database.
+async fn the_national_spellings_compare_like_char_and_varchar(cluster: Arc<Cluster>) {
+    for (name, column_type, visible) in [
+        (
+            "national-character",
+            "NATIONAL CHARACTER(4)",
+            &["d1", "d3"][..],
+        ),
+        ("national-char", "NATIONAL CHAR(4)", &["d1", "d3"]),
+        ("nchar", "NCHAR(4)", &["d1", "d3"]),
+        (
+            "national-character-varying",
+            "NATIONAL CHARACTER VARYING(4)",
+            &["d3"],
+        ),
+        ("national-char-varying", "NATIONAL CHAR VARYING(4)", &["d3"]),
+        ("nchar-varying", "NCHAR VARYING(4)", &["d3"]),
+    ] {
+        let case = ParityCase::reading(
+            &format!("runner-{name}"),
+            &format!(
+                "
+CREATE TABLE docs (id TEXT PRIMARY KEY, code {column_type});
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_code ON docs FOR SELECT USING (code = 'ab ');
+"
+            ),
+            &[
+                "INSERT INTO docs (id, code) VALUES ('d1', 'ab'), ('d2', ' ab'), ('d3', 'ab ')",
+                "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
+            ],
+            vec![Principal::as_role("app_user", "app_user")],
+        )
+        .loading_from_rows();
+        let run = support::parity::run(&cluster, &case).await;
+        for id in ["d1", "d2", "d3"] {
             support::parity::assert_postgres(
                 &case,
                 &run,
