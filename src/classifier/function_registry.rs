@@ -523,8 +523,15 @@ impl FunctionRegistry {
     }
 
     pub(crate) fn resolved_name(&self, name: &str) -> String {
-        let key = FunctionKey::parse(name);
-        let resolved = self.function_resolution.get(&key).unwrap_or(&key);
+        self.resolved_key_name(&FunctionKey::parse(name))
+    }
+
+    pub(crate) fn resolved_target_name(&self, target: &TargetName<'_>) -> String {
+        self.resolved_key_name(&FunctionKey::from_target(target))
+    }
+
+    fn resolved_key_name(&self, key: &FunctionKey) -> String {
+        let resolved = self.function_resolution.get(key).unwrap_or(key);
         self.function_names
             .get(resolved)
             .cloned()

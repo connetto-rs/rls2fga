@@ -293,8 +293,16 @@ fn a_role_column_not_closed_to_literals_keeps_the_body_condition() {
 /// and the policy with the literal cast and the call aliased.
 #[test]
 fn the_dumped_spelling_reads_as_the_written_one() {
-    let written = model(&format!("{LEVELS}{OWNER_READS}{ORDERS}"), BOTH);
-    let dumped = format!("{LEVELS}{OWNER_READS}{ORDERS}")
+    let translate = |sql: &str| {
+        translator(ConfidenceLevel::B, BOTH)
+            .translate(&db_of(sql))
+            .expect("the schema should plan")
+            .outputs()
+            .expect("every clause should translate")
+    };
+    let written_sql = format!("{LEVELS}{OWNER_READS}{ORDERS}");
+    let written = translate(&written_sql);
+    let dumped = written_sql
         .replace(
             "CHECK (role IN ('read', 'write', 'admin'))",
             // `read` twice, which the closed domain holds once.
@@ -303,8 +311,12 @@ fn the_dumped_spelling_reads_as_the_written_one() {
         .replace(
             "project_id = ANY (ARRAY(SELECT authz.projects_with('read')))",
             "(project_id = ANY (ARRAY( SELECT authz.projects_with('read'::text) AS projects_with)))",
-        );
-    assert_eq!(model(&dumped, BOTH), written);
+        )
+        .replace("authz.projects_with", "\"authz\".\"projects_with\"")
+        .replace("authz.teams_with", "\"authz\".\"teams_with\"");
+    let dumped = translate(&dumped);
+    assert_eq!(dumped.model(), written.model());
+    assert_eq!(dumped.report(), written.report());
 }
 
 /// The report names the pattern by its README row.

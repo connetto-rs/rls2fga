@@ -300,7 +300,7 @@ fn helper_call<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperCall, HelperRefusal> {
-    let name = function.target_name().to_string();
+    let name = registry.resolved_target_name(&function.target_name());
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
