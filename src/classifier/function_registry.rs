@@ -449,15 +449,15 @@ impl FunctionRegistry {
         table: &str,
         column: &str,
     ) -> bool {
-        let Some(guarded) = resolve_table_id(db, table) else {
-            return false;
-        };
-        self.attribute_columns
-            .iter()
-            .any(|(confirmed, confirmed_column)| {
-                confirmed_column == column
-                    && resolve_table_id(db, confirmed.spelling()).as_ref() == Some(&guarded)
-            })
+        let guarded = resolve_table_id(db, table);
+        guarded.is_some()
+            && self
+                .attribute_columns
+                .iter()
+                .any(|(confirmed, confirmed_column)| {
+                    confirmed_column == column
+                        && resolve_table_id(db, confirmed.spelling()) == guarded
+                })
     }
 
     /// Declare the `lc_monetary` the schema's `money` literals were written in.
