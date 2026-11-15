@@ -30,6 +30,8 @@ mod casts;
 mod helper;
 /// Whether a residual answers every caller alike.
 mod invariant;
+/// P26 the caller compared with an immutable function of one row column.
+mod owner_expression;
 /// Request-scoped values a deployment declared readable.
 mod session;
 /// P4/P5 membership and parent-inheritance recognizers (correlated EXISTS / IN subqueries).
@@ -50,6 +52,7 @@ pub(crate) use attribute::{
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use helper::recognize_declared_helper;
 pub(crate) use invariant::{residual_relations, MembershipScope};
+pub use owner_expression::recognize_owner_expression;
 pub use session::recognize_session_attribute;
 pub(crate) use session::{
     caller_set, caller_set_in_subquery, row_valued_set, undeclared_set_reads,

@@ -633,17 +633,42 @@ fn repeated_far_equality_keeps_the_same_membership() {
     assert_standard_payload(&classify(&predicate), "a repeated far equality");
 }
 
-#[test]
-fn both_hops_must_name_distinct_tables() {
+/// The closure table serving as its own membership table, the two hops told apart by
+/// their aliases alone.
+fn self_joined(alias: &str) -> (String, String) {
     let schema = SCHEMA.replace(
         "owner TEXT NOT NULL REFERENCES owners(id),",
         "owner TEXT NOT NULL REFERENCES owners(id),
          member_id TEXT REFERENCES principals(id), role TEXT,",
     );
     let predicate = NESTED_ROLE
-        .replace("FROM memberships m", "FROM ownable_ancestors m")
-        .replace("m.owner_id", "m.owner");
-    not_p19(&schema, &predicate, "two aliases of the closure table");
+        .replace("FROM memberships m", &format!("FROM ownable_ancestors {alias}"))
+        .replace("m.owner_id", &format!("{alias}.owner"))
+        .replace("m.", &format!("{alias}."));
+    (schema, predicate)
+}
+
+#[test]
+fn one_table_serves_both_hops_under_distinct_aliases() {
+    let (schema, predicate) = self_joined("m");
+    let c = classify_in(&schema, &predicate);
+    let p19 = p19(&c);
+    assert_eq!(p19.link_table.name(), "ownable_ancestors");
+    assert_eq!(pair_names(&p19.pairs), [("ownable", "id")]);
+    let [membership] = &p19.memberships[..] else {
+        panic!("{:?}", p19.memberships);
+    };
+    assert_eq!(membership.join_table.name(), "ownable_ancestors");
+    assert_eq!(pair_names(&membership.pairs), [("owner", "id")]);
+    assert_eq!(membership.user_column.as_str(), "member_id");
+}
+
+/// Under one alias the inner hop hides the outer one, so `a.owner = a.owner` compares
+/// the inner row with itself and correlates nothing.
+#[test]
+fn one_table_under_one_alias_is_not_two_hops() {
+    let (schema, predicate) = self_joined("a");
+    not_p19(&schema, &predicate, "two hops under one alias");
 }
 
 #[test]

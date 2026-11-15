@@ -72,7 +72,7 @@ use crate::classifier::patterns::{
     ConstantInCallerSet, DirectOwnership, ExistsMembership, ExpandedFunction,
     FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
     JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
-    ParentInheritance, PatternClass, RoleNameInList, RowValueEqualsCallerScalar,
+    OwnerExpression, ParentInheritance, PatternClass, RoleNameInList, RowValueEqualsCallerScalar,
     RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 
@@ -330,6 +330,7 @@ where
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P11ArrayMembership(ArrayMembership { .. })
         | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { .. })
+        | PatternClass::P26OwnerExpression(OwnerExpression { .. })
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
         | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
     };

@@ -155,13 +155,14 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P16 | `ConstantInCallerSet` | `'admin' = ANY(string_to_array(current_setting('app.roles', true), ','))` | A test of the caller's list, held once per table, see below |
 | P17 | `CallerScalarEqualsConstant` | `(SELECT auth.jwt() ->> 'aal') = 'aal2'` | A test of the caller's value, held once per table, see below |
 | P18 | `MembershipInCallerSet` | `EXISTS (SELECT 1 FROM shares s WHERE s.parent_id = t.id AND s.viewer = ANY(...))` | The gate on each share row, reached through the same parent P4 bridges to |
-| P19 | `IndirectMembership` | Nested `EXISTS` or an inner `JOIN` through a closure table | `member from ancestor`, with both hops referencing the same declared owner key |
+| P19 | `IndirectMembership` | Nested `EXISTS`, `IN` or an inner `JOIN` through a closure table, the membership table joined to itself on its group column included | `member from ancestor`, with both hops referencing the same declared owner key |
 | P20 | `DeclaredHelper` | `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))` | One relation per role and per call, `projects_with_read from projects` |
 | P21 | `CallerScalarUnequalsConstant` | `current_setting('app.mode', true) <> 'main'` | A test of the caller's value, held once per table, see below |
 | P22 | `CallerScalarInConstantList` | `current_setting('app.mode', true) IN ('main', 'dev')`, `= ANY (ARRAY[...])`, `NOT IN` | A test of the caller's value, one per constant it names, see below |
 | P23 | `FallbackScalarEqualsConstant` | `auth.role() = 'authenticated'`, read through a body that falls back across declared settings | The same test on the value the first declared setting that is set hands over, see below |
 | P24 | `FallbackScalarUnequalsConstant` | `auth.role() <> 'anonymous'`, read through such a body | The same test on the fallback value |
 | P25 | `FallbackScalarInConstantList` | `auth.role() IN ('authenticated', 'anonymous')`, `NOT IN` | The same test, one per constant it names |
+| P26 | `OwnerExpression` | `lower(owner) = current_user_id()`, every function the call reaches declared `IMMUTABLE` | `owner: [user]`, computed by the database and replayed by the row's key |
 | - | `MembershipExclusion` | Positive grant `AND NOT EXISTS (...)`, caller `NOT IN (...)`, caller `<> ALL (...)` | Grant `but not blocked`, with independent relations per blocklist |
 | - | `Unknown` | Anything else | Denied, with a TODO, unless an oracle classifies it |
 

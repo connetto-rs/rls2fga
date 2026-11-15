@@ -401,6 +401,20 @@ pub struct JsonbFieldOwnership {
     pub path: Vec<String>,
 }
 
+/// P26: The caller equals an immutable function of one column of the row:
+/// `lower(owner) = current_setting('app.user_id', true)`.
+///
+/// Only the database computes the function as the policy does, collation and all, so the
+/// ownership tuple is read by a query keyed on the row rather than from a row image.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OwnerExpression {
+    /// The one column of the row the expression reads.
+    pub column: ColumnName,
+    /// The expression as SQL over the bare row, its column quoted and every call
+    /// qualified by the schema of the one function it reaches.
+    pub expression: String,
+}
+
 /// A membership check naming no column of the guarded table, so it admits every
 /// row at once to whoever appears in the member table.
 #[derive(Debug, Clone, PartialEq)]
@@ -697,6 +711,9 @@ pub enum PatternClass {
     /// Exact: `->>` yields NULL for a missing key, a null value and a null column, and
     /// the comparison then filters, which is what dropping the NULLs reproduces.
     P12JsonbFieldOwnership(JsonbFieldOwnership),
+    /// P26: The caller equals an immutable function of one column of the row:
+    /// `lower(owner) = current_setting('app.user_id', true)`.
+    P26OwnerExpression(OwnerExpression),
     /// A membership check naming no column of the guarded table, so it admits every
     /// row at once to whoever appears in the member table.
     P13UncorrelatedMembership(UncorrelatedMembership),

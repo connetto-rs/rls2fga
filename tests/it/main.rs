@@ -12,6 +12,7 @@ mod classifier_edge_case_tests;
 mod classifier_indirect_membership_tests;
 mod classifier_tests;
 mod clock_threshold_tests;
+mod co_membership_tests;
 mod collation_replay_tests;
 mod common_patterns_tests;
 mod composite_key_membership_tests;
@@ -57,6 +58,7 @@ mod openfga_integration_tests;
 #[cfg(feature = "client")]
 mod openfga_semantic_tests;
 mod output_formatter_tests;
+mod owner_expression_tests;
 #[cfg(feature = "client")]
 mod parity_runner_tests;
 mod parser_tests;
