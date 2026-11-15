@@ -42,7 +42,7 @@ fn types_declaring_no_relation(dsl: &str) -> Vec<String> {
 fn a_composite_primary_key_names_a_row_by_every_key_column() {
     let db = db_of(
         r"
-CREATE TABLE public.docs(tenant_id UUID, id UUID, owner_id UUID, PRIMARY KEY (tenant_id, id));
+CREATE TABLE public.docs(tenant_id UUID, id UUID, owner_id TEXT, PRIMARY KEY (tenant_id, id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
@@ -196,7 +196,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 fn column_no_constraint_makes_unique_does_not_identify_objects() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID, owner_id UUID);
+CREATE TABLE docs(id UUID, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
@@ -226,7 +226,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 fn not_null_unique_column_identifies_objects_without_a_primary_key() {
     let db = db_of(
         r"
-CREATE TABLE public.docs(id UUID NOT NULL UNIQUE, owner_id UUID);
+CREATE TABLE public.docs(id UUID NOT NULL UNIQUE, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
@@ -253,8 +253,8 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 fn a_primary_key_declared_by_alter_table_identifies_rows() {
     let schema = |key: &str, constraint: &str| {
         format!(
-            "CREATE TABLE public.users (id UUID PRIMARY KEY);\n\
-             CREATE TABLE public.docs (id UUID {key}, owner_id UUID NOT NULL REFERENCES users(id));\n\
+            "CREATE TABLE public.users (id TEXT PRIMARY KEY);\n\
+             CREATE TABLE public.docs (id UUID {key}, owner_id TEXT NOT NULL REFERENCES users(id));\n\
              {constraint}\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));\n"
@@ -286,9 +286,9 @@ fn a_primary_key_declared_by_alter_table_identifies_rows() {
 fn a_unique_constraint_declared_by_alter_table_identifies_rows() {
     let schema = |unique: &str, constraint: &str| {
         format!(
-            "CREATE TABLE public.users (id UUID PRIMARY KEY);\n\
+            "CREATE TABLE public.users (id TEXT PRIMARY KEY);\n\
              CREATE TABLE public.docs (id UUID NOT NULL {unique}, \
-             owner_id UUID NOT NULL REFERENCES users(id));\n\
+             owner_id TEXT NOT NULL REFERENCES users(id));\n\
              {constraint}\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));\n"
@@ -515,7 +515,7 @@ CREATE POLICY b_read ON b FOR SELECT USING (EXISTS (SELECT 1 FROM a WHERE a.k = 
 fn a_bridge_the_schema_cannot_write_is_reported() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
   SELECT 1 FROM doc_members dm WHERE dm.doc_id = nonexistent AND dm.user_id = current_setting('app.user_id')));

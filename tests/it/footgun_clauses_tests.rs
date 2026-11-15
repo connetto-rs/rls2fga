@@ -14,7 +14,7 @@ use crate::support::footgun::{
 };
 
 const SPLIT_INSERT_AND_SELECT: &str = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, author_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, author_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (author_id = current_setting('app.user_id'));
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
@@ -23,7 +23,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 /// A `docs` the owner reads by `SELECT`, with an `UPDATE` whose only stored clause is
 /// `WITH CHECK`.
 const CLAUSELESS_UPDATE: &str = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_upd ON docs FOR UPDATE WITH CHECK (owner_id = current_setting('app.user_id'));
@@ -59,7 +59,7 @@ fn reading_the_inserted_row_back_needs_select_as_well_as_insert() {
 fn readback_relation_is_absent_when_inserting_implies_reading() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_setting('app.user_id'))
     WITH CHECK (owner_id = current_setting('app.user_id'));
@@ -84,7 +84,7 @@ CREATE POLICY docs_all ON docs FOR ALL USING (owner_id = current_setting('app.us
 fn an_upsert_requires_the_update_policies_as_well_as_the_insert() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id'));
@@ -131,7 +131,7 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting
 fn an_upsert_where_no_row_can_be_inserted_is_refused() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
@@ -167,7 +167,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app
 fn updating_and_deleting_a_row_requires_being_able_to_select_it() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id'));
@@ -209,7 +209,7 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_settin
 fn without_a_select_policy_no_row_can_be_updated_or_deleted() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id'));
 ",
@@ -341,7 +341,7 @@ fn a_command_a_policy_names_without_the_clause_it_needs_is_reported_as_unpolicie
 fn a_locking_read_needs_the_rows_an_update_may_touch() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (TRUE);
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id')) WITH CHECK (TRUE);
@@ -409,7 +409,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (TRUE);
 fn a_locking_read_is_answered_even_where_the_update_clauses_agree() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (TRUE);
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id'));
@@ -464,7 +464,7 @@ fn report_names_the_policy_whose_clause_is_absent() {
 fn a_clauseless_policy_beside_a_working_one_is_not_reported_as_a_denial() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_bare ON docs FOR SELECT;
@@ -504,7 +504,7 @@ CREATE POLICY docs_bare ON docs FOR SELECT;
 fn a_restrictive_update_check_narrows_the_write_but_not_the_lock() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id'));
@@ -546,7 +546,7 @@ CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR UPDATE WITH CHECK (reviewer_id
 fn a_clauseless_policy_is_found_through_any_spelling_of_its_table() {
     let db = db_of(
         r#"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_bare ON "docs" FOR SELECT;
@@ -917,6 +917,7 @@ fn a_restrictive_using_below_the_threshold_still_checks_inserts() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION unreadable(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY ins ON docs FOR INSERT WITH CHECK (owner_id = current_user);
 CREATE POLICY p ON docs AS RESTRICTIVE USING (unreadable(owner_id));

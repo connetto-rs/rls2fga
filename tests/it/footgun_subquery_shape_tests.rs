@@ -441,9 +441,9 @@ fn a_distinct_membership_subquery_still_translates() {
 /// Whatever is wrong with the refusal of a `SELECT` policy on `teams`, across the
 /// classification, its reason, the model and the membership tuples alike. Empty when
 /// every output refuses it and says why.
-fn refused_teams_policy_complaints(clause: &str, reason_names: &str) -> Vec<String> {
+fn refused_teams_policy_complaints(schema: &str, clause: &str, reason_names: &str) -> Vec<String> {
     let db = db_of(&format!(
-        "{TEAMS_SCHEMA}CREATE POLICY teams_members ON teams FOR SELECT USING ({clause});"
+        "{schema}CREATE POLICY teams_members ON teams FOR SELECT USING ({clause});"
     ));
     let translator = translator(ConfidenceLevel::B);
     let mut complaints = Vec::new();
@@ -514,17 +514,22 @@ fn refused_teams_policy_complaints(clause: &str, reason_names: &str) -> Vec<Stri
 /// every team the caller belongs to.
 #[test]
 fn an_in_subquery_selecting_something_other_than_a_column_is_refused() {
+    let schema = TEAMS_SCHEMA.replace("UUID", "TEXT");
     let complaints: Vec<String> = [
         "id IN (SELECT min(team_id) FROM members WHERE user_id = current_setting('app.user_id', true))",
         "id = ANY (SELECT min(team_id) FROM members WHERE user_id = current_setting('app.user_id', true))",
         "id IN (SELECT team_id || '' FROM members WHERE user_id = current_setting('app.user_id', true))",
-        "id IN (SELECT * FROM members WHERE user_id = current_setting('app.user_id', true))",
-        "id IN (SELECT row_number() OVER (ORDER BY team_id) FROM members \
+        "id IN (SELECT * FROM (SELECT team_id FROM members WHERE user_id = current_setting('app.user_id', true)) AS membership_keys)",
+        "id IN (SELECT CAST(row_number() OVER (ORDER BY team_id) AS TEXT) FROM members \
          WHERE user_id = current_setting('app.user_id', true))",
     ]
     .iter()
     .flat_map(|clause| {
-        refused_teams_policy_complaints(clause, "selects an expression rather than a column")
+        refused_teams_policy_complaints(
+            &schema,
+            clause,
+            "selects an expression rather than a column",
+        )
     })
     .collect();
     assert!(
@@ -543,6 +548,7 @@ fn an_in_subquery_selecting_a_cast_is_refused() {
     // Refused by the analyzer rather than by the projection guard: a cast is a column
     // reference, and what it cannot be is the key a tuple carries.
     let complaints = refused_teams_policy_complaints(
+        TEAMS_SCHEMA,
         "id IN (SELECT team_id::uuid FROM members WHERE user_id = current_setting('app.user_id', true))",
         "could not infer a unique membership join",
     );

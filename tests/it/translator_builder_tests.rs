@@ -76,7 +76,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = who());
 #[test]
 fn translator_builder_default_settings_rejects_uuid_array_accessor_inference() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID[]);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE FUNCTION listed_ids_accessor() RETURNS UUID[]
   LANGUAGE sql STABLE
@@ -128,6 +128,8 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user_id());
 fn translator_builder_registry_json_and_deployment_work_together() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE FUNCTION oauth_token() RETURNS UUID
+  LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = oauth_token());
 ";

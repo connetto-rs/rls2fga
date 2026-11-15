@@ -1982,12 +1982,11 @@ fn primary_key_of(table: &TableId, db: &ParserDB) -> Vec<String> {
     }
 }
 
-/// An arm nothing can classify, so the threshold drops it while the ownership arm
-/// beside it survives. `opaque_gate` is deliberately unregistered and bodyless, so
-/// no later vocabulary work can make it recognizable and quietly retire these tests.
+/// An opaque, unregistered function drops below the threshold beside a surviving ownership arm.
 const PARTIAL_SELECT_DROP: &str = "
 CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE FUNCTION auth_current_user_id() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.current_user_id'')';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -2002,6 +2001,7 @@ CREATE POLICY docs_opaque ON docs FOR SELECT USING (opaque_gate(id));
 const FOR_ALL_DROP: &str = "
 CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE FUNCTION auth_current_user_id() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.current_user_id'')';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -2023,6 +2023,7 @@ CREATE POLICY docs_owner ON docs FOR ALL USING (owner_id = auth_current_user_id(
 const WITH_CHECK_DROP: &str = "
 CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE FUNCTION auth_current_user_id() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.current_user_id'')';
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -2393,6 +2394,7 @@ CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT USING (is_public);
 const TOTAL_DROP: &str = "
 CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_opaque ON docs FOR SELECT USING (opaque_gate(id));
 ";
@@ -3089,7 +3091,7 @@ const EXPIRING_EXISTS: &str = "
 CREATE TABLE public.docs (id UUID PRIMARY KEY);
 CREATE TABLE public.doc_shares (
     doc_id UUID,
-    user_id UUID,
+    user_id TEXT,
     expires_at TIMESTAMPTZ,
     PRIMARY KEY (doc_id, user_id)
 );

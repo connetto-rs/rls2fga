@@ -25,7 +25,9 @@ fn formatter_uses_same_tuple_format_as_tuple_generator_helper() {
 fn formatter_report_discloses_policies_below_min_confidence() {
     let (classified, db, registry) = support::classify_sql(
         r"
-CREATE TABLE docs(id uuid primary key, owner_id uuid);
+CREATE TABLE docs(id uuid primary key, owner_id text);
+CREATE FUNCTION mystery_auth(owner_id TEXT) RETURNS BOOLEAN
+    LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY p_unknown ON docs FOR SELECT USING (mystery_auth(owner_id));

@@ -14,8 +14,8 @@ use crate::support::deployment;
 use crate::support::footgun::{db_of, translator};
 
 /// A schema every clause of which translates.
-const CLEAN: &str = "CREATE TABLE users(id UUID PRIMARY KEY);\n\
-                     CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID NOT NULL REFERENCES users(id));\n\
+const CLEAN: &str = "CREATE TABLE users(id TEXT PRIMARY KEY);\n\
+                     CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT NOT NULL REFERENCES users(id));\n\
                      ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
                      CREATE POLICY docs_all ON docs FOR ALL \
                      USING (owner_id = current_setting('app.user_id', true)) \

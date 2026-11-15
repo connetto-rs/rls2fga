@@ -731,14 +731,14 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
     );
 }
 
-/// A call whose argument count disagrees with the declaration is not the
-/// declared function's meaning, so it refuses rather than substituting a guess.
+/// A call leaving a defaulted parameter to its default passes fewer arguments than the
+/// declaration names, so it refuses rather than substituting a guess.
 #[test]
 fn an_arity_mismatch_refuses() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
-CREATE FUNCTION is_member(d UUID, extra INT) RETURNS BOOLEAN LANGUAGE sql AS
+CREATE FUNCTION is_member(d UUID, extra INT DEFAULT 0) RETURNS BOOLEAN LANGUAGE sql AS
 'SELECT TRUE';
 CREATE POLICY docs_sel ON docs FOR SELECT USING (is_member(id));
 ";

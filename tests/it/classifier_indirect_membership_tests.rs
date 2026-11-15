@@ -197,6 +197,13 @@ fn composite_owner_equalities_preserve_foreign_key_positions() {
 
 #[test]
 fn indirect_membership_requires_unmodified_table_sources() {
+    let schema = format!(
+        "{SCHEMA}
+CREATE FUNCTION ownable_ancestors() RETURNS TABLE (ownable TEXT, owner TEXT)
+    LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN; END $$;
+CREATE FUNCTION memberships() RETURNS TABLE (owner_id TEXT, member_id TEXT, role TEXT)
+    LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN; END $$;"
+    );
     let accepted: Vec<_> = [
         ("ownable_ancestors a", "ownable_ancestors() a"),
         ("memberships m", "memberships() m"),
@@ -208,7 +215,7 @@ fn indirect_membership_requires_unmodified_table_sources() {
     .into_iter()
     .filter(|&(source, replacement)| {
         matches!(
-            classify(&NESTED_ROLE.replace(source, replacement)).pattern,
+            classify_in(&schema, &NESTED_ROLE.replace(source, replacement)).pattern,
             PatternClass::P19IndirectMembership(_)
         )
     })
@@ -486,7 +493,7 @@ fn link_residual_reading_the_clock_is_refused() {
 
 #[test]
 fn link_residual_the_row_cannot_decide_is_refused() {
-    let schema = format!("{SCHEMA}ALTER TABLE ownable_ancestors ADD COLUMN kind TEXT;");
+    let schema = format!("{SCHEMA}ALTER TABLE ownable_ancestors ADD COLUMN kind DOUBLE PRECISION;");
     not_p19(
         &schema,
         "EXISTS (SELECT 1 FROM ownable_ancestors a WHERE a.ownable = orders.id

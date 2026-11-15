@@ -619,6 +619,7 @@ CREATE POLICY {name} ON docs USING (TRUE);
     fn a_surviving_or_arm_is_not_reported_as_excluded() {
         let sql = "
 CREATE TABLE docs(id uuid PRIMARY KEY, owner_id TEXT, meta TEXT);
+CREATE FUNCTION my_mystery(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user OR my_mystery(meta));
 ";
@@ -654,6 +655,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_user OR my_mystery(
     fn a_fully_dropped_clause_stays_reported() {
         let sql = "
 CREATE TABLE docs(id uuid PRIMARY KEY, meta TEXT);
+CREATE FUNCTION my_mystery(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (my_mystery(meta));
 ";
@@ -686,6 +688,7 @@ CREATE POLICY p ON docs FOR SELECT USING (my_mystery(meta));
         let sql = format!(
             "
 CREATE TABLE docs(id uuid PRIMARY KEY, owner_id TEXT, expires_at TIMESTAMPTZ, meta TEXT);
+CREATE FUNCTION my_mystery(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING ({using});
 "
@@ -712,6 +715,8 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
     fn a_composite_row_names_the_parts_that_set_its_grade() {
         const INFINITE: &str =
             "Unknown: INTERVAL 'infinity' has no finite length, so it has no CEL duration";
+        const OPAQUE: &str = "Unknown: Function 'my_mystery' is LANGUAGE plpgsql, and only a \
+                              single-expression LANGUAGE sql body expands";
         for (using, rendered) in [
             (
                 "owner_id = current_user AND expires_at > now() - interval 'infinity'",
@@ -724,16 +729,11 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
             ),
             (
                 "expires_at > now() - interval 'infinity' AND my_mystery(meta)",
-                format!(
-                    "P8 (And of 2 parts, graded D by {INFINITE} and by Unknown: Function \
-                     'my_mystery' not in registry and body not available)"
-                ),
+                format!("P8 (And of 2 parts, graded D by {INFINITE} and by {OPAQUE})"),
             ),
             (
                 "owner_id = current_user OR my_mystery(meta)",
-                "P8 (Or of 2 parts, graded D by Unknown: Function 'my_mystery' not in \
-                 registry and body not available)"
-                    .to_string(),
+                format!("P8 (Or of 2 parts, graded D by {OPAQUE})"),
             ),
             (
                 "owner_id = current_user AND meta = 'x'",

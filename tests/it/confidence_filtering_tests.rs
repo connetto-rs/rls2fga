@@ -120,6 +120,8 @@ CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_a TEXT, owner_b TEXT);
 CREATE FUNCTION auth_uid() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.user_id'')';
+CREATE FUNCTION unreadable(value TEXT) RETURNS BOOLEAN
+    LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_a = auth_uid() OR unreadable(owner_b));
 ";
@@ -129,6 +131,8 @@ CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_a TEXT, owner_b TEXT);
 CREATE FUNCTION auth_uid() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.user_id'')';
+CREATE FUNCTION unreadable(value TEXT) RETURNS BOOLEAN
+    LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pa ON docs FOR SELECT USING (owner_a = auth_uid());
 CREATE POLICY pb ON docs FOR SELECT USING (unreadable(owner_b));
@@ -186,6 +190,8 @@ CREATE TABLE users (id TEXT PRIMARY KEY);
 CREATE TABLE docs (id TEXT PRIMARY KEY, owner_a TEXT, owner_b TEXT);
 CREATE FUNCTION auth_uid() RETURNS TEXT LANGUAGE sql STABLE
     AS 'SELECT current_setting(''app.user_id'')';
+CREATE FUNCTION unreadable(value TEXT) RETURNS BOOLEAN
+    LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_a = auth_uid() AND unreadable(owner_b));
 ";

@@ -61,6 +61,7 @@ CREATE TABLE team_memberships(id UUID PRIMARY KEY, user_id UUID, team_id UUID);
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE TABLE object_grants(id UUID PRIMARY KEY, grantee_id UUID, resource_id UUID, role_level INT);
+CREATE FUNCTION role_level(TEXT, UUID) RETURNS INT LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE POLICY p ON docs FOR SELECT USING (role_level(current_setting('app.user_id'), id) >= 1);
 ";
     let db = support::deployment::db(sql);
@@ -117,6 +118,7 @@ CREATE TABLE team_memberships(id UUID PRIMARY KEY, user_id UUID, team_id UUID);
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE TABLE object_grants(id UUID PRIMARY KEY, grantee_id UUID, resource_id UUID, role_level INT);
+CREATE FUNCTION role_level(TEXT, UUID) RETURNS INT LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE POLICY p ON docs FOR SELECT USING (role_level(current_setting('app.user_id'), id) >= 1);
 ";
     let db = support::deployment::db(sql);
@@ -183,7 +185,7 @@ CREATE POLICY p ON items FOR SELECT USING (is_public = TRUE);
 #[test]
 fn a_declared_parent_fk_emits_its_tuple_to_userset_bridge() {
     let sql = r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON tasks FOR SELECT
@@ -211,7 +213,7 @@ CREATE POLICY p ON tasks FOR SELECT
 fn p4_reading_the_guarded_table_fails_closed_without_invalid_membership_sql() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, is_public BOOLEAN);
-CREATE TABLE doc_members(doc_id UUID, user_id UUID);
+CREATE TABLE doc_members(doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -258,7 +260,7 @@ CREATE POLICY p ON docs FOR SELECT
 fn p4_derived_joined_unqualified_extra_fails_closed_without_invalid_membership_sql() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, is_public BOOLEAN);
-CREATE TABLE doc_members(doc_id UUID, user_id UUID);
+CREATE TABLE doc_members(doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -306,7 +308,7 @@ CREATE POLICY p ON docs FOR SELECT
 #[test]
 fn report_contains_pattern_short_names() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN, status TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY p_flag ON docs FOR SELECT USING (is_public = TRUE);
@@ -387,7 +389,7 @@ CREATE POLICY p ON docs FOR SELECT
 #[test]
 fn p5_source_table_without_pk_generates_bridge_note() {
     let sql = r"
-CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE TABLE docs(org_id UUID REFERENCES orgs(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
@@ -462,6 +464,7 @@ CREATE TABLE users(id UUID PRIMARY KEY);
 CREATE TABLE items(val TEXT, owner_id UUID);
 ALTER TABLE items ENABLE ROW LEVEL SECURITY;
 CREATE TABLE object_grants(id UUID PRIMARY KEY, grantee_id UUID, resource_id UUID, role_level INT);
+CREATE FUNCTION role_level(TEXT, TEXT) RETURNS INT LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE POLICY p ON items FOR SELECT USING (role_level(current_setting('app.user_id'), val) >= 1);
 ";
     let db = support::deployment::db(sql);

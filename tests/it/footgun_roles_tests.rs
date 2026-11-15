@@ -21,7 +21,7 @@ use crate::support::footgun::{
 fn untranslatable_restrictive_policy_denies_instead_of_widening_access() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
@@ -63,7 +63,7 @@ fn translate_for(acting_roles: &[&str], db: &ParserDB) -> Outputs {
 /// One permissive read plus a barrier only `contractor` is subject to.
 const ROLE_SCOPED_BARRIER: &str = r"
 CREATE ROLE contractor NOLOGIN;
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
@@ -117,7 +117,7 @@ fn two_role_scoped_barriers_each_bind_their_own_role() {
         r"
 CREATE ROLE contractor NOLOGIN;
 CREATE ROLE auditor NOLOGIN;
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID, approver_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT, approver_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT TO contractor
@@ -145,7 +145,7 @@ fn a_write_behind_a_barrier_keeps_its_read_gate() {
     let db = db_of(
         r"
 CREATE ROLE contractor NOLOGIN;
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID, reviewer_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT, reviewer_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_edit ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id', true));
@@ -176,10 +176,10 @@ fn a_barrier_over_an_inherited_rule_keeps_its_references() {
     let db = db_of(
         r"
 CREATE ROLE contractor NOLOGIN;
-CREATE TABLE parents(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE parents(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE parents ENABLE ROW LEVEL SECURITY;
 CREATE POLICY parents_own ON parents FOR SELECT USING (owner_id = current_setting('app.user_id', true));
-CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id), reviewer_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id), reviewer_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_inherit ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM parents p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
@@ -203,7 +203,7 @@ GRANT SELECT ON parents, docs TO contractor;
 fn an_unscoped_restrictive_policy_binds_every_role() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_review ON docs AS RESTRICTIVE FOR SELECT
@@ -237,7 +237,7 @@ fn membership_readable_by_two_roles_admits_either_role() {
 CREATE ROLE auditor NOLOGIN;
 CREATE ROLE support NOLOGIN;
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dm_audit ON doc_members FOR SELECT TO auditor USING (true);
 CREATE POLICY dm_support ON doc_members FOR SELECT TO support USING (true);
@@ -375,7 +375,7 @@ fn a_clauseless_policy_mints_no_role_scope() {
     let db = db_of(
         r"
 CREATE ROLE auditor NOLOGIN;
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR ALL TO auditor;
@@ -422,7 +422,7 @@ CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR ALL TO auditor;
 fn a_restrictive_update_barrier_binds_both_halves_of_the_update() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true))
@@ -587,7 +587,7 @@ fn the_exempt_table_owner_is_named_when_the_schema_says_who_it_is() {
 fn a_barrier_role_the_schema_never_creates_binds_everyone() {
     let db = db_of(
         r"
-CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id UUID, secret BOOLEAN);
+CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT, secret BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT TO contractor
@@ -636,7 +636,7 @@ fn a_created_barrier_role_binds_only_its_own_branch() {
     let db = db_of(
         r"
 CREATE ROLE contractor NOLOGIN;
-CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id UUID, secret BOOLEAN);
+CREATE TABLE docs(id TEXT PRIMARY KEY, owner_id TEXT, secret BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT TO contractor
@@ -923,6 +923,7 @@ fn a_policy_the_threshold_emptied_mints_no_scope_relation() {
     let db = db_of(
         "CREATE ROLE auditor;
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_scoped ON docs FOR SELECT TO auditor USING (opaque_gate(id));

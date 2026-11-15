@@ -120,7 +120,7 @@ fn a_wrapped_clock_reading_never_reaches_the_loader() {
 #[test]
 fn an_undeclared_function_never_reaches_the_loader() {
     let schema = format!(
-        "{}\nCREATE FUNCTION public.mine(flag BOOLEAN) RETURNS BOOLEAN LANGUAGE sql STABLE AS\n'SELECT flag AND random() > 0.5';",
+        "CREATE FUNCTION public.mine(flag BOOLEAN) RETURNS BOOLEAN LANGUAGE sql STABLE AS\n'SELECT flag AND random() > 0.5';\n{}",
         membership_with("public.mine(m.active)")
     );
     let db = db_of(&schema);
