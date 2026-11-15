@@ -11,15 +11,15 @@ use crate::no_std_prelude::*;
 use alloc::borrow::Cow;
 use core::ops::ControlFlow;
 
-use sqlparser::ast::{BinaryOperator, Expr, InTarget};
+use sqlparser::ast::{BinaryOperator, Expr, InTarget, Value};
 
-use super::session::{declared_read, set_read, sole_projection};
+use super::session::{call_result, declared_read, set_read, sole_projection};
 use super::{
     caller_read_of, caller_renaming_cast, caller_source, comparison_renaming_cast,
     is_coalesce_wrapped, positional_function_arg, reads_the_caller,
 };
 use crate::classifier::function_registry::FunctionRegistry;
-use crate::parser::expr::{element_type, CastChain};
+use crate::parser::expr::{element_type, keeps_literal, CastChain};
 
 /// The cast on the row's side of a comparison that can rename the row's value.
 ///
@@ -44,15 +44,21 @@ pub(super) fn row_renaming_cast(expr: &Expr) -> Option<String> {
 ///
 /// A row value renames only through a cast of its own. A literal is also coerced into
 /// whatever type the request value ends in, so `'07'` compared with an `integer` is `7`.
+/// A string literal that already spells the canonical output of every type it passes
+/// through keeps its text, so `PostgreSQL` compares it as written.
 pub(super) fn other_side_renaming(other: &Expr, request: &CastChain) -> Option<String> {
-    if let Some(cast) = row_renaming_cast(other) {
-        return Some(cast);
-    }
-    let (_, peeled) = CastChain::peeled(other);
-    match (peeled, request.outermost()) {
-        (Expr::Value(_), Some(outermost)) if !request.yields_text() => Some(outermost.to_string()),
-        _ => None,
-    }
+    let (casts, peeled) = CastChain::peeled(other);
+    let Expr::Value(literal) = peeled else {
+        return row_renaming_cast(other);
+    };
+    let coerced = request.outermost().filter(|_| !request.yields_text());
+    let renaming = match &literal.value {
+        Value::SingleQuotedString(text) => casts
+            .renaming_literal(text)
+            .or_else(|| coerced.filter(|cast| !keeps_literal(cast, text))),
+        _ => casts.renaming(None).or(coerced),
+    };
+    renaming.map(str::to_string)
 }
 
 /// Why `expr` cannot translate for a cast that renames a value it compares with a request
@@ -171,6 +177,9 @@ fn caller_read(
     let read = caller_read_of(caller, registry)?;
     let declarable = caller_source(&read, registry).map(|source| source.setting_key().to_string());
     outer.extend(read.casts);
+    if read.path.is_empty() {
+        outer.extend(call_result(read.root, registry));
+    }
     Some(RequestRead {
         subject: format!("the caller's identity {}", read.root),
         declarable,
