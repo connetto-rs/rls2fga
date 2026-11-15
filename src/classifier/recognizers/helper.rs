@@ -17,13 +17,15 @@ use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
 use crate::classifier::recognizers::session::{declared_scalar, grade};
 use crate::classifier::recognizers::{projected_select, unparenthesize};
-use crate::generator::db_lookup::single_identity_column;
+use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
+use crate::generator::db_lookup::{row_uniquely_keys, single_identity_column};
+use crate::generator::model_bounds::MAX_CONDITIONS;
 use crate::parser::expr::CastChain;
 use crate::parser::names::{lookup_table, stored_ident_name, stored_relation_name, table_identity};
 use crate::parser::sql_parser::{
     CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, GrantArm,
     GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent, SettingValue,
-    TableLike,
+    TableLike, TimeBound, TimeComparison,
 };
 use crate::types::ColumnName;
 use sql_traits::errors::{HelperSetError, LookupError};
@@ -166,6 +168,29 @@ pub(crate) enum HelperRefusal {
         table: String,
         /// The helper returning the grantees.
         grantees: String,
+    },
+    /// A grant arm bounds its rows against the clock more than once, while several of
+    /// its rows can grant one caller one row, so no one tuple carries the bounds of the
+    /// row that meets them all.
+    #[error(
+        "grant table '{table}' can hold several rows granting one caller the same row, \
+         and several clock bounds cannot be compressed into one fact without mixing rows"
+    )]
+    MixedTimeBounds {
+        /// The grant table.
+        table: String,
+    },
+    /// Each bound keeping `NULL` doubles the ways a row meets the arm's bounds, each a
+    /// condition of its own, and the arm needs more than an `OpenFGA` model admits.
+    #[error(
+        "grant table '{table}' keeps NULL in {bounds} clock bounds, which takes more than \
+         the {MAX_CONDITIONS} conditions an OpenFGA model admits"
+    )]
+    TooManyNullBounds {
+        /// The grant table.
+        table: String,
+        /// The bounds keeping `NULL`.
+        bounds: usize,
     },
 }
 
@@ -526,7 +551,7 @@ fn helper_call<DB: DatabaseLike>(
             HelperArm::Grant(grant) => (
                 rows_named_by(grant.table(), grant.column(), db)?
                     .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
-                HelperSetArm::Grant(helper_grant(&name, grant, db)?),
+                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db)?)),
             ),
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
@@ -630,12 +655,58 @@ fn helper_grant<DB: DatabaseLike>(
             user_column: column,
         },
     };
-    Ok(HelperGrant {
+    let grant = HelperGrant {
         table: table_identity(table),
         object_column: ColumnName::from_stored(grant.column().stored_column_name()),
         grantee,
         rows: grant_rows(table, grant.restrictions(), db)?,
-    })
+        time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
+    };
+    if grant.time_bounds.len() > 1 && !row_uniquely_keys(&grant.table, &grant.tuple_key(), db) {
+        return Err(HelperRefusal::MixedTimeBounds {
+            table: grant.table.to_string(),
+        });
+    }
+    let null_kept = grant
+        .time_bounds
+        .iter()
+        .filter(|bound| bound.keeps_null)
+        .count();
+    // Each way a row meets the bounds is a condition, unless every bound is one met by
+    // `NULL`, which leaves one way comparing nothing with the clock.
+    let all_null = usize::from(null_kept == grant.time_bounds.len());
+    let conditions = u32::try_from(null_kept)
+        .ok()
+        .and_then(|shift| 1_usize.checked_shl(shift))
+        .map(|ways| ways - all_null);
+    if conditions.is_none_or(|conditions| conditions > MAX_CONDITIONS) {
+        return Err(HelperRefusal::TooManyNullBounds {
+            table: grant.table.to_string(),
+            bounds: null_kept,
+        });
+    }
+    Ok(grant)
+}
+
+/// The bound as the comparison the request clock completes, `now()` read unshifted.
+fn time_bound<DB: DatabaseLike>(bound: &TimeBound<'_, DB>) -> HelperTimeBound {
+    let operator = match bound.comparison() {
+        TimeComparison::Later => AttributeOperator::Gt,
+        TimeComparison::LaterOrEqual => AttributeOperator::GtEq,
+        TimeComparison::Earlier => AttributeOperator::Lt,
+        TimeComparison::EarlierOrEqual => AttributeOperator::LtEq,
+    };
+    HelperTimeBound {
+        comparison: AttributeRequestPredicate {
+            column: ColumnName::from_stored(bound.column().stored_column_name()),
+            operator,
+            threshold: ClockThreshold {
+                reading: ClockReading::Instant,
+                offset: ClockOffset::ZERO,
+            },
+        },
+        keeps_null: bound.keeps_null(),
+    }
 }
 
 /// The rows `restrictions` keep of `table`, split by its role column where it has one.

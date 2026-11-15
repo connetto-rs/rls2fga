@@ -1596,22 +1596,25 @@ fn helper_grant_parts<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
-    let groups = grant_row_groups(&grant.rows);
+    let groups = grant_row_groups(&grant.rows, &grant.time_bounds);
     match &grant.grantee {
-        HelperGrantee::Caller { user_column } => {
+        HelperGrantee::Caller { .. } => {
+            let aggregate = !row_uniquely_keys(&grant.table, &grant.tuple_key(), ctx.db);
             let plan = helper_level_plan(level_type, level, table_plan, all_types);
             groups
                 .into_iter()
-                .map(|(base, extra_predicates)| {
-                    UsersetExpr::Computed(caller_grant_relation(
+                .filter_map(|(base, extra_predicates)| {
+                    caller_grant_relation(
                         grant,
-                        user_column,
-                        base,
-                        extra_predicates,
                         level_type,
                         plan,
-                    ))
+                        ctx,
+                        base,
+                        extra_predicates,
+                        aggregate,
+                    )
                 })
+                .map(UsersetExpr::Computed)
                 .collect()
         }
         HelperGrantee::RequestSet {
@@ -1654,34 +1657,24 @@ fn helper_grant_parts<DB: DatabaseLike>(
 /// row it keeps where the grant table has no role column, each with the relation name
 /// it earns.
 ///
+/// A time bound rides the tuple as a condition comparing the row's column with the
+/// request clock. A bound keeping `NULL` splits the rows by whether the column holds
+/// one, since a `NULL` row meets the bound at every instant and fills no parameter, so
+/// each role is the union of one group per way the row can meet the bounds.
+///
 /// A condition with no SQL spelling loads nothing rather than every row.
-fn grant_row_groups(rows: &GrantRows) -> Vec<(String, ResidualPredicates)> {
-    let residual = |predicates: Vec<AttributePredicate>| {
-        predicates
-            .into_iter()
-            .map(|predicate| {
-                Some(ResidualPredicate {
-                    sql: format!(
-                        "{} {}",
-                        quote_sql_identifier(predicate.column.as_str()),
-                        render_attribute_test(&predicate.test)?
-                    ),
-                    guard: Some(ResidualGuard::Compare(predicate)),
-                    request: None,
-                    relations: Vec::new(),
-                })
-            })
-            .collect::<Option<Vec<_>>>()
-            .map(ResidualPredicates::new)
-    };
-    match rows {
+fn grant_row_groups(
+    rows: &GrantRows,
+    time_bounds: &[HelperTimeBound],
+) -> Vec<(String, ResidualPredicates)> {
+    let roles: Vec<(String, Vec<AttributePredicate>)> = match rows {
         GrantRows::Roles {
             column,
             values,
             predicates,
         } => values
             .iter()
-            .filter_map(|value| {
+            .map(|value| {
                 // A role spelled as text names its relation, any other literal the
                 // generic name the source key disambiguates.
                 let base = match value {
@@ -1696,29 +1689,124 @@ fn grant_row_groups(rows: &GrantRows) -> Vec<(String, ResidualPredicates)> {
                     },
                 };
                 let kept = core::iter::once(role).chain(predicates.iter().cloned());
-                Some((base, residual(kept.collect())?))
+                (base, kept.collect())
             })
             .collect(),
-        GrantRows::Matching { predicates } => residual(predicates.clone())
-            .map(|kept| (member_relation().to_string(), kept))
-            .into_iter()
-            .collect(),
+        GrantRows::Matching { predicates } => {
+            vec![(member_relation().to_string(), predicates.clone())]
+        }
+    };
+    let null_kept = time_bounds.iter().filter(|bound| bound.keeps_null).count();
+    let mut groups = Vec::with_capacity(roles.len() << null_kept);
+    for (base, kept) in roles {
+        // Bit `i` set reads the rows holding `NULL` in the `i`th bound keeping it.
+        for nulls in 0..1_usize << null_kept {
+            groups.extend(
+                grant_row_conjuncts(&kept, time_bounds, nulls)
+                    .map(|conjuncts| (base.clone(), conjuncts)),
+            );
+        }
     }
+    groups
+}
+
+/// The conjuncts a grant row meets: its role and kept values, `IS NULL` on each bound
+/// keeping `NULL` whose bit `nulls` sets, and the clock comparison of every other bound.
+/// `None` where a conjunct has no SQL spelling.
+fn grant_row_conjuncts(
+    kept: &[AttributePredicate],
+    time_bounds: &[HelperTimeBound],
+    nulls: usize,
+) -> Option<ResidualPredicates> {
+    let guard = |predicate: AttributePredicate| -> Option<ResidualPredicate> {
+        Some(ResidualPredicate {
+            sql: format!(
+                "{} {}",
+                quote_sql_identifier(predicate.column.as_str()),
+                render_attribute_test(&predicate.test)?
+            ),
+            guard: Some(ResidualGuard::Compare(predicate)),
+            request: None,
+            relations: Vec::new(),
+        })
+    };
+    let mut conjuncts = Vec::with_capacity(kept.len() + time_bounds.len());
+    for predicate in kept {
+        conjuncts.push(guard(predicate.clone())?);
+    }
+    let mut null_kept = 0;
+    for bound in time_bounds {
+        let column = &bound.comparison.column;
+        if bound.keeps_null {
+            let reads_null = nulls & (1 << null_kept) != 0;
+            null_kept += 1;
+            if reads_null {
+                conjuncts.push(guard(AttributePredicate {
+                    column: column.clone(),
+                    test: AttributeTest::IsNull,
+                })?);
+                continue;
+            }
+        }
+        conjuncts.push(ResidualPredicate {
+            sql: format!(
+                "{} {} now()",
+                quote_sql_identifier(column.as_str()),
+                bound.comparison.operator.sql()
+            ),
+            guard: None,
+            request: Some(bound.comparison.clone()),
+            relations: Vec::new(),
+        });
+    }
+    Some(ResidualPredicates::new(conjuncts))
 }
 
 /// The relation holding the caller each grant row `extra_predicates` keeps names, with
-/// the source loading it.
-fn caller_grant_relation(
+/// the source loading it, conditioned on the request clock where a conjunct compares
+/// with it, and `None` where that condition cannot be declared.
+fn caller_grant_relation<DB: DatabaseLike>(
     grant: &HelperGrant,
-    user_column: &ColumnName,
-    base: String,
-    extra_predicates: ResidualPredicates,
     level_type: &TypeName,
     plan: &mut TypePlan,
-) -> RelationName {
+    ctx: &PatternCtx<'_, DB>,
+    base: String,
+    extra_predicates: ResidualPredicates,
+    aggregate: bool,
+) -> Option<RelationName> {
+    let gate = if extra_predicates.has_requests() {
+        let (condition, context) = declare_temporal_condition(
+            &extra_predicates,
+            &grant.table,
+            plan,
+            ctx.condition_parameters,
+            ctx.db,
+        )?;
+        Some(MembershipGate {
+            condition,
+            context,
+            aggregate,
+        })
+    } else {
+        None
+    };
+    let user_column = grant.grantee.compared_column();
     let fk_cols = vec![grant.object_column.clone()];
-    let key = membership_source_key(&grant.table, &fk_cols, user_column, &extra_predicates, None);
-    let subject = DirectSubject::Type(plan.well_known.user.clone());
+    let key = membership_source_key(
+        &grant.table,
+        &fk_cols,
+        user_column,
+        &extra_predicates,
+        gate.as_ref().map(MembershipSourceGate::from),
+    );
+    let user = plan.well_known.user.clone();
+    let subject = match &gate {
+        Some(gate) => DirectSubject::ConditionalType {
+            type_name: user,
+            condition: gate.condition.clone(),
+        },
+        None => DirectSubject::Type(user),
+    };
     let relation = plan.membership_source_relation(&key, base, subject);
     plan.add_source(TupleSource::ExistsMembership {
         join_table: grant.table.clone(),
@@ -1727,9 +1815,9 @@ fn caller_grant_relation(
         parent_type: level_type.clone(),
         relation: relation.clone(),
         extra_predicates,
-        gate: None,
+        gate,
     });
-    relation
+    Some(relation)
 }
 
 /// The rows of a table admitting whoever presents a value the request compares with
@@ -1854,9 +1942,12 @@ pub(crate) fn emit_request_value_in_helper_set<DB: DatabaseLike>(
             source: &test.source,
             comparison: RequestComparison::CallerValueEquals,
         };
-        let groups = grant_row_groups(&GrantRows::Matching {
-            predicates: arm.predicates.clone(),
-        });
+        let groups = grant_row_groups(
+            &GrantRows::Matching {
+                predicates: arm.predicates.clone(),
+            },
+            &[],
+        );
         let Some((identity_cols, share_type, gates)) =
             share.gates(groups, ctx, table_plan, all_types)
         else {
