@@ -642,7 +642,10 @@ fn self_joined(alias: &str) -> (String, String) {
          member_id TEXT REFERENCES principals(id), role TEXT,",
     );
     let predicate = NESTED_ROLE
-        .replace("FROM memberships m", &format!("FROM ownable_ancestors {alias}"))
+        .replace(
+            "FROM memberships m",
+            &format!("FROM ownable_ancestors {alias}"),
+        )
         .replace("m.owner_id", &format!("{alias}.owner"))
         .replace("m.", &format!("{alias}."));
     (schema, predicate)
