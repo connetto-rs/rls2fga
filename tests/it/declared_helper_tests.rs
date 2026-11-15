@@ -1,6 +1,8 @@
 //! A column compared with the set a declared `SECURITY DEFINER` helper returns becomes
 //! the grants the helper's body reads, `role from parent` through each parent arm.
 
+use core::fmt::Write as _;
+
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, GrantRows, HelperSetArm, PatternClass, UnclassifiedExpr,
 };
@@ -1504,4 +1506,137 @@ fn a_set_of_the_caller_and_audiences_without_a_closed_kind_grants_users() {
         .collect();
     assert_eq!(callers.len(), 1, "{grants:#?}");
     assert!(!callers[0].contains("\"kind\""), "{}", callers[0]);
+}
+
+/// Grants kept from their start while their end is unset or ahead, as the request's
+/// expiring grants are.
+pub(crate) const EXPIRING: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE projects (id TEXT PRIMARY KEY);
+CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects (id),
+  title TEXT);
+CREATE TABLE project_grants (project_id TEXT NOT NULL REFERENCES projects (id),
+  grantee_id TEXT NOT NULL, starts_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ,
+  PRIMARY KEY (project_id, grantee_id));
+GRANT SELECT ON project_grants TO authz_owner;
+CREATE FUNCTION authz.projects_granted() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT pg.project_id FROM public.project_grants pg
+  WHERE pg.grantee_id = current_setting('app.user_id', true)
+    AND now() >= pg.starts_at
+    AND (pg.expires_at IS NULL OR pg.expires_at > now())
+$$;
+ALTER FUNCTION authz.projects_granted() OWNER TO authz_owner;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  project_id = ANY (ARRAY(SELECT authz.projects_granted())));
+";
+
+/// A row with no end meets the end at every instant, so its tuple compares the start
+/// alone, and every other row's tuple compares both with the request clock.
+#[test]
+fn an_expiring_grant_is_a_tuple_conditioned_on_the_request_clock() {
+    let dsl = model(EXPIRING, &["authz.projects_granted"]);
+    let relation = |name: &str| relation_definition(&dsl, "projects", name);
+    assert_eq!(
+        relation("projects_granted").as_deref(),
+        Some("member_1c2a7792 or member_1bf410e4"),
+        "{dsl}"
+    );
+    let conditioned = |relation: Option<String>| {
+        let condition = relation?
+            .strip_prefix("[user with ")?
+            .strip_suffix(']')?
+            .to_string();
+        let (_, body) = dsl.split_once(&format!("condition {condition}("))?;
+        Some(
+            body.split_once("{\n")?
+                .1
+                .split_once('\n')?
+                .0
+                .trim()
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        conditioned(relation("member_1c2a7792")).as_deref(),
+        Some("starts_at <= request_time && expires_at > request_time"),
+        "{dsl}"
+    );
+    assert_eq!(
+        conditioned(relation("member_1bf410e4")).as_deref(),
+        Some("starts_at <= request_time"),
+        "{dsl}"
+    );
+}
+
+/// Two rows of one caller on one project could each meet one bound, and no one tuple
+/// says whether a single row meets both.
+#[test]
+fn several_bounds_over_rows_repeating_a_grant_are_refused() {
+    let sql = EXPIRING.replace(",\n  PRIMARY KEY (project_id, grantee_id)", "");
+    assert!(refusal_of(&sql, &["authz.projects_granted"], "docs_read")
+        .contains("several clock bounds cannot be compressed into one fact"));
+}
+
+/// Four ends that may be unset take fifteen conditions, which a model admits, and five
+/// take thirty-one, which none does.
+#[test]
+fn bounds_keeping_null_stop_at_the_conditions_a_model_admits() {
+    let bounded = |ends: usize| {
+        let mut columns = String::new();
+        let mut conditions = String::new();
+        for end in 1..=ends {
+            let _ = write!(columns, ", ends_{end} TIMESTAMPTZ");
+            let _ = write!(
+                conditions,
+                "\n    AND (pg.ends_{end} IS NULL OR pg.ends_{end} > now())"
+            );
+        }
+        EXPIRING
+            .replace(
+                "expires_at TIMESTAMPTZ,",
+                &format!("expires_at TIMESTAMPTZ{columns},"),
+            )
+            .replace(
+                "    AND now() >= pg.starts_at\n    AND (pg.expires_at IS NULL OR pg.expires_at > now())",
+                &format!("    AND (pg.expires_at IS NULL OR pg.expires_at > now()){conditions}"),
+            )
+    };
+    let helpers = &["authz.projects_granted"];
+    let four_ends = using_of(&bounded(3), helpers, "docs_read");
+    assert_eq!(four_ends.confidence, ConfidenceLevel::A, "{four_ends:?}");
+    assert_eq!(
+        relation_definition(&model(&bounded(3), helpers), "projects", "projects_granted")
+            .map(|union| union.split(" or ").count()),
+        Some(16)
+    );
+    assert!(refusal_of(&bounded(4), helpers, "docs_read")
+        .contains("keeps NULL in 5 clock bounds, which takes more than the 25 conditions"));
+}
+
+/// A bound written either way round compares the column with the request clock the way
+/// the body compares it with `now()`.
+#[test]
+fn each_clock_comparison_keeps_its_direction() {
+    for (bound, compared) in [
+        ("now() < pg.starts_at", "starts_at > request_time"),
+        ("pg.starts_at >= now()", "starts_at >= request_time"),
+        ("pg.starts_at < now()", "starts_at < request_time"),
+        ("now() >= pg.starts_at", "starts_at <= request_time"),
+    ] {
+        let sql = EXPIRING.replace(
+            "    AND now() >= pg.starts_at\n    AND (pg.expires_at IS NULL OR pg.expires_at > now())",
+            &format!("    AND {bound}"),
+        );
+        let dsl = model(&sql, &["authz.projects_granted"]);
+        let condition = dsl
+            .split_once("\ncondition ")
+            .and_then(|(_, body)| body.split_once("{\n"))
+            .and_then(|(_, body)| body.split_once('\n'))
+            .map(|(line, _)| line.trim());
+        assert_eq!(condition, Some(compared), "{bound}: {dsl}");
+    }
 }
