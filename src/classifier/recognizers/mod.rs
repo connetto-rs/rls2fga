@@ -50,7 +50,7 @@ pub(crate) use attribute::{
     temporal_literal_comparisons, TemporalColumns,
 };
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
-pub(crate) use helper::recognize_declared_helper;
+pub(crate) use helper::{recognize_declared_helper, recognize_excluded_helper, HelperRefusal};
 pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use owner_expression::recognize_owner_expression;
 pub use session::recognize_session_attribute;

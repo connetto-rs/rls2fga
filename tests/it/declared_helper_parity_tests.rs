@@ -7,6 +7,7 @@ use core::time::Duration;
 
 use rls2fga::types::ActionStatement;
 
+use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_tests::{GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS};
 use crate::support;
 use crate::support::parity::{
@@ -235,6 +236,89 @@ async fn a_walk_down_the_group_tree_agrees_with_postgres_17_and_18() {
             // No grant, and no caller at all, read nothing.
             expect("erin", "docs:d_squad", ActionStatement::Select, false);
             expect("anonymous", "docs:d_org", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const BLOCK_HELPERS: &str = r#"{
+    "authz.blocked_projects": { "kind": "declared_helper" },
+    "authz.blocking_organizations": { "kind": "declared_helper" }
+}"#;
+
+/// `O1` blocks `alice` and `O2` blocks `carol`, who own projects or write documents in
+/// both organizations.
+fn blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-blocklist-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!("{BLOCKS}{PROJECTS_UNBLOCKED}{DOCS_UNBLOCKED}"),
+        &[
+            "INSERT INTO organizations VALUES ('O1'), ('O2');
+             INSERT INTO projects VALUES ('P1', 'O1', 'alice', NULL), ('P2', 'O2', 'alice', NULL),
+               ('P3', 'O1', 'bob', NULL), ('P4', 'O2', 'bob', NULL);
+             INSERT INTO docs VALUES ('d1', 'P1', 'alice', NULL), ('d2', 'P2', 'alice', NULL),
+               ('d3', 'P3', 'bob', NULL), ('d4', 'P4', 'carol', NULL), ('d5', 'P1', 'carol', NULL);
+             INSERT INTO organization_blocks VALUES ('O1', 'alice'), ('O2', 'carol')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON projects, docs TO app_reader;
+             GRANT UPDATE ON projects TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("carol"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(BLOCK_HELPERS)
+    .writing(
+        "projects",
+        Mutations {
+            update_set: Some("label = 'changed'".into()),
+            check_neutral: true,
+        },
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_blocklist_through_a_declared_helper_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = blocks_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, statement, allowed| {
+                assert_postgres(&case, &run, subject, object, statement, allowed);
+            };
+            // A block hides the organization's projects from their owner, for every
+            // command, and their documents through the project.
+            expect("alice", "projects:P1", ActionStatement::Select, false);
+            expect("alice", "projects:P1", ActionStatement::Update, false);
+            expect("alice", "projects:P2", ActionStatement::Select, true);
+            expect("alice", "projects:P2", ActionStatement::Update, true);
+            expect("alice", "docs:d1", ActionStatement::Select, false);
+            expect("alice", "docs:d2", ActionStatement::Select, true);
+            // A block on someone else changes nothing for an unblocked owner.
+            expect("bob", "projects:P3", ActionStatement::Select, true);
+            expect("bob", "projects:P4", ActionStatement::Update, true);
+            expect("bob", "docs:d3", ActionStatement::Select, true);
+            // A block reaches only its own organization's projects.
+            expect("carol", "docs:d4", ActionStatement::Select, false);
+            expect("carol", "docs:d5", ActionStatement::Select, true);
+            // No grant, and no caller at all, read nothing.
+            expect("erin", "projects:P2", ActionStatement::Select, false);
+            expect("anonymous", "projects:P2", ActionStatement::Select, false);
             assert_agrees(&case, &run);
         }
     }

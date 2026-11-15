@@ -1120,7 +1120,7 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
 }
 
 pub(super) fn emit_blocked_set<DB: DatabaseLike>(
-    subtract: &[ExistsMembership],
+    subtract: &[ExcludedSet],
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
@@ -1128,17 +1128,20 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
     readability: &mut BTreeMap<TableId, TableReadability>,
 ) -> Option<UsersetExpr> {
     let mut sets = Vec::with_capacity(subtract.len());
-    for membership in subtract {
+    for excluded in subtract {
         let before = notes.len();
-        let set = emit_membership(
-            membership,
-            ctx,
-            table_plan,
-            all_types,
-            notes,
-            readability,
-            MembershipRoute::Parent(MembershipPolarity::Block),
-        );
+        let set = match excluded {
+            ExcludedSet::Membership(membership) => emit_membership(
+                membership,
+                ctx,
+                table_plan,
+                all_types,
+                notes,
+                readability,
+                MembershipRoute::Parent(MembershipPolarity::Block),
+            ),
+            ExcludedSet::Helper(helper) => emit_declared_helper(helper, ctx, table_plan, all_types),
+        };
         if grants_nothing(&set, table_plan)
             || notes
                 .iter()
