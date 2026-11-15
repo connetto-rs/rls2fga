@@ -36,12 +36,12 @@ fn schema_collision_tables_get_disambiguated_type_names() {
     let sql = r"
 CREATE SCHEMA app;
 CREATE SCHEMA auth;
-CREATE TABLE app.users (id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE app.users (id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE app.users ENABLE ROW LEVEL SECURITY;
 CREATE POLICY app_users_select ON app.users FOR SELECT
     USING (owner_id = current_setting('app.user_id', true));
 
-CREATE TABLE auth.users (id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE auth.users (id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE auth.users ENABLE ROW LEVEL SECURITY;
 CREATE POLICY auth_users_select ON auth.users FOR SELECT
     USING (owner_id = current_setting('app.user_id', true));

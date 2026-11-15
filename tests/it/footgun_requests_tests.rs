@@ -206,8 +206,8 @@ fn two_guards_in_one_or_policy_mint_two_distinct_gates() {
 fn a_restrictive_clause_never_drops_an_attribute_conjunct() {
     let schema = |restriction: &str| {
         format!(
-            "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, deleted_at TIMESTAMP, \
-             tenant_id UUID, title TEXT);\n\
+            "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, deleted_at TIMESTAMP, \
+             tenant_id TEXT, title TEXT);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
              CREATE POLICY docs_bar ON docs AS RESTRICTIVE FOR SELECT USING ({restriction});\n"
@@ -666,7 +666,7 @@ CREATE POLICY docs_json ON docs FOR SELECT
 #[test]
 fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
     let plain_db = db_of(
-        "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, data JSONB, tags TEXT[], status TEXT);
+        "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, data JSONB, tags TEXT[], status TEXT);
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
          CREATE POLICY docs_hybrid ON docs FOR SELECT
            USING (owner_id = current_setting('app.user_id', true) AND status = 'published');",
@@ -693,7 +693,7 @@ fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
         "tags @> ARRAY['x']",
     ] {
         let db = db_of(&format!(
-            "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, data JSONB, tags TEXT[], status TEXT);
+            "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, data JSONB, tags TEXT[], status TEXT);
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
              CREATE POLICY docs_hybrid ON docs FOR SELECT
                USING (owner_id = current_setting('app.user_id', true) AND {guard});"
@@ -728,7 +728,7 @@ fn a_jsonb_or_array_attribute_guard_keeps_the_relationship_it_guards() {
 fn a_dropped_jsonb_attribute_guard_names_the_field_it_stopped_checking() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, data JSONB);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, data JSONB);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_hybrid ON docs FOR SELECT
   USING (owner_id = current_setting('app.user_id', true) AND data ->> 'status' = 'published');
@@ -873,7 +873,7 @@ fn only_a_literal_constant_earns_the_attribute_wildcard() {
     // the emission depends on.
     for clause in [
         "status = current_setting('app.user_id', true)",
-        "status > now()",
+        "expires_at > now()",
         "status = owner_id",
         "status = upper('a')",
     ] {

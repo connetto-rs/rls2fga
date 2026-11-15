@@ -84,12 +84,12 @@ pub(crate) fn overlength_name_schema(role: Option<&str>) -> String {
     let long_table = "t".repeat(60);
     let long_parent = "p".repeat(60);
     format!(
-        "CREATE TABLE {long_parent}(id UUID PRIMARY KEY, owner_id UUID);\n\
+        "CREATE TABLE {long_parent}(id UUID PRIMARY KEY, owner_id TEXT);\n\
          ALTER TABLE {long_parent} ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY parent_sel ON {long_parent} FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
          CREATE TABLE {long_table}(\n\
            id UUID PRIMARY KEY,\n\
-           {long_column}_id UUID,\n\
+           {long_column}_id TEXT,\n\
            parent_ref UUID REFERENCES {long_parent}(id)\n\
          );\n\
          ALTER TABLE {long_table} ENABLE ROW LEVEL SECURITY;\n\

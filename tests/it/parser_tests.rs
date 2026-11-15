@@ -139,7 +139,7 @@ fn parse_emi_rls_enabled() {
 #[test]
 fn a_policy_expression_altered_after_creation_is_the_one_translated() {
     let sql = "
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ALTER POLICY docs_sel ON docs USING (FALSE);
@@ -162,7 +162,7 @@ ALTER POLICY docs_sel ON docs USING (FALSE);
 #[test]
 fn renaming_a_policy_is_still_accepted() {
     let sql = "
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ALTER POLICY docs_sel ON docs RENAME TO docs_select;
@@ -176,7 +176,7 @@ ALTER POLICY docs_sel ON docs RENAME TO docs_select;
 #[test]
 fn a_grant_naming_a_role_the_schema_does_not_create_is_accepted() {
     const SCHEMA: &str = "
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 ";

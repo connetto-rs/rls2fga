@@ -26,7 +26,7 @@ fn equals_any_subquery_classifies_as_exists_membership() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(doc_id UUID, user_id UUID);
+CREATE TABLE doc_members(doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT
   USING (id = ANY (SELECT doc_id FROM doc_members WHERE user_id = current_setting('app.user_id', true)));
@@ -59,7 +59,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT
 fn nested_correlated_exists_resolves_to_the_scanned_table() {
     let db = db_of(
         r"
-CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY orgs_sel ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE projects(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id));
@@ -127,7 +127,7 @@ fn membership_join_on_the_scanned_tables_own_key_is_refused() {
     // No foreign key is declared, so parent inheritance cannot be confirmed either.
     let db = db_of(
         r"
-CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY orgs_sel ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE projects(id UUID PRIMARY KEY, org_id UUID);
@@ -169,7 +169,7 @@ CREATE POLICY projects_sel ON projects FOR SELECT USING (
 fn membership_table_whose_primary_key_is_its_foreign_key_still_translates() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_owner(doc_id UUID PRIMARY KEY REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_owner(doc_id UUID PRIMARY KEY REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_owner o WHERE o.doc_id = docs.id AND o.user_id = current_setting('app.user_id', true)));
@@ -209,7 +209,7 @@ fn membership_subquery_with_a_join_is_refused() {
     let db = db_of(
         r"
 CREATE TABLE departments(id UUID PRIMARY KEY, region TEXT);
-CREATE TABLE user_permissions(id UUID PRIMARY KEY, user_id UUID, dept_id UUID REFERENCES departments(id));
+CREATE TABLE user_permissions(id UUID PRIMARY KEY, user_id TEXT, dept_id UUID REFERENCES departments(id));
 CREATE TABLE orders(id UUID PRIMARY KEY, region TEXT);
 ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
 CREATE POLICY orders_sel ON orders FOR SELECT USING (
@@ -262,8 +262,8 @@ fn a_nested_quoted_table_is_not_precomputed_as_a_membership_residual() {
 fn self_referential_membership_defines_the_relation_it_reads() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (
@@ -295,7 +295,7 @@ fn membership_through_an_unreadable_join_table_grants_nothing() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
@@ -328,7 +328,7 @@ fn membership_through_a_guarded_join_table_is_disclosed() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_setting('app.user_id', true));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -362,7 +362,7 @@ fn membership_through_an_open_join_table_needs_no_caveat() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
@@ -388,7 +388,7 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
 fn membership_readable_only_by_a_role_denies_the_guarded_table() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dm_read ON doc_members FOR SELECT TO auditor USING (true);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -434,7 +434,7 @@ fn membership_readable_by_public_keeps_the_grant_unscoped() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
 CREATE ROLE auditor;
 CREATE POLICY dm_audit ON doc_members FOR SELECT TO auditor USING (true);
@@ -735,7 +735,7 @@ fn membership_readability(policies: &str) -> (String, bool, bool, Vec<Translatio
     let sql = format!(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
-CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
+CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
 {policies}
@@ -1649,10 +1649,10 @@ CREATE POLICY docs_b_select ON docs_b FOR SELECT TO PUBLIC
 fn distinct_acl_tables_do_not_share_a_member_relation() {
     let db = db_of(
         r"
-CREATE TABLE principals(id UUID PRIMARY KEY);
+CREATE TABLE principals(id TEXT PRIMARY KEY);
 CREATE TABLE resources(id UUID PRIMARY KEY);
-CREATE TABLE read_acl(resource_id UUID REFERENCES resources(id), user_id UUID REFERENCES principals(id));
-CREATE TABLE delete_acl(resource_id UUID REFERENCES resources(id), user_id UUID REFERENCES principals(id));
+CREATE TABLE read_acl(resource_id UUID REFERENCES resources(id), user_id TEXT REFERENCES principals(id));
+CREATE TABLE delete_acl(resource_id UUID REFERENCES resources(id), user_id TEXT REFERENCES principals(id));
 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
 CREATE POLICY resources_read ON resources FOR SELECT USING (
   EXISTS (SELECT 1 FROM read_acl m WHERE m.resource_id = resources.id AND m.user_id = current_setting('app.user_id', true)));

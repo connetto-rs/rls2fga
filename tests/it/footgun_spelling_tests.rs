@@ -44,7 +44,7 @@ fn quoted_dot_in_a_table_name_is_not_read_as_a_schema_separator() {
 fn a_quoted_parent_reference_still_inherits() {
     let schema = |parent_ref: &str| {
         format!(
-            "CREATE TABLE parents(id UUID PRIMARY KEY, owner_id UUID);\n\
+            "CREATE TABLE parents(id UUID PRIMARY KEY, owner_id TEXT);\n\
              ALTER TABLE parents ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY parents_sel ON parents FOR SELECT USING (owner_id = current_setting('app.user_id'));\n\
              CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES parents(id));\n\
@@ -257,7 +257,7 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
 fn a_mixed_case_foreign_key_still_inherits_the_parent_rule() {
     let db = db_of(
         r"
-CREATE TABLE public.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE public.projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE public.tasks(id UUID PRIMARY KEY, Project_Id UUID REFERENCES projects(id));
@@ -296,7 +296,7 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
     // the join columns in another case.
     let policy_side = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
@@ -686,6 +686,8 @@ fn a_parenthesized_setting_conjunct_classifies_as_the_bare_one() {
             "CREATE TABLE ownables(id UUID PRIMARY KEY, owner_id UUID, status TEXT);\n\
              CREATE TABLE owner_grants(grantee_owner_id UUID, granted_owner_id UUID, role_id INTEGER);\n\
              CREATE TABLE team_members(user_id UUID, team_id UUID);\n\
+             CREATE FUNCTION auth_current_user_id() RETURNS UUID LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;\n\
+             CREATE FUNCTION get_owner_role(caller UUID, owner UUID) RETURNS INTEGER LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;\n\
              ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY ownables_update ON ownables FOR UPDATE USING ({using});\n"
         )
@@ -723,6 +725,8 @@ fn a_parenthesized_list_setting_conjunct_classifies_as_the_bare_one() {
             "CREATE TABLE ownables(id UUID PRIMARY KEY, owner_id UUID, status TEXT);\n\
              CREATE TABLE owner_grants(grantee_owner_id UUID, granted_owner_id UUID, role_id INTEGER);\n\
              CREATE TABLE team_members(user_id UUID, team_id UUID);\n\
+             CREATE FUNCTION auth_current_user_id() RETURNS UUID LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;\n\
+             CREATE FUNCTION get_owner_role(caller UUID, owner UUID) RETURNS INTEGER LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;\n\
              ALTER TABLE ownables ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY ownables_update ON ownables FOR UPDATE USING ({using});\n"
         )

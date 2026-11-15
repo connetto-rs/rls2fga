@@ -2028,6 +2028,11 @@ mod tests {
         assert_eq!(render_attribute_test(&AttributeTest::In(Vec::new())), None);
     }
 
+    /// The functions [`role_threshold_registry`] registers, declared as the schema needs them.
+    const ROLE_THRESHOLD_FUNCTIONS: &str = "\
+CREATE FUNCTION auth_current_user_id() RETURNS uuid LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
+CREATE FUNCTION role_level(uuid, uuid) RETURNS integer LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN 0; END $$;";
+
     fn role_threshold_registry() -> FunctionRegistry {
         let mut registry = FunctionRegistry::new();
         registry
@@ -2313,16 +2318,17 @@ CREATE POLICY docs_update ON docs FOR ALL
 
     #[test]
     fn generate_role_threshold_tuples_uses_policy_resource_column_for_grant_join() {
-        let db = parse_schema(
+        let db = parse_schema(&format!(
             r"
 CREATE TABLE public.users(id uuid primary key);
 CREATE TABLE public.docs(id uuid primary key, owner_id uuid references users(id));
 CREATE TABLE public.object_grants(grantee_id uuid, resource_id uuid, role_level integer);
+{ROLE_THRESHOLD_FUNCTIONS}
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT
   USING (role_level(auth_current_user_id(), id) >= 2);
-",
-        )
+"
+        ))
         .expect("schema should parse");
 
         let registry = role_threshold_registry();
@@ -2356,14 +2362,17 @@ CREATE POLICY docs_select ON docs FOR SELECT
     #[test]
     fn generate_role_threshold_tuples_extracts_resource_column_from_composite_classification() {
         let db = parse_schema(
-            r"
+            &format!(
+                r"
 CREATE TABLE public.users(id uuid primary key);
 CREATE TABLE public.docs(id uuid primary key, owner_id uuid references users(id), is_public boolean);
 CREATE TABLE public.object_grants(grantee_id uuid, resource_id uuid, role_level integer);
+{ROLE_THRESHOLD_FUNCTIONS}
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT
   USING ((role_level(auth_current_user_id(), id) >= 2) AND is_public = TRUE);
-",
+"
+            ),
         )
         .expect("schema should parse");
 
@@ -2387,18 +2396,19 @@ CREATE POLICY docs_select ON docs FOR SELECT
     /// a fact about the value the call passed and the two calls passed different values.
     #[test]
     fn generate_role_threshold_tuples_points_at_every_owner_column() {
-        let db = parse_schema(
+        let db = parse_schema(&format!(
             r"
 CREATE TABLE public.users(id uuid primary key);
 CREATE TABLE public.docs(id uuid primary key, owner_id uuid references users(id), project_id uuid);
 CREATE TABLE public.object_grants(grantee_id uuid, resource_id uuid, role_level integer);
+{ROLE_THRESHOLD_FUNCTIONS}
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select_id ON docs FOR SELECT
   USING (role_level(auth_current_user_id(), id) >= 2);
 CREATE POLICY docs_select_project ON docs FOR SELECT
   USING (role_level(auth_current_user_id(), project_id) >= 2);
-",
-        )
+"
+        ))
         .expect("schema should parse");
 
         let registry = role_threshold_registry();
@@ -2437,19 +2447,20 @@ CREATE POLICY docs_select_project ON docs FOR SELECT
     /// The same, where one policy reaches two owner columns through an `OR`.
     #[test]
     fn generate_role_threshold_tuples_points_at_both_columns_of_one_policy() {
-        let db = parse_schema(
+        let db = parse_schema(&format!(
             r"
 CREATE TABLE public.users(id uuid primary key);
 CREATE TABLE public.docs(id uuid primary key, owner_id uuid references users(id), project_id uuid);
 CREATE TABLE public.object_grants(grantee_id uuid, resource_id uuid, role_level integer);
+{ROLE_THRESHOLD_FUNCTIONS}
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT
   USING (
     (role_level(auth_current_user_id(), id) >= 2)
     OR (role_level(auth_current_user_id(), project_id) >= 2)
   );
-",
-        )
+"
+        ))
         .expect("schema should parse");
 
         let registry = role_threshold_registry();
@@ -2478,7 +2489,7 @@ CREATE POLICY docs_select ON docs FOR SELECT
         let db = parse_schema(
             r"
 CREATE TABLE public.docs(id uuid primary key);
-CREATE TABLE public.doc_members(doc_id uuid, user_id uuid, role text);
+CREATE TABLE public.doc_members(doc_id uuid, user_id text, role text);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON docs FOR SELECT USING (
   EXISTS (
@@ -2527,7 +2538,7 @@ CREATE POLICY docs_select ON docs FOR SELECT USING (
         let db = parse_schema(
             r"
 CREATE SCHEMA app;
-CREATE TABLE app.docs(id uuid primary key, owner_id uuid);
+CREATE TABLE app.docs(id uuid primary key, owner_id text);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON app.docs USING (owner_id = current_setting('app.user_id'));
 ",
@@ -2550,7 +2561,7 @@ CREATE POLICY docs_select ON app.docs USING (owner_id = current_setting('app.use
             r#"
 CREATE TABLE public."Doc Items"(
   id uuid primary key,
-  "OwnerID" uuid
+  "OwnerID" text
 );
 ALTER TABLE "Doc Items" ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_select ON "Doc Items" FOR SELECT
