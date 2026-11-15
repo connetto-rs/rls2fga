@@ -1794,13 +1794,36 @@ mod tests {
 
     /// The bare read is `NULL` on a fresh connection and `''` once a transaction-local
     /// value has ended, so `IS NULL` on it answers both ways for one request, and a
-    /// setting every request sets is never absent. Each stays refused naming why, and so
-    /// does a cast that renames the wrapped read.
+    /// setting every request sets is never absent, nor is a field of a document. Each
+    /// stays refused naming why, once however often the policy repeats it, and so does a
+    /// cast that renames the wrapped read.
     #[test]
     fn an_absence_test_the_request_cannot_answer_is_refused() {
         let unset = registry([scalar("app.mode").may_be_unset()]);
         let always = registry([scalar("app.mode")]);
+        let field = registry([json_field(
+            "request.jwt.claims",
+            &["mode"],
+            SettingValue::Scalar(DataType::Text),
+        )
+        .may_be_unset()]);
         for (clause, registry, reason) in [
+            (
+                "current_setting('app.mode', true) IS NULL \
+                 OR current_setting('app.mode', true) IS NULL",
+                &unset,
+                "Test NULLIF(current_setting('app.mode', true), '') instead",
+            ),
+            (
+                "NULLIF(current_setting('request.jwt.claims', true)::jsonb ->> 'mode', '') IS NULL",
+                &field,
+                "NULLIF hides a field of setting 'request.jwt.claims'",
+            ),
+            (
+                "current_setting('request.jwt.claims', true)::jsonb ->> 'mode' IS NULL",
+                &field,
+                "A field of setting 'request.jwt.claims' tested for NULL",
+            ),
             (
                 "current_setting('app.mode', true) IS NULL",
                 &unset,

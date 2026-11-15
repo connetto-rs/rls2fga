@@ -822,6 +822,18 @@ fn classify_expr_inner<DB: DatabaseLike>(
         }
         let inner_classified =
             classify_expr_depth(inner, db, registry, table, command, depth + 1, state);
+        // An absence test is never `NULL`, so its negation is the opposite test.
+        if let PatternClass::P28RequestValueAbsent(RequestValueAbsent { source, negated }) =
+            inner_classified.pattern
+        {
+            return ClassifiedExpr {
+                pattern: PatternClass::P28RequestValueAbsent(RequestValueAbsent {
+                    source,
+                    negated: !negated,
+                }),
+                confidence: inner_classified.confidence,
+            };
+        }
         let desc = pattern_short_name(&inner_classified.pattern);
         return unknown_d(
             expr,

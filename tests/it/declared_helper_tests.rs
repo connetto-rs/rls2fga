@@ -890,6 +890,48 @@ fn an_installation_every_request_sets_refuses_the_absence_test() {
     );
 }
 
+/// `NOT` around an absence test is the opposite test, since an absence test is never
+/// `NULL`.
+#[test]
+fn a_negated_absence_test_is_the_opposite_test() {
+    let translator = absent_installation_translator(
+        typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    );
+    for (using, carried) in [
+        (
+            "NOT (NULLIF(current_setting('app.installation_id', true), '') IS NULL)",
+            true,
+        ),
+        (
+            "NOT NOT (NULLIF(current_setting('app.installation_id', true), '') IS NULL)",
+            false,
+        ),
+        (
+            "NOT (NULLIF(current_setting('app.installation_id', true), '') IS NOT NULL)",
+            false,
+        ),
+    ] {
+        let classified = translator.classify(&db_of(&format!(
+            "{ABSENT_INSTALLATION}
+             CREATE POLICY docs_negated ON docs AS RESTRICTIVE FOR SELECT USING ({using});"
+        )));
+        let pattern = &classified
+            .iter()
+            .find(|classified| classified.name() == "docs_negated")
+            .expect("the negation should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .pattern;
+        assert!(
+            matches!(
+                pattern,
+                PatternClass::P28RequestValueAbsent(test) if test.negated == carried
+            ),
+            "`{using}`: {pattern:?}"
+        );
+    }
+}
+
 /// A request value behind a helper falls closed where the rows it reads depend on the
 /// request or on the statement time, and so does a grant to everyone kept by the
 /// statement time and a caller gate on rows a request's set admits.

@@ -164,7 +164,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P25 | `FallbackScalarInConstantList` | `auth.role() IN ('authenticated', 'anonymous')`, `NOT IN` | The same test, one per constant it names |
 | P26 | `OwnerExpression` | `lower(owner) = current_user_id()`, every function the call reaches declared `IMMUTABLE` | `owner: [user]`, computed by the database and replayed by the row's key |
 | P27 | `RequestValueInHelperSet` | `current_setting('app.installation_id', true) IN (SELECT authz.installations_allowing('docs', 'select'))` | One tuple per row the helper returns, held once per table on the `request_gate` object, testing the caller's value against the row's |
-| P28 | `RequestValueAbsent` | `NULLIF(current_setting('app.installation_id', true), '')::uuid IS NULL`, `IS NOT NULL`, on a setting a request may leave unset | One tuple per table on the `request_gate` object, testing whether the `settings` map lacks the key, or holds it |
+| P28 | `RequestValueAbsent` | `NULLIF(current_setting('app.installation_id', true), '')::uuid IS NULL`, `IS NOT NULL` or `NOT` of either, on a setting a request may leave unset | One tuple per table on the `request_gate` object, testing whether the `settings` map lacks the key, or holds it |
 | - | `MembershipExclusion` | Positive grant `AND NOT EXISTS (...)`, caller `NOT IN (...)`, caller `<> ALL (...)`, column `NOT IN` a declared helper's set | Grant `but not blocked`, with independent relations per blocklist |
 | - | `Unknown` | Anything else | Denied, with a TODO, unless an oracle classifies it |
 
