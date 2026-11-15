@@ -8,8 +8,8 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, InTarget, Query,
-    SelectItem, UnaryOperator, Value,
+    BinaryOperator, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, InTarget,
+    Query, SelectItem, UnaryOperator, Value,
 };
 
 use crate::classifier::expansion::call_matches_declared;
@@ -21,9 +21,9 @@ use crate::generator::db_lookup::single_identity_column;
 use crate::parser::expr::CastChain;
 use crate::parser::names::{lookup_table, stored_ident_name, stored_relation_name, table_identity};
 use crate::parser::sql_parser::{
-    CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, GrantArm,
-    GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent, SettingValue,
-    TableLike,
+    CallerGate, CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike,
+    GrantArm, GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent,
+    SettingPresence, SettingValue, TableLike,
 };
 use crate::types::ColumnName;
 use sql_traits::errors::{HelperSetError, LookupError};
@@ -106,17 +106,38 @@ pub(crate) enum HelperRefusal {
         /// The table the helper returns keys of.
         level: String,
     },
-    /// An arm returns the same rows whoever calls, which no grantee of the compared
-    /// column stands for.
+    /// A gate on a caller the deployment lets go unset keeps rows for a request no
+    /// subject names apart from a caller's.
     #[error(
-        "declared helper '{function}' returns the rows of '{table}' it keeps to every \
-         request alike, and no grantee stands for every caller"
+        "declared helper '{function}' tests whether setting '{setting}' holds a caller, \
+         which the deployment lets a request leave unset, so no subject names such a request"
     )]
-    SameForEveryRequest {
+    GateOnUnsetCaller {
         /// The helper.
         function: String,
-        /// The table the arm reads.
-        table: String,
+        /// The caller setting.
+        setting: String,
+    },
+    /// A gate excludes a caller spelled otherwise than the identity a check sends.
+    #[error(
+        "declared helper '{function}' excludes the caller {value}, which is not spelled as \
+         the identity a check sends"
+    )]
+    UnnamedCaller {
+        /// The helper.
+        function: String,
+        /// The excluded value as written.
+        value: String,
+    },
+    /// A gate excludes callers from rows admitting whoever presents a value of a set
+    /// the request carries.
+    #[error(
+        "declared helper '{function}' excludes callers from rows a set the request \
+         carries admits"
+    )]
+    ExcludedFromRequestSet {
+        /// The helper.
+        function: String,
     },
     /// A request value is compared with arms whose rows depend on the request.
     #[error(
@@ -142,13 +163,12 @@ pub(crate) enum HelperRefusal {
         /// The table the arm reads.
         table: String,
     },
-    /// An arm keeps its rows only while a caller setting reads a value, a condition
-    /// no grant relation carries.
+    /// An arm keeping every caller keeps its rows by the statement time.
     #[error(
-        "declared helper '{function}' keeps the rows of '{table}' only while a caller \
-         setting is set, which no grant relation carries"
+        "declared helper '{function}' keeps the rows of '{table}' for everyone by the \
+         statement time, which a grant to everyone does not carry"
     )]
-    CallerGated {
+    TimeBoundedAudience {
         /// The helper.
         function: String,
         /// The table the arm reads.
@@ -526,7 +546,7 @@ fn helper_call<DB: DatabaseLike>(
             HelperArm::Grant(grant) => (
                 rows_named_by(grant.table(), grant.column(), db)?
                     .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
-                HelperSetArm::Grant(helper_grant(&name, grant, db)?),
+                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db)?)),
             ),
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
@@ -592,48 +612,48 @@ fn helper_grant<DB: DatabaseLike>(
     db: &DB,
 ) -> Result<HelperGrant, HelperRefusal> {
     let table = grant.table();
-    let refused_table = || table_identity(table).to_string();
-    if grant.gate().is_some() {
-        return Err(HelperRefusal::CallerGated {
-            function: function.to_string(),
-            table: refused_table(),
-        });
-    }
-    let compared = match grant.granted_to() {
-        GrantedTo::Request(compared) => compared,
-        GrantedTo::Anyone => {
-            return Err(HelperRefusal::SameForEveryRequest {
-                function: function.to_string(),
-                table: refused_table(),
-            })
+    let grantee = match grant.granted_to() {
+        GrantedTo::Request(compared) => {
+            let column = ColumnName::from_stored(compared.column().stored_column_name());
+            // `sql-traits` compares a column with the caller or with the elements of a
+            // whole setting declared as a set.
+            match compared.setting().content() {
+                SettingContent::Value(value @ SettingValue::Set { .. }) => {
+                    bounded_by_no_time(function, grant)?;
+                    HelperGrantee::RequestSet {
+                        value_column: column,
+                        source: DeclaredSource::whole(compared.setting(), value.clone()),
+                    }
+                }
+                _ => HelperGrantee::Caller {
+                    user_column: column,
+                },
+            }
         }
         GrantedTo::Set(set) => {
             return Err(HelperRefusal::GranteeSet {
                 function: function.to_string(),
-                table: refused_table(),
+                table: table_identity(table).to_string(),
                 grantees: set.function().target_name().to_string(),
             })
         }
+        GrantedTo::Anyone => HelperGrantee::Anyone,
     };
-    let column = ColumnName::from_stored(compared.column().stored_column_name());
-    // `sql-traits` compares a column with the caller or with the elements of a whole
-    // setting declared as a set.
-    let grantee = match compared.setting().content() {
-        SettingContent::Value(value @ SettingValue::Set { .. }) => {
-            bounded_by_no_time(function, grant)?;
-            HelperGrantee::RequestSet {
-                value_column: column,
-                source: DeclaredSource::whole(compared.setting(), value.clone()),
-            }
-        }
-        _ => HelperGrantee::Caller {
-            user_column: column,
-        },
+    if !grant.time_bounds().is_empty() && grantee == HelperGrantee::Anyone {
+        return Err(HelperRefusal::TimeBoundedAudience {
+            function: function.to_string(),
+            table: table_identity(table).to_string(),
+        });
+    }
+    let excluded = match grant.gate() {
+        None => Vec::new(),
+        Some(gate) => excluded_callers(function, gate, &grantee)?,
     };
     Ok(HelperGrant {
         table: table_identity(table),
         object_column: ColumnName::from_stored(grant.column().stored_column_name()),
         grantee,
+        excluded,
         rows: grant_rows(table, grant.restrictions(), db)?,
     })
 }
@@ -665,6 +685,84 @@ fn grant_rows<DB: DatabaseLike>(
         },
         _ => GrantRows::Matching { predicates },
     })
+}
+
+/// The callers a gate on the caller setting keeps no row for, as the identities their
+/// checks send.
+///
+/// A check always names a caller, so `IS NOT NULL` and `<> ''` exclude nobody it can
+/// send. That holds only where the deployment promises a caller on every request: a
+/// request it lets leave the setting unset reads `NULL` or `''`, and no subject names
+/// such a check apart from a caller's, unless the arm compares a column with the caller
+/// and so keeps nothing for it anyway.
+fn excluded_callers(
+    function: &str,
+    gate: &CallerGate<'_>,
+    grantee: &HelperGrantee,
+) -> Result<Vec<String>, HelperRefusal> {
+    let setting = gate.setting();
+    if setting.presence() == SettingPresence::MayBeUnset
+        && !matches!(grantee, HelperGrantee::Caller { .. })
+    {
+        return Err(HelperRefusal::GateOnUnsetCaller {
+            function: function.to_string(),
+            setting: setting.name().to_string(),
+        });
+    }
+    let data_type = match setting.content() {
+        SettingContent::Value(SettingValue::Caller(data_type)) => Some(data_type),
+        _ => None,
+    };
+    let mut excluded = Vec::with_capacity(gate.excluded().len());
+    for value in gate.excluded() {
+        // No check sends an empty caller, so `<> ''` excludes nobody.
+        if matches!(value, Value::SingleQuotedString(text) if text.is_empty()) {
+            continue;
+        }
+        let identity = data_type
+            .and_then(|data_type| caller_identity(value, data_type))
+            .ok_or_else(|| HelperRefusal::UnnamedCaller {
+                function: function.to_string(),
+                value: value.to_string(),
+            })?;
+        if !excluded.contains(&identity) {
+            excluded.push(identity);
+        }
+    }
+    if !excluded.is_empty() && matches!(grantee, HelperGrantee::RequestSet { .. }) {
+        return Err(HelperRefusal::ExcludedFromRequestSet {
+            function: function.to_string(),
+        });
+    }
+    Ok(excluded)
+}
+
+/// The identity a check sends for a caller equal to `value`, which the deployment
+/// promises to send in the canonical text of `data_type`.
+///
+/// `None` where the literal is not that canonical text, since the cast `PostgreSQL`
+/// applies is not read here, and for a type with no such reading.
+fn caller_identity(value: &Value, data_type: &DataType) -> Option<String> {
+    let text = match value {
+        Value::SingleQuotedString(text) => text.as_str(),
+        Value::DollarQuotedString(text) => text.value.as_str(),
+        _ => return None,
+    };
+    let canonical = match data_type {
+        DataType::Text | DataType::Varchar(None) | DataType::CharacterVarying(None) => true,
+        DataType::Uuid => {
+            text.len() == 36
+                && text.char_indices().all(|(index, character)| {
+                    if matches!(index, 8 | 13 | 18 | 23) {
+                        character == '-'
+                    } else {
+                        character.is_ascii_digit() || matches!(character, 'a'..='f')
+                    }
+                })
+        }
+        _ => false,
+    };
+    canonical.then(|| text.to_string())
 }
 
 /// `<column> IN (<values>)`, the values one restriction keeps.

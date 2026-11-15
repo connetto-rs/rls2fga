@@ -712,8 +712,8 @@ fn request_values_behind_declared_helpers_translate() {
 }
 
 /// A request value behind a helper falls closed where the rows it reads depend on the
-/// request or on the statement time, and a column compared with rows every request
-/// gets alike names no grantee.
+/// request or on the statement time, and so does a grant to everyone kept by the
+/// statement time and a caller gate on rows a request's set admits.
 #[test]
 fn request_values_the_gates_cannot_carry_are_refused() {
     let policy = |using: &str| {
@@ -721,10 +721,6 @@ fn request_values_the_gates_cannot_carry_are_refused() {
             "{LEVELS}{OWNER_READS}{REQUEST_VALUES}
              CREATE TABLE expiring_links (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL);
              GRANT SELECT ON expiring_links TO authz_owner;
-             CREATE FUNCTION authz.every_link() RETURNS SETOF TEXT
-             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-               SELECT l.id FROM public.share_links l WHERE l.revoked = FALSE
-             $$;
              CREATE FUNCTION authz.live_links() RETURNS SETOF TEXT
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT e.id FROM public.expiring_links e
@@ -735,16 +731,15 @@ fn request_values_the_gates_cannot_carry_are_refused() {
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT e.id FROM public.expiring_links e WHERE e.expires_at > now()
              $$;
-             CREATE FUNCTION authz.signed_in_links() RETURNS SETOF TEXT
+             CREATE FUNCTION authz.gated_links() RETURNS SETOF TEXT
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT l.id FROM public.share_links l
                WHERE l.id = ANY (string_to_array(current_setting('app.link_ids', true), ','))
-                 AND current_setting('app.user_id', true) <> ''
+                 AND current_setting('app.user_id', true) <> 'anonymous'
              $$;
-             ALTER FUNCTION authz.every_link() OWNER TO authz_owner;
              ALTER FUNCTION authz.live_links() OWNER TO authz_owner;
              ALTER FUNCTION authz.live_ids() OWNER TO authz_owner;
-             ALTER FUNCTION authz.signed_in_links() OWNER TO authz_owner;
+             ALTER FUNCTION authz.gated_links() OWNER TO authz_owner;
              CREATE FUNCTION authz.allowing_twice(target TEXT) RETURNS SETOF TEXT
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT ip.installation_id FROM public.installation_permissions ip
@@ -779,10 +774,9 @@ fn request_values_the_gates_cannot_carry_are_refused() {
     let helpers = [
         "authz.presented_links",
         "authz.installations_allowing",
-        "authz.every_link",
         "authz.live_links",
         "authz.live_ids",
-        "authz.signed_in_links",
+        "authz.gated_links",
         "authz.allowing_twice",
         "authz.caller_teams",
         "authz.team_projects",
@@ -811,15 +805,15 @@ fn request_values_the_gates_cannot_carry_are_refused() {
              statement time",
         ),
         (
-            "link_id = ANY (ARRAY(SELECT authz.every_link()))",
-            "to every request alike, and no grantee stands for every caller",
+            "live_id = ANY (ARRAY(SELECT authz.live_ids()))",
+            "keeps the rows of 'public.expiring_links' for everyone by the statement time",
         ),
         (
-            "link_id = ANY (ARRAY(SELECT authz.signed_in_links()))",
-            "keeps the rows of 'public.share_links' only while a caller setting is set",
+            "link_id = ANY (ARRAY(SELECT authz.gated_links()))",
+            "excludes callers from rows a set the request carries admits",
         ),
         (
-            "current_setting('app.installation_id', true) IN (SELECT authz.signed_in_links())",
+            "current_setting('app.installation_id', true) IN (SELECT authz.gated_links())",
             "is compared with the request's value 'app.installation_id'",
         ),
         (
@@ -1071,4 +1065,129 @@ fn each_walk_is_noted_once_with_the_depth_openfga_resolves() {
         [walk("groups_with_read"), walk("groups_with_write")],
         "{notes:#?}"
     );
+}
+
+/// Projects every caller sees, every caller but `anonymous` sees, or their members see
+/// but `anonymous`.
+pub(crate) const AUDIENCES: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE projects (id TEXT PRIMARY KEY,
+  visibility TEXT NOT NULL CHECK (visibility IN ('public', 'signed_in', 'private')));
+CREATE TABLE project_members (project_id TEXT NOT NULL REFERENCES projects (id),
+  user_id TEXT NOT NULL, PRIMARY KEY (project_id, user_id));
+GRANT SELECT ON projects, project_members TO authz_owner;
+CREATE FUNCTION authz.projects_visible() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT p.id FROM public.projects p WHERE p.visibility = 'public'
+  UNION
+  SELECT p.id FROM public.projects p
+  WHERE p.visibility = 'signed_in' AND current_setting('app.user_id', true) <> 'anonymous'
+  UNION
+  SELECT m.project_id FROM public.project_members m
+  WHERE m.user_id = current_setting('app.user_id', true)
+    AND current_setting('app.user_id', true) <> 'anonymous'
+$$;
+ALTER FUNCTION authz.projects_visible() OWNER TO authz_owner;
+CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects (id), title TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  project_id = ANY (ARRAY(SELECT authz.projects_visible())));
+";
+
+/// The audience helper declared.
+pub(crate) const AUDIENCE_HELPERS: &[&str] = &["authz.projects_visible"];
+
+/// An arm keeping its rows for every caller grants them to `user:*`, and one gated on
+/// the caller being someone other than a constant grants them to every user but that
+/// one.
+#[test]
+fn an_audience_arm_grants_every_caller_but_the_ones_its_gate_excludes() {
+    let dsl = model(AUDIENCES, AUDIENCE_HELPERS);
+    let definition = |relation: &str| {
+        relation_definition(&dsl, "projects", relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(definition("public"), "[user:*]");
+    assert_eq!(definition("signed_in_everyone"), "[user:*]");
+    assert_eq!(definition("signed_in_excluded"), "[user]");
+    let visible = definition("projects_visible");
+    let arms: Vec<&str> = visible.split(" or ").collect();
+    assert!(arms.contains(&"public"), "{dsl}");
+    assert!(
+        arms.contains(&"(signed_in_everyone but not signed_in_excluded)"),
+        "{dsl}"
+    );
+    // No check sends an empty caller, so `<> ''` excludes nobody.
+    let ungated = model(
+        &AUDIENCES.replace("<> 'anonymous'", "<> ''"),
+        AUDIENCE_HELPERS,
+    );
+    assert_eq!(
+        relation_definition(&ungated, "projects", "signed_in").as_deref(),
+        Some("[user:*]"),
+        "{ungated}"
+    );
+}
+
+/// The excluded caller is loaded on the rows it is excluded from, and a gated arm naming
+/// the caller loads no row naming the excluded one.
+#[test]
+fn a_caller_gate_loads_the_constant_it_excludes() {
+    let outputs = translator(ConfidenceLevel::B, AUDIENCE_HELPERS)
+        .translate(&db_of(AUDIENCES))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let queries: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .collect();
+    let reading = |needles: &[&str]| -> usize {
+        queries
+            .iter()
+            .filter(|sql| needles.iter().all(|needle| sql.contains(needle)))
+            .count()
+    };
+    assert_eq!(
+        reading(&[
+            "'signed_in_excluded' AS relation",
+            "'user:anonymous' AS subject",
+            "\"visibility\" = 'signed_in'"
+        ]),
+        1,
+        "{queries:#?}"
+    );
+    assert_eq!(
+        reading(&[
+            "FROM \"public\".\"project_members\"",
+            "\"user_id\" <> 'anonymous'"
+        ]),
+        1,
+        "{queries:#?}"
+    );
+}
+
+/// A gate on a caller the deployment lets go unset names a request no subject spells
+/// apart from a caller's, so an arm granting its audience is refused.
+#[test]
+fn a_gate_on_a_caller_that_may_be_unset_is_refused() {
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id").may_be_unset()]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers(AUDIENCE_HELPERS)
+        .build();
+    let classified = translator
+        .classify(&db_of(AUDIENCES))
+        .into_iter()
+        .find(|classified| classified.name() == "docs_read")
+        .expect("docs_read should classify")
+        .using_classification()
+        .expect("USING should classify")
+        .clone();
+    assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
+    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = classified.pattern else {
+        panic!("docs_read should be refused, got {classified:?}");
+    };
+    assert!(reason.contains("app.user_id"), "{reason}");
 }

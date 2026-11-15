@@ -583,7 +583,10 @@ fn membership_refusal<DB: DatabaseLike>(
 fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<String> {
     call.arms.iter().find_map(|arm| match arm {
         HelperSetArm::Grant(grant) => key_collation_refusal(&grant.table, &grant.object_column, db)
-            .or_else(|| key_collation_refusal(&grant.table, grant.grantee.compared_column(), db)),
+            .or_else(|| {
+                let compared = grant.grantee.compared_column()?;
+                key_collation_refusal(&grant.table, compared, db)
+            }),
         HelperSetArm::Parent(parent) => key_collation_refusal(&call.level, &parent.fk_column, db)
             .or_else(|| helper_call_refusal(&parent.call, db)),
         HelperSetArm::Walk(walk) => key_collation_refusal(&call.level, &walk.fk_column, db),
