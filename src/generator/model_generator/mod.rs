@@ -2555,6 +2555,21 @@ fn translate_pattern<DB: DatabaseLike>(
                 },
             )
         }
+        PatternClass::P26OwnerExpression(OwnerExpression { column, expression }) => {
+            emit_row_ownership(
+                &format!("expression:{expression}"),
+                column.as_str(),
+                "expression ownership tuples",
+                ctx,
+                table_plan,
+                |identity_cols, relation| TupleSource::ExpressionOwnership {
+                    table: source_table.clone(),
+                    identity_cols,
+                    expression: expression.clone(),
+                    relation,
+                },
+            )
+        }
         PatternClass::P13UncorrelatedMembership(uncorrelated_membership) => {
             emit_uncorrelated_membership(
                 uncorrelated_membership,

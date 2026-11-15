@@ -356,6 +356,7 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P20DeclaredHelper(_)
             | PatternClass::P11ArrayMembership(_)
             | PatternClass::P12JsonbFieldOwnership(_)
+            | PatternClass::P26OwnerExpression(_)
             | PatternClass::P13UncorrelatedMembership(_) => TermCaller::Identity,
             PatternClass::P5ParentInheritance(ParentInheritance { inner_pattern, .. })
             | PatternClass::ExpandedFunction(ExpandedFunction {

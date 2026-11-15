@@ -89,6 +89,16 @@ pub(crate) enum TupleSource {
         relation: RelationName,
     },
 
+    /// P26 ownership by an immutable function of `column`. Produces
+    /// `(type:pk, relation, user:expression)`, dropping the rows the expression maps to NULL.
+    ExpressionOwnership {
+        table: TableId,
+        identity_cols: Vec<ColumnName>,
+        /// The expression as SQL over the bare row.
+        expression: String,
+        relation: RelationName,
+    },
+
     /// P1/P2 owner identity: `(owner_type:pk, relation, subject_type:pk)` over a
     /// principal table.
     ///
@@ -505,6 +515,12 @@ pub(crate) enum TupleSourceKey<'a> {
         path: &'a [String],
         relation: &'a RelationName,
     },
+    ExpressionOwnership {
+        table: &'a TableId,
+        identity_cols: &'a [ColumnName],
+        expression: &'a str,
+        relation: &'a RelationName,
+    },
     OwnerIdentity {
         owner_type: &'a TypeName,
         principal_table: &'a TableId,
@@ -688,6 +704,7 @@ impl TupleSource {
             Self::DirectOwnership { .. }
             | Self::ArrayMembership { .. }
             | Self::JsonbFieldOwnership { .. }
+            | Self::ExpressionOwnership { .. }
             | Self::ParentBridge { .. }
             | Self::PublicFlag { .. }
             | Self::RowPresenceGate { .. }
@@ -722,6 +739,7 @@ impl TupleSource {
             Self::DirectOwnership { relation, .. }
             | Self::ArrayMembership { relation, .. }
             | Self::JsonbFieldOwnership { relation, .. }
+            | Self::ExpressionOwnership { relation, .. }
             | Self::ParentBridge { relation, .. }
             | Self::RowPresenceGate { relation, .. }
             | Self::ConditionalAttributeGate { relation, .. }
@@ -837,6 +855,17 @@ impl TupleSource {
                 identity_cols,
                 column,
                 path,
+                relation,
+            },
+            Self::ExpressionOwnership {
+                table,
+                identity_cols,
+                expression,
+                relation,
+            } => TupleSourceKey::ExpressionOwnership {
+                table,
+                identity_cols,
+                expression,
                 relation,
             },
             Self::OwnerIdentity {

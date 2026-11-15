@@ -7,8 +7,8 @@ use crate::types::{ColumnName, TableId};
 use alloc::collections::BTreeSet;
 use core::ops::ControlFlow;
 use sqlparser::ast::{
-    Distinct, GroupByExpr, Ident, JoinOperator, LimitClause, Query, SetExpr, TableInheritance,
-    TableWithJoins, Visit, VisitMut, Visitor, VisitorMut,
+    Distinct, GroupByExpr, Ident, JoinOperator, LimitClause, Query, SetExpr, TableAlias,
+    TableInheritance, TableWithJoins, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 mod indirect;
@@ -905,6 +905,10 @@ pub fn recognize_p4_in_subquery<DB: DatabaseLike>(
 /// the subquery's own source, the tested value the guarded table. Without them a column
 /// both tables spell alike reads as either, which drops the correlation and grants the
 /// guarded table whole.
+///
+/// The tested value moves from the enclosing scope into the subquery's, where a source
+/// visible under the tested value's qualifier would capture it. That source is renamed
+/// first, which is what a membership table read against itself needs.
 fn membership_exists_from_in_subquery(
     expr: &Expr,
     registry: &FunctionRegistry,
@@ -919,19 +923,24 @@ fn membership_exists_from_in_subquery(
         return None;
     };
 
-    let select = query_select(query)?;
-    let projected = single_projected_column(select)?;
-    let projected = match relation_sources(select).as_slice() {
+    let mut rewritten = query.clone();
+    let SetExpr::Select(body) = rewritten.body.as_mut() else {
+        return None;
+    };
+    let qualifier = match &tested {
+        Expr::CompoundIdentifier(parts) => parts.iter().rev().nth(1),
+        _ => None,
+    };
+    if let Some(qualifier) = qualifier {
+        unshadow_scope(body, &stored_ident_name(qualifier))?;
+    }
+    let projected = single_projected_column(body)?;
+    let projected = match relation_sources(body).as_slice() {
         [source] => qualified_column(
             &projected,
             source.alias.as_deref().unwrap_or(&source.table_name),
         ),
         _ => projected,
-    };
-
-    let mut rewritten = query.clone();
-    let SetExpr::Select(body) = rewritten.body.as_mut() else {
-        return None;
     };
     let bound = Expr::BinaryOp {
         left: Box::new(projected),
@@ -950,6 +959,99 @@ fn membership_exists_from_in_subquery(
         subquery: Box::new(rewritten),
         negated: false,
     })
+}
+
+/// The alias [`unshadow_scope`] gives a source hiding an enclosing one.
+const UNSHADOWED_ALIAS: &str = "rls2fga_unshadowed";
+
+/// Requalifies references to `outer` as [`UNSHADOWED_ALIAS`] for [`unshadow_scope`], and
+/// marks the rewrite refused where that could change a reference's meaning.
+struct Renamer<'a> {
+    outer: &'a str,
+    refused: bool,
+}
+
+impl VisitorMut for Renamer<'_> {
+    type Break = ();
+
+    fn pre_visit_query(&mut self, query: &mut Query) -> ControlFlow<()> {
+        let binds_nothing =
+            matches!(query.body.as_ref(), SetExpr::Select(nested) if nested.from.is_empty());
+        if binds_nothing {
+            ControlFlow::Continue(())
+        } else {
+            self.refused = true;
+            ControlFlow::Break(())
+        }
+    }
+
+    fn pre_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
+        let Expr::CompoundIdentifier(parts) = expr else {
+            return ControlFlow::Continue(());
+        };
+        let qualifiers = parts.split_last().map_or(&[][..], |(_, rest)| rest);
+        if qualifiers
+            .iter()
+            .any(|part| stored_ident_name(part) == UNSHADOWED_ALIAS)
+            || (qualifiers.len() > 1
+                && qualifiers
+                    .last()
+                    .is_some_and(|part| stored_ident_name(part) == self.outer))
+        {
+            self.refused = true;
+            return ControlFlow::Break(());
+        }
+        if let [qualifier, _] = parts.as_mut_slice() {
+            if stored_ident_name(qualifier) == self.outer {
+                *qualifier = Ident::new(UNSHADOWED_ALIAS);
+            }
+        }
+        ControlFlow::Continue(())
+    }
+}
+
+/// Rename the source of `select` visible as `outer`, so a reference to the enclosing
+/// source of that name reaches it from inside `select`.
+///
+/// `None` where the renaming cannot keep every reference's meaning: a source among
+/// several, a nested query binding names of its own, a reference longer than
+/// `qualifier.column`, or one already naming the new alias.
+fn unshadow_scope(select: &mut Select, outer: &str) -> Option<()> {
+    let hides_outer = |factor: &TableFactor| {
+        table_factor_parts(factor).is_none_or(|(table_name, alias)| {
+            alias.unwrap_or_else(|| stored_relation_name(&table_name)) == outer
+        })
+    };
+    let relation = match select.from.as_slice() {
+        [TableWithJoins { relation, joins }] if joins.is_empty() => relation,
+        _ => return (!any_named_source(select, &hides_outer)).then_some(()),
+    };
+    if !hides_outer(relation) {
+        return Some(());
+    }
+
+    let mut renamer = Renamer {
+        outer,
+        refused: false,
+    };
+    let _ = select.visit(&mut renamer);
+    if renamer.refused {
+        return None;
+    }
+    let [TableWithJoins {
+        relation: TableFactor::Table { alias, .. },
+        ..
+    }] = select.from.as_mut_slice()
+    else {
+        return None;
+    };
+    *alias = Some(TableAlias {
+        explicit: true,
+        name: Ident::new(UNSHADOWED_ALIAS),
+        columns: Vec::new(),
+        at: None,
+    });
+    Some(())
 }
 
 /// `col` as `qualifier.col`, leaving anything already qualified alone.
@@ -2765,4 +2867,63 @@ fn has_fk_pointing_to<DB: DatabaseLike>(
             });
             table_matches && column_matches
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    /// `sql` after [`unshadow_scope`] renames the source hiding `team_members`, or `None`.
+    fn unshadowed(sql: &str) -> Option<String> {
+        let mut select = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .unwrap()
+            .parse_select()
+            .unwrap();
+        unshadow_scope(&mut select, "team_members").map(|()| select.to_string())
+    }
+
+    #[test]
+    fn the_hiding_source_is_renamed_with_every_reference_to_it() {
+        assert_eq!(
+            unshadowed("SELECT team_id FROM team_members WHERE team_members.member_id = 'a'")
+                .as_deref(),
+            Some(
+                "SELECT team_id FROM team_members AS rls2fga_unshadowed \
+                 WHERE rls2fga_unshadowed.member_id = 'a'"
+            )
+        );
+    }
+
+    #[test]
+    fn references_to_other_sources_keep_their_meaning() {
+        let sql = "SELECT team_id FROM teams WHERE users.id = 'a'";
+        assert_eq!(unshadowed(sql).as_deref(), Some(sql));
+        assert_eq!(
+            unshadowed(
+                "SELECT team_id FROM team_members WHERE users.id = 'a' AND public.users.id = 'a'"
+            )
+            .as_deref(),
+            Some(
+                "SELECT team_id FROM team_members AS rls2fga_unshadowed \
+                 WHERE users.id = 'a' AND public.users.id = 'a'"
+            )
+        );
+    }
+
+    /// Each spelling holds a reference the rename would point somewhere else, or a source
+    /// the rename cannot alias.
+    #[test]
+    fn a_rename_that_could_move_a_reference_is_refused() {
+        for sql in [
+            "SELECT team_id FROM team_members WHERE public.team_members.member_id = 'a'",
+            "SELECT team_id FROM team_members WHERE rls2fga_unshadowed.member_id = 'a'",
+            "SELECT team_id FROM team_members WHERE team_id IN (SELECT id FROM teams)",
+            "SELECT x FROM unnest(ARRAY['a']) AS x",
+        ] {
+            assert_eq!(unshadowed(sql), None, "{sql}");
+        }
+    }
 }

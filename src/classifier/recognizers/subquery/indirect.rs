@@ -1,6 +1,7 @@
 use super::*;
 use crate::classifier::recognizers::invariant::plain_table;
 use crate::types::AttributeLiteral;
+use alloc::borrow::Cow;
 
 /// Recognize membership reached through a closure table.
 pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
@@ -65,12 +66,21 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
         _ => return None,
     };
 
-    // Reading the guarded table would recurse through its policy.
     let link_id = resolve_table_id(db, &link.name)?;
     let far_id = resolve_table_id(db, &far.name)?;
     if link_id == far_id {
-        return None;
+        // One table read on both hops, so each hop's scope holds every column the other
+        // does and a qualifier is all that tells them apart.
+        if link.qualifier() == far.qualifier() {
+            return None;
+        }
+        // Nested, the far scope is innermost, which is where an unqualified name resolves.
+        // Joined, both are one scope and PostgreSQL refuses the name as ambiguous.
+        if joined_on.is_none() {
+            far.qualify_own_columns(&mut far_select);
+        }
     }
+    // Reading the guarded table would recurse through its policy.
     if !state.reading_as_owner()
         && (written_tables_are_same(db, &link.name, outer_table).unwrap_or(true)
             || written_tables_are_same(db, &far.name, outer_table).unwrap_or(true))
@@ -298,6 +308,38 @@ struct P19Table {
     columns: Vec<String>,
 }
 
+impl P19Table {
+    /// The name a reference to this source is qualified by.
+    fn qualifier(&self) -> Cow<'_, str> {
+        self.alias.as_deref().map_or_else(
+            || Cow::Owned(stored_relation_name(&self.name)),
+            Cow::Borrowed,
+        )
+    }
+
+    /// Qualify each unqualified column of `select`'s condition this source holds, which
+    /// is what the name means when `select` reads this source in the innermost scope.
+    fn qualify_own_columns(&self, select: &mut Select) {
+        let qualifier = Ident::with_quote('"', self.qualifier());
+        let mut qualify = TopLevelOnlyMut::new(false, |expr: &mut Expr| {
+            if let Expr::Identifier(ident) = &*expr {
+                if !is_sql_current_user_keyword_expr(expr)
+                    && self
+                        .columns
+                        .iter()
+                        .any(|column| *column == stored_ident_name(ident))
+                {
+                    *expr = Expr::CompoundIdentifier(vec![qualifier.clone(), ident.clone()]);
+                }
+            }
+            ControlFlow::Continue(())
+        });
+        select.selection.iter_mut().for_each(|selection| {
+            let _ = selection.visit(&mut qualify);
+        });
+    }
+}
+
 fn p19_table<DB: DatabaseLike>(db: &DB, source: &RelationSource) -> Option<P19Table> {
     Some(P19Table {
         name: source.table_name.clone(),
@@ -513,7 +555,8 @@ fn p19_far_exists<'a>(
                 outer_table,
                 outer_columns,
             ) == P19Side::Link;
-            membership_exists_from_in_subquery(conjunct, registry, &link.name).filter(|_| is_link)
+            membership_exists_from_in_subquery(conjunct, registry, &link.qualifier())
+                .filter(|_| is_link)
         };
         if let Some(candidate) = candidate {
             if found.is_some() {

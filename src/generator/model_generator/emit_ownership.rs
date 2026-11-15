@@ -1,14 +1,15 @@
 //! Emission for the patterns one column of the row decides.
 //!
-//! Ownership by a column, an array element or a jsonb field, the public flag, a constant, an
-//! attribute guard, and the refusal a clause nobody classified earns.
+//! Ownership by a column, an array element, a jsonb field or an immutable function of a
+//! column, the public flag, a constant, an attribute guard, and the refusal a clause nobody
+//! classified earns.
 
 use super::*;
 
 /// A relation whose subjects are named by one column of the row, and the tuples that fill it.
 ///
-/// P3, P11 and P12 are one shape: mint an ownership relation, declare it direct, and load it
-/// from the row unless nothing names the row. Only the memo key, the name, and which
+/// P3, P11, P12 and P26 are one shape: mint an ownership relation, declare it direct, and
+/// load it from the row unless nothing names the row. Only the memo key, the name, and which
 /// `TupleSource` reads the column differ, so the source arrives as a constructor.
 pub(crate) fn emit_row_ownership<DB: DatabaseLike>(
     memo_key: &str,

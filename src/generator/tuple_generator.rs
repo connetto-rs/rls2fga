@@ -819,6 +819,35 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
+        // A function's result is bounded by nothing the column declares, so its length is
+        // checked whatever the column's type.
+        TupleSource::ExpressionOwnership {
+            table,
+            identity_cols,
+            expression,
+            relation,
+        } => {
+            let operand = format!("({expression})");
+            let subject_sql = typed_name_sql(&well_known.user, [operand.as_str()]);
+            let (table_sql, object_sql, nameable) =
+                owner_object_sql(owner_type, table, identity_cols, only_own_rows, names);
+            Some(TupleQuery {
+                comment: format!("-- Expression ownership ({expression} references users)"),
+                sql: format!(
+                    "SELECT {object_sql} AS object, '{relation}' AS relation, \
+                     {subject_sql} AS subject\n\
+                     FROM {table_sql}\n\
+                     WHERE {operand} IS NOT NULL\n\
+                     AND {nameable}\n\
+                     AND octet_length({subject_sql}) <= {MAX_SUBJECT_NAME_BYTES};"
+                ),
+                description: None,
+                condition: None,
+                skipped: None,
+                monetary_locale: None,
+            })
+        }
+
         TupleSource::OwnerIdentity {
             owner_type: identity_type,
             principal_table,

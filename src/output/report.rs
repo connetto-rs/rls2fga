@@ -9,8 +9,8 @@ use crate::classifier::patterns::{
     ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership, ExpandedFunction,
     FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
     JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
-    ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
-    UnclassifiedExpr, UncorrelatedMembership,
+    OwnerExpression, ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar,
+    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -191,6 +191,9 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         }
         PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { column, path }) => {
             format!("P12 ({column} ->> {} = user)", path.join(" -> "))
+        }
+        PatternClass::P26OwnerExpression(OwnerExpression { expression, .. }) => {
+            format!("P26 ({expression} = user)")
         }
         PatternClass::P4ExistsMembership(ExistsMembership { join_table, .. }) => {
             format!("P4 (EXISTS {join_table})")

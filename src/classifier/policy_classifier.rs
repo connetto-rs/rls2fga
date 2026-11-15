@@ -304,6 +304,7 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P9AttributeCondition(AttributeCondition { column, .. })
         | PatternClass::P11ArrayMembership(ArrayMembership { column, .. })
         | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { column, .. })
+        | PatternClass::P26OwnerExpression(OwnerExpression { column, .. })
         | PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { column, .. })
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
             column, ..
@@ -412,6 +413,7 @@ fn compared_key_refusal<DB: DatabaseLike>(
         PatternClass::P3DirectOwnership(DirectOwnership { column })
         | PatternClass::P11ArrayMembership(ArrayMembership { column })
         | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { column, .. })
+        | PatternClass::P26OwnerExpression(OwnerExpression { column, .. })
         | PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { column, .. })
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
             column, ..
@@ -878,6 +880,11 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classified;
     }
 
+    // Try P26: the caller equal to an immutable function of one column.
+    if let Some(classified) = recognizers::recognize_owner_expression(expr, db, registry) {
+        return classified;
+    }
+
     // Try P20: a column compared with the set a declared definer helper returns. Before
     // the membership recognizers, whose `IN` and `= ANY` spellings it shares.
     if let Some(classified) = recognizers::recognize_declared_helper(expr, db, registry, table) {
@@ -1137,6 +1144,7 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { .. }) => {
             "jsonb-field-ownership check"
         }
+        PatternClass::P26OwnerExpression(OwnerExpression { .. }) => "owner-expression check",
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. }) => {
             "uncorrelated membership check"
         }
@@ -1188,6 +1196,7 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         // both are user-resource relationships exactly as ownership is.
         | PatternClass::P11ArrayMembership(ArrayMembership { .. })
         | PatternClass::P12JsonbFieldOwnership(JsonbFieldOwnership { .. })
+        | PatternClass::P26OwnerExpression(OwnerExpression { .. })
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::P20DeclaredHelper(DeclaredHelper { .. })

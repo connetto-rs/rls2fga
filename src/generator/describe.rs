@@ -328,6 +328,33 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             Vec::new(),
         )),
 
+        // Only the database applies the function as the policy does, so a changed row is
+        // answered by the query bound to its key, and the slice it settles is that row's
+        // ownership.
+        TupleSource::ExpressionOwnership {
+            table,
+            identity_cols,
+            relation,
+            ..
+        } => Some(RecordDescription {
+            tables: tables(&[table]),
+            derivation: RecordDerivation::Joined {
+                queries: bind(
+                    rendered(query)?,
+                    table,
+                    identity_cols,
+                    &bound_eq(None, identity_cols),
+                    ReplayScope::Object {
+                        object_type: owner_type.clone(),
+                        relations: vec![relation.clone()],
+                    },
+                )
+                .into_iter()
+                .collect(),
+                reason: "the owner is a function of the row only the database computes".to_string(),
+            },
+        }),
+
         // The owner identity is the principal of the same name, which one principal row
         // decides on its own.
         TupleSource::OwnerIdentity {
