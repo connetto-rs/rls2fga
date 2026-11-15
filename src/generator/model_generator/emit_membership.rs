@@ -1461,6 +1461,9 @@ pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
 
 /// The relation holding everyone `call` returns a row for, defined on its level's type
 /// with the relations and sources it reads. `None` where it returns nothing.
+///
+/// A walk arm makes the relation name itself through the level's parent, which is how
+/// `OpenFGA` spells every row below one the rest of the call returns.
 fn helper_call_relation<DB: DatabaseLike>(
     call: &HelperCall,
     ctx: &PatternCtx<'_, DB>,
@@ -1469,6 +1472,7 @@ fn helper_call_relation<DB: DatabaseLike>(
 ) -> Option<RelationName> {
     let level_type = ctx.table_types.resolve(&call.level);
     let mut parts = Vec::with_capacity(call.arms.len());
+    let mut walked = Vec::new();
     for arm in &call.arms {
         match arm {
             HelperSetArm::Grant(grant) => {
@@ -1485,27 +1489,67 @@ fn helper_call_relation<DB: DatabaseLike>(
                     continue;
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
-                let columns = core::slice::from_ref(&parent.fk_column);
-                // The arm's key is the level's primary key and its column a single-column
-                // foreign key, so the bridge is always buildable.
                 let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
-                let tupleset = parent_bridge_relation(plan, &call.level, columns, &parent_type);
-                plan.add_source(TupleSource::ParentBridge {
-                    table: call.level.clone(),
-                    fk_cols: columns.to_vec(),
-                    parent_type,
-                    relation: tupleset.clone(),
-                });
                 parts.push(UsersetExpr::TupleToUserset {
-                    tupleset,
+                    tupleset: helper_parent_bridge(
+                        plan,
+                        &call.level,
+                        &parent.fk_column,
+                        parent_type,
+                    ),
                     computed: parents,
                 });
             }
+            HelperSetArm::Walk(walk) => walked.push(&walk.fk_column),
         }
     }
-    let returned = combine_union(parts)?;
+    // Below nothing is nothing, so a walk alone returns no row.
+    if parts.is_empty() {
+        return None;
+    }
     let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
-    Some(plan.ensure_computed(helper_call_relation_name(call), returned))
+    let name = helper_call_relation_name(call);
+    if walked.is_empty() {
+        return combine_union(parts).map(|returned| plan.ensure_computed(name, returned));
+    }
+    let walks = walked
+        .iter()
+        .map(|column| helper_parent_bridge(plan, &call.level, column, level_type.clone()))
+        .collect();
+    let relation = plan.ensure_walk_computed(name, parts, walks);
+    for column in walked {
+        plan.walk_notes
+            .entry((relation.clone(), column.clone()))
+            .or_insert_with(|| TranslationNote::HelperWalkDepth {
+                function: call.function.clone(),
+                table: call.level.clone(),
+                column: column.clone(),
+                relation: relation.clone(),
+            });
+    }
+    Some(relation)
+}
+
+/// The tupleset naming each row's parent of `parent_type` through `fk_column` of
+/// `level`, with the source loading it.
+///
+/// The column is a single-column foreign key to the parent's primary key, so the bridge
+/// is always buildable.
+fn helper_parent_bridge(
+    plan: &mut TypePlan,
+    level: &TableId,
+    fk_column: &ColumnName,
+    parent_type: TypeName,
+) -> RelationName {
+    let columns = core::slice::from_ref(fk_column);
+    let tupleset = parent_bridge_relation(plan, level, columns, &parent_type);
+    plan.add_source(TupleSource::ParentBridge {
+        table: level.clone(),
+        fk_cols: columns.to_vec(),
+        parent_type,
+        relation: tupleset.clone(),
+    });
+    tupleset
 }
 
 /// The plan of the type a helper's level names, which is the guarded table's own plan

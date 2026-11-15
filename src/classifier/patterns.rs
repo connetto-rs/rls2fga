@@ -611,6 +611,8 @@ pub enum HelperSetArm {
     Grant(HelperGrant),
     /// The rows of the level whose parent another call returns.
     Parent(HelperParent),
+    /// The rows of the level whose parent this same call returns.
+    Walk(HelperWalk),
 }
 
 /// `SELECT <object column> FROM <table> WHERE <user column> = <caller> [AND <rows>]`.
@@ -653,6 +655,15 @@ pub struct HelperParent {
     pub fk_column: ColumnName,
     /// The call returning the parents.
     pub call: HelperCall,
+}
+
+/// `SELECT <level key> FROM <level> JOIN <walk> ON <fk column> = <walk>.<column>` in
+/// the recursive term of a `WITH RECURSIVE` body, which returns every row below one the
+/// call returns.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperWalk {
+    /// Column of the level referencing its own key, the row's parent.
+    pub fk_column: ColumnName,
 }
 
 /// Correlated caller-identity memberships subtracted from a positive grant.

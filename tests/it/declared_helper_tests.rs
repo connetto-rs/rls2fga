@@ -624,3 +624,139 @@ fn a_column_with_no_foreign_key_is_a_parent_of_each_level_it_is_compared_with() 
         "installations_administered from installations and acting_app_user from request_gate"
     );
 }
+
+/// connetto's group tree under the teams, with a helper granting a group and every group
+/// below it through a recursive walk down `parent_id`.
+pub(crate) const GROUPS: &str = "
+CREATE TABLE groups (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES groups (id),
+  team_id TEXT REFERENCES teams (id));
+CREATE TABLE group_grants (group_id TEXT NOT NULL REFERENCES groups (id), principal_id TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('read', 'write')), PRIMARY KEY (group_id, principal_id));
+CREATE TABLE docs (id TEXT PRIMARY KEY, group_id TEXT NOT NULL REFERENCES groups (id), title TEXT);
+CREATE FUNCTION authz.groups_with(min_role TEXT) RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  WITH RECURSIVE reached (id) AS (
+    SELECT g.group_id FROM public.group_grants g
+    WHERE g.principal_id = current_setting('app.user_id', true)
+      AND (g.role = 'write' OR min_role = 'read')
+    UNION
+    SELECT child.id FROM public.groups child JOIN reached ON child.parent_id = reached.id
+  )
+  SELECT id FROM reached
+$$;
+ALTER FUNCTION authz.groups_with(TEXT) OWNER TO authz_owner;
+GRANT SELECT ON groups, group_grants TO authz_owner;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  group_id = ANY (ARRAY(SELECT authz.groups_with('read'))));
+CREATE POLICY docs_update ON docs FOR UPDATE
+  USING (group_id = ANY (ARRAY(SELECT authz.groups_with('write'))))
+  WITH CHECK (group_id = ANY (ARRAY(SELECT authz.groups_with('write'))));
+";
+
+/// Every row below a group the call returns holds it too, so the call's relation holds
+/// whoever holds it on the group's parent.
+#[test]
+fn a_walk_down_a_tree_reads_the_call_from_each_parent() {
+    let dsl = model(
+        &format!("{LEVELS}{OWNER_READS}{GROUPS}"),
+        &["authz.groups_with"],
+    );
+    let definition = |type_name: &str, relation: &str| {
+        relation_definition(&dsl, type_name, relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(definition("groups", "groups"), "[groups]");
+    assert_eq!(
+        definition("groups", "groups_with_read"),
+        "read or write or groups_with_read from groups"
+    );
+    assert_eq!(
+        definition("groups", "groups_with_write"),
+        "write or groups_with_write from groups"
+    );
+    assert_eq!(
+        definition("docs", "can_select"),
+        "groups_with_read from groups and acting_app_user from request_gate"
+    );
+}
+
+/// The rows a parent arm returns are walked down like the caller's grants.
+#[test]
+fn a_walk_composes_with_a_parent_arm() {
+    let sql = format!(
+        "{LEVELS}{OWNER_READS}{GROUPS}
+         CREATE FUNCTION authz.groups_reached(min_role TEXT) RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           WITH RECURSIVE reached (id) AS (
+             SELECT g.group_id FROM public.group_grants g
+             WHERE g.principal_id = current_setting('app.user_id', true)
+               AND (g.role = 'write' OR min_role = 'read')
+             UNION
+             SELECT g.id FROM public.groups g WHERE g.team_id IN (SELECT authz.teams_with(min_role))
+             UNION
+             SELECT child.id FROM public.groups child JOIN reached ON child.parent_id = reached.id
+           )
+           SELECT id FROM reached
+         $$;
+         ALTER FUNCTION authz.groups_reached(TEXT) OWNER TO authz_owner;
+         ALTER TABLE groups ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY groups_read ON groups FOR SELECT USING (
+           id = ANY (ARRAY(SELECT authz.groups_reached('read'))));"
+    );
+    let dsl = model(
+        &sql,
+        &[
+            "authz.groups_reached",
+            "authz.groups_with",
+            "authz.teams_with",
+        ],
+    );
+    assert_eq!(
+        relation_definition(&dsl, "groups", "groups_reached_read").as_deref(),
+        Some("read or write or teams_with_read from teams or groups_reached_read from groups"),
+        "{dsl}"
+    );
+}
+
+/// `OpenFGA` resolves a walk only so deep, and the schema cannot say how deep the tree
+/// goes, so each walk the model resolves is noted once, however many clauses call it.
+#[test]
+fn each_walk_is_noted_once_with_the_depth_openfga_resolves() {
+    let notes = translator(ConfidenceLevel::B, &["authz.groups_with"])
+        .translate(&db_of(&format!("{LEVELS}{OWNER_READS}{GROUPS}")))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate")
+        .notes()
+        .to_vec();
+    let walks: Vec<(String, String, String, String)> = notes
+        .iter()
+        .filter_map(|note| match note {
+            TranslationNote::HelperWalkDepth {
+                function,
+                table,
+                column,
+                relation,
+            } => Some((
+                function.clone(),
+                table.to_string(),
+                column.to_string(),
+                relation.to_string(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let walk = |relation: &str| {
+        (
+            "authz.groups_with".to_string(),
+            "public.groups".to_string(),
+            "parent_id".to_string(),
+            relation.to_string(),
+        )
+    };
+    assert_eq!(
+        walks,
+        [walk("groups_with_read"), walk("groups_with_write")],
+        "{notes:#?}"
+    );
+}
