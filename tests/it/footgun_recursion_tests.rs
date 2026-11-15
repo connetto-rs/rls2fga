@@ -16,7 +16,7 @@ fn a_select_policy_reading_its_own_table_denies_the_table() {
     // The plain policy alone would grant every row to its owner.
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tree ON docs FOR SELECT USING (
@@ -51,8 +51,8 @@ CREATE POLICY docs_tree ON docs FOR SELECT USING (
     // The same shape through a join recurses identically.
     let joined = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM docs d2 JOIN doc_members dm ON dm.doc_id = d2.id
@@ -77,7 +77,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (
 fn a_non_select_policy_may_read_its_own_table() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (
@@ -140,8 +140,8 @@ CREATE POLICY t1_tree ON t1 FOR SELECT USING (
 fn cycle_pair_schema(command: &str) -> ParserDB {
     db_of(&format!(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, b_id INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, a_id INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, b_id INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, a_id INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (b_id) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
@@ -255,9 +255,9 @@ fn a_read_cycle_reaches_the_commands_that_read_no_row() {
 fn a_read_cycle_across_three_tables_denies_all_three() {
     let db = db_of(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE c(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE c(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE b ADD CONSTRAINT b_c FOREIGN KEY (nx) REFERENCES c(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
@@ -291,9 +291,9 @@ CREATE POLICY pc ON c FOR SELECT USING (owner_id = current_setting('app.user_id'
 fn a_table_that_only_reaches_a_read_cycle_is_denied_too() {
     let db = db_of(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
-CREATE TABLE x(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
+CREATE TABLE x(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
@@ -332,8 +332,8 @@ CREATE POLICY px ON x FOR SELECT USING (owner_id = current_setting('app.user_id'
 fn a_read_cycle_through_a_restrictive_policy_denies_both() {
     let db = db_of(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
@@ -404,8 +404,8 @@ CREATE POLICY pb ON b FOR SELECT USING (owner_id = current_user
 fn a_write_clause_reading_a_recursive_table_denies_that_command() {
     let db = db_of(
         r"
-CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id UUID);
-CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
+CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
@@ -474,8 +474,8 @@ CREATE POLICY pdi_loop ON docs FOR INSERT WITH CHECK (
 fn an_update_check_reading_a_recursive_table_denies_every_update() {
     let db = db_of(
         r"
-CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id UUID);
-CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
+CREATE TABLE docs(id INTEGER PRIMARY KEY, owner_id TEXT);
+CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
@@ -558,7 +558,7 @@ fn a_read_recursion_note_names_tables_as_the_schema_spells_them() {
     let db = db_of(
         r"
 CREATE SCHEMA app;
-CREATE TABLE app.docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES app.docs(id), owner_id UUID);
+CREATE TABLE app.docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES app.docs(id), owner_id TEXT);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_tree ON app.docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM app.docs p WHERE p.id = app.docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
@@ -588,7 +588,7 @@ CREATE POLICY docs_tree ON app.docs FOR SELECT USING (
 fn a_policy_no_acting_role_reaches_denies_and_contributes_nothing() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, parent_id UUID REFERENCES docs(id), owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_tree ON docs FOR SELECT TO auditor USING (
   EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.owner_id = current_setting('app.user_id', true)));
@@ -631,10 +631,10 @@ CREATE POLICY docs_tree ON docs FOR SELECT TO auditor USING (
 fn a_diamond_sharing_a_table_without_a_cycle_still_translates() {
     let db = db_of(
         r"
-CREATE TABLE g(id INTEGER PRIMARY KEY, owner_id UUID);
-CREATE TABLE e(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES g(id));
-CREATE TABLE f(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES g(id));
-CREATE TABLE d(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES e(id));
+CREATE TABLE g(id INTEGER PRIMARY KEY, owner_id TEXT);
+CREATE TABLE e(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES g(id));
+CREATE TABLE f(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES g(id));
+CREATE TABLE d(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES e(id));
 ALTER TABLE g ENABLE ROW LEVEL SECURITY;
 ALTER TABLE e ENABLE ROW LEVEL SECURITY;
 ALTER TABLE f ENABLE ROW LEVEL SECURITY;
@@ -677,8 +677,8 @@ CREATE POLICY pd ON d FOR SELECT USING (
 fn an_update_clause_pointing_back_is_not_a_read_cycle() {
     let db = db_of(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
@@ -722,8 +722,8 @@ CREATE POLICY pb ON b FOR SELECT USING (
 fn a_cycle_through_a_table_without_row_level_security_is_not_a_cycle() {
     let db = db_of(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pa ON a FOR SELECT USING (
@@ -759,8 +759,8 @@ CREATE POLICY pb ON b FOR SELECT USING (
 fn a_read_cycle_survives_a_leg_dropped_by_confidence_filtering() {
     let db = db_of(
         r"
-CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER);
-CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id UUID, nx INTEGER REFERENCES a(id));
+CREATE TABLE a(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER);
+CREATE TABLE b(id INTEGER PRIMARY KEY, owner_id TEXT, nx INTEGER REFERENCES a(id));
 ALTER TABLE a ADD CONSTRAINT a_b FOREIGN KEY (nx) REFERENCES b(id);
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
@@ -793,7 +793,7 @@ fn a_looping_membership_table_asks_for_no_tuples() {
     let db = db_of(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
-CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id UUID);
+CREATE TABLE m(id INTEGER PRIMARY KEY, doc_id INTEGER REFERENCES docs(id), user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));
@@ -812,7 +812,7 @@ fn a_looping_uncorrelated_membership_table_asks_for_no_tuples() {
     let db = db_of(
         r"
 CREATE TABLE docs(id INTEGER PRIMARY KEY, title TEXT);
-CREATE TABLE m(id INTEGER PRIMARY KEY, user_id UUID);
+CREATE TABLE m(id INTEGER PRIMARY KEY, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE m ENABLE ROW LEVEL SECURITY;
 CREATE POLICY pm ON m FOR SELECT USING (EXISTS (SELECT 1 FROM m m2 WHERE m2.user_id = current_setting('app.user_id', true)));

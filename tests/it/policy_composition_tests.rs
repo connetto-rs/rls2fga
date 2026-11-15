@@ -167,13 +167,13 @@ CREATE POLICY p_false ON docs AS RESTRICTIVE FOR SELECT TO PUBLIC USING (FALSE);
 #[test]
 fn a_true_constant_comparison_translates_as_the_rule_it_guards() {
     let owner_sql = r"
-CREATE TABLE docs (id UUID PRIMARY KEY, owner UUID NOT NULL);
+CREATE TABLE docs (id UUID PRIMARY KEY, owner TEXT NOT NULL);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
   USING (owner = current_setting('app.user_id', true));
 ";
     let guarded_sql = r"
-CREATE TABLE docs (id UUID PRIMARY KEY, owner UUID NOT NULL);
+CREATE TABLE docs (id UUID PRIMARY KEY, owner TEXT NOT NULL);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
   USING ('on' = 'on' AND owner = current_setting('app.user_id', true));
@@ -209,7 +209,7 @@ CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
 #[test]
 fn a_false_constant_comparison_in_restrictive_denies() {
     let sql = r"
-CREATE TABLE docs (id UUID PRIMARY KEY, owner UUID NOT NULL);
+CREATE TABLE docs (id UUID PRIMARY KEY, owner TEXT NOT NULL);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_owner ON docs FOR SELECT TO PUBLIC
   USING (owner = current_setting('app.user_id', true));

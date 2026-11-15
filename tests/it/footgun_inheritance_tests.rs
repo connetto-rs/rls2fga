@@ -22,10 +22,10 @@ fn parent_inheritance_resolves_the_disambiguated_parent_type() {
         r"
 CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
-CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE aaa.projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
-CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE zzz.projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY zzz_sel ON zzz.projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES zzz.projects(id));
@@ -81,10 +81,10 @@ fn untyped_parent_does_not_borrow_another_tables_type() {
         r"
 CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
-CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE aaa.projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
-CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES zzz.projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
@@ -114,7 +114,7 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
 fn inherited_commands_consult_the_parents_select_policy() {
     let db = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
@@ -189,7 +189,7 @@ fn top_level_operators(body: &str) -> std::collections::BTreeSet<&'static str> {
 fn no_definition_mixes_operators_without_parentheses() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant_id UUID, reviewer_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, tenant_id TEXT, reviewer_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT TO auditor USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs FOR SELECT USING (tenant_id = current_setting('app.user_id', true));
@@ -233,7 +233,7 @@ GRANT SELECT ON docs TO app_user;
 fn inheritance_requires_only_the_rule_the_policy_names() {
     let db = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY projects_public ON projects FOR SELECT USING (is_public = TRUE);
@@ -290,7 +290,7 @@ fn self_referential_inheritance_keeps_the_rule_it_reads() {
 CREATE TABLE docs(
   id UUID PRIMARY KEY,
   parent_id UUID REFERENCES docs(id),
-  owner_id UUID,
+  owner_id TEXT,
   is_public BOOLEAN
 );
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -324,12 +324,12 @@ GRANT SELECT, DELETE ON docs TO app_user;
 fn an_ownership_column_cannot_take_over_a_parent_pointer() {
     let db = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(
   id UUID PRIMARY KEY,
-  projects_id UUID,
+  projects_id TEXT,
   project_id UUID REFERENCES projects(id)
 );
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
@@ -389,7 +389,7 @@ GRANT SELECT, DELETE ON tasks TO app_user;
 fn an_inherited_parent_rule_is_named_after_the_rule_itself() {
     let schema = |tasks_policy: &str| {
         format!(
-            "CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);\n\
+            "CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);\n\
              ALTER TABLE projects ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY proj_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));\n\
              CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));\n\
@@ -467,7 +467,7 @@ fn an_inherited_parent_rule_is_named_after_the_rule_itself() {
 fn inheritance_is_gated_by_the_parent_own_select_rule() {
     let db = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY proj_own ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
@@ -519,7 +519,7 @@ GRANT SELECT ON tasks TO app_user;
 fn inheritance_from_an_unprotected_parent_is_not_gated() {
     let db = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
@@ -556,7 +556,7 @@ fn a_self_referential_rule_is_gated_like_any_other_parent() {
 CREATE TABLE docs(
   id UUID PRIMARY KEY,
   parent_id UUID REFERENCES docs(id),
-  owner_id UUID,
+  owner_id TEXT,
   is_public BOOLEAN
 );
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -587,7 +587,7 @@ GRANT SELECT, DELETE ON docs TO app_user;
 fn inheriting_from_a_parent_with_no_policies_grants_nothing() {
     let db = db_of(
         r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
@@ -713,7 +713,7 @@ fn the_in_membership_spelling_translates_the_same_however_it_is_parenthesised() 
 #[test]
 fn parent_inheritance_translates_the_same_however_it_is_parenthesised() {
     const PARENT_SCHEMA: &str = "
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
@@ -782,7 +782,7 @@ fn a_foreign_key_declared_by_alter_table_resolves_the_parent_type() {
             "CREATE TABLE users (id UUID PRIMARY KEY);\n\
              CREATE TABLE teams (id UUID PRIMARY KEY);\n\
              CREATE TABLE team_members (team_id UUID NOT NULL {references}, \
-             user_id UUID NOT NULL);\n\
+             user_id TEXT NOT NULL);\n\
              CREATE TABLE docs (id UUID PRIMARY KEY, team_id UUID NOT NULL);\n\
              {constraint}\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
@@ -1245,7 +1245,7 @@ CREATE POLICY p ON docs FOR SELECT
 fn a_bare_delegation_to_a_restricted_parent_keeps_delegating() {
     let db = db_of(
         r"
-CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE TABLE docs(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id));
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY op ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id', true));

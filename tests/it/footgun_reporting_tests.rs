@@ -16,7 +16,7 @@ use crate::support::footgun::{
 fn generated_comments_cannot_escape_into_executable_sql() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY);\n\
-         CREATE TABLE \"doc_mem\nSELECT 1; --\"(doc_id UUID, user_id UUID);\n\
+         CREATE TABLE \"doc_mem\nSELECT 1; --\"(doc_id UUID, user_id TEXT);\n\
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY docs_sel ON docs FOR SELECT USING (EXISTS (\n\
            SELECT 1 FROM \"doc_mem\nSELECT 1; --\" m\n\
@@ -89,7 +89,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 fn command_without_permissive_policy_is_denied() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (owner_id = current_setting('app.user_id', true));
 ",
@@ -181,7 +181,7 @@ CREATE POLICY docs_pub ON docs FOR SELECT USING (is_public = TRUE);
 fn report_names_dropped_permissive_policies_and_their_reason() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs FOR SELECT USING (tenant = current_setting('app.tenant'));
@@ -212,6 +212,7 @@ fn report_names_the_function_call_that_defeated_recognition() {
     let db = db_of(
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, status TEXT);
+CREATE FUNCTION tenant_of(UUID) RETURNS TEXT LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (tenant_of(owner_id) = 'acme');
 ",
@@ -240,7 +241,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (tenant_of(owner_id) = 'acme');
 fn report_enumerates_policies_dropped_by_confidence_filtering() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, tenant TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, tenant TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
@@ -273,7 +274,7 @@ CREATE POLICY docs_tenant ON docs AS RESTRICTIVE FOR SELECT
 fn one_clause_is_reported_once_even_when_it_covers_two_phases() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, status TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true) AND status LIKE 'live%');
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true) AND status LIKE 'live%');
@@ -306,7 +307,7 @@ CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app
 fn a_redundant_select_gate_is_left_out() {
     let inherited_body = |parent_policies: &str| {
         let db = db_of(&format!(
-            "CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID, \
+            "CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT, \
              is_public BOOLEAN);\n\
              ALTER TABLE projects ENABLE ROW LEVEL SECURITY;\n\
              {parent_policies}\
@@ -366,7 +367,7 @@ fn a_redundant_select_gate_is_left_out() {
 #[test]
 fn a_relation_reached_only_by_insert_keeps_its_tuples() {
     let sql = r"
-CREATE TABLE docs(id INTEGER PRIMARY KEY, parent_id INTEGER, editor_id UUID);
+CREATE TABLE docs(id INTEGER PRIMARY KEY, parent_id INTEGER, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM docs p WHERE p.id = docs.parent_id AND p.editor_id = current_setting('app.user_id', true)));
@@ -408,7 +409,7 @@ CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_settin
 #[test]
 fn a_granting_model_keeps_its_tuple_queries() {
     let sql = r"
-CREATE TABLE projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
@@ -442,7 +443,7 @@ CREATE POLICY tasks_sel ON tasks FOR SELECT USING (
 fn a_write_policy_without_readable_rows_is_reported() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id', true));
 ",
@@ -466,7 +467,7 @@ CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('ap
     // A table that grants reads has nothing to report.
     let readable = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('app.user_id', true));
@@ -486,7 +487,7 @@ CREATE POLICY docs_del ON docs FOR DELETE USING (editor_id = current_setting('ap
     // An INSERT reads nothing, so an insert-only table is not affected either.
     let insert_only = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_setting('app.user_id', true));
 ",
@@ -649,6 +650,7 @@ fn the_model_follows_a_policy_altered_after_creation() {
 fn a_filtered_with_check_does_not_resurrect_through_the_bucket_mirror() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app.user_id', true))
@@ -685,6 +687,7 @@ CREATE POLICY docs_upd ON docs FOR UPDATE USING (owner_id = current_setting('app
 fn a_clause_the_threshold_dropped_is_named_by_a_typed_note() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id', true));
 CREATE POLICY docs_opaque ON docs FOR SELECT USING (opaque_gate(id));
@@ -749,6 +752,7 @@ CREATE POLICY docs_opaque ON docs FOR SELECT USING (opaque_gate(id));
 fn a_dropped_for_all_policy_reports_one_note_per_clause_not_per_phase() {
     let db = db_of(
         "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE FUNCTION opaque_gate(UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_owner ON docs FOR ALL USING (owner_id = current_setting('app.user_id', true))
   WITH CHECK (owner_id = current_setting('app.user_id', true));

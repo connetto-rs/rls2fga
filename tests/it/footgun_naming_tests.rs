@@ -22,10 +22,10 @@ use crate::support::footgun::{
 
 const COLLIDING_SCHEMAS: &str = r"
 CREATE SCHEMA app;
-CREATE TABLE app.docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE app.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY app_docs_sel ON app.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
-CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY public_docs_sel ON public.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
@@ -132,7 +132,7 @@ fn a_table_named_after_a_structural_relation_does_not_take_it() {
     ] {
         let db = db_of(&format!(
             "
-CREATE TABLE {reserved}(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE {reserved}(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE {reserved} ENABLE ROW LEVEL SECURITY;
 CREATE POLICY parent_sel ON {reserved} FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE tasks(id UUID PRIMARY KEY, parent_id UUID REFERENCES {reserved}(id));
@@ -173,7 +173,7 @@ fn a_column_named_after_an_action_relation_does_not_take_it() {
     ] {
         let db = db_of(&format!(
             "
-CREATE TABLE docs(id UUID PRIMARY KEY, {reserved}_id UUID, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, {reserved}_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING ({reserved}_id = current_setting('app.user_id'));
 CREATE POLICY docs_ins ON docs FOR INSERT WITH CHECK (editor_id = current_setting('app.user_id'));
@@ -213,7 +213,7 @@ CREATE POLICY docs_upd ON docs FOR UPDATE USING ({reserved}_id = current_setting
 fn policies_compose_however_each_one_spells_the_table() {
     let schema = |restrictive_on: &str| {
         format!(
-            "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, reviewer_id UUID);\n\
+            "CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, reviewer_id TEXT);\n\
              ALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
              CREATE POLICY docs_owner ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));\n\
              CREATE POLICY docs_reviewed ON {restrictive_on} AS RESTRICTIVE FOR SELECT\n\
@@ -243,7 +243,7 @@ fn a_policy_naming_its_table_without_the_schema_still_translates() {
         r"
 CREATE SCHEMA app;
 SET search_path TO app;
-CREATE TABLE app.docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE app.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE app.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
@@ -282,8 +282,8 @@ fn a_policy_naming_a_table_two_schemas_hold_follows_the_search_path() {
     let db = db_of(
         r"
 CREATE SCHEMA aaa;
-CREATE TABLE aaa.docs(id UUID PRIMARY KEY, owner_id UUID);
-CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE aaa.docs(id UUID PRIMARY KEY, owner_id TEXT);
+CREATE TABLE public.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE aaa.docs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
 SET search_path TO aaa, public;
@@ -381,7 +381,7 @@ CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
 CREATE TABLE aaa.docs(id UUID PRIMARY KEY);
 ALTER TABLE aaa.docs ENABLE ROW LEVEL SECURITY;
-CREATE TABLE zzz.docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE zzz.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE zzz.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ",
@@ -416,7 +416,7 @@ CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('
 fn a_policy_naming_a_role_the_schema_cannot_settle_is_reported_refused() {
     let db = db_of(
         r#"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT TO "billing admin" USING (owner_id = current_setting('app.user_id'));
 "#,
@@ -450,7 +450,7 @@ CREATE POLICY docs_sel ON docs FOR SELECT TO "billing admin" USING (owner_id = c
 fn distinct_ownership_columns_get_distinct_relations() {
     let db = db_of(
         r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_sel ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_upd ON docs FOR UPDATE USING (editor_id = current_setting('app.user_id'));
@@ -513,7 +513,7 @@ CREATE SCHEMA zzz;
 CREATE TABLE aaa.docs(id UUID PRIMARY KEY, tenant TEXT);
 ALTER TABLE aaa.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY aaa_sel ON aaa.docs FOR SELECT USING (tenant = current_setting('app.tenant'));
-CREATE TABLE zzz.docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE zzz.docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE zzz.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY zzz_sel ON zzz.docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
@@ -933,10 +933,10 @@ fn exhausted_ownership_relation_candidates_stay_distinct_across_commands() {
         r#"
 CREATE TABLE public.widgets(
     id UUID PRIMARY KEY,
-    foo UUID,
-    "owner_foo_iD" UUID,
-    owner_foo_id_52ed0fe5 UUID,
-    foo_id UUID
+    foo TEXT,
+    "owner_foo_iD" TEXT,
+    owner_foo_id_52ed0fe5 TEXT,
+    foo_id TEXT
 );
 ALTER TABLE widgets ENABLE ROW LEVEL SECURITY;
 CREATE POLICY sel_foo    ON widgets FOR SELECT USING (foo                    = current_setting('app.user_id'));

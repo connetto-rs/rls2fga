@@ -140,10 +140,10 @@ CREATE POLICY tasks_member ON tasks FOR SELECT TO PUBLIC USING (
 #[test]
 fn p5_parent_inheritance_classifies_and_translates_end_to_end() {
     let sql = r"
-CREATE TABLE public.users (id UUID PRIMARY KEY);
+CREATE TABLE public.users (id TEXT PRIMARY KEY);
 CREATE TABLE public.projects (
   id UUID PRIMARY KEY,
-  owner_id UUID REFERENCES users(id)
+  owner_id TEXT REFERENCES users(id)
 );
 CREATE TABLE public.tasks (
   id UUID PRIMARY KEY,

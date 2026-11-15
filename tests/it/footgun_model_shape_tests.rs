@@ -25,10 +25,10 @@ fn json_model_declares_the_same_relations_as_the_dsl() {
         r"
 CREATE SCHEMA aaa;
 CREATE SCHEMA zzz;
-CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE aaa.projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE aaa.projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY aaa_sel ON aaa.projects FOR SELECT USING (owner_id = current_setting('app.user_id'));
-CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE zzz.projects(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE zzz.projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY zzz_sel ON zzz.projects FOR SELECT TO analyst USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES zzz.projects(id), is_public BOOLEAN);
@@ -107,7 +107,7 @@ fn no_userset_references_an_undefined_relation() {
 fn a_layered_model_stays_internally_consistent() {
     let db = db_of(
         r"
-CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
+CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);
 ALTER TABLE orgs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY orgs_own ON orgs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY orgs_pub ON orgs FOR SELECT USING (is_public = TRUE);
@@ -115,7 +115,7 @@ CREATE TABLE projects(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id));
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY projects_sel ON projects FOR SELECT TO analyst USING (
   EXISTS (SELECT 1 FROM orgs o WHERE o.id = projects.org_id AND o.owner_id = current_setting('app.user_id')));
-CREATE TABLE members(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id), user_id UUID);
+CREATE TABLE members(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id), user_id TEXT);
 CREATE TABLE notes(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_sel ON notes FOR SELECT USING (
@@ -137,15 +137,15 @@ CREATE POLICY notes_sel ON notes FOR SELECT USING (
 fn no_type_defines_a_relation_twice() {
     let db = db_of(
         r"
-CREATE TABLE teams(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE teams(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 CREATE POLICY teams_sel ON teams FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE TABLE docs(
   id UUID PRIMARY KEY,
-  can_select_id UUID,
-  no_access_id UUID,
-  owner_id UUID,
-  teams_id UUID,
+  can_select_id TEXT,
+  no_access_id TEXT,
+  owner_id TEXT,
+  teams_id TEXT,
   team_ref UUID REFERENCES teams(id)
 );
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -233,7 +233,7 @@ CREATE POLICY t1_tree ON t1 FOR SELECT USING (
 fn role_scoped_barrier_schemas() -> Vec<String> {
     vec![
         "
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN NOT NULL DEFAULT FALSE);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN NOT NULL DEFAULT FALSE);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_public ON docs FOR SELECT USING (is_public = TRUE);
@@ -243,7 +243,7 @@ CREATE POLICY docs_barrier ON docs AS RESTRICTIVE FOR SELECT TO contractor
         .to_string(),
         // Two barriers, so the read the acting role faces carries both refusals.
         "
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN NOT NULL DEFAULT FALSE);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN NOT NULL DEFAULT FALSE);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY docs_public ON docs FOR SELECT USING (is_public = TRUE);

@@ -12,19 +12,19 @@ use crate::support;
 #[test]
 fn registered_function_not_matching_any_pattern_falls_to_unknown() {
     let sql = r"
+CREATE FUNCTION my_user_func() RETURNS INT LANGUAGE plpgsql STABLE AS
+$$ BEGIN RETURN NULL; END $$;
 CREATE TABLE docs(id UUID PRIMARY KEY, val INT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (val + my_user_func() > 0);
 
-CREATE FUNCTION my_user_func() RETURNS UUID LANGUAGE sql AS
-'SELECT current_setting(''app.current_user_id'')::uuid';
 ";
     let db = parse_schema(sql).unwrap();
     let mut registry = FunctionRegistry::new();
     registry.register_if_absent(
         "my_user_func",
         &FunctionSemantic::CurrentUserAccessor {
-            returns: "uuid".to_string(),
+            returns: "int4".to_string(),
         },
     );
 
@@ -49,6 +49,7 @@ CREATE FUNCTION my_user_func() RETURNS UUID LANGUAGE sql AS
 fn registered_unknown_function_produces_registered_as_unknown_message() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, val INT);
+CREATE FUNCTION mystery_func(INT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (mystery_func(val));
 ";
@@ -82,6 +83,7 @@ CREATE POLICY p ON docs FOR SELECT USING (mystery_func(val));
 fn registered_role_threshold_function_bare_call_gives_specific_message() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, val INT);
+CREATE FUNCTION role_level(INT, UUID) RETURNS BOOLEAN LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (role_level(val, id));
 ";
@@ -126,7 +128,7 @@ CREATE POLICY p ON docs FOR SELECT USING (role_level(val, id));
 #[test]
 fn classifications_iterator_yields_both_using_and_with_check() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR UPDATE
     USING (owner_id = current_setting('app.user_id'))
@@ -145,7 +147,7 @@ CREATE POLICY p ON docs FOR UPDATE
 #[test]
 fn classifications_iterator_yields_one_for_select() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
@@ -245,7 +247,7 @@ CREATE POLICY p ON docs FOR SELECT USING (COALESCE(owner_id, 'nobody') = current
 #[test]
 fn ownership_beside_a_literal_guard_keeps_the_composite_structure() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, status TEXT);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, status TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (owner_id = current_setting('app.user_id') AND status = 'published');
@@ -272,7 +274,7 @@ CREATE POLICY p ON docs FOR SELECT
 #[test]
 fn p8_composite_or_with_all_relationship_parts() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, editor_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, editor_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (owner_id = current_setting('app.user_id') OR editor_id = current_setting('app.user_id'));
@@ -366,7 +368,8 @@ CREATE POLICY p ON tasks FOR SELECT
 #[test]
 fn p5_with_unknown_inner_generates_no_access_todo() {
     let sql = r"
-CREATE TABLE projects(id UUID PRIMARY KEY);
+CREATE TABLE projects(id UUID PRIMARY KEY, val INT);
+CREATE FUNCTION mystery() RETURNS INT LANGUAGE plpgsql STABLE AS $$ BEGIN RETURN NULL; END $$;
 CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id));
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON tasks FOR SELECT
@@ -412,7 +415,7 @@ CREATE POLICY p ON tasks FOR SELECT
 #[test]
 fn confidence_filter_drops_below_threshold_classifications() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID, is_public BOOLEAN);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT, is_public BOOLEAN);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p_own ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 CREATE POLICY p_flag ON docs FOR SELECT USING (is_public = TRUE);
@@ -493,7 +496,7 @@ CREATE POLICY p ON docs FOR SELECT USING (pg_has_role(current_user, 'editor', 'M
 #[test]
 fn current_setting_as_user_accessor() {
     let sql = r"
-CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE docs(id UUID PRIMARY KEY, owner_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_id'));
 ";
@@ -640,7 +643,7 @@ CREATE POLICY p ON docs FOR SELECT USING (FALSE);
 fn p4_in_subquery_form_classified_as_membership() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
+CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (id IN (SELECT doc_id FROM shares WHERE shares.user_id = current_setting('app.user_id')));
@@ -665,7 +668,7 @@ CREATE POLICY p ON docs FOR SELECT
 fn p4_reading_the_guarded_table_in_the_join_is_refused() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, member_id UUID);
+CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, member_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -690,7 +693,7 @@ fn p4_on_clause_joining_guarded_table_is_refused() {
     for sql in [
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
+CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -701,7 +704,7 @@ CREATE POLICY p ON docs FOR SELECT
 ",
         r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
+CREATE TABLE shares(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -727,7 +730,7 @@ CREATE POLICY p ON docs FOR SELECT
 fn p4_reversed_correlation_names_the_guarded_column() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE doc_access(id UUID PRIMARY KEY, doc_id UUID, user_id UUID);
+CREATE TABLE doc_access(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -752,7 +755,7 @@ CREATE POLICY p ON docs FOR SELECT
 fn p4_conflicting_fk_columns_in_where_rejects() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, project_id UUID);
-CREATE TABLE access(id UUID PRIMARY KEY, doc_id UUID, project_id UUID, user_id UUID);
+CREATE TABLE access(id UUID PRIMARY KEY, doc_id UUID, project_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -775,7 +778,7 @@ CREATE POLICY p ON docs FOR SELECT
 fn p13_uncorrelated_membership_when_subquery_has_no_fk_to_guarded_table() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY);
-CREATE TABLE log(id UUID PRIMARY KEY, doc_id UUID, editor UUID);
+CREATE TABLE log(id UUID PRIMARY KEY, doc_id UUID, editor TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
     USING (EXISTS (
@@ -806,7 +809,7 @@ CREATE POLICY p ON docs FOR SELECT
 #[test]
 fn p5_conflicting_join_columns_classified_as_unknown() {
     let sql = r"
-CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id UUID);
+CREATE TABLE orgs(id UUID PRIMARY KEY, owner_id TEXT);
 CREATE TABLE docs(id UUID PRIMARY KEY, org_id UUID REFERENCES orgs(id), alt_org_id UUID REFERENCES orgs(id));
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT
