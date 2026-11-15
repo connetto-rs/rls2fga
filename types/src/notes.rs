@@ -408,6 +408,23 @@ pub enum TranslationNote {
         /// Characters the key may render, once encoded, before the row is left out.
         budget: usize,
     },
+    /// A declared helper walks down its table's own parent column, which `PostgreSQL`
+    /// follows to any depth and `OpenFGA` resolves only as deep as its
+    /// `resolveNodeLimit` allows.
+    ///
+    /// Stated as a contract rather than a list, since the translator never sees how deep
+    /// the tree goes.
+    HelperWalkDepth {
+        /// The helper.
+        function: String,
+        /// The table it walks.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// The column naming each row's parent.
+        column: ColumnName,
+        /// The relation resolved once per parent.
+        relation: RelationName,
+    },
     /// A condition parameter the caller has to put in every check context.
     ///
     /// A list parameter and a clock parameter are carried by name, and a single value
@@ -561,6 +578,7 @@ impl TranslationNote {
             Self::ReadsDeniedSoWritesCannotName { .. }
             | Self::CallerSuppliesConditionParameter { .. }
             | Self::RowIdentifierBudget { .. }
+            | Self::HelperWalkDepth { .. }
             | Self::TypeNameCollision { .. }
             | Self::PolicyClauseIllegal { .. } => NoteSeverity::ActionRequired,
             Self::PolicyReadRecursion { .. }
@@ -609,6 +627,9 @@ impl TranslationNote {
                 table: spelling, ..
             }
             | Self::RowIdentifierBudget {
+                table: spelling, ..
+            }
+            | Self::HelperWalkDepth {
                 table: spelling, ..
             }
             | Self::ReadsDeniedSoWritesCannotName {
@@ -824,6 +845,19 @@ impl fmt::Display for TranslationNote {
                  and the generated query leaves a longer one out rather than shortening it, \
                  which would merge two rows into one object. Check whether any row exceeds \
                  it: the model denies those rows where PostgreSQL grants them."
+            ),
+            Self::HelperWalkDepth {
+                function,
+                table,
+                column,
+                relation,
+            } => write!(
+                f,
+                "Declared helper '{function}' walks '{table}' down '{column}', which OpenFGA \
+                 resolves as '{relation}' once per parent and only as deep as its \
+                 resolveNodeLimit allows, 25 by default. A row further below the one granted \
+                 fails the check where PostgreSQL grants it, so keep the tree shallower or \
+                 raise the limit."
             ),
             Self::FunctionExpanded { function, .. } => write!(
                 f,

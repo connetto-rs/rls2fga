@@ -313,6 +313,12 @@ fn helper_call<DB: DatabaseLike>(
                 table_identity(parent.table()),
                 HelperSetArm::Parent(helper_parent(&name, parent, db, registry)?),
             ),
+            HelperArm::Walk(walk) => (
+                table_identity(walk.table()),
+                HelperSetArm::Walk(HelperWalk {
+                    fk_column: ColumnName::from_stored(walk.column().stored_column_name()),
+                }),
+            ),
         };
         if returned != *level {
             return Err(HelperRefusal::OtherLevel {

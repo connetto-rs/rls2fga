@@ -7,7 +7,7 @@ use core::time::Duration;
 
 use rls2fga::types::ActionStatement;
 
-use crate::declared_helper_tests::{INSTALLATIONS, LEVELS, ORDERS, OWNER_READS};
+use crate::declared_helper_tests::{GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -139,6 +139,102 @@ async fn declared_helpers_agree_with_postgres_17_and_18() {
                 ActionStatement::Select,
                 false,
             );
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const GROUP_HELPERS: &str = r#"{
+    "authz.groups_with": { "kind": "declared_helper" }
+}"#;
+
+/// The groups read their own rows through the walk too.
+const GROUP_READS: &str = "
+ALTER TABLE groups ENABLE ROW LEVEL SECURITY;
+CREATE POLICY groups_read ON groups FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.groups_with('read'))));
+";
+
+/// `org` holds `team` and `side`, `team` holds `squad`, `other` is a tree of its own, and
+/// `loop_a` and `loop_b` are each other's parent.
+fn groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-walk-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!("{LEVELS}{OWNER_READS}{GROUPS}{GROUP_READS}"),
+        &[
+            "INSERT INTO groups (id, parent_id) VALUES
+               ('org', NULL), ('team', 'org'), ('side', 'org'), ('squad', 'team'),
+               ('other', NULL), ('loop_a', NULL), ('loop_b', 'loop_a');
+             UPDATE groups SET parent_id = 'loop_b' WHERE id = 'loop_a';
+             INSERT INTO docs VALUES ('d_org', 'org', NULL), ('d_team', 'team', NULL),
+               ('d_side', 'side', NULL), ('d_squad', 'squad', NULL), ('d_other', 'other', NULL),
+               ('d_loop_a', 'loop_a', NULL), ('d_loop_b', 'loop_b', NULL);
+             INSERT INTO group_grants VALUES
+               ('team', 'alice', 'read'), ('org', 'bob', 'write'), ('loop_a', 'dave', 'read')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs, groups TO app_reader;
+             GRANT UPDATE ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("dave"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(GROUP_HELPERS)
+    .writing(
+        "docs",
+        Mutations {
+            update_set: Some("title = 'changed'".into()),
+            check_neutral: true,
+        },
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_walk_down_the_group_tree_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = groups_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, statement, allowed| {
+                assert_postgres(&case, &run, subject, object, statement, allowed);
+            };
+            // A grant in the middle reaches the subtree, not the parent or a sibling.
+            expect("alice", "docs:d_team", ActionStatement::Select, true);
+            expect("alice", "docs:d_squad", ActionStatement::Select, true);
+            expect("alice", "docs:d_org", ActionStatement::Select, false);
+            expect("alice", "docs:d_side", ActionStatement::Select, false);
+            expect("alice", "docs:d_other", ActionStatement::Select, false);
+            expect("alice", "docs:d_squad", ActionStatement::Update, false);
+            expect("alice", "groups:squad", ActionStatement::Select, true);
+            expect("alice", "groups:org", ActionStatement::Select, false);
+            // A write grant at the root reads and changes the whole tree, and no other.
+            expect("bob", "docs:d_org", ActionStatement::Select, true);
+            expect("bob", "docs:d_squad", ActionStatement::Update, true);
+            expect("bob", "docs:d_side", ActionStatement::Update, true);
+            expect("bob", "docs:d_other", ActionStatement::Select, false);
+            // A grant on a cycle reaches every group on it, and a walk never reaching a
+            // grant ends.
+            expect("dave", "docs:d_loop_a", ActionStatement::Select, true);
+            expect("dave", "docs:d_loop_b", ActionStatement::Select, true);
+            expect("alice", "docs:d_loop_a", ActionStatement::Select, false);
+            // No grant, and no caller at all, read nothing.
+            expect("erin", "docs:d_squad", ActionStatement::Select, false);
+            expect("anonymous", "docs:d_org", ActionStatement::Select, false);
             assert_agrees(&case, &run);
         }
     }

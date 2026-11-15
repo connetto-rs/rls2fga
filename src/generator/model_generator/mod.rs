@@ -327,6 +327,10 @@ pub(crate) struct TypePlan {
     /// Per command some acting role holds on some columns only, the relations on this
     /// table's gate object naming who holds it on each column.
     pub column_relations: Vec<ColumnRelations>,
+    /// The note each declared helper's walk down this type's parent column carries,
+    /// keyed by the relation resolved through it and that column, and read once pruning
+    /// has settled which relations survive.
+    walk_notes: BTreeMap<(RelationName, ColumnName), TranslationNote>,
 }
 
 /// Subjects the generator's own structural relations hold, or `None` when the
@@ -385,6 +389,7 @@ impl TypePlan {
             narrowed_relations: BTreeSet::new(),
             source_table: None,
             column_relations: Vec::new(),
+            walk_notes: BTreeMap::new(),
         }
     }
 
@@ -568,19 +573,58 @@ impl TypePlan {
     fn ensure_computed(&mut self, relation: impl Into<String>, expr: UsersetExpr) -> RelationName {
         let base = clamp_relation_name(relation.into());
         let key = userset_key(&expr);
-        // One name, one rule, or a caller deriving the name reads the wrong definition.
-        let relation = yield_until_free(&base, &key, |relation| {
-            self.direct_relations.contains_key(relation)
-                || self
-                    .computed_relations
-                    .get(relation)
-                    .is_some_and(|held| *held != expr)
-                || generator_defines(relation)
-        });
+        let relation = yield_until_free(&base, &key, |relation| self.holds_other(relation, &expr));
         self.computed_relations
             .entry(relation.clone())
             .or_insert(expr);
         relation
+    }
+
+    /// `parts`, or a row whose parent through one of `walks` the relation itself holds,
+    /// under the first name free for that rule.
+    ///
+    /// The rule names itself, so each name tried is spelled into its walks before the
+    /// rule held under that name is compared.
+    fn ensure_walk_computed(
+        &mut self,
+        relation: impl Into<String>,
+        mut parts: Vec<UsersetExpr>,
+        walks: Vec<RelationName>,
+    ) -> RelationName {
+        let base = clamp_relation_name(relation.into());
+        let own = parts.len();
+        let named = RelationName::canonicalized(&base);
+        parts.extend(
+            walks
+                .into_iter()
+                .map(|tupleset| UsersetExpr::TupleToUserset {
+                    tupleset,
+                    computed: named.clone(),
+                }),
+        );
+        let mut rule = UsersetExpr::Union(parts);
+        let key = userset_key(&rule);
+        let relation = yield_until_free(&base, &key, |relation| {
+            name_walks(&mut rule, own, relation);
+            self.holds_other(relation, &rule)
+        });
+        name_walks(&mut rule, own, &relation);
+        self.computed_relations
+            .entry(relation.clone())
+            .or_insert(rule);
+        relation
+    }
+
+    /// Whether `relation` already names something other than the computed `rule`.
+    ///
+    /// One name, one rule, or a caller deriving the name reads the wrong definition.
+    fn holds_other(&self, relation: &RelationName, rule: &UsersetExpr) -> bool {
+        self.direct_relations.contains_key(relation)
+            || self
+                .computed_relations
+                .get(relation)
+                .is_some_and(|held| held != rule)
+            || generator_defines(relation)
     }
 
     fn set_computed(&mut self, relation: impl Into<String>, expr: UsersetExpr) -> RelationName {
@@ -605,7 +649,11 @@ impl TypePlan {
 }
 
 /// The first name `held` does not refuse, renaming from `base` under `key` until free.
-fn yield_until_free(base: &str, key: &str, held: impl Fn(&RelationName) -> bool) -> RelationName {
+fn yield_until_free(
+    base: &str,
+    key: &str,
+    mut held: impl FnMut(&RelationName) -> bool,
+) -> RelationName {
     let mut relation = RelationName::canonicalized(base);
     for attempt in 0..MAX_RELATION_RENAME_ATTEMPTS {
         if !held(&relation) {
@@ -614,6 +662,19 @@ fn yield_until_free(base: &str, key: &str, held: impl Fn(&RelationName) -> bool)
         relation = yielded_relation_name(base, key, attempt);
     }
     relation
+}
+
+/// Spell `relation` into the walks of a rule [`TypePlan::ensure_walk_computed`] built,
+/// its children after the first `own`.
+fn name_walks(rule: &mut UsersetExpr, own: usize, relation: &RelationName) {
+    let UsersetExpr::Union(children) = rule else {
+        return;
+    };
+    for child in children.iter_mut().skip(own) {
+        if let UsersetExpr::TupleToUserset { computed, .. } = child {
+            computed.clone_from(relation);
+        }
+    }
 }
 
 /// Choices a deployment makes about the emitted model.
@@ -1388,6 +1449,16 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         registry.deployment(),
     );
     prune_unreferenced_relations(&mut all_types, &answers.answered_locally);
+    // After pruning, so only a walk the model still resolves is noted.
+    for plan in all_types.values_mut() {
+        let walks = core::mem::take(&mut plan.walk_notes);
+        notes.extend(
+            walks
+                .into_iter()
+                .filter(|((relation, _), _)| plan.computed_relations.contains_key(relation))
+                .map(|(_, note)| note),
+        );
+    }
     narrow_grant_sources_to_declared(&mut all_types);
     // Every check states the kind it acts as, so the type it names is declared whether or
     // not a branch reads it.

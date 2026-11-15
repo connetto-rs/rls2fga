@@ -565,6 +565,7 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
             .or_else(|| key_collation_refusal(&grant.table, &grant.user_column, db)),
         HelperSetArm::Parent(parent) => key_collation_refusal(&call.level, &parent.fk_column, db)
             .or_else(|| helper_call_refusal(&parent.call, db)),
+        HelperSetArm::Walk(walk) => key_collation_refusal(&call.level, &walk.fk_column, db),
     })
 }
 
