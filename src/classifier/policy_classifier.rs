@@ -157,6 +157,20 @@ fn temporal_columns<DB: DatabaseLike>(db: &DB, table: &str) -> recognizers::Temp
     })
 }
 
+/// A literal attribute check's grade, A once the deployment confirms its column on `table`.
+fn literal_attribute_confidence<DB: DatabaseLike>(
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    column: &ColumnName,
+) -> ConfidenceLevel {
+    if registry.is_confirmed_attribute_column(db, table, column.as_str()) {
+        ConfidenceLevel::A
+    } else {
+        ConfidenceLevel::B
+    }
+}
+
 fn unknown_d(expr: &Expr, reason: impl Into<String>) -> ClassifiedExpr {
     ClassifiedExpr {
         pattern: PatternClass::Unknown(UnclassifiedExpr {
@@ -758,13 +772,13 @@ fn classify_expr_inner<DB: DatabaseLike>(
     if let Some(typed) = recognizers::temporal_literal_comparison(expr, &temporal) {
         return match typed {
             Ok(predicate) => ClassifiedExpr {
+                confidence: literal_attribute_confidence(db, registry, table, &predicate.column),
                 pattern: PatternClass::P9AttributeCondition(AttributeCondition {
                     column: predicate.column.clone(),
                     value_description: describe_comparison_value(expr),
                     predicate: Some(predicate),
                     request_predicate: None,
                 }),
-                confidence: ConfidenceLevel::B,
             },
             Err(refusal) => unknown_d(expr, refusal.to_string()),
         };
@@ -954,16 +968,15 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classified;
     }
 
-    // Try P9: standalone attribute condition. A literal constant is decided by the
-    // row, so it grades with the boolean flag it generalises. Anything else, a
-    // temporal function among them, keeps falling closed at C.
+    // Try P9: standalone attribute condition, only a literal one decided by the row.
     if let Some(col) = recognizers::is_attribute_check(expr) {
         let value_desc = describe_comparison_value(expr);
         let predicate = recognizers::attribute_literal_predicate(expr);
         let request_predicate = recognizers::attribute_request_predicate(expr);
-        // A literal is row data and a request value becomes a condition the service
-        // evaluates, so both translate. Anything else still falls closed at C.
-        let confidence = if predicate.is_some() || request_predicate.is_some() {
+        // No confirmation vouches for a request value, which the service evaluates.
+        let confidence = if predicate.is_some() {
+            literal_attribute_confidence(db, registry, table, &col)
+        } else if request_predicate.is_some() {
             ConfidenceLevel::B
         } else {
             ConfidenceLevel::C
@@ -1414,6 +1427,115 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
             // flag rather than falling to the review tier.
             assert_eq!(classified.confidence, ConfidenceLevel::B);
         }
+    }
+
+    fn grants_db() -> ParserDB {
+        parse_schema(
+            r"
+CREATE SCHEMA app;
+CREATE TABLE grants (
+  id UUID PRIMARY KEY,
+  role TEXT,
+  expires_on DATE,
+  starts_at TIMESTAMPTZ
+);
+CREATE TABLE app.grants (
+  id UUID PRIMARY KEY,
+  role TEXT
+);
+CREATE TABLE teams (
+  id UUID PRIMARY KEY,
+  role TEXT
+);
+",
+        )
+        .expect("schema should parse")
+    }
+
+    fn grade(registry: &FunctionRegistry, table: &str, expr_sql: &str) -> ConfidenceLevel {
+        classify_expr(
+            &parse_expr(expr_sql),
+            &grants_db(),
+            registry,
+            table,
+            PolicyCommand::Select,
+        )
+        .confidence
+    }
+
+    #[test]
+    fn a_confirmed_attribute_column_grades_its_literal_checks_a() {
+        let mut registry = FunctionRegistry::new();
+        registry.register_attribute_column("grants", "role");
+        registry.register_attribute_column("public.grants", "expires_on");
+
+        for expr_sql in [
+            "role = 'writer'",
+            "'writer' = role",
+            "role IN ('reader', 'writer')",
+            "role = ANY (ARRAY['reader', 'writer'])",
+            "role IS NULL",
+            "role IS NOT NULL",
+            "expires_on >= DATE '2024-01-01'",
+        ] {
+            assert_eq!(
+                grade(&registry, "grants", expr_sql),
+                ConfidenceLevel::A,
+                "`{expr_sql}`"
+            );
+        }
+    }
+
+    #[test]
+    fn an_attribute_confirmation_is_bound_to_its_table() {
+        let mut registry = FunctionRegistry::new();
+        registry.register_attribute_column("grants", "role");
+
+        assert_eq!(
+            grade(&registry, "teams", "role = 'writer'"),
+            ConfidenceLevel::B
+        );
+        assert_eq!(
+            grade(&registry, "app.grants", "role = 'writer'"),
+            ConfidenceLevel::B
+        );
+        assert_eq!(
+            grade(&registry, "public.grants", "role = 'writer'"),
+            ConfidenceLevel::A
+        );
+    }
+
+    #[test]
+    fn an_attribute_confirmation_keeps_quoted_identity() {
+        let mut registry = FunctionRegistry::new();
+        registry.register_attribute_column("grants", "\"Role\"");
+
+        assert_eq!(
+            grade(&registry, "grants", "role = 'writer'"),
+            ConfidenceLevel::B
+        );
+    }
+
+    #[test]
+    fn an_attribute_confirmation_leaves_checks_the_row_does_not_decide() {
+        let mut registry = FunctionRegistry::new();
+        registry.register_attribute_column("grants", "expires_on");
+        registry.register_attribute_column("grants", "starts_at");
+
+        // The session TimeZone places a zoneless literal, so each request decides it.
+        assert_eq!(
+            grade(
+                &registry,
+                "grants",
+                "starts_at >= TIMESTAMP '2024-01-01 00:00:00'"
+            ),
+            ConfidenceLevel::B
+        );
+        // A clock reading admits a row today and refuses it tomorrow.
+        assert_eq!(
+            grade(&registry, "grants", "expires_on > now()"),
+            ConfidenceLevel::B
+        );
     }
 
     #[test]

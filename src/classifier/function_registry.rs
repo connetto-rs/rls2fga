@@ -8,12 +8,12 @@ use crate::parser::function_analyzer::{
     body_role_keyword, body_setting_fallback, body_setting_key, body_single_projection,
     normalize_setting_key, renamed_caller_body, FunctionSemantic,
 };
-use crate::parser::names::{stored_relation_name, RoleKeyword};
+use crate::parser::names::{resolve_table_id, stored_relation_name, RoleKeyword};
 use crate::parser::sql_parser::{
     DatabaseLike, Deployment, FunctionLike, SessionSetting, SetPacking, SettingContent,
     SettingPresence, SettingValue,
 };
-use crate::types::ConditionParameterName;
+use crate::types::{ConditionParameterName, TableRef};
 use sql_traits::structs::{IdentifierCase, TargetName};
 use sqlparser::ast::FunctionSecurity;
 
@@ -333,6 +333,8 @@ pub struct FunctionRegistry {
     /// Columns confirmed as public flags. Only these reach confidence A, so an
     /// implicit wildcard grant always surfaces for review.
     pub(crate) public_flag_columns: BTreeSet<String>,
+    /// Columns confirmed as access attributes, each with its table as written.
+    attribute_columns: Vec<(TableRef, String)>,
     /// Functions whose body describes a caller accessor their security mode
     /// invalidates, kept so the report can name the cause.
     owner_bound_accessors: BTreeMap<FunctionKey, String>,
@@ -363,6 +365,7 @@ impl FunctionRegistry {
             function_names: BTreeMap::new(),
             function_resolution: BTreeMap::new(),
             public_flag_columns: BTreeSet::new(),
+            attribute_columns: Vec::new(),
             owner_bound_accessors: BTreeMap::new(),
             renamed_accessors: BTreeMap::new(),
             role_keyword_accessors: BTreeMap::new(),
@@ -423,6 +426,38 @@ impl FunctionRegistry {
     /// public-flag column.
     pub(crate) fn is_confirmed_public_flag_column(&self, column: &str) -> bool {
         self.public_flag_columns.contains(column)
+    }
+
+    /// Confirm `column` of `table` as an access attribute, grading its literal checks A.
+    ///
+    /// `table` resolves against the schema, so another table's `column` stays unconfirmed.
+    pub fn register_attribute_column(
+        &mut self,
+        table: impl Into<String>,
+        column: impl Into<String>,
+    ) {
+        self.attribute_columns.push((
+            TableRef::as_written(table),
+            stored_relation_name(&column.into()),
+        ));
+    }
+
+    /// True when `column`, named as stored, is a confirmed access attribute of `table`.
+    pub(crate) fn is_confirmed_attribute_column<DB: DatabaseLike>(
+        &self,
+        db: &DB,
+        table: &str,
+        column: &str,
+    ) -> bool {
+        let guarded = resolve_table_id(db, table);
+        guarded.is_some()
+            && self
+                .attribute_columns
+                .iter()
+                .any(|(confirmed, confirmed_column)| {
+                    confirmed_column == column
+                        && resolve_table_id(db, confirmed.spelling()) == guarded
+                })
     }
 
     /// Declare the `lc_monetary` the schema's `money` literals were written in.
