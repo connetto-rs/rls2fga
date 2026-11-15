@@ -152,8 +152,8 @@ fn every_pattern_enclosing_an_answered_refusal_is_regraded() {
         .expect("the clause survives");
     assert_eq!(
         outer.confidence,
-        ConfidenceLevel::B,
-        "a composed pattern grades B once nothing below it is refused"
+        ConfidenceLevel::A,
+        "a composed pattern grades as its parts once nothing below it is refused"
     );
     // The pattern in between was regraded too, not just the outermost one.
     let PatternClass::P5ParentInheritance(ParentInheritance { inner_pattern, .. }) = &outer.pattern
@@ -162,9 +162,34 @@ fn every_pattern_enclosing_an_answered_refusal_is_regraded() {
     };
     assert_eq!(
         inner_pattern.confidence,
-        ConfidenceLevel::B,
+        ConfidenceLevel::A,
         "the parent-side composite must be regraded as well"
     );
+}
+
+/// An exact answer below a relationship leaves the attribute guard beside it unenforced.
+#[test]
+fn an_answered_refusal_under_an_attribute_guard_keeps_the_guard_grade() {
+    let schema = BIT_FLAG_SCHEMA
+        .replace(
+            "docs(id UUID PRIMARY KEY,",
+            "docs(id UUID PRIMARY KEY, title TEXT,",
+        )
+        .replace("= 2)));", "= 2)) AND docs.title LIKE 'a%');");
+    let db = parse_schema(&schema).expect("schema parses");
+
+    let mut classified = translator().classify(&db);
+    consult_oracle(&mut classified, &BitFlagIsPublic);
+
+    let outer = classified[0]
+        .using_classification()
+        .expect("the clause survives");
+    assert!(
+        matches!(outer.pattern, PatternClass::P7AbacAnd(_)),
+        "expected a relationship beside a guard, got {:?}",
+        outer.pattern
+    );
+    assert_eq!(outer.confidence, ConfidenceLevel::C);
 }
 
 /// An oracle grades its own answer, and that grade still faces the operator's

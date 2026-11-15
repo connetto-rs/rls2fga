@@ -271,9 +271,9 @@ pub enum ConfidenceLevel {
     D,
     /// Low confidence: partially recognised (e.g. ABAC crossover).
     C,
-    /// Medium confidence: composite patterns where sub-parts are well-understood.
+    /// Medium confidence: row-decided or read through indirection.
     B,
-    /// Highest confidence: fully recognised, single-pattern expression.
+    /// Highest confidence: fully translated, alone or combined by `AND` and `OR`.
     A,
 }
 

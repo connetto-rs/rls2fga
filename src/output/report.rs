@@ -228,8 +228,7 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         PatternClass::P8Composite(Composite { op, parts }) => {
             let mut rendered = format!("P8 ({op:?} of {} parts", parts.len());
             let grade = parts.iter().map(|part| part.confidence).min();
-            // A grade at or above `B` is the composite cap, which no part sets.
-            if let Some(grade) = grade.filter(|grade| *grade < ConfidenceLevel::B) {
+            if let Some(grade) = grade.filter(|grade| *grade < ConfidenceLevel::A) {
                 let mut deciders = Vec::new();
                 grade_deciders(parts, grade, &mut deciders);
                 let _ = write!(rendered, ", graded {grade}");
@@ -737,7 +736,8 @@ CREATE POLICY p ON docs FOR SELECT USING ({using});
             ),
             (
                 "owner_id = current_user AND meta = 'x'",
-                "P8 (And of 2 parts)".to_string(),
+                "P8 (And of 2 parts, graded B by P9 (owner_id = 'app_user') and by P9 (meta = 'x'))"
+                    .to_string(),
             ),
         ] {
             let row = using_row([], using);

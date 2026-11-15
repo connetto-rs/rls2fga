@@ -788,12 +788,12 @@ pub struct ClassifiedExpr {
     pub confidence: ConfidenceLevel,
 }
 
-/// Grade a pattern built out of `parts`.
+/// Grade a pattern built out of `parts` as its lowest part.
 ///
-/// The lowest part decides, capped at `B`: combining separately recognized halves is
-/// never as certain as recognizing one shape whole. Both `AND` and `OR` used this rule
-/// already, spelled differently, and an oracle substituting a part has to regrade the
-/// same way or the composite keeps the grade its refused part dragged it to.
+/// `and` and `or` of exact relations admit what `PostgreSQL`'s `AND` and `OR` admit, since a
+/// `NULL` part admits nothing as a `false` one does. That holds only while no `NOT` sits
+/// above the composite, which the classifier guarantees by refusing `NOT` over anything
+/// but a constant.
 #[must_use]
 pub fn composite_confidence<'a, I>(parts: I) -> ConfidenceLevel
 where
@@ -803,9 +803,7 @@ where
         .into_iter()
         .map(|part| part.confidence)
         .min()
-        .map_or(ConfidenceLevel::D, |lowest| {
-            core::cmp::min(lowest, ConfidenceLevel::B)
-        })
+        .unwrap_or(ConfidenceLevel::D)
 }
 
 /// Confidence of the positive grant, or `A` for a restrictive exclusion.
@@ -1128,10 +1126,8 @@ fn worst_confidence(dropped: &[ClassifiedExpr]) -> Option<ConfidenceLevel> {
 ///
 /// For a permissive clause the bar applies to each arm of an `OR` rather than to the
 /// clause as a whole, so one weak arm no longer takes the strong ones with it and one
-/// `OR` policy lands where two policies land. The clause's own grade is never compared,
-/// which matters twice: it is capped at B, so an `OR` of two grade A arms would
-/// otherwise die at the strictest bar with nothing weak anywhere. The report reads the
-/// same partition, so what it calls excluded is exactly what the model excluded.
+/// `OR` policy lands where two policies land. The report reads the same partition, so
+/// what it calls excluded is exactly what the model excluded.
 pub(crate) fn apply_threshold(
     classification: Option<&ClassifiedExpr>,
     min_confidence: ConfidenceLevel,
@@ -1183,8 +1179,7 @@ fn filter_or_arms(
 
     match kept.len() {
         0 => (None, lost),
-        // One survivor is that arm, not a union of one. Keeping the wrapper would cap its
-        // grade at B, which is the difference between this and two separate policies.
+        // One survivor is that arm, not a union of one.
         1 => (kept.pop(), lost),
         _ => {
             let confidence = composite_confidence(kept.iter());
