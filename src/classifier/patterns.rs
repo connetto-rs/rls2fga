@@ -666,13 +666,25 @@ pub struct HelperWalk {
     pub fk_column: ColumnName,
 }
 
-/// Correlated caller-identity memberships subtracted from a positive grant.
+/// Caller-identity sets subtracted from a positive grant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MembershipExclusion {
     /// The grant, absent only for a negative-only top-level restrictive clause.
     pub base: Option<Box<ClassifiedExpr>>,
-    /// The blocked `P4` sets whose union is removed from the grant.
-    pub subtract: Vec<ExistsMembership>,
+    /// The blocked sets whose union is removed from the grant.
+    pub subtract: Vec<ExcludedSet>,
+}
+
+/// One set of rows a blocklist removes for the caller.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExcludedSet {
+    /// The rows a correlated `P4` membership names, `NOT EXISTS (SELECT 1 FROM blocks
+    /// b WHERE b.doc = docs.id AND b.user_id = <caller>)`.
+    Membership(ExistsMembership),
+    /// The rows whose column a declared helper returns,
+    /// `NOT (project_id = ANY (ARRAY(SELECT authz.blocked_projects())))`, with the
+    /// column and every value the helper can return proven non-null.
+    Helper(DeclaredHelper),
 }
 
 /// No known pattern matched.
@@ -770,7 +782,7 @@ pub enum PatternClass {
     /// A column compared with the set a declared `SECURITY DEFINER` helper returns, as in
     /// `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))`.
     P20DeclaredHelper(DeclaredHelper),
-    /// A correlated blocklist removed from a positive grant.
+    /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced
     /// by its body with the call-site arguments substituted.

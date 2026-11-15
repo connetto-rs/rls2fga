@@ -9,13 +9,13 @@
 use crate::no_std_prelude::*;
 use sqlparser::ast::{
     BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, InTarget, Query,
-    SelectItem, Value,
+    SelectItem, UnaryOperator, Value,
 };
 
 use crate::classifier::expansion::call_matches_declared;
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::*;
-use crate::classifier::recognizers::projected_select;
+use crate::classifier::recognizers::{projected_select, unparenthesize};
 use crate::generator::db_lookup::single_identity_column;
 use crate::parser::expr::CastChain;
 use crate::parser::names::{lookup_table, stored_ident_name, stored_relation_name, table_identity};
@@ -118,6 +118,47 @@ pub(crate) fn recognize_declared_helper<DB: DatabaseLike>(
     table: &str,
 ) -> Option<ClassifiedExpr> {
     let (compared, query) = helper_set_operands(expr)?;
+    Some(
+        match helper_compared_with(compared, query, db, registry, table)? {
+            Ok(helper) => ClassifiedExpr {
+                pattern: PatternClass::P20DeclaredHelper(helper),
+                confidence: ConfidenceLevel::A,
+            },
+            Err(refusal) => ClassifiedExpr {
+                pattern: PatternClass::Unknown(UnclassifiedExpr {
+                    sql_text: expr.to_string(),
+                    reason: refusal.to_string(),
+                }),
+                confidence: ConfidenceLevel::D,
+            },
+        },
+    )
+}
+
+/// Recognize the rows a declared helper `h` does not return, written
+/// `NOT (<column> = ANY (ARRAY(SELECT h(...))))`, `<column> <> ALL (ARRAY(SELECT h(...)))`
+/// or `<column> NOT IN (SELECT h(...))`, as the helper whose set they exclude.
+///
+/// `None` where the expression has another shape or calls an undeclared function.
+pub(crate) fn recognize_excluded_helper<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> Option<Result<DeclaredHelper, HelperRefusal>> {
+    let (compared, query) = excluded_set_operands(expr)?;
+    helper_compared_with(compared, query, db, registry, table)
+}
+
+/// The helper `query` calls compared with `compared`, `None` where `query` calls no
+/// declared helper or `compared` is no column of `table`.
+fn helper_compared_with<DB: DatabaseLike>(
+    compared: &Expr,
+    query: &Query,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> Option<Result<DeclaredHelper, HelperRefusal>> {
     let (call, arguments) = called_helper(query)?;
     let mut reached = db
         .functions()
@@ -134,7 +175,7 @@ pub(crate) fn recognize_declared_helper<DB: DatabaseLike>(
         .ok()?
         .find(|candidate| candidate.stored_column_name() == column.as_str())?;
 
-    let pattern = if reached.next().is_some() {
+    Some(if reached.next().is_some() {
         Err(HelperRefusal::Overloaded {
             function: function.target_name().to_string(),
         })
@@ -148,19 +189,6 @@ pub(crate) fn recognize_declared_helper<DB: DatabaseLike>(
             db,
             registry,
         )
-    };
-    Some(match pattern {
-        Ok(helper) => ClassifiedExpr {
-            pattern: PatternClass::P20DeclaredHelper(helper),
-            confidence: ConfidenceLevel::A,
-        },
-        Err(refusal) => ClassifiedExpr {
-            pattern: PatternClass::Unknown(UnclassifiedExpr {
-                sql_text: expr.to_string(),
-                reason: refusal.to_string(),
-            }),
-            confidence: ConfidenceLevel::D,
-        },
     })
 }
 
@@ -179,14 +207,43 @@ fn helper_set_operands(expr: &Expr) -> Option<(&Expr, &Query)> {
             compare_op: BinaryOperator::Eq,
             right,
             ..
-        } => match right.as_ref() {
-            Expr::Subquery(query) => Some((left, query)),
-            // Under the `PostgreSQL` dialect only the `ARRAY(subquery)` constructor parses
-            // as a call taking a subquery.
-            Expr::Function(array) => match &array.args {
-                FunctionArguments::Subquery(query) => Some((left, query)),
-                _ => None,
-            },
+        } => Some((left, set_query(right)?)),
+        _ => None,
+    }
+}
+
+/// The compared value and the query of the three spellings of set exclusion, which
+/// `PostgreSQL` evaluates alike, `NULL` included.
+fn excluded_set_operands(expr: &Expr) -> Option<(&Expr, &Query)> {
+    match expr {
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr,
+        } => helper_set_operands(unparenthesize(expr)),
+        Expr::In {
+            expr: compared,
+            target: InTarget::Subquery(query),
+            negated: true,
+            global: false,
+        } => Some((compared, query)),
+        Expr::AllOp {
+            left,
+            compare_op: BinaryOperator::NotEq,
+            right,
+        } => Some((left, set_query(right)?)),
+        _ => None,
+    }
+}
+
+/// The query a quantified comparison reads its set from, `(SELECT ...)` or
+/// `ARRAY(SELECT ...)`.
+fn set_query(set: &Expr) -> Option<&Query> {
+    match set {
+        Expr::Subquery(query) => Some(query),
+        // Under the `PostgreSQL` dialect only the `ARRAY(subquery)` constructor parses as
+        // a call taking a subquery.
+        Expr::Function(array) => match &array.args {
+            FunctionArguments::Subquery(query) => Some(query),
             _ => None,
         },
         _ => None,

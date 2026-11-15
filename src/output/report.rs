@@ -6,11 +6,12 @@ use crate::classifier::patterns::{
     apply_threshold, AbacAnd, ArrayMembership, AttributeCondition, BooleanFlag,
     CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
     ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
-    ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExistsMembership, ExpandedFunction,
-    FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
-    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
-    OwnerExpression, ParentInheritance, PolicyMode, RoleNameInList, RowValueEqualsCallerScalar,
-    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExcludedSet, ExistsMembership,
+    ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
+    FallbackScalarUnequalsConstant, JsonbFieldOwnership, MembershipExclusion,
+    MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
+    RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr,
+    UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -368,11 +369,21 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 }
                 None => String::from("restrictive blocklist "),
             };
-            for (at, membership) in subtract.iter().enumerate() {
+            for (at, excluded) in subtract.iter().enumerate() {
                 if at != 0 {
                     rendered.push_str(", ");
                 }
-                let _ = write!(rendered, "{}", membership.join_table);
+                let _ = match excluded {
+                    ExcludedSet::Membership(membership) => {
+                        write!(rendered, "{}", membership.join_table)
+                    }
+                    ExcludedSet::Helper(DeclaredHelper { column, call }) => write!(
+                        rendered,
+                        "{column} in {}({})",
+                        call.function,
+                        call.arguments.join(", ")
+                    ),
+                };
             }
             rendered
         }

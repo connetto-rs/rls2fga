@@ -60,14 +60,14 @@ CREATE POLICY orders_update ON orders FOR UPDATE
 const BOTH: &[&str] = &["authz.projects_with", "authz.teams_with"];
 
 /// The caller, and a scalar the request carries, which no helper may take its caller from.
-fn translator(min_confidence: ConfidenceLevel, helpers: &[&str]) -> Translator {
+pub(crate) fn translator(min_confidence: ConfidenceLevel, helpers: &[&str]) -> Translator {
     TranslatorBuilder::new(deployment([caller("app.user_id"), scalar("app.tenant")]))
         .with_min_confidence(min_confidence)
         .with_declared_helpers(helpers)
         .build()
 }
 
-fn model(sql: &str, helpers: &[&str]) -> String {
+pub(crate) fn model(sql: &str, helpers: &[&str]) -> String {
     translator(ConfidenceLevel::B, helpers)
         .translate(&db_of(sql))
         .expect("the schema should plan")
@@ -78,7 +78,7 @@ fn model(sql: &str, helpers: &[&str]) -> String {
 }
 
 /// The `USING` classification of the policy named `policy`.
-fn using_of(sql: &str, helpers: &[&str], policy: &str) -> ClassifiedExpr {
+pub(crate) fn using_of(sql: &str, helpers: &[&str], policy: &str) -> ClassifiedExpr {
     translator(ConfidenceLevel::B, helpers)
         .classify(&db_of(sql))
         .into_iter()
@@ -89,7 +89,7 @@ fn using_of(sql: &str, helpers: &[&str], policy: &str) -> ClassifiedExpr {
         .clone()
 }
 
-fn refusal_of(sql: &str, helpers: &[&str], policy: &str) -> String {
+pub(crate) fn refusal_of(sql: &str, helpers: &[&str], policy: &str) -> String {
     let classified = using_of(sql, helpers, policy);
     assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
     match classified.pattern {

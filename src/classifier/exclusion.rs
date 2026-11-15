@@ -1,4 +1,5 @@
-//! Correlated blocklist subtraction from positive grants.
+//! Blocklist subtraction from positive grants, correlated memberships and declared
+//! helpers alike.
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
@@ -6,19 +7,19 @@ use crate::no_std_prelude::*;
 use crate::classifier::expansion::{self, ExpansionState};
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
-    exclusion_confidence, ClassifiedExpr, ExistsMembership, MembershipExclusion, PatternClass,
-    PolicyCommand,
+    exclusion_confidence, ClassifiedExpr, DeclaredHelper, ExcludedSet, ExistsMembership,
+    HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
 };
 use crate::classifier::recognizers::{
-    diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_p4, recognize_p4_in_subquery,
-    renaming_casts, unparenthesize,
+    diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_excluded_helper,
+    recognize_p4, recognize_p4_in_subquery, renaming_casts, unparenthesize, HelperRefusal,
 };
-use crate::parser::names::{lookup_table_id, table_identity};
+use crate::parser::names::{lookup_table, lookup_table_id, table_identity};
 use crate::parser::sql_parser::DatabaseLike;
 use crate::types::{ColumnName, TableId};
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
 
-/// Why a correlated blocklist cannot be represented exactly.
+/// Why a blocklist cannot be represented exactly.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum ExclusionError {
     #[error("{0}")]
@@ -27,9 +28,17 @@ pub(crate) enum ExclusionError {
     GuardedTable(TableId),
     #[error("the blocklist projection '{table}.{column}' must be provably non-null")]
     NullableProjection { table: TableId, column: ColumnName },
+    #[error(
+        "the column '{table}.{column}' compared with the blocklist must be provably \
+         non-null, since PostgreSQL hides a row holding NULL there from exactly the callers \
+         whose blocklist is not empty"
+    )]
+    NullableCompared { table: String, column: ColumnName },
+    #[error(transparent)]
+    Helper(#[from] HelperRefusal),
 }
 
-/// Split a clause into its positive grant and correlated blocklists.
+/// Split a clause into its positive grant and blocklists.
 ///
 /// `see_through_functions` widens the `AND`/parenthesis flattening below to also
 /// substitute a declared, unregistered `LANGUAGE sql` function call's body in
@@ -56,7 +65,7 @@ pub(crate) fn try_membership_exclusion<DB: DatabaseLike>(
         return Ok(None);
     }
     let mut positives: Vec<Expr> = Vec::new();
-    let mut subtract: Vec<ExistsMembership> = Vec::new();
+    let mut subtract: Vec<ExcludedSet> = Vec::new();
     if !collect_conjuncts(
         expr,
         db,
@@ -150,9 +159,19 @@ fn has_exclusion_conjunct(expr: &Expr, depth: u32) -> bool {
         Expr::UnaryOp {
             op: UnaryOperator::Not,
             expr,
-        } => {
-            matches!(unparenthesize(expr), Expr::Exists { negated: false, .. })
-        }
+        } => matches!(
+            unparenthesize(expr),
+            Expr::Exists { negated: false, .. }
+                | Expr::AnyOp {
+                    compare_op: BinaryOperator::Eq,
+                    ..
+                }
+                | Expr::In {
+                    target: InTarget::Subquery(_),
+                    negated: false,
+                    ..
+                }
+        ),
         _ => false,
     }
 }
@@ -182,7 +201,7 @@ fn collect_conjuncts<DB: DatabaseLike>(
     state: &ExpansionState,
     see_through_functions: bool,
     positives: &mut Vec<Expr>,
-    subtract: &mut Vec<ExistsMembership>,
+    subtract: &mut Vec<ExcludedSet>,
 ) -> Result<bool, ExclusionError> {
     if depth > crate::classifier::policy_classifier::MAX_CLASSIFY_DEPTH {
         return Ok(false);
@@ -268,7 +287,7 @@ fn collect_conjuncts<DB: DatabaseLike>(
             }
             match exclusion_conjunct(expr, db, registry, table, state)? {
                 None => positives.push(expr.clone()),
-                Some(membership) => subtract.push(membership),
+                Some(excluded) => subtract.push(excluded),
             }
             Ok(true)
         }
@@ -310,8 +329,12 @@ fn exclusion_conjunct<DB: DatabaseLike>(
     registry: &FunctionRegistry,
     table: &str,
     state: &ExpansionState,
-) -> Result<Option<ExistsMembership>, ExclusionError> {
-    let positive = match unparenthesize(conjunct) {
+) -> Result<Option<ExcludedSet>, ExclusionError> {
+    let conjunct = unparenthesize(conjunct);
+    if let Some(helper) = recognize_excluded_helper(conjunct, db, registry, table) {
+        return excluded_helper(helper?, db, table).map(|helper| Some(ExcludedSet::Helper(helper)));
+    }
+    let positive = match conjunct {
         Expr::Exists {
             subquery,
             negated: true,
@@ -395,9 +418,42 @@ fn exclusion_conjunct<DB: DatabaseLike>(
                     column: membership.user_column,
                 });
             }
-            Ok(Some(membership))
+            Ok(Some(ExcludedSet::Membership(membership)))
         }
     }
+}
+
+/// `helper` as a set to subtract, refused where `PostgreSQL` would compare a `NULL`.
+///
+/// `NOT (x = ANY (s))` is `NULL`, which hides the row, both where `x` is `NULL` and
+/// where `s` holds one while not holding `x`. A row without a value in `x` has no tuple
+/// naming it, so it would stay visible to every caller, and a `NULL` the helper returns
+/// has no tuple either, so it would hide nothing. A parent or walk arm returns its
+/// table's primary key, so only a grant arm's column needs proving.
+fn excluded_helper<DB: DatabaseLike>(
+    helper: DeclaredHelper,
+    db: &DB,
+    table: &str,
+) -> Result<DeclaredHelper, ExclusionError> {
+    if !lookup_table(db, table)
+        .is_some_and(|guarded| declared_not_null(db, guarded, helper.column.as_str()))
+    {
+        return Err(ExclusionError::NullableCompared {
+            table: table.to_string(),
+            column: helper.column,
+        });
+    }
+    for arm in &helper.call.arms {
+        if let HelperSetArm::Grant(grant) = arm {
+            if !column_proven_not_null(db, &grant.table, grant.object_column.as_str()) {
+                return Err(ExclusionError::NullableProjection {
+                    table: grant.table.clone(),
+                    column: grant.object_column.clone(),
+                });
+            }
+        }
+    }
+    Ok(helper)
 }
 
 /// Accept only `P4`, excluding caller-set and parent-inheritance patterns.
@@ -434,19 +490,17 @@ fn requires_non_null_projection(conjunct: &Expr) -> bool {
 }
 
 fn column_proven_not_null<DB: DatabaseLike>(db: &DB, table: &TableId, column: &str) -> bool {
+    lookup_table_id(db, table).is_some_and(|table| declared_not_null(db, table, column))
+}
+
+fn declared_not_null<DB: DatabaseLike>(db: &DB, table: &DB::Table, column: &str) -> bool {
     use sql_traits::prelude::{ColumnLike, TableLike};
-    let Some(table) = lookup_table_id(db, table) else {
-        return false;
-    };
-    let Some(column_ref) = table
+    table
         .columns(db)
         .into_iter()
         .flatten()
         .find(|declared| declared.stored_column_name() == column)
-    else {
-        return false;
-    };
-    column_ref.is_nullable(db) == Ok(false)
+        .is_some_and(|declared| declared.is_nullable(db) == Ok(false))
 }
 
 #[cfg(test)]

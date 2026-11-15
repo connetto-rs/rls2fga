@@ -461,9 +461,14 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { membership, .. }) => {
             membership_refusal(membership, guarded, db)
         }
-        PatternClass::MembershipExclusion(MembershipExclusion { subtract, .. }) => subtract
-            .iter()
-            .find_map(|membership| membership_refusal(membership, guarded, db)),
+        PatternClass::MembershipExclusion(MembershipExclusion { subtract, .. }) => {
+            subtract.iter().find_map(|excluded| match excluded {
+                ExcludedSet::Membership(membership) => membership_refusal(membership, guarded, db),
+                ExcludedSet::Helper(DeclaredHelper { column, call }) => {
+                    check(guarded, column).or_else(|| helper_call_refusal(call, db))
+                }
+            })
+        }
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {
             member_table,
             user_column,
