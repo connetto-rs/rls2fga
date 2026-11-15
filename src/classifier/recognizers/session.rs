@@ -522,8 +522,7 @@ fn tested_value(expr: &Expr) -> TestedValue {
     }
 }
 
-/// A field taken out of the caller's value is indirection, which caps at B exactly as a
-/// scalar subquery wrapper and a `COALESCE` wrapper already do.
+/// A field taken out of the caller's value is indirection, which caps at B.
 fn grade(source: &DeclaredSource) -> ConfidenceLevel {
     if source.path().is_empty() {
         ConfidenceLevel::A

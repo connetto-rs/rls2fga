@@ -524,7 +524,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
 }
 
 #[test]
-fn subquery_wrapped_accessor_caps_confidence_at_b() {
+fn subquery_wrapped_accessor_grades_as_the_bare_call() {
     let sql = r"
 CREATE TABLE docs(id UUID PRIMARY KEY, owner_id UUID);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -556,8 +556,8 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = (SELECT auth.uid()));
     );
     assert_eq!(
         c.confidence,
-        ConfidenceLevel::B,
-        "Subquery-wrapped accessor should cap confidence at B"
+        ConfidenceLevel::A,
+        "(SELECT auth.uid()) is evaluated once per statement and holds the same value"
     );
 }
 

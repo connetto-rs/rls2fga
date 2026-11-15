@@ -320,9 +320,8 @@ pub fn recognize_p3<DB: DatabaseLike>(
         return None;
     }
 
-    // Subquery- and COALESCE-wrapped accessors are accepted but capped at B due to added
-    // indirection.
-    let confidence = if is_subquery_wrapped(accessor_side) || is_coalesce_wrapped(column_side) {
+    // The fallback value of a COALESCE default takes part in the comparison.
+    let confidence = if is_coalesce_wrapped(column_side) {
         ConfidenceLevel::B
     } else {
         ConfidenceLevel::A
@@ -1014,11 +1013,6 @@ fn accessor_return_type<'r>(root: &Expr, registry: &'r FunctionRegistry) -> Opti
         FunctionSemantic::CurrentUserAccessor { returns } => Some(returns.as_str()),
         _ => None,
     }
-}
-
-/// Returns `true` when `expr` (or its Cast/Nested wrapper) is a scalar subquery.
-fn is_subquery_wrapped(expr: &Expr) -> bool {
-    matches!(unwrap_cast_or_nested(expr), Expr::Subquery(_))
 }
 
 /// Peel parentheses, which the parse has already resolved into tree shape and which

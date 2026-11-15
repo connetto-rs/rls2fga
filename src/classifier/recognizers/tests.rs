@@ -422,46 +422,35 @@ fn recognize_p3_refuses_null_safe_equality() {
 }
 
 #[test]
-fn recognize_p3_scalar_subquery_wrapper_caps_confidence_at_b() {
+fn recognize_p3_scalar_subquery_wrapper_grades_as_the_bare_read() {
     let db = db_with_docs_and_members();
     // `registry_with_role_level` has `auth_current_user_id` as a confirmed accessor.
-    let registry = registry_with_role_level();
-
-    // Bare function call → confidence A (registry-confirmed).
-    let bare = parse_expr("owner_id = auth_current_user_id()");
-    let c_bare = recognize_p3(&bare, &db, &registry).expect("expected P3 match");
-    assert_eq!(
-        c_bare.confidence,
-        ConfidenceLevel::A,
-        "bare registry call should be A"
-    );
-
-    // Scalar subquery wrapping the same registry-confirmed function → confidence B.
-    let subquery = parse_expr("owner_id = (SELECT auth_current_user_id())");
-    let c_subquery = recognize_p3(&subquery, &db, &registry).expect("expected P3 match");
-    assert!(
-        matches!(
-            &c_subquery.pattern,
-            PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"
-        ),
-        "subquery-wrapped accessor should still produce P3, got: {:?}",
-        c_subquery.pattern
-    );
-    assert_eq!(
-        c_subquery.confidence,
-        ConfidenceLevel::B,
-        "subquery-wrapped registry accessor should be capped at B"
-    );
-
-    // A subquery around the declared caller caps at B, like the one around the accessor.
+    let accessor = registry_with_role_level();
     let caller = caller_registry();
-    let caller_subquery = parse_expr("owner_id = (SELECT current_setting('app.current_user_id'))");
-    let c_caller = recognize_p3(&caller_subquery, &db, &caller).expect("expected P3 match");
-    assert_eq!(
-        c_caller.confidence,
-        ConfidenceLevel::B,
-        "a subquery around the caller should also be capped at B"
-    );
+
+    // `(SELECT read)` without `FROM` yields one row holding the read's value.
+    for (expr, registry) in [
+        ("owner_id = auth_current_user_id()", &accessor),
+        ("owner_id = (SELECT auth_current_user_id())", &accessor),
+        ("(SELECT auth_current_user_id()) = owner_id", &accessor),
+        ("owner_id = current_setting('app.current_user_id')", &caller),
+        (
+            "owner_id = (SELECT current_setting('app.current_user_id'))",
+            &caller,
+        ),
+    ] {
+        let classified = recognize_p3(&parse_expr(expr), &db, registry)
+            .unwrap_or_else(|| panic!("expected P3 match for {expr}"));
+        assert!(
+            matches!(
+                &classified.pattern,
+                PatternClass::P3DirectOwnership(DirectOwnership { column }) if column == "owner_id"
+            ),
+            "{expr} should produce P3 on owner_id, got: {:?}",
+            classified.pattern
+        );
+        assert_eq!(classified.confidence, ConfidenceLevel::A, "{expr}");
+    }
 }
 
 #[test]
