@@ -21,7 +21,7 @@ use crate::types::ConditionName;
 
 /// The number of pairs `AuthorizationModel.conditions` and
 /// `WriteAuthorizationModelRequest.conditions` admit.
-const MAX_CONDITIONS: usize = 25;
+pub(crate) const MAX_CONDITIONS: usize = 25;
 
 /// The number of pairs `Condition.parameters` admits.
 const MAX_CONDITION_PARAMETERS: usize = 25;
