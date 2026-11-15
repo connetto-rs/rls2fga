@@ -70,9 +70,6 @@ fn immutable_row_expression<DB: DatabaseLike>(
         )
         .then(|| expr.clone()),
         Expr::Identifier(_) | Expr::CompoundIdentifier(_) => {
-            if is_sql_current_user_keyword_expr(expr) {
-                return None;
-            }
             let read = extract_column_name(expr)?;
             if column.as_ref().is_some_and(|known| *known != read) {
                 return None;
@@ -82,27 +79,22 @@ fn immutable_row_expression<DB: DatabaseLike>(
             Some(quoted)
         }
         Expr::Function(function) => {
+            let mut rewritten = function.clone();
+            let FunctionArguments::List(arguments) = &mut rewritten.args else {
+                return None;
+            };
             if function.filter.is_some()
                 || function.over.is_some()
                 || function.null_treatment.is_some()
                 || !function.within_group.is_empty()
                 || !matches!(function.parameters, FunctionArguments::None)
+                || !arguments.clauses.is_empty()
+                || arguments.duplicate_treatment.is_some()
                 || registry.get(&function.name.to_string()).is_some()
             {
                 return None;
             }
-            let FunctionArguments::List(list) = &function.args else {
-                return None;
-            };
-            if !list.clauses.is_empty() || list.duplicate_treatment.is_some() {
-                return None;
-            }
-            let name = immutable_call_name(function, list.args.len(), db)?;
-            let mut rewritten = function.clone();
-            rewritten.name = name;
-            let FunctionArguments::List(arguments) = &mut rewritten.args else {
-                return None;
-            };
+            rewritten.name = immutable_call_name(function, arguments.args.len(), db)?;
             for argument in &mut arguments.args {
                 let FunctionArg::Unnamed(FunctionArgExpr::Expr(value)) = argument else {
                     return None;
@@ -160,4 +152,39 @@ fn immutable_call_name<DB: DatabaseLike>(
         Some(schema) => vec![Ident::with_quote('"', schema.as_str()), name],
         None => vec![name],
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::expr::parse_expr_for_tests as parse_expr;
+    use crate::parser::sql_parser::parse_schema;
+    use crate::test_support::caller_registry;
+
+    /// A recognizer called directly meets what the classifier would have replaced or refused
+    /// first: role keywords, none of them a column of the row, and a caller under a cast
+    /// that can rename it.
+    #[test]
+    fn only_the_bare_caller_against_a_column_is_recognized() {
+        let db = parse_schema("CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT);").unwrap();
+        let registry = caller_registry();
+        for (sql, recognized) in [
+            ("lower(user) = current_setting('app.user_id', true)", false),
+            (
+                "lower(current_user) = current_setting('app.user_id', true)",
+                false,
+            ),
+            (
+                "lower(owner) = current_setting('app.user_id', true)::varchar(8)",
+                false,
+            ),
+            ("lower(owner) = current_setting('app.user_id', true)", true),
+        ] {
+            assert_eq!(
+                recognize_owner_expression(&parse_expr(sql), &db, &registry).is_some(),
+                recognized,
+                "{sql}"
+            );
+        }
+    }
 }

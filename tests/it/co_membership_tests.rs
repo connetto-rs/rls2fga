@@ -175,6 +175,21 @@ fn a_shadowed_reference_is_not_read_as_the_link() {
     assert!(diverges(&outputs), "{}", outputs.report());
 }
 
+/// An unqualified name the roster lacks reaches past both hops to the guarded row, so the
+/// inner hop's filter depends on the row being read and no membership tuple holds it.
+#[test]
+fn a_far_filter_reading_the_guarded_row_stays_refused() {
+    let outputs = outputs(
+        SCHEMA,
+        &format!(
+            "id IN (SELECT member_id FROM team_members WHERE team_id IN (
+                SELECT team_id FROM team_members
+                WHERE member_id = {CALLER} AND login_name <> ''))"
+        ),
+    );
+    assert!(diverges(&outputs), "{}", outputs.report());
+}
+
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 #[tokio::test]
 #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]

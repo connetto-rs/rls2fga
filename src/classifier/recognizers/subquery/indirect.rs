@@ -320,9 +320,6 @@ impl P19Table {
     /// Qualify each unqualified column of `select`'s condition this source holds, which
     /// is what the name means when `select` reads this source in the innermost scope.
     fn qualify_own_columns(&self, select: &mut Select) {
-        let Some(selection) = select.selection.as_mut() else {
-            return;
-        };
         let qualifier = Ident::with_quote('"', self.qualifier());
         let mut qualify = TopLevelOnlyMut::new(false, |expr: &mut Expr| {
             if let Expr::Identifier(ident) = &*expr {
@@ -337,7 +334,9 @@ impl P19Table {
             }
             ControlFlow::Continue(())
         });
-        let _ = selection.visit(&mut qualify);
+        select.selection.iter_mut().for_each(|selection| {
+            let _ = selection.visit(&mut qualify);
+        });
     }
 }
 

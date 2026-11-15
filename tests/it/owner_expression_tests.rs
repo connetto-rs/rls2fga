@@ -129,7 +129,7 @@ fn an_expression_over_two_columns_stays_refused() {
     let db = support::deployment::db(&format!(
         "CREATE TABLE notes (id INT PRIMARY KEY, owner TEXT NOT NULL, domain TEXT NOT NULL);
          ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
-         CREATE POLICY own ON notes FOR SELECT USING (concat(owner, domain) = {CALLER});"
+         CREATE POLICY own ON notes FOR SELECT USING (split_part(owner, domain, 1) = {CALLER});"
     ));
     let outputs = TranslatorBuilder::new(support::deployment::caller_deployment())
         .with_min_confidence(ConfidenceLevel::B)
@@ -138,6 +138,95 @@ fn an_expression_over_two_columns_stays_refused() {
         .unwrap()
         .outputs_accepting_gaps();
     assert!(diverges(&outputs), "{}", outputs.report());
+}
+
+#[test]
+fn the_caller_may_stand_on_either_side_and_the_column_in_parentheses() {
+    for predicate in [
+        format!("{CALLER} = lower(owner)"),
+        format!("lower((owner)) = {CALLER}"),
+    ] {
+        let outputs = outputs(&format!(
+            "CREATE POLICY own ON notes FOR SELECT USING ({predicate});"
+        ));
+        assert!(!diverges(&outputs), "{predicate}\n{}", outputs.report());
+        assert_eq!(requeried(&outputs).len(), 1, "{predicate}");
+    }
+}
+
+/// Each spelling compares something other than an immutable function of the owner with
+/// the bare caller, so no tuple the database computes stands for it.
+#[test]
+fn a_comparison_beyond_an_immutable_function_of_the_owner_stays_refused() {
+    for predicate in [
+        format!("lower(owner) = {CALLER}::varchar(8)"),
+        format!("owner || '' = {CALLER}"),
+        format!("lower(owner || 'x') = {CALLER}"),
+        format!("app_norm(value => owner) = {CALLER}"),
+    ] {
+        let outputs = outputs(&format!(
+            "CREATE FUNCTION app_norm(value TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE
+                AS 'SELECT lower(value)';
+             CREATE POLICY own ON notes FOR SELECT USING ({predicate});"
+        ));
+        assert!(diverges(&outputs), "{predicate}\n{}", outputs.report());
+    }
+}
+
+/// What the registry says of a function overrides what the schema declares of it.
+#[test]
+fn a_function_the_registry_declares_is_not_read_as_an_owner_expression() {
+    let db = support::deployment::db(&format!(
+        "{SCHEMA}
+         CREATE FUNCTION app_norm(value TEXT) RETURNS TEXT LANGUAGE sql IMMUTABLE
+            AS 'SELECT lower(value)';
+         CREATE POLICY own ON notes FOR SELECT USING (app_norm(owner) = {CALLER});"
+    ));
+    let outputs = TranslatorBuilder::new(support::deployment::caller_deployment())
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_registry_json(
+            r#"{"app_norm": {"kind": "unknown", "reason": "audited and declined"}}"#,
+        )
+        .expect("registry json should load")
+        .build()
+        .translate(&db)
+        .unwrap()
+        .outputs_accepting_gaps();
+    assert!(diverges(&outputs), "{}", outputs.report());
+}
+
+#[test]
+fn the_report_and_a_negation_name_the_owner_expression() {
+    let outputs = outputs(&format!(
+        "CREATE POLICY own ON notes FOR SELECT USING (lower(owner) = {CALLER});"
+    ));
+    assert!(
+        outputs
+            .report()
+            .contains(r#"| own (USING) | P26 ("pg_catalog"."lower"("owner") = user) | B |"#),
+        "{}",
+        outputs.report()
+    );
+
+    let db = support::deployment::db(&format!(
+        "{SCHEMA} CREATE POLICY own ON notes FOR SELECT USING (NOT (lower(owner) = {CALLER}));"
+    ));
+    let classified = TranslatorBuilder::new(support::deployment::caller_deployment())
+        .build()
+        .classify(&db);
+    let pattern = &classified[0]
+        .using_classification()
+        .expect("the policy has a USING clause")
+        .pattern;
+    assert!(
+        matches!(
+            pattern,
+            rls2fga::classifier::patterns::PatternClass::Unknown(
+                rls2fga::classifier::patterns::UnclassifiedExpr { reason, .. }
+            ) if reason.contains("NOT applied to owner-expression check")
+        ),
+        "{pattern:?}"
+    );
 }
 
 /// The bare column decides its tuple from the row image and the expression only by a query,

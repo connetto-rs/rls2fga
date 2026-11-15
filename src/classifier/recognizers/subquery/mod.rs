@@ -927,10 +927,12 @@ fn membership_exists_from_in_subquery(
     let SetExpr::Select(body) = rewritten.body.as_mut() else {
         return None;
     };
-    if let Expr::CompoundIdentifier(parts) = &tested {
-        if let [.., qualifier, _] = parts.as_slice() {
-            unshadow_scope(body, &stored_ident_name(qualifier))?;
-        }
+    let qualifier = match &tested {
+        Expr::CompoundIdentifier(parts) => parts.iter().rev().nth(1),
+        _ => None,
+    };
+    if let Some(qualifier) = qualifier {
+        unshadow_scope(body, &stored_ident_name(qualifier))?;
     }
     let projected = single_projected_column(body)?;
     let projected = match relation_sources(body).as_slice() {
@@ -2865,4 +2867,63 @@ fn has_fk_pointing_to<DB: DatabaseLike>(
             });
             table_matches && column_matches
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sqlparser::dialect::PostgreSqlDialect;
+    use sqlparser::parser::Parser;
+
+    /// `sql` after [`unshadow_scope`] renames the source hiding `team_members`, or `None`.
+    fn unshadowed(sql: &str) -> Option<String> {
+        let mut select = Parser::new(&PostgreSqlDialect {})
+            .try_with_sql(sql)
+            .unwrap()
+            .parse_select()
+            .unwrap();
+        unshadow_scope(&mut select, "team_members").map(|()| select.to_string())
+    }
+
+    #[test]
+    fn the_hiding_source_is_renamed_with_every_reference_to_it() {
+        assert_eq!(
+            unshadowed("SELECT team_id FROM team_members WHERE team_members.member_id = 'a'")
+                .as_deref(),
+            Some(
+                "SELECT team_id FROM team_members AS rls2fga_unshadowed \
+                 WHERE rls2fga_unshadowed.member_id = 'a'"
+            )
+        );
+    }
+
+    #[test]
+    fn references_to_other_sources_keep_their_meaning() {
+        let sql = "SELECT team_id FROM teams WHERE users.id = 'a'";
+        assert_eq!(unshadowed(sql).as_deref(), Some(sql));
+        assert_eq!(
+            unshadowed(
+                "SELECT team_id FROM team_members WHERE users.id = 'a' AND public.users.id = 'a'"
+            )
+            .as_deref(),
+            Some(
+                "SELECT team_id FROM team_members AS rls2fga_unshadowed \
+                 WHERE users.id = 'a' AND public.users.id = 'a'"
+            )
+        );
+    }
+
+    /// Each spelling holds a reference the rename would point somewhere else, or a source
+    /// the rename cannot alias.
+    #[test]
+    fn a_rename_that_could_move_a_reference_is_refused() {
+        for sql in [
+            "SELECT team_id FROM team_members WHERE public.team_members.member_id = 'a'",
+            "SELECT team_id FROM team_members WHERE rls2fga_unshadowed.member_id = 'a'",
+            "SELECT team_id FROM team_members WHERE team_id IN (SELECT id FROM teams)",
+            "SELECT x FROM unnest(ARRAY['a']) AS x",
+        ] {
+            assert_eq!(unshadowed(sql), None, "{sql}");
+        }
+    }
 }
