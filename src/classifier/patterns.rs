@@ -185,6 +185,12 @@ impl ResidualPredicates {
             .collect()
     }
 
+    /// Whether a conjunct is a comparison the clock finishes.
+    #[must_use]
+    pub fn has_requests(&self) -> bool {
+        self.0.iter().any(|conjunct| conjunct.request.is_some())
+    }
+
     /// The row-decidable conjuncts as guards, ignoring request-completed and SQL-only
     /// ones. Total, unlike [`Self::guards`], so a caller that has already separated the
     /// requests takes the guards without a second fallible pass.
@@ -652,7 +658,7 @@ pub enum HelperSetArm {
     Walk(HelperWalk),
 }
 
-/// `SELECT <object column> FROM <table> WHERE <grantee> [AND <rows>]`.
+/// `SELECT <object column> FROM <table> WHERE <grantee> [AND <rows>] [AND <time bounds>]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperGrant {
     /// The grant table.
@@ -666,6 +672,32 @@ pub struct HelperGrant {
     pub excluded: Vec<String>,
     /// Which grant rows count.
     pub rows: GrantRows,
+    /// The bounds a kept row meets against the statement time, all of them, which the
+    /// request completes per check.
+    pub time_bounds: Vec<HelperTimeBound>,
+}
+
+impl HelperGrant {
+    /// The columns keying one tuple of the arm's relations, its object, the column naming
+    /// its grantee where one does and, for a relation per role, its role.
+    pub(crate) fn tuple_key(&self) -> Vec<&ColumnName> {
+        let mut key = vec![&self.object_column];
+        key.extend(self.grantee.compared_column());
+        if let GrantRows::Roles { column, .. } = &self.rows {
+            key.push(column);
+        }
+        key
+    }
+}
+
+/// `<column> <operator> now() [OR <column> IS NULL]` in a grant arm's condition, on a
+/// `timestamptz` column of the grant table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HelperTimeBound {
+    /// The column compared with the request clock, at `now()` unshifted.
+    pub comparison: AttributeRequestPredicate,
+    /// Whether a row holding `NULL` in the column meets the bound.
+    pub keeps_null: bool,
 }
 
 /// Whom a grant arm's rows admit.
