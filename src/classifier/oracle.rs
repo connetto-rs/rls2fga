@@ -325,6 +325,7 @@ where
         | PatternClass::P6BooleanFlag(BooleanFlag { .. })
         | PatternClass::P19IndirectMembership(_)
         | PatternClass::P20DeclaredHelper(_)
+        | PatternClass::P27RequestValueInHelperSet(_)
         | PatternClass::P9AttributeCondition(AttributeCondition { .. })
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P11ArrayMembership(ArrayMembership { .. })

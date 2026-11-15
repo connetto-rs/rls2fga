@@ -8,7 +8,9 @@ use core::time::Duration;
 use rls2fga::types::ActionStatement;
 
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
-use crate::declared_helper_tests::{GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS};
+use crate::declared_helper_tests::{
+    GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
+};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -319,6 +321,95 @@ async fn a_blocklist_through_a_declared_helper_agrees_with_postgres_17_and_18() 
             // No grant, and no caller at all, read nothing.
             expect("erin", "projects:P2", ActionStatement::Select, false);
             expect("anonymous", "projects:P2", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const REQUEST_HELPERS: &str = r#"{
+    "authz.presented_links": { "kind": "declared_helper" },
+    "authz.installations_allowing": { "kind": "declared_helper" }
+}"#;
+
+/// A caller presenting `links` through `installation`, `None` leaving it unset.
+fn presenting(subject: &str, links: &[&str], installation: Option<&str>) -> Principal {
+    let mut principal =
+        Principal::with_setting(subject, "app_reader", "app.link_ids", &links.join(","))
+            .with_context(serde_json::json!({ "app_link_ids": links }));
+    if let Some(installation) = installation {
+        principal
+            .session
+            .push(("app.installation_id".into(), installation.into()));
+    }
+    principal
+}
+
+/// `l2` is revoked, `i1` may read the docs and `i2` may only update them.
+fn request_values_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-request-values-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!("{LEVELS}{OWNER_READS}{REQUEST_VALUES}"),
+        &[
+            "INSERT INTO share_links VALUES ('l1', FALSE), ('l2', TRUE), ('l3', FALSE);
+             INSERT INTO docs VALUES ('d1', 'l1'), ('d2', 'l2'), ('d3', 'l3');
+             INSERT INTO installation_permissions VALUES
+               ('i1', 'docs', 'select'), ('i2', 'docs', 'update')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            presenting("direct", &["l1", "l2"], Some("")),
+            presenting("via_i1", &["l1", "l3"], Some("i1")),
+            presenting("via_i2", &["l1", "l3"], Some("i2")),
+            presenting("no_links", &[], Some("")),
+            presenting("unset_installation", &["l1"], None),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id"),
+        support::deployment::scalar("app.installation_id"),
+        support::deployment::delimited_set("app.link_ids", ","),
+    ])
+    .with_registry(REQUEST_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn request_values_behind_helpers_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = request_values_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            // A presented link reads its docs, a revoked one does not.
+            expect("direct", "docs:d1", true);
+            expect("direct", "docs:d2", false);
+            expect("direct", "docs:d3", false);
+            // An installation approved for reading passes the cap, another does not.
+            expect("via_i1", "docs:d1", true);
+            expect("via_i1", "docs:d3", true);
+            expect("via_i2", "docs:d1", false);
+            // No link, and an installation never set, read nothing.
+            expect("no_links", "docs:d1", false);
+            expect("unset_installation", "docs:d1", false);
             assert_agrees(&case, &run);
         }
     }

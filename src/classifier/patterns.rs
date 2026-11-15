@@ -591,6 +591,37 @@ pub struct DeclaredHelper {
     pub call: HelperCall,
 }
 
+/// The request's declared single value compared with the values a declared `SECURITY
+/// DEFINER` helper returns to every caller alike, as in
+/// `current_setting('app.installation_id', true) IN (SELECT
+/// authz.installations_allowing('docs', 'select'))`.
+///
+/// The helper reads as its owner, so every value it returns is a row the tuple queries
+/// load the same way, and the clause holds where the request's value equals one of them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestValueInHelperSet {
+    /// The declared single value, carrying the parameter the caller supplies.
+    pub source: DeclaredSource,
+    /// The helper, as declared.
+    pub function: String,
+    /// Its arguments, each a literal as SQL spells it.
+    pub arguments: Vec<String>,
+    /// The sets the call returns the union of, none where it returns nothing.
+    pub arms: Vec<HelperValues>,
+}
+
+/// `SELECT <value column> FROM <table> [WHERE <predicates>]`, an arm comparing no column
+/// with the request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperValues {
+    /// The table the arm reads.
+    pub table: TableId,
+    /// Column holding the values the arm returns.
+    pub value_column: ColumnName,
+    /// The conditions the body puts on the row, all holding at once.
+    pub predicates: Vec<AttributePredicate>,
+}
+
 /// One call of a declared helper and the rows of `level` it returns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperCall {
@@ -615,36 +646,68 @@ pub enum HelperSetArm {
     Walk(HelperWalk),
 }
 
-/// `SELECT <object column> FROM <table> WHERE <user column> = <caller> [AND <rows>]`.
+/// `SELECT <object column> FROM <table> WHERE <grantee> [AND <rows>]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperGrant {
     /// The grant table.
     pub table: TableId,
     /// Column naming the level's row each grant is on.
     pub object_column: ColumnName,
-    /// Column holding the caller.
-    pub user_column: ColumnName,
-    /// Which of the caller's grant rows count.
+    /// Whom each grant row admits.
+    pub grantee: HelperGrantee,
+    /// Which grant rows count.
     pub rows: GrantRows,
+}
+
+/// Whom a grant arm's rows admit.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HelperGrantee {
+    /// `<user column> = current_setting(<caller>)`, the caller each row names.
+    Caller {
+        /// Column holding the caller.
+        user_column: ColumnName,
+    },
+    /// `<value column> = ANY (<set>)`, each row admitting whoever presents its value in
+    /// a set the request carries.
+    RequestSet {
+        /// Column whose value the set has to hold.
+        value_column: ColumnName,
+        /// The declared set, carrying the parameter the caller supplies.
+        source: DeclaredSource,
+    },
+}
+
+impl HelperGrantee {
+    /// The grant table's column compared with a value of the request.
+    #[must_use]
+    pub fn compared_column(&self) -> &ColumnName {
+        match self {
+            Self::Caller { user_column } => user_column,
+            Self::RequestSet { value_column, .. } => value_column,
+        }
+    }
 }
 
 /// Which grant rows a grant arm keeps.
 #[derive(Debug, Clone, PartialEq)]
 pub enum GrantRows {
     /// Rows holding one of `values` in `column`, the one column of the grant table both
-    /// `NOT NULL` and closed by a `CHECK` to literals. Every value is a relation of its
-    /// own, so each grant row is one tuple whichever call reads it.
+    /// `NOT NULL` and closed by a `CHECK` to literals, and satisfying `predicates`. Every
+    /// value is a relation of its own, so each grant row is one tuple whichever call
+    /// reads it.
     Roles {
         /// The closed column.
         column: ColumnName,
         /// The values kept, each one the column can hold.
         values: Vec<AttributeLiteral>,
+        /// The conditions the body puts on the other columns, all holding at once.
+        predicates: Vec<AttributePredicate>,
     },
-    /// Rows satisfying `predicate`, every row where it is absent, for a grant table with
-    /// no such column or a condition on another one.
+    /// Rows satisfying every one of `predicates`, every row where there is none, for a
+    /// grant table with no such column.
     Matching {
-        /// The condition the body puts on the row.
-        predicate: Option<AttributePredicate>,
+        /// The conditions the body puts on the row, all holding at once.
+        predicates: Vec<AttributePredicate>,
     },
 }
 
@@ -782,6 +845,11 @@ pub enum PatternClass {
     /// A column compared with the set a declared `SECURITY DEFINER` helper returns, as in
     /// `project_id = ANY (ARRAY(SELECT authz.projects_with('read')))`.
     P20DeclaredHelper(DeclaredHelper),
+    /// P27: The request's declared single value is one of the values a declared
+    /// `SECURITY DEFINER` helper returns to every caller alike, so no row takes part:
+    /// `current_setting('app.installation_id', true) IN (SELECT
+    /// authz.installations_allowing('docs', 'select'))`.
+    P27RequestValueInHelperSet(RequestValueInHelperSet),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

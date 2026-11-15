@@ -523,7 +523,7 @@ fn tested_value(expr: &Expr) -> TestedValue {
 }
 
 /// A field taken out of the caller's value is indirection, which caps at B.
-fn grade(source: &DeclaredSource) -> ConfidenceLevel {
+pub(super) fn grade(source: &DeclaredSource) -> ConfidenceLevel {
     if source.path().is_empty() {
         ConfidenceLevel::A
     } else {
@@ -533,7 +533,7 @@ fn grade(source: &DeclaredSource) -> ConfidenceLevel {
 
 /// The declared source `expr` reads, when it was declared as one single value and no cast
 /// on the read renames it.
-fn declared_scalar<'r>(
+pub(super) fn declared_scalar<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<(&'r DeclaredSource, CastChain)> {

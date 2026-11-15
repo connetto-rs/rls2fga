@@ -794,7 +794,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
         // the record's context, exactly as the sibling session-attribute gate carries it.
         // A residual only SQL can evaluate leaves the shape joined, and its query is then
         // what keeps the records current.
-        TupleSource::CallerSetShareGate {
+        TupleSource::RequestShareGate {
             join_table,
             identity_cols,
             share_type,
@@ -1018,12 +1018,11 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             Vec::new(),
         )),
 
-        // One record per membership row: the object is the one holder, the subject the
-        // row's own witness.
-        TupleSource::HolderShares {
+        TupleSource::ScopeShares {
+            scope_type,
+            scope_object,
             member_table,
             identity_cols,
-            holder_type,
             share_type,
             relation,
         } => {
@@ -1034,8 +1033,8 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                 .collect();
             Some(from_row(
                 member_table,
-                holder_type,
-                ObjectKey::new(vec![ValueSource::Literal(HOLDER_OBJECT_ID.to_string())]),
+                scope_type,
+                ObjectKey::new(vec![ValueSource::Literal(scope_object.clone())]),
                 relation,
                 share_type,
                 composite_subject(member_table, first, rest, db),

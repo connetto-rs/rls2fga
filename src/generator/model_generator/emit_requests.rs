@@ -71,7 +71,7 @@ pub(crate) fn session_attribute_expr<DB: DatabaseLike>(
 /// in, and a single value travels in the `settings` map, keyed by `request_parameter`,
 /// which the row tests for equality or inequality against, guarded so an absent key
 /// reads as `NULL`.
-fn request_comparison_spec(
+pub(super) fn request_comparison_spec(
     row_parameter: &ConditionParameterName,
     request_parameter: &ConditionParameterName,
     comparison: RequestComparison,
@@ -697,7 +697,7 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
         (gate_relation, condition)
     };
 
-    let gate_source = TupleSource::CallerSetShareGate {
+    let gate_source = TupleSource::RequestShareGate {
         join_table: join_table.clone(),
         identity_cols: identity_cols.clone(),
         share_type: share_type.clone(),
@@ -708,6 +708,7 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
         request_parameter: request_parameter.to_string(),
         setting_key: source.setting_key().to_string(),
         separator: separator.clone(),
+        comparison: RequestComparison::CallerSetHolds,
         extra_predicates: extra_predicates.clone(),
         temporal_context,
     };

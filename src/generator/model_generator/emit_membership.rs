@@ -3,11 +3,13 @@
 //! Membership through a join table, a membership naming no column of the guarded table, a
 //! parent rule through a foreign key, and the two shapes that combine other patterns.
 
+use super::emit_requests::{declare_condition, request_comparison_spec};
 use super::*;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
 use crate::generator::tuple_generator::{quote_sql_identifier, render_attribute_test};
+use crate::generator::well_known::HOLDER_OBJECT_ID;
 
 pub(super) struct MembershipSourceGate<'a> {
     pub condition: &'a ConditionName,
@@ -280,10 +282,11 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
                 computed: member_rel,
             },
         );
-        holder_plan.add_source(TupleSource::HolderShares {
+        holder_plan.add_source(TupleSource::ScopeShares {
+            scope_type: holder_type.clone(),
+            scope_object: HOLDER_OBJECT_ID.to_string(),
             member_table: member_table.clone(),
             identity_cols,
-            holder_type: holder_type.clone(),
             share_type,
             relation: link,
         });
@@ -1478,14 +1481,14 @@ fn helper_call_relation<DB: DatabaseLike>(
     let mut walked = Vec::new();
     for arm in &call.arms {
         match arm {
-            HelperSetArm::Grant(grant) => {
-                let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
-                parts.extend(
-                    helper_grant_relations(grant, &level_type, plan)
-                        .into_iter()
-                        .map(UsersetExpr::Computed),
-                );
-            }
+            HelperSetArm::Grant(grant) => parts.extend(helper_grant_parts(
+                grant,
+                &call.level,
+                &level_type,
+                ctx,
+                table_plan,
+                all_types,
+            )),
             HelperSetArm::Parent(parent) => {
                 let Some(parents) = helper_call_relation(&parent.call, ctx, table_plan, all_types)
                 else {
@@ -1511,7 +1514,7 @@ fn helper_call_relation<DB: DatabaseLike>(
         return None;
     }
     let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
-    let name = helper_call_relation_name(call);
+    let name = helper_call_relation_name(&call.function, &call.arguments);
     if walked.is_empty() {
         return combine_union(parts).map(|returned| plan.ensure_computed(name, returned));
     }
@@ -1575,62 +1578,108 @@ fn helper_level_plan<'p>(
 
 /// The call spelled as a relation name, `projects_with_read` for
 /// `authz.projects_with('read')`.
-fn helper_call_relation_name(call: &HelperCall) -> String {
-    let mut name = stored_relation_name(&call.function);
-    for argument in &call.arguments {
+fn helper_call_relation_name(function: &str, arguments: &[String]) -> String {
+    let mut name = stored_relation_name(function);
+    for argument in arguments {
         name.push('_');
         name.push_str(argument.trim_matches('\''));
     }
     clamp_relation_name(name)
 }
 
-/// One relation per role a grant arm keeps, or one for the rows it keeps where the
-/// grant table has no role column, each with the source loading it.
+/// The rows of the level a grant arm returns, one rule per group of rows it keeps.
+fn helper_grant_parts<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
+    let groups = grant_row_groups(&grant.rows);
+    match &grant.grantee {
+        HelperGrantee::Caller { user_column } => {
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
+            groups
+                .into_iter()
+                .map(|(base, extra_predicates)| {
+                    UsersetExpr::Computed(caller_grant_relation(
+                        grant,
+                        user_column,
+                        base,
+                        extra_predicates,
+                        level_type,
+                        plan,
+                    ))
+                })
+                .collect()
+        }
+        HelperGrantee::RequestSet {
+            value_column,
+            source,
+        } => {
+            let share = RequestShares {
+                table: &grant.table,
+                value_column,
+                source,
+                comparison: RequestComparison::CallerSetHolds,
+            };
+            let Some((identity_cols, share_type, gates)) =
+                share.gates(groups, ctx, table_plan, all_types)
+            else {
+                return Vec::new();
+            };
+            // Two rows naming one level row with different values would collide on one
+            // tuple there, so each row is its own object, reached from the level row it
+            // names, as a caller-set membership's share rows are.
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
+            let link = link_share_rows(
+                plan,
+                &ShareRows {
+                    join_table: &grant.table,
+                    identity_cols: &identity_cols,
+                    fk_cols: core::slice::from_ref(&grant.object_column),
+                    share_type: &share_type,
+                },
+            );
+            gates
+                .into_iter()
+                .map(|gate| share_reach(link.clone(), gate))
+                .collect()
+        }
+    }
+}
+
+/// The grant rows one rule reads, one group per role the arm keeps, or one for every
+/// row it keeps where the grant table has no role column, each with the relation name
+/// it earns.
 ///
 /// A condition with no SQL spelling loads nothing rather than every row.
-fn helper_grant_relations(
-    grant: &HelperGrant,
-    level_type: &TypeName,
-    plan: &mut TypePlan,
-) -> Vec<RelationName> {
-    let fk_cols = vec![grant.object_column.clone()];
-    let subject = DirectSubject::Type(plan.well_known.user.clone());
-    let mut relation = |base: String, predicate: Option<AttributePredicate>| {
-        let conjuncts = match predicate {
-            Some(predicate) => vec![ResidualPredicate {
-                sql: format!(
-                    "{} {}",
-                    quote_sql_identifier(predicate.column.as_str()),
-                    render_attribute_test(&predicate.test)?
-                ),
-                guard: Some(ResidualGuard::Compare(predicate)),
-                request: None,
-                relations: Vec::new(),
-            }],
-            None => Vec::new(),
-        };
-        let extra_predicates = ResidualPredicates::new(conjuncts);
-        let key = membership_source_key(
-            &grant.table,
-            &fk_cols,
-            &grant.user_column,
-            &extra_predicates,
-            None,
-        );
-        let relation = plan.membership_source_relation(&key, base, subject.clone());
-        plan.add_source(TupleSource::ExistsMembership {
-            join_table: grant.table.clone(),
-            fk_cols: fk_cols.clone(),
-            user_col: grant.user_column.clone(),
-            parent_type: level_type.clone(),
-            relation: relation.clone(),
-            extra_predicates,
-            gate: None,
-        });
-        Some(relation)
+fn grant_row_groups(rows: &GrantRows) -> Vec<(String, ResidualPredicates)> {
+    let residual = |predicates: Vec<AttributePredicate>| {
+        predicates
+            .into_iter()
+            .map(|predicate| {
+                Some(ResidualPredicate {
+                    sql: format!(
+                        "{} {}",
+                        quote_sql_identifier(predicate.column.as_str()),
+                        render_attribute_test(&predicate.test)?
+                    ),
+                    guard: Some(ResidualGuard::Compare(predicate)),
+                    request: None,
+                    relations: Vec::new(),
+                })
+            })
+            .collect::<Option<Vec<_>>>()
+            .map(ResidualPredicates::new)
     };
-    match &grant.rows {
-        GrantRows::Roles { column, values } => values
+    match rows {
+        GrantRows::Roles {
+            column,
+            values,
+            predicates,
+        } => values
             .iter()
             .filter_map(|value| {
                 // A role spelled as text names its relation, any other literal the
@@ -1639,22 +1688,234 @@ fn helper_grant_relations(
                     AttributeLiteral::Text(text) => text.clone(),
                     _ => member_relation().to_string(),
                 };
-                relation(
-                    base,
-                    Some(AttributePredicate {
-                        column: column.clone(),
-                        test: AttributeTest::Compare {
-                            operator: AttributeOperator::Eq,
-                            value: value.clone(),
-                        },
-                    }),
-                )
+                let role = AttributePredicate {
+                    column: column.clone(),
+                    test: AttributeTest::Compare {
+                        operator: AttributeOperator::Eq,
+                        value: value.clone(),
+                    },
+                };
+                let kept = core::iter::once(role).chain(predicates.iter().cloned());
+                Some((base, residual(kept.collect())?))
             })
             .collect(),
-        GrantRows::Matching { predicate } => {
-            relation(member_relation().to_string(), predicate.clone())
-                .into_iter()
-                .collect()
-        }
+        GrantRows::Matching { predicates } => residual(predicates.clone())
+            .map(|kept| (member_relation().to_string(), kept))
+            .into_iter()
+            .collect(),
     }
+}
+
+/// The relation holding the caller each grant row `extra_predicates` keeps names, with
+/// the source loading it.
+fn caller_grant_relation(
+    grant: &HelperGrant,
+    user_column: &ColumnName,
+    base: String,
+    extra_predicates: ResidualPredicates,
+    level_type: &TypeName,
+    plan: &mut TypePlan,
+) -> RelationName {
+    let fk_cols = vec![grant.object_column.clone()];
+    let key = membership_source_key(&grant.table, &fk_cols, user_column, &extra_predicates, None);
+    let subject = DirectSubject::Type(plan.well_known.user.clone());
+    let relation = plan.membership_source_relation(&key, base, subject);
+    plan.add_source(TupleSource::ExistsMembership {
+        join_table: grant.table.clone(),
+        fk_cols,
+        user_col: user_column.clone(),
+        parent_type: level_type.clone(),
+        relation: relation.clone(),
+        extra_predicates,
+        gate: None,
+    });
+    relation
+}
+
+/// The rows of a table admitting whoever presents a value the request compares with
+/// each row's.
+struct RequestShares<'a> {
+    table: &'a TableId,
+    value_column: &'a ColumnName,
+    source: &'a DeclaredSource,
+    comparison: RequestComparison,
+}
+
+impl RequestShares<'_> {
+    /// The relation of the table's share type admitting whoever presents a row's value,
+    /// one per group of rows, with the table's row identity and its share type. `None`
+    /// where the table has no row identity.
+    ///
+    /// Each row is an object of its own, so one condition parameter carries its value.
+    fn gates<DB: DatabaseLike>(
+        &self,
+        groups: Vec<(String, ResidualPredicates)>,
+        ctx: &PatternCtx<'_, DB>,
+        table_plan: &mut TypePlan,
+        all_types: &mut BTreeMap<TypeName, TypePlan>,
+    ) -> Option<(Vec<ColumnName>, TypeName, Vec<RelationName>)> {
+        let table = self.table;
+        let Some(identity_cols) = resolve_row_identity(table, ctx.db) else {
+            skip_source_without_row_identity(table_plan, table, "request value shares", ctx.db);
+            return None;
+        };
+        let share_type = share_type_name(table, ctx.table_types);
+        let request_parameter = self.source.condition_parameter();
+        let mut namespace = ctx.condition_parameters.namespace([request_parameter]);
+        let row_parameter = namespace.allocate_row(self.value_column.as_str());
+        let separator = self.source.separator().map(str::to_string);
+        let share_plan = all_types.entry(share_type.clone()).or_insert_with(|| {
+            TypePlan::new_with_well_known(share_type.clone(), &ctx.settings.well_known)
+        });
+        let condition = declare_condition(
+            share_plan,
+            request_comparison_spec(&row_parameter, request_parameter, self.comparison),
+        );
+        let mut gates = Vec::with_capacity(groups.len());
+        for (base, extra_predicates) in groups {
+            let key = membership_source_key(
+                table,
+                &identity_cols,
+                self.value_column,
+                &extra_predicates,
+                Some(MembershipSourceGate {
+                    condition: &condition,
+                    context: &[],
+                    aggregate: false,
+                    clocked: false,
+                    inputs: &[
+                        row_parameter.as_str(),
+                        request_parameter.as_str(),
+                        self.source.setting_key(),
+                        if separator.is_some() { "some" } else { "none" },
+                        separator.as_deref().unwrap_or_default(),
+                    ],
+                }),
+            );
+            let subject = DirectSubject::ConditionalWildcard {
+                type_name: share_plan.well_known.user.clone(),
+                condition: condition.clone(),
+            };
+            let gate = share_plan.membership_source_relation(&key, base, subject);
+            let gate_source = TupleSource::RequestShareGate {
+                join_table: table.clone(),
+                identity_cols: identity_cols.clone(),
+                share_type: share_type.clone(),
+                relation: gate.clone(),
+                condition: condition.clone(),
+                row_parameter: row_parameter.to_string(),
+                member_col: self.value_column.clone(),
+                request_parameter: request_parameter.to_string(),
+                setting_key: self.source.setting_key().to_string(),
+                separator: separator.clone(),
+                comparison: self.comparison,
+                extra_predicates,
+                temporal_context: Vec::new(),
+            };
+            share_plan.add_source(gate_source.clone());
+            // The guarded table's own sources state what its checks ask of the caller.
+            table_plan.add_source(gate_source);
+            gates.push(gate);
+        }
+        Some((identity_cols, share_type, gates))
+    }
+}
+
+/// Gate rows on the request's value being one a declared helper returns.
+///
+/// The helper returns the same rows to every caller, so the clause has one truth value
+/// for every guarded row and is stated once, on the request-gate object standing for this
+/// type, as a request formula is. Each row the helper returns is an object of its own
+/// share type, admitting whoever presents its value, and every row of its table is
+/// linked to the gate object, so the gate object admits whoever presents any of them.
+pub(crate) fn emit_request_value_in_helper_set<DB: DatabaseLike>(
+    test: &RequestValueInHelperSet,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> UsersetExpr {
+    let Some(identity_cols) = resolve_row_identity(ctx.source_table, ctx.db) else {
+        skip_source_without_row_identity(
+            table_plan,
+            ctx.source_table,
+            "request gate links",
+            ctx.db,
+        );
+        return deny_expr(table_plan);
+    };
+    let well_known = &ctx.settings.well_known;
+    let gate_type = well_known.request_gate.clone();
+    let gate_object = table_plan.type_name.to_string();
+    let mut parts = Vec::with_capacity(test.arms.len());
+    for arm in &test.arms {
+        let share = RequestShares {
+            table: &arm.table,
+            value_column: &arm.value_column,
+            source: &test.source,
+            comparison: RequestComparison::CallerValueEquals,
+        };
+        let groups = grant_row_groups(&GrantRows::Matching {
+            predicates: arm.predicates.clone(),
+        });
+        let Some((identity_cols, share_type, gates)) =
+            share.gates(groups, ctx, table_plan, all_types)
+        else {
+            continue;
+        };
+        let gate_plan = request_gate_plan(all_types, well_known);
+        // Every row of the table, which the share relations then keep as the arm does,
+        // so one link serves every helper reading the table.
+        let link = gate_plan.ensure_direct(
+            clamp_relation_name(share_type.to_string()),
+            vec![DirectSubject::Type(share_type.clone())],
+        );
+        gate_plan.add_source(TupleSource::ScopeShares {
+            scope_type: gate_type.clone(),
+            scope_object: gate_object.clone(),
+            member_table: arm.table.clone(),
+            identity_cols,
+            share_type,
+            relation: link.clone(),
+        });
+        parts.extend(
+            gates
+                .into_iter()
+                .map(|gate| share_reach(link.clone(), gate)),
+        );
+    }
+    let Some(held) = combine_union(parts) else {
+        return deny_expr(table_plan);
+    };
+    let call = helper_call_relation_name(&test.function, &test.arguments);
+    let relation = request_gate_plan(all_types, well_known).ensure_computed(
+        clamp_relation_name(format!("{}_in_{call}", test.source.condition_parameter())),
+        held,
+    );
+    let link = table_plan.ensure_direct(
+        request_gate_link_relation(),
+        vec![DirectSubject::Type(gate_type.clone())],
+    );
+    table_plan.add_source(TupleSource::PolicyScope {
+        table: ctx.source_table.clone(),
+        identity_cols,
+        scope_relation: link.clone(),
+        scope_type: gate_type,
+        scope_object: gate_object,
+    });
+    UsersetExpr::TupleToUserset {
+        tupleset: link,
+        computed: relation,
+    }
+}
+
+/// The plan of the request-gate type, declared on first use.
+fn request_gate_plan<'p>(
+    all_types: &'p mut BTreeMap<TypeName, TypePlan>,
+    well_known: &WellKnownTypes,
+) -> &'p mut TypePlan {
+    all_types
+        .entry(well_known.request_gate.clone())
+        .or_insert_with(|| {
+            TypePlan::new_with_well_known(well_known.request_gate.clone(), well_known)
+        })
 }

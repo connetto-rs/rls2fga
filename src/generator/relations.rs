@@ -13,8 +13,8 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::types::{
-    RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestComparison,
-    RequestPredicate, RowDecision, TypeName, ValueSource,
+    RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestPredicate,
+    RowDecision, TypeName, ValueSource,
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 
@@ -339,15 +339,16 @@ fn leaf_decision<DB: DatabaseLike>(
 
     if distinct
         .iter()
-        .any(|indexed| matches!(indexed.source, TupleSource::CallerSetShareGate { .. }))
+        .any(|indexed| matches!(indexed.source, TupleSource::RequestShareGate { .. }))
     {
         let [indexed] = distinct.as_slice() else {
             return None;
         };
-        let TupleSource::CallerSetShareGate {
+        let TupleSource::RequestShareGate {
             row_parameter,
             request_parameter,
             temporal_context,
+            comparison,
             ..
         } = indexed.source
         else {
@@ -362,7 +363,7 @@ fn leaf_decision<DB: DatabaseLike>(
             shapes: vec![description],
             context_key: row_parameter.clone(),
             request_parameter: request_parameter.clone(),
-            comparison: RequestComparison::CallerSetHolds,
+            comparison: *comparison,
         });
     }
 

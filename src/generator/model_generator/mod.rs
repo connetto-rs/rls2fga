@@ -85,7 +85,7 @@ use dsl::render_dsl;
 use emit_membership::{
     emit_abac_and, emit_blocked_set, emit_composite, emit_declared_helper, emit_exists_membership,
     emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
-    emit_uncorrelated_membership,
+    emit_request_value_in_helper_set, emit_uncorrelated_membership,
 };
 use emit_ownership::{
     emit_attribute_condition, emit_boolean_flag, emit_constant_bool, emit_direct_ownership,
@@ -1876,8 +1876,16 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
     let mut contracts: BTreeSet<(String, Option<String>, Option<String>, bool)> = BTreeSet::new();
     for source in &plan.table_tuple_sources {
         match source {
-            // A row column gate states either a set or a value, by its comparison.
+            // A row column gate, or a share row's, states either a set or a value, by its
+            // comparison.
             TupleSource::SessionAttributeGate {
+                request_parameter,
+                setting_key,
+                separator,
+                comparison,
+                ..
+            }
+            | TupleSource::RequestShareGate {
                 request_parameter,
                 setting_key,
                 separator,
@@ -1889,20 +1897,6 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     Some(setting_key.clone()),
                     separator.clone(),
                     matches!(comparison, RequestComparison::CallerSetHolds),
-                ));
-            }
-            // A share gate is a set, so its parameter holds a list.
-            TupleSource::CallerSetShareGate {
-                request_parameter,
-                setting_key,
-                separator,
-                ..
-            } => {
-                contracts.insert((
-                    request_parameter.clone(),
-                    Some(setting_key.clone()),
-                    separator.clone(),
-                    true,
                 ));
             }
             TupleSource::RequestGateEntry { atom, .. } => {
@@ -2021,7 +2015,7 @@ fn source_carries_condition(source: &TupleSource) -> bool {
         TupleSource::ConditionalAttributeGate { .. }
             | TupleSource::SessionAttributeGate { .. }
             | TupleSource::RequestGateEntry { .. }
-            | TupleSource::CallerSetShareGate { .. }
+            | TupleSource::RequestShareGate { .. }
             | TupleSource::ExistsMembership { gate: Some(_), .. }
             | TupleSource::HolderMembers { gate: Some(_), .. }
             | TupleSource::MembershipShareMembers { .. }
@@ -2690,6 +2684,9 @@ fn translate_pattern<DB: DatabaseLike>(
         }
         PatternClass::P20DeclaredHelper(helper) => {
             emit_declared_helper(helper, ctx, table_plan, all_types)
+        }
+        PatternClass::P27RequestValueInHelperSet(test) => {
+            emit_request_value_in_helper_set(test, ctx, table_plan, all_types)
         }
         PatternClass::ExpandedFunction(expanded) => {
             notes.push(TranslationNote::FunctionExpanded {
