@@ -749,20 +749,8 @@ fn request_values_the_gates_cannot_carry_are_refused() {
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT ip.installation_id FROM public.installation_permissions ip
              $$;
-             CREATE FUNCTION authz.caller_teams() RETURNS SETOF TEXT
-             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-               SELECT g.team_id FROM public.team_grants g
-               WHERE g.principal_id = current_setting('app.user_id', true)
-             $$;
-             CREATE FUNCTION authz.team_projects() RETURNS SETOF TEXT
-             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-               SELECT pg.project_id FROM public.project_grants pg
-               WHERE pg.principal_id IN (SELECT authz.caller_teams())
-             $$;
              ALTER FUNCTION authz.allowing_twice(TEXT) OWNER TO authz_owner;
              ALTER FUNCTION authz.allowing_twice(INT) OWNER TO authz_owner;
-             ALTER FUNCTION authz.caller_teams() OWNER TO authz_owner;
-             ALTER FUNCTION authz.team_projects() OWNER TO authz_owner;
              CREATE TABLE notes (id TEXT PRIMARY KEY,
                link_id TEXT NOT NULL REFERENCES share_links (id),
                live_id TEXT NOT NULL REFERENCES expiring_links (id),
@@ -778,8 +766,6 @@ fn request_values_the_gates_cannot_carry_are_refused() {
         "authz.live_ids",
         "authz.gated_links",
         "authz.allowing_twice",
-        "authz.caller_teams",
-        "authz.team_projects",
     ];
     let translator = TranslatorBuilder::new(deployment([
         caller("app.user_id"),
@@ -806,7 +792,8 @@ fn request_values_the_gates_cannot_carry_are_refused() {
         ),
         (
             "live_id = ANY (ARRAY(SELECT authz.live_ids()))",
-            "keeps the rows of 'public.expiring_links' for everyone by the statement time",
+            "keeps the rows of 'public.expiring_links' naming a set of grantees or everyone by \
+             the statement time",
         ),
         (
             "link_id = ANY (ARRAY(SELECT authz.gated_links()))",
@@ -824,10 +811,6 @@ fn request_values_the_gates_cannot_carry_are_refused() {
         (
             "current_setting('app.installation_id', true) IN (SELECT authz.allowing_twice('docs'))",
             "more than one declaration of 'authz.allowing_twice' takes this call's arguments",
-        ),
-        (
-            "project_id = ANY (ARRAY(SELECT authz.team_projects()))",
-            "naming a grantee 'authz.caller_teams' returns",
         ),
     ];
     for (using, reason) in cases {
@@ -1190,4 +1173,225 @@ fn a_gate_on_a_caller_that_may_be_unset_is_refused() {
         panic!("docs_read should be refused, got {classified:?}");
     };
     assert!(reason.contains("app.user_id"), "{reason}");
+}
+
+/// The request's grantees, one `grantee_id` per grant naming a user, an organization's
+/// active members, a team with the teams above it, or an audience.
+pub(crate) const GRANTEES: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE grantees (id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('user', 'team', 'organization', 'everyone', 'signed_in')));
+CREATE TABLE organizations (id TEXT PRIMARY KEY REFERENCES grantees (id));
+CREATE TABLE memberships (organization_id TEXT NOT NULL REFERENCES organizations (id),
+  user_id TEXT NOT NULL REFERENCES grantees (id),
+  state TEXT NOT NULL CHECK (state IN ('active', 'deactivated')),
+  PRIMARY KEY (organization_id, user_id));
+CREATE TABLE teams (id TEXT PRIMARY KEY REFERENCES grantees (id), parent_id TEXT REFERENCES teams (id));
+CREATE TABLE team_members (team_id TEXT NOT NULL REFERENCES teams (id),
+  user_id TEXT NOT NULL REFERENCES grantees (id), PRIMARY KEY (team_id, user_id));
+CREATE TABLE projects (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations (id));
+CREATE TABLE project_grants (project_id TEXT NOT NULL REFERENCES projects (id),
+  grantee_id TEXT NOT NULL REFERENCES grantees (id), PRIMARY KEY (project_id, grantee_id));
+GRANT SELECT ON grantees, memberships, teams, team_members, project_grants TO authz_owner;
+CREATE FUNCTION authz.caller_grantees() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  WITH RECURSIVE reached (id) AS (
+    SELECT g.id FROM public.grantees g WHERE g.id = current_setting('app.user_id', true)
+    UNION
+    SELECT g.id FROM public.grantees g WHERE g.kind = 'everyone'
+    UNION
+    SELECT g.id FROM public.grantees g WHERE g.kind = 'signed_in' AND current_setting('app.user_id', true) <> ''
+    UNION
+    SELECT m.organization_id FROM public.memberships m
+    WHERE m.user_id = current_setting('app.user_id', true) AND m.state = 'active'
+    UNION
+    SELECT tm.team_id FROM public.team_members tm WHERE tm.user_id = current_setting('app.user_id', true)
+    UNION
+    SELECT t.parent_id FROM public.teams t JOIN reached ON t.id = reached.id
+  ) SELECT id FROM reached
+$$;
+CREATE FUNCTION authz.projects_granted() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT pg.project_id FROM public.project_grants pg WHERE pg.grantee_id IN (SELECT authz.caller_grantees())
+$$;
+ALTER FUNCTION authz.caller_grantees() OWNER TO authz_owner;
+ALTER FUNCTION authz.projects_granted() OWNER TO authz_owner;
+GRANT EXECUTE ON FUNCTION authz.caller_grantees() TO authz_owner;
+CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects (id), title TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  project_id = ANY (ARRAY(SELECT authz.projects_granted())));
+";
+
+/// Both grantee helpers declared.
+pub(crate) const GRANTEE_HELPERS: &[&str] = &["authz.caller_grantees", "authz.projects_granted"];
+
+/// A grant naming one of the caller's grantees holds whoever the set holds on that
+/// grantee, every arm of the set and the walk up the teams on the grantees' own type.
+#[test]
+fn a_grant_naming_a_set_of_grantees_holds_whoever_the_set_holds_on_it() {
+    let dsl = model(GRANTEES, GRANTEE_HELPERS);
+    let definition = |type_name: &str, relation: &str| {
+        relation_definition(&dsl, type_name, relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(
+        definition("projects", "project_grants"),
+        "[grantees#caller_grantees]"
+    );
+    assert_eq!(definition("projects", "projects_granted"), "project_grants");
+    let caller_grantees = definition("grantees", "caller_grantees");
+    let arms: Vec<&str> = caller_grantees.split(" or ").collect();
+    assert_eq!(arms.last(), Some(&"caller_grantees from child"), "{dsl}");
+    assert!(arms.contains(&"active"), "{dsl}");
+    assert_eq!(definition("grantees", "active"), "[user]");
+    assert_eq!(definition("grantees", "child"), "[grantees]");
+    assert_eq!(
+        definition("docs", "can_select"),
+        "projects_granted from projects and acting_app_user from request_gate"
+    );
+}
+
+/// Each grant row loads the grantee it names, and the set's arms and the walk up the
+/// teams load only from the tables the set's arms read.
+#[test]
+fn a_grant_row_loads_the_grantee_it_names() {
+    let outputs = translator(ConfidenceLevel::B, GRANTEE_HELPERS)
+        .translate(&db_of(GRANTEES))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let queries: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .collect();
+    let reading = |needles: &[&str]| -> Vec<&str> {
+        queries
+            .iter()
+            .copied()
+            .filter(|sql| needles.iter().all(|needle| sql.contains(needle)))
+            .collect()
+    };
+    assert_eq!(
+        reading(&[
+            "FROM \"public\".\"project_grants\"",
+            "'grantees:' ||",
+            "'#caller_grantees'"
+        ])
+        .len(),
+        1,
+        "{queries:#?}"
+    );
+    assert_eq!(
+        reading(&["FROM \"public\".\"teams\"", "'child'", "'grantees:' ||"]).len(),
+        1,
+        "{queries:#?}"
+    );
+    assert!(
+        reading(&["\"public\".\"organizations\""]).is_empty(),
+        "no arm reads organizations: {queries:#?}"
+    );
+}
+
+/// `schema` with `authz.caller_grantees` cut down to the caller and the audiences, so
+/// no arm reads a grantee holding another.
+pub(crate) fn caller_and_audiences_only(schema: &str) -> String {
+    let cut = schema
+        .replace(
+            "
+    UNION
+    SELECT m.organization_id FROM public.memberships m
+    WHERE m.user_id = current_setting('app.user_id', true) AND m.state = 'active'
+    UNION
+    SELECT tm.team_id FROM public.team_members tm WHERE tm.user_id = current_setting('app.user_id', true)
+    UNION
+    SELECT t.parent_id FROM public.teams t JOIN reached ON t.id = reached.id
+  ) SELECT id FROM reached",
+            "",
+        )
+        .replace("  WITH RECURSIVE reached (id) AS (\n", "");
+    assert!(!cut.contains("reached"), "{cut}");
+    cut
+}
+
+/// A set whose arms are only the caller and audiences grants each grant row that user
+/// or every user, checked against the grantee row it names, with no grantee type.
+#[test]
+fn a_grant_naming_a_set_of_only_the_caller_and_audiences_grants_users() {
+    let schema = caller_and_audiences_only(GRANTEES);
+    let dsl = model(&schema, GRANTEE_HELPERS);
+    assert_eq!(
+        relation_definition(&dsl, "projects", "project_grants").as_deref(),
+        Some("[user, user:*]"),
+        "{dsl}"
+    );
+    assert_eq!(
+        relation_definition(&dsl, "grantees", "caller_grantees"),
+        None,
+        "{dsl}"
+    );
+    let outputs = translator(ConfidenceLevel::B, GRANTEE_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let grants: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .filter(|sql| sql.contains("FROM \"public\".\"project_grants\""))
+        .collect();
+    let joining = |subject: &str, kinds: &str| {
+        grants
+            .iter()
+            .filter(|sql| sql.contains(subject) && sql.contains(kinds))
+            .count()
+    };
+    assert_eq!(grants.len(), 3, "{grants:#?}");
+    assert_eq!(
+        joining(
+            "'user:' ||",
+            "\"kind\" IN ('user', 'team', 'organization', 'everyone', 'signed_in')"
+        ),
+        1,
+        "{grants:#?}"
+    );
+    assert_eq!(
+        joining("'user:*'", "\"kind\" IN ('everyone')"),
+        1,
+        "{grants:#?}"
+    );
+    assert_eq!(
+        joining("'user:*'", "\"kind\" IN ('signed_in')"),
+        1,
+        "{grants:#?}"
+    );
+}
+
+/// A gate on the arm naming the set keeps none of its rows for the constant it names,
+/// so every grantee the set holds holds the grant but that caller.
+#[test]
+fn a_caller_gate_on_a_grant_naming_a_set_excludes_the_constant_from_every_grantee() {
+    let dsl = model(
+        &GRANTEES.replace(
+            "IN (SELECT authz.caller_grantees())",
+            "IN (SELECT authz.caller_grantees()) \
+             AND current_setting('app.user_id', true) <> 'anonymous'",
+        ),
+        GRANTEE_HELPERS,
+    );
+    let definition = |relation: &str| {
+        relation_definition(&dsl, "projects", relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(
+        definition("projects_granted"),
+        "project_grants_grantees but not project_grants_excluded"
+    );
+    assert_eq!(
+        definition("project_grants_grantees"),
+        "[grantees#caller_grantees]"
+    );
+    assert_eq!(definition("project_grants_excluded"), "[user]");
 }

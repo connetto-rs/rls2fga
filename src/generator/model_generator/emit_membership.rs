@@ -10,6 +10,7 @@ use crate::classifier::expansion::ExpansionState;
 use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
 use crate::generator::tuple_generator::{quote_sql_identifier, render_attribute_test};
 use crate::generator::well_known::HOLDER_OBJECT_ID;
+use sql_traits::structs::WalkDirection;
 
 pub(super) struct MembershipSourceGate<'a> {
     pub condition: &'a ConditionName,
@@ -111,7 +112,7 @@ fn parent_bridge_relation(
     plan.membership_source_relation(
         &key,
         parent_type.as_str(),
-        DirectSubject::Type(parent_type.clone()),
+        vec![DirectSubject::Type(parent_type.clone())],
     )
 }
 
@@ -248,10 +249,10 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
             share_plan.membership_source_relation(
                 &key,
                 member_relation(),
-                DirectSubject::ConditionalType {
+                vec![DirectSubject::ConditionalType {
                     type_name: table_plan.well_known.user.clone(),
                     condition: condition.clone(),
-                },
+                }],
             )
         };
         let share_source = TupleSource::MembershipShareMembers {
@@ -333,7 +334,7 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
                 condition: gate.condition.clone(),
             },
         );
-        holder_plan.membership_source_relation(&key, member_relation(), subject)
+        holder_plan.membership_source_relation(&key, member_relation(), vec![subject])
     };
     table_plan.add_source(TupleSource::HolderMembers {
         holder_type: holder_type.clone(),
@@ -568,7 +569,7 @@ pub(super) fn link_share_rows(plan: &mut TypePlan, share: &ShareRows<'_>) -> Rel
     let link = plan.membership_source_relation(
         &key,
         share.share_type.as_str(),
-        DirectSubject::Type(share.share_type.clone()),
+        vec![DirectSubject::Type(share.share_type.clone())],
     );
     plan.add_source(TupleSource::ShareBridge {
         join_table: share.join_table.clone(),
@@ -763,10 +764,10 @@ fn emit_membership<DB: DatabaseLike>(
             share_plan.membership_source_relation(
                 &key,
                 base,
-                DirectSubject::ConditionalType {
+                vec![DirectSubject::ConditionalType {
                     type_name: table_plan.well_known.user.clone(),
                     condition: condition.clone(),
-                },
+                }],
             )
         };
         let reached = if tupleset.is_some() {
@@ -840,7 +841,7 @@ fn emit_membership<DB: DatabaseLike>(
                     condition: gate.condition.clone(),
                 },
             );
-            parent_plan.membership_source_relation(&key, base, subject)
+            parent_plan.membership_source_relation(&key, base, vec![subject])
         };
         // On the guarded plan first, which is the order the renderer emits.
         let membership_source = TupleSource::ExistsMembership {
@@ -1039,7 +1040,7 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
     let link_relation = table_plan.membership_source_relation(
         &key,
         format!("indirect_{owner_type}"),
-        DirectSubject::Type(owner_type.clone()),
+        vec![DirectSubject::Type(owner_type.clone())],
     );
     table_plan.add_source(TupleSource::ClosureBridge {
         link_table: link_table.clone(),
@@ -1468,8 +1469,11 @@ pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
 /// The relation holding everyone `call` returns a row for, defined on its level's type
 /// with the relations and sources it reads. `None` where it returns nothing.
 ///
-/// A walk arm makes the relation name itself through the level's parent, which is how
-/// `OpenFGA` spells every row below one the rest of the call returns.
+/// A walk arm makes the relation name itself through its tree's parent or child, which
+/// is how `OpenFGA` spells every row below or above one the rest of the call returns. An
+/// arm returning keys of a table whose key references the level's, an organization or a
+/// team among the grantees, holds on the level's row sharing that key, so the walk
+/// starts from every key the call returns, as the recursive term joins all of them.
 fn helper_call_relation<DB: DatabaseLike>(
     call: &HelperCall,
     ctx: &PatternCtx<'_, DB>,
@@ -1496,20 +1500,25 @@ fn helper_call_relation<DB: DatabaseLike>(
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
                 let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
+                let Some(tupleset) = helper_parent_link(
+                    plan,
+                    &parent.table,
+                    &call.level,
+                    &parent.fk_column,
+                    parent_type,
+                    ctx.db,
+                ) else {
+                    continue;
+                };
                 parts.push(UsersetExpr::TupleToUserset {
-                    tupleset: helper_parent_bridge(
-                        plan,
-                        &call.level,
-                        &parent.fk_column,
-                        parent_type,
-                    ),
+                    tupleset,
                     computed: parents,
                 });
             }
-            HelperSetArm::Walk(walk) => walked.push(&walk.fk_column),
+            HelperSetArm::Walk(walk) => walked.push(walk),
         }
     }
-    // Below nothing is nothing, so a walk alone returns no row.
+    // Next to nothing is nothing, so a walk alone returns no row.
     if parts.is_empty() {
         return None;
     }
@@ -1520,20 +1529,62 @@ fn helper_call_relation<DB: DatabaseLike>(
     }
     let walks = walked
         .iter()
-        .map(|column| helper_parent_bridge(plan, &call.level, column, level_type.clone()))
-        .collect();
+        .map(|walk| match walk.direction {
+            WalkDirection::Down => helper_parent_link(
+                plan,
+                &walk.table,
+                &call.level,
+                &walk.fk_column,
+                level_type.clone(),
+                ctx.db,
+            ),
+            // `sql-traits` reads a walk up only along a one-column key.
+            WalkDirection::Up => single_identity_column(&walk.table, ctx.db).map(|key| {
+                helper_child_bridge(plan, &walk.table, &walk.fk_column, &level_type, &key)
+            }),
+        })
+        .collect::<Option<Vec<_>>>()?;
     let relation = plan.ensure_walk_computed(name, parts, walks);
-    for column in walked {
+    for walk in walked {
         plan.walk_notes
-            .entry((relation.clone(), column.clone()))
+            .entry((relation.clone(), walk.fk_column.clone()))
             .or_insert_with(|| TranslationNote::HelperWalkDepth {
                 function: call.function.clone(),
-                table: call.level.clone(),
-                column: column.clone(),
+                table: walk.table.clone(),
+                column: walk.fk_column.clone(),
                 relation: relation.clone(),
             });
     }
     Some(relation)
+}
+
+/// The tupleset naming, on the level's row sharing each key of `table`, the row of
+/// `parent_type` its `fk_column` names, with the source loading it. `None` where `table`
+/// is not the level and has no one-column key.
+fn helper_parent_link<DB: DatabaseLike>(
+    plan: &mut TypePlan,
+    table: &TableId,
+    level: &TableId,
+    fk_column: &ColumnName,
+    parent_type: TypeName,
+    db: &DB,
+) -> Option<RelationName> {
+    if table == level {
+        return Some(helper_parent_bridge(plan, level, fk_column, parent_type));
+    }
+    let key = single_identity_column(table, db)?;
+    let columns = core::slice::from_ref(fk_column);
+    let tupleset = parent_bridge_relation(plan, table, columns, &parent_type);
+    plan.add_source(TupleSource::ClosureBridge {
+        link_table: table.clone(),
+        object_cols: vec![key],
+        subject_cols: columns.to_vec(),
+        guarded_type: plan.type_name.clone(),
+        owner_type: parent_type,
+        relation: tupleset.clone(),
+        extra_predicates: ResidualPredicates::default(),
+    });
+    Some(tupleset)
 }
 
 /// The tupleset naming each row's parent of `parent_type` through `fk_column` of
@@ -1554,6 +1605,34 @@ fn helper_parent_bridge(
         fk_cols: columns.to_vec(),
         parent_type,
         relation: tupleset.clone(),
+    });
+    tupleset
+}
+
+/// The tupleset naming, on each row of `level`, the rows whose `fk_column` names it, with
+/// the source loading it.
+fn helper_child_bridge(
+    plan: &mut TypePlan,
+    level: &TableId,
+    fk_column: &ColumnName,
+    level_type: &TypeName,
+    key: &ColumnName,
+) -> RelationName {
+    let mut source_key = table_source_key("child_bridge", level);
+    source_key_part(&mut source_key, fk_column.as_str());
+    let tupleset = plan.membership_source_relation(
+        &source_key,
+        "child",
+        vec![DirectSubject::Type(level_type.clone())],
+    );
+    plan.add_source(TupleSource::ClosureBridge {
+        link_table: level.clone(),
+        object_cols: vec![fk_column.clone()],
+        subject_cols: vec![key.clone()],
+        guarded_type: level_type.clone(),
+        owner_type: level_type.clone(),
+        relation: tupleset.clone(),
+        extra_predicates: ResidualPredicates::default(),
     });
     tupleset
 }
@@ -1588,7 +1667,8 @@ fn helper_call_relation_name(function: &str, arguments: &[String]) -> String {
 }
 
 /// The rows of the level a grant arm returns, one rule per group of rows it keeps, and
-/// an audience it keeps for every caller but some as its own rule less them.
+/// each audience or set of grantees it keeps for every caller but some as its own rule
+/// less them.
 fn helper_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
     level: &TableId,
@@ -1598,21 +1678,23 @@ fn helper_grant_parts<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
     // A grant row naming the caller is the one membership the generic name stands for,
-    // and an audience is named after its table.
+    // and a grant row naming another grantee is named after its table.
     let unsplit = match grant.grantee {
         HelperGrantee::Caller { .. } | HelperGrantee::RequestSet { .. } => {
             member_relation().to_string()
         }
-        HelperGrantee::Anyone => stored_relation_name(grant.table.name()),
+        HelperGrantee::Set { .. } | HelperGrantee::Anyone => {
+            stored_relation_name(grant.table.name())
+        }
     };
     let groups = grant_row_groups(&grant.rows, &unsplit);
-    match &grant.grantee {
+    let subjects = match &grant.grantee {
         HelperGrantee::Caller { user_column } => {
             let Some(excluded) = caller_exclusion(user_column, &grant.excluded) else {
                 return Vec::new();
             };
             let plan = helper_level_plan(level_type, level, table_plan, all_types);
-            groups
+            return groups
                 .into_iter()
                 .map(|(base, extra_predicates)| {
                     UsersetExpr::Computed(caller_grant_relation(
@@ -1624,7 +1706,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
                         plan,
                     ))
                 })
-                .collect()
+                .collect();
         }
         HelperGrantee::RequestSet {
             value_column,
@@ -1654,19 +1736,62 @@ fn helper_grant_parts<DB: DatabaseLike>(
                     share_type: &share_type,
                 },
             );
-            gates
+            return gates
                 .into_iter()
                 .map(|gate| share_reach(link.clone(), gate))
-                .collect()
+                .collect();
         }
-        HelperGrantee::Anyone => {
-            let plan = helper_level_plan(level_type, level, table_plan, all_types);
-            groups
-                .into_iter()
-                .map(|(base, rows)| audience_relation(grant, &base, &rows, level_type, plan))
-                .collect()
-        }
+        HelperGrantee::Anyone => vec![GrantSubject {
+            granted: Granted::Grantee(GranteeSubject::Everyone),
+            joins: Vec::new(),
+            excluded: grant.excluded.clone(),
+        }],
+        HelperGrantee::Set {
+            grantee_column,
+            call,
+        } => set_subjects(
+            &grant.table,
+            grantee_column,
+            call,
+            &grant.excluded,
+            ctx,
+            table_plan,
+            all_types,
+        ),
+    };
+    if subjects.is_empty() {
+        return Vec::new();
     }
+    let grantees = match &grant.grantee {
+        HelperGrantee::Set {
+            grantee_column,
+            call,
+        } => Some((grantee_column, call)),
+        _ => None,
+    };
+    let plan = helper_level_plan(level_type, level, table_plan, all_types);
+    groups
+        .into_iter()
+        .flat_map(|(base, rows)| {
+            grant_relation_exprs(grant, grantees, &base, &rows, &subjects, level_type, plan)
+        })
+        .collect()
+}
+
+/// Who a grant row grants.
+enum Granted {
+    /// The user its column names.
+    User(ColumnName),
+    /// Whoever the grantee it names stands for.
+    Grantee(GranteeSubject),
+}
+
+/// One subject of a grant row, with the conjuncts typing its grantee, and the callers
+/// an audience grants every user but.
+struct GrantSubject {
+    granted: Granted,
+    joins: Vec<ResidualPredicate>,
+    excluded: Vec<String>,
 }
 
 /// `<column> <> '<caller>'` for each of `excluded`. `None` where one has no SQL spelling.
@@ -1681,79 +1806,143 @@ fn caller_exclusion(column: &ColumnName, excluded: &[String]) -> Option<Vec<Resi
             },
         })
         .collect();
-    attribute_conjuncts(&kept)
+    attribute_conjuncts(&kept, None)
 }
 
-/// `predicates` as residual conjuncts on the columns of the query's one table. `None`
-/// where one has no SQL spelling.
-fn attribute_conjuncts(predicates: &[AttributePredicate]) -> Option<Vec<ResidualPredicate>> {
-    predicates
-        .iter()
-        .map(|predicate| {
-            Some(ResidualPredicate {
-                sql: format!(
-                    "{} {}",
-                    quote_sql_identifier(predicate.column.as_str()),
-                    render_attribute_test(&predicate.test)?
-                ),
-                guard: Some(ResidualGuard::Compare(predicate.clone())),
-                request: None,
-                relations: Vec::new(),
-            })
+impl GrantSubject {
+    /// The user `column` names, unless it is one of `excluded`, which no row grants.
+    /// `None` where an exclusion has no SQL spelling.
+    fn user(
+        column: ColumnName,
+        mut joins: Vec<ResidualPredicate>,
+        excluded: &[String],
+    ) -> Option<GrantSubject> {
+        joins.extend(caller_exclusion(&column, excluded)?);
+        Some(GrantSubject {
+            granted: Granted::User(column),
+            joins,
+            excluded: Vec::new(),
         })
-        .collect()
+    }
+
+    fn direct_subject(&self, well_known: &WellKnownTypes) -> DirectSubject {
+        match &self.granted {
+            Granted::User(_) | Granted::Grantee(GranteeSubject::Caller(_)) => {
+                DirectSubject::Type(well_known.user.clone())
+            }
+            Granted::Grantee(GranteeSubject::Userset {
+                type_name,
+                relation,
+                ..
+            }) => DirectSubject::Userset {
+                type_name: type_name.clone(),
+                relation: relation.clone(),
+            },
+            Granted::Grantee(GranteeSubject::Everyone) => {
+                DirectSubject::Wildcard(well_known.user.clone())
+            }
+        }
+    }
 }
 
-/// The relation holding every caller on the level rows `rows` names, or every caller
-/// but the ones the arm excludes, with the sources loading it.
-fn audience_relation(
-    grant: &HelperGrant,
-    base: &str,
-    rows: &ResidualPredicates,
-    level_type: &TypeName,
-    plan: &mut TypePlan,
-) -> UsersetExpr {
-    let fk_cols = vec![grant.object_column.clone()];
-    let mut key = membership_source_key(&grant.table, &fk_cols, &grant.object_column, rows, None);
-    source_key_part(&mut key, "anyone");
-    for caller in &grant.excluded {
-        source_key_part(&mut key, caller);
-    }
-    let grantee_grant = |relation: &RelationName, subject| TupleSource::GranteeGrant {
-        join_table: grant.table.clone(),
-        fk_cols: fk_cols.clone(),
-        parent_type: level_type.clone(),
-        relation: relation.clone(),
-        subject,
-        extra_predicates: rows.clone(),
-    };
-    let everyone = DirectSubject::Wildcard(plan.well_known.user.clone());
-    if grant.excluded.is_empty() {
-        let relation = plan.membership_source_relation(&key, base, everyone);
-        plan.add_source(grantee_grant(&relation, GranteeSubject::Everyone));
-        return UsersetExpr::Computed(relation);
-    }
-    let kept = plan.membership_source_relation(
-        &format!("{key}kept"),
-        format!("{base}_everyone"),
-        everyone,
+/// The subjects a grant naming one of the grantees `call` returns grants, typed by the
+/// rows `grantee_column` of `grant_table` names, none of them one of the callers
+/// `excluded` names.
+///
+/// Where every arm is the caller itself or an audience, a grantee the arm keeps is that
+/// user or every user. Otherwise it is whoever the call holds on it.
+fn set_subjects<DB: DatabaseLike>(
+    grant_table: &TableId,
+    grantee_column: &ColumnName,
+    call: &HelperCall,
+    excluded: &[String],
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<GrantSubject> {
+    let outer = format!(
+        "{}.{}",
+        grant_table.sql_name(),
+        quote_sql_identifier(grantee_column.as_str())
     );
-    let excluded = plan.membership_source_relation(
-        &format!("{key}excluded"),
-        format!("{base}_excluded"),
-        DirectSubject::Type(plan.well_known.user.clone()),
+    let inline = call.arms.iter().all(|arm| {
+        matches!(arm, HelperSetArm::Grant(grant)
+            if grant.returns_the_caller() || grant.grantee == HelperGrantee::Anyone)
+    });
+    if !inline {
+        return helper_call_relation(call, ctx, table_plan, all_types)
+            .map(|relation| GrantSubject {
+                granted: Granted::Grantee(GranteeSubject::Userset {
+                    type_name: ctx.table_types.resolve(&call.level),
+                    relation,
+                    column: grantee_column.clone(),
+                }),
+                joins: Vec::new(),
+                excluded: excluded.to_vec(),
+            })
+            .into_iter()
+            .collect();
+    }
+    let mut subjects = Vec::with_capacity(call.arms.len());
+    for arm in &call.arms {
+        let HelperSetArm::Grant(grant) = arm else {
+            continue;
+        };
+        let Some(join) = grantee_join(
+            &grant.table,
+            &grant.object_column,
+            &outer,
+            &kept_rows(&grant.rows),
+        ) else {
+            continue;
+        };
+        let mut kept_out = grant.excluded.clone();
+        for caller in excluded {
+            if !kept_out.contains(caller) {
+                kept_out.push(caller.clone());
+            }
+        }
+        if grant.returns_the_caller() {
+            subjects.extend(GrantSubject::user(
+                grantee_column.clone(),
+                vec![join],
+                &kept_out,
+            ));
+        } else {
+            subjects.push(GrantSubject {
+                granted: Granted::Grantee(GranteeSubject::Everyone),
+                joins: vec![join],
+                excluded: kept_out,
+            });
+        }
+    }
+    subjects
+}
+
+/// `EXISTS` a row of `table` whose `column` holds `outer` and that satisfies
+/// `predicates`. `None` where a predicate has no SQL spelling.
+fn grantee_join(
+    table: &TableId,
+    column: &ColumnName,
+    outer: &str,
+    predicates: &[AttributePredicate],
+) -> Option<ResidualPredicate> {
+    let alias = quote_sql_identifier("grantee");
+    let mut sql = format!(
+        "EXISTS (SELECT 1 FROM {} AS {alias} WHERE {alias}.{} = {outer}",
+        table.sql_name(),
+        quote_sql_identifier(column.as_str())
     );
-    plan.add_source(grantee_grant(&kept, GranteeSubject::Everyone));
-    for caller in &grant.excluded {
-        plan.add_source(grantee_grant(
-            &excluded,
-            GranteeSubject::Caller(caller.clone()),
-        ));
+    for conjunct in attribute_conjuncts(predicates, Some(&alias))? {
+        let _ = write!(sql, " AND {}", conjunct.sql);
     }
-    UsersetExpr::Exclusion {
-        base: Box::new(UsersetExpr::Computed(kept)),
-        subtract: Box::new(UsersetExpr::Computed(excluded)),
-    }
+    sql.push(')');
+    Some(ResidualPredicate {
+        sql,
+        guard: None,
+        request: None,
+        relations: vec![table.clone()],
+    })
 }
 
 /// The grant rows one rule reads, one group per role the arm keeps, or one for every
@@ -1763,7 +1952,7 @@ fn audience_relation(
 /// A condition with no SQL spelling loads nothing rather than every row.
 fn grant_row_groups(rows: &GrantRows, unsplit: &str) -> Vec<(String, ResidualPredicates)> {
     let residual = |predicates: &[AttributePredicate]| {
-        attribute_conjuncts(predicates).map(ResidualPredicates::new)
+        attribute_conjuncts(predicates, None).map(ResidualPredicates::new)
     };
     match rows {
         GrantRows::Roles {
@@ -1812,7 +2001,7 @@ fn caller_grant_relation(
     let fk_cols = vec![grant.object_column.clone()];
     let key = membership_source_key(&grant.table, &fk_cols, user_column, &extra_predicates, None);
     let subject = DirectSubject::Type(plan.well_known.user.clone());
-    let relation = plan.membership_source_relation(&key, base, subject);
+    let relation = plan.membership_source_relation(&key, base, vec![subject]);
     plan.add_source(TupleSource::ExistsMembership {
         join_table: grant.table.clone(),
         fk_cols,
@@ -1889,7 +2078,7 @@ impl RequestShares<'_> {
                 type_name: share_plan.well_known.user.clone(),
                 condition: condition.clone(),
             };
-            let gate = share_plan.membership_source_relation(&key, base, subject);
+            let gate = share_plan.membership_source_relation(&key, base, vec![subject]);
             let gate_source = TupleSource::RequestShareGate {
                 join_table: table.clone(),
                 identity_cols: identity_cols.clone(),
@@ -2014,4 +2203,158 @@ fn request_gate_plan<'p>(
         .or_insert_with(|| {
             TypePlan::new_with_well_known(well_known.request_gate.clone(), well_known)
         })
+}
+
+/// The conditions every row a grant arm keeps satisfies, whichever role it holds.
+fn kept_rows(rows: &GrantRows) -> Vec<AttributePredicate> {
+    match rows {
+        GrantRows::Roles {
+            column,
+            values,
+            predicates,
+        } => core::iter::once(AttributePredicate {
+            column: column.clone(),
+            test: AttributeTest::In(values.clone()),
+        })
+        .chain(predicates.iter().cloned())
+        .collect(),
+        GrantRows::Matching { predicates } => predicates.clone(),
+    }
+}
+
+/// `predicates` as residual conjuncts on the columns of the row `qualifier` names, or
+/// of the query's one table. `None` where one has no SQL spelling.
+fn attribute_conjuncts(
+    predicates: &[AttributePredicate],
+    qualifier: Option<&str>,
+) -> Option<Vec<ResidualPredicate>> {
+    predicates
+        .iter()
+        .map(|predicate| {
+            let column = quote_sql_identifier(predicate.column.as_str());
+            let test = render_attribute_test(&predicate.test)?;
+            Some(match qualifier {
+                Some(qualifier) => ResidualPredicate {
+                    sql: format!("{qualifier}.{column} {test}"),
+                    guard: None,
+                    request: None,
+                    relations: Vec::new(),
+                },
+                None => ResidualPredicate {
+                    sql: format!("{column} {test}"),
+                    guard: Some(ResidualGuard::Compare(predicate.clone())),
+                    request: None,
+                    relations: Vec::new(),
+                },
+            })
+        })
+        .collect()
+}
+
+/// The relations one set of a grant arm's rows holds on the level, each with the
+/// sources loading it.
+///
+/// Every subject but one excluding some callers shares one relation, whose type
+/// restriction lists them. Such a subject, an audience or whoever a set of grantees
+/// holds, is a relation of its own, less one of the callers it excludes.
+fn grant_relation_exprs(
+    grant: &HelperGrant,
+    grantees: Option<(&ColumnName, &HelperCall)>,
+    base: &str,
+    rows: &ResidualPredicates,
+    subjects: &[GrantSubject],
+    level_type: &TypeName,
+    plan: &mut TypePlan,
+) -> Vec<UsersetExpr> {
+    let fk_cols = vec![grant.object_column.clone()];
+    let compared = grantees.map_or(&grant.object_column, |(column, _)| column);
+    let mut key = membership_source_key(&grant.table, &fk_cols, compared, rows, None);
+    match grantees {
+        Some((_, call)) => {
+            source_key_part(&mut key, "grantees");
+            source_key_part(
+                &mut key,
+                &helper_call_relation_name(&call.function, &call.arguments),
+            );
+        }
+        None => source_key_part(&mut key, "anyone"),
+    }
+    for caller in &grant.excluded {
+        source_key_part(&mut key, caller);
+    }
+    let predicates = |subject: &GrantSubject| rows.and(&subject.joins);
+    let grantee_grant =
+        |relation: &RelationName, subject: GranteeSubject, extra| TupleSource::GranteeGrant {
+            join_table: grant.table.clone(),
+            fk_cols: fk_cols.clone(),
+            parent_type: level_type.clone(),
+            relation: relation.clone(),
+            subject,
+            extra_predicates: extra,
+        };
+    let source = |relation: &RelationName, subject: &GrantSubject| match &subject.granted {
+        Granted::User(column) => TupleSource::ExistsMembership {
+            join_table: grant.table.clone(),
+            fk_cols: fk_cols.clone(),
+            user_col: column.clone(),
+            parent_type: level_type.clone(),
+            relation: relation.clone(),
+            extra_predicates: predicates(subject),
+            gate: None,
+        },
+        Granted::Grantee(granted) => grantee_grant(relation, granted.clone(), predicates(subject)),
+    };
+    let mut exprs = Vec::new();
+    let (shared, gated): (Vec<&GrantSubject>, Vec<&GrantSubject>) = subjects
+        .iter()
+        .partition(|subject| subject.excluded.is_empty());
+    let mut direct: Vec<DirectSubject> = Vec::with_capacity(shared.len());
+    for subject in &shared {
+        let held = subject.direct_subject(&plan.well_known);
+        if !direct.contains(&held) {
+            direct.push(held);
+        }
+    }
+    if !direct.is_empty() {
+        let relation = plan.membership_source_relation(&key, base, direct);
+        for subject in shared {
+            plan.add_source(source(&relation, subject));
+        }
+        exprs.push(UsersetExpr::Computed(relation));
+    }
+    for (index, subject) in gated.into_iter().enumerate() {
+        let mut gated_key = key.clone();
+        source_key_part(&mut gated_key, &index.to_string());
+        // Only an audience and whoever a set holds keep excluded callers, a user
+        // subject leaving them out of its rows instead.
+        let kept_name = match &subject.granted {
+            Granted::Grantee(GranteeSubject::Userset { type_name, .. }) => {
+                format!("{base}_{type_name}")
+            }
+            _ => format!("{base}_everyone"),
+        };
+        let kept = plan.membership_source_relation(
+            &format!("{gated_key}kept"),
+            kept_name,
+            vec![subject.direct_subject(&plan.well_known)],
+        );
+        let excluded = plan.membership_source_relation(
+            &format!("{gated_key}excluded"),
+            format!("{base}_excluded"),
+            vec![DirectSubject::Type(plan.well_known.user.clone())],
+        );
+        plan.add_source(source(&kept, subject));
+        for caller in &subject.excluded {
+            plan.add_source(grantee_grant(
+                &excluded,
+                GranteeSubject::Caller(caller.clone()),
+                predicates(subject),
+            ));
+        }
+        exprs.push(UsersetExpr::Exclusion {
+            base: Box::new(UsersetExpr::Computed(kept)),
+            subtract: Box::new(UsersetExpr::Computed(excluded)),
+        });
+    }
+    exprs
 }

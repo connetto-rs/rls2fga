@@ -242,7 +242,7 @@ fn an_untranslatable_helper_keeps_its_own_reason() {
         "projects_unblocked",
     );
     assert!(
-        reason.contains("'authz.blocking_organizations' is not declared"),
+        reason.contains("calls 'authz.blocking_organizations', which is not declared"),
         "{reason}"
     );
 }

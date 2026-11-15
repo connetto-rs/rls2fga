@@ -57,6 +57,12 @@ pub(crate) struct MembershipGate {
 /// Who a [`TupleSource::GranteeGrant`] row grants.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum GranteeSubject {
+    /// `type_name:<column>#relation`, whoever holds `relation` on the grantee.
+    Userset {
+        type_name: TypeName,
+        relation: RelationName,
+        column: ColumnName,
+    },
     /// `user:*`, every caller.
     Everyone,
     /// `user:<identity>`, one caller named by a constant.
@@ -174,8 +180,10 @@ pub(crate) enum TupleSource {
         gate: Option<MembershipGate>,
     },
 
-    /// A grant row naming every caller, or one caller a gate excludes. Produces
-    /// `(parent_type:fk_cols, relation, <subject>)` once per distinct tuple.
+    /// A grant row naming whoever a grantee set holds on its grantee, every caller, or
+    /// one caller a gate excludes, an inline grantee's type checked by the rows its
+    /// predicates join. Produces `(parent_type:fk_cols, relation, <subject>)` once per
+    /// distinct tuple.
     GranteeGrant {
         join_table: TableId,
         /// Columns of `join_table` naming the parent resource, in the parent key's order.
@@ -183,7 +191,7 @@ pub(crate) enum TupleSource {
         parent_type: TypeName,
         relation: RelationName,
         subject: GranteeSubject,
-        /// Residual predicate.
+        /// Residual predicate, with the joins typing an inline grantee among them.
         extra_predicates: ResidualPredicates,
     },
 
@@ -340,7 +348,10 @@ pub(crate) enum TupleSource {
         share_type: TypeName,
         relation: RelationName,
     },
-    /// P19 links each guarded object to the owner its closure row names.
+    /// Links each object a row names to the subject the same row names, such as the owner
+    /// a P19 closure row names, or a tree's parent and child keys read from a table whose
+    /// key is another type's key. Produces
+    /// `(guarded_type:object_cols, relation, owner_type:subject_cols)`.
     ClosureBridge {
         /// Table whose rows record the closure.
         link_table: TableId,

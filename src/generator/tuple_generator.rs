@@ -1116,8 +1116,8 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
-        // Several grant rows may name one audience on one object, so the query keeps
-        // each tuple once.
+        // Several grant rows may name grantees of one type on one object, or audiences
+        // alike, so the query keeps each tuple once.
         TupleSource::GranteeGrant {
             join_table,
             fk_cols,
@@ -1129,17 +1129,35 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             let join_table_sql = join_table.sql_name();
             let fk_parts = quoted_key_parts(fk_cols);
             let object_sql = typed_name_sql(parent_type, fk_parts.iter().map(String::as_str));
-            let guards: Vec<String> = fk_parts
+            let mut guards: Vec<String> = fk_parts
                 .iter()
                 .map(|part| format!("{part} IS NOT NULL"))
                 .collect();
-            let (subject_sql, described) = match subject {
+            let (subject_sql, subject_columns, described) = match subject {
+                GranteeSubject::Userset {
+                    type_name,
+                    relation: subject_relation,
+                    column,
+                } => {
+                    let column_sql = quote_sql_identifier(column.as_str());
+                    guards.push(format!("{column_sql} IS NOT NULL"));
+                    (
+                        format!(
+                            "{} || '#{subject_relation}'",
+                            typed_name_sql(type_name, [column_sql.as_str()])
+                        ),
+                        core::slice::from_ref(column),
+                        format!("{type_name}#{subject_relation}"),
+                    )
+                }
                 GranteeSubject::Everyone => (
                     wildcard_subject_literal(&well_known.user),
+                    &[][..],
                     "every caller".to_string(),
                 ),
                 GranteeSubject::Caller(identity) => (
                     typed_name_literal(&well_known.user, identity),
+                    &[][..],
                     format!("caller {identity}"),
                 ),
             };
@@ -1149,7 +1167,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 Some(&subject_sql),
                 join_table,
                 fk_cols,
-                &[],
+                subject_columns,
                 names,
             );
             let where_clause = extra_predicates.sql().map_or_else(
