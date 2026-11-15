@@ -1395,3 +1395,113 @@ fn a_caller_gate_on_a_grant_naming_a_set_excludes_the_constant_from_every_grante
     );
     assert_eq!(definition("project_grants_excluded"), "[user]");
 }
+
+/// Each way a grant naming a set of grantees fails to name rows refuses the policy with
+/// its own reason.
+#[test]
+fn a_grant_naming_a_set_that_names_no_rows_is_refused() {
+    let cases = [
+        (
+            GRANTEES.to_owned(),
+            &["authz.projects_granted"][..],
+            "calls 'authz.caller_grantees', which is not declared",
+        ),
+        (
+            GRANTEES.replace(
+                "grantee_id TEXT NOT NULL REFERENCES grantees (id), PRIMARY",
+                "grantee_id TEXT NOT NULL, PRIMARY",
+            ),
+            GRANTEE_HELPERS,
+            "column 'grantee_id' of 'public.project_grants' names no row of one table",
+        ),
+        (
+            GRANTEES.replace(
+                "team_members (team_id TEXT NOT NULL REFERENCES teams (id)",
+                "team_members (team_id TEXT NOT NULL",
+            ),
+            GRANTEE_HELPERS,
+            "column 'team_id' of 'public.team_members' names no row of one table",
+        ),
+        (
+            GRANTEES.replace(
+                "organizations (id TEXT PRIMARY KEY REFERENCES grantees (id))",
+                "organizations (id TEXT PRIMARY KEY)",
+            ),
+            GRANTEE_HELPERS,
+            "column 'grantee_id' names rows of 'public.grantees', while declared helper \
+             'authz.caller_grantees' returns keys of 'public.organizations'",
+        ),
+    ];
+    for (schema, helpers, expected) in cases {
+        let reason = refusal_of(&schema, helpers, "docs_read");
+        assert!(reason.contains(expected), "{reason}");
+    }
+}
+
+/// A walk down the teams holds the set on a team when it holds on the team's parent, and
+/// the teams table loads each team's parent.
+#[test]
+fn a_walk_down_the_teams_holds_the_set_on_each_team_below() {
+    let schema = GRANTEES.replace(
+        "SELECT t.parent_id FROM public.teams t JOIN reached ON t.id = reached.id",
+        "SELECT t.id FROM public.teams t JOIN reached ON t.parent_id = reached.id",
+    );
+    let dsl = model(&schema, GRANTEE_HELPERS);
+    let caller_grantees =
+        relation_definition(&dsl, "grantees", "caller_grantees").unwrap_or_else(|| panic!("{dsl}"));
+    assert!(
+        caller_grantees.ends_with(" or caller_grantees from grantees"),
+        "{dsl}"
+    );
+    assert_eq!(
+        relation_definition(&dsl, "grantees", "grantees").as_deref(),
+        Some("[grantees]"),
+        "{dsl}"
+    );
+    let outputs = translator(ConfidenceLevel::B, GRANTEE_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let parents: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .filter(|sql| sql.contains("FROM \"public\".\"teams\"") && sql.contains("'grantees'"))
+        .collect();
+    assert_eq!(parents.len(), 1, "{:#?}", outputs.tuple_queries());
+    assert!(parents[0].contains("\"parent_id\""), "{}", parents[0]);
+}
+
+/// Without a closed role column the caller's and the audiences' grant rows are kept by
+/// their conditions alone, so the caller's arm grants every grantee row it names.
+#[test]
+fn a_set_of_the_caller_and_audiences_without_a_closed_kind_grants_users() {
+    let schema =
+        caller_and_audiences_only(GRANTEES).replace("kind TEXT NOT NULL CHECK", "kind TEXT CHECK");
+    let outputs = translator(ConfidenceLevel::B, GRANTEE_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    assert_eq!(
+        relation_definition(&dsl, "projects", "project_grants").as_deref(),
+        Some("[user, user:*]"),
+        "{dsl}"
+    );
+    let grants: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .filter(|sql| sql.contains("FROM \"public\".\"project_grants\""))
+        .collect();
+    assert_eq!(grants.len(), 3, "{grants:#?}");
+    let callers: Vec<&str> = grants
+        .iter()
+        .copied()
+        .filter(|sql| sql.contains("'user:' ||"))
+        .collect();
+    assert_eq!(callers.len(), 1, "{grants:#?}");
+    assert!(!callers[0].contains("\"kind\""), "{}", callers[0]);
+}
