@@ -1167,6 +1167,7 @@ fn classify_membership_select<DB: DatabaseLike>(
         | MembershipSelectAnalysis::AmbiguousNoUniqueJoin
         | MembershipSelectAnalysis::JoinsAnotherTable { .. }
         | MembershipSelectAnalysis::ScansEntityByOwnKey { .. }
+        | MembershipSelectAnalysis::ReadsFunctionRows { .. }
         | MembershipSelectAnalysis::RescansGuardedTable
         | MembershipSelectAnalysis::UnkeyedPairing { .. }
         | MembershipSelectAnalysis::NoMatch => None,
@@ -1202,6 +1203,12 @@ enum MembershipSelectAnalysis {
     UnkeyedPairing {
         reason: String,
     },
+    /// The subquery reads the rows a function call in its `FROM` returns. Whether the
+    /// function's body reads the guarded table, and as whom, is the declared helper route's
+    /// question, so the call is refused by name rather than guessed to be the guarded table.
+    ReadsFunctionRows {
+        function: String,
+    },
     /// The subquery scans the guarded table itself, which `PostgreSQL` refuses to plan:
     /// reading it re-enters the policy being evaluated. Verified on `PostgreSQL` 18, which
     /// raises `infinite recursion detected in policy`.
@@ -1216,6 +1223,10 @@ fn analyze_membership_select<DB: DatabaseLike>(
     outer_table: &str,
     state: &ExpansionState,
 ) -> MembershipSelectAnalysis {
+    if let Some(function) = called_source(select) {
+        return MembershipSelectAnalysis::ReadsFunctionRows { function };
+    }
+
     if membership_sources_include_ambiguous_unresolvable_shape(select, db)
         && selection_references_current_user(select, registry)
     {
@@ -1700,6 +1711,11 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
                  guarded row, so drop the inner scan and correlate against '{outer_table}' \
                  directly"
             )),
+            MembershipSelectAnalysis::ReadsFunctionRows { function } => Some(format!(
+                "Subquery reads the rows function '{function}' returns, which translate only \
+                 when '{function}' is a declared helper and the column is compared with every \
+                 row it returns"
+            )),
             MembershipSelectAnalysis::UnkeyedPairing { reason } => Some(reason),
             MembershipSelectAnalysis::Unique { .. }
             | MembershipSelectAnalysis::Uncorrelated { .. }
@@ -1974,6 +1990,25 @@ fn relation_sources(select: &Select) -> Vec<RelationSource> {
 fn relation_source_from_table_factor(tf: &TableFactor) -> Option<RelationSource> {
     let (table_name, alias) = table_factor_parts(tf)?;
     Some(RelationSource { table_name, alias })
+}
+
+/// The name of the first function called in `FROM`, among the items [`relation_sources`]
+/// reads.
+fn called_source(select: &Select) -> Option<String> {
+    select
+        .from
+        .iter()
+        .flat_map(|from| {
+            core::iter::once(&from.relation).chain(from.joins.iter().map(|join| &join.relation))
+        })
+        .find_map(|factor| match factor {
+            TableFactor::Table {
+                name,
+                args: Some(_),
+                ..
+            } => Some(name.to_string()),
+            _ => None,
+        })
 }
 
 fn membership_sources_include_ambiguous_unresolvable_shape<DB: DatabaseLike>(
