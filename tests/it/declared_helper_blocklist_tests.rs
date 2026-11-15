@@ -1,11 +1,9 @@
 //! A clause keeping the rows a declared helper does not return subtracts the helper's set
 //! with `but not`, from every command relation a restrictive policy covers.
 
-use rls2fga::classifier::patterns::{ClassifiedExpr, PatternClass, UnclassifiedExpr};
-use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 
-use crate::support::deployment::{caller, deployment};
+use crate::declared_helper_tests::{refusal_of, translator};
 use crate::support::footgun::{db_of, relation_definition, relation_definitions};
 
 /// Organizations blocking principals, the projects those blocks reach, and the documents
@@ -65,13 +63,6 @@ CREATE POLICY docs_unblocked ON docs AS RESTRICTIVE FOR SELECT
 /// Both helpers the blocks read.
 const HELPERS: &[&str] = &["authz.blocked_projects", "authz.blocking_organizations"];
 
-fn translator(helpers: &[&str]) -> Translator {
-    TranslatorBuilder::new(deployment([caller("app.user_id")]))
-        .with_min_confidence(ConfidenceLevel::B)
-        .with_declared_helpers(helpers)
-        .build()
-}
-
 /// The schema with one restrictive `SELECT` policy on `projects` keeping the rows
 /// `using` holds.
 fn restricted(using: &str) -> String {
@@ -83,32 +74,30 @@ fn restricted(using: &str) -> String {
 }
 
 fn model(sql: &str) -> String {
-    translator(HELPERS)
-        .translate(&db_of(sql))
+    crate::declared_helper_tests::model(sql, HELPERS)
+}
+
+/// The report names each blocklist by the helper call it subtracts, after the grant it
+/// subtracts from where the clause holds one.
+#[test]
+fn the_report_names_the_excluded_helper_call() {
+    let report = translator(ConfidenceLevel::B, HELPERS)
+        .translate(&db_of(&format!(
+            "{BLOCKS}{PROJECTS_UNBLOCKED}
+             ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY docs_read ON docs FOR SELECT USING (
+               author_id = current_setting('app.user_id', true)
+               AND NOT (project_id = ANY (ARRAY(SELECT authz.blocked_projects()))));"
+        )))
         .expect("the schema should plan")
         .outputs()
         .expect("every clause should translate")
-        .model()
-        .clone()
-}
-
-fn using_of(sql: &str, helpers: &[&str], policy: &str) -> ClassifiedExpr {
-    translator(helpers)
-        .classify(&db_of(sql))
-        .into_iter()
-        .find(|classified| classified.name() == policy)
-        .unwrap_or_else(|| panic!("{policy} should classify"))
-        .using_classification()
-        .expect("USING should classify")
-        .clone()
-}
-
-fn refusal_of(sql: &str, helpers: &[&str], policy: &str) -> String {
-    let classified = using_of(sql, helpers, policy);
-    assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
-    match classified.pattern {
-        PatternClass::Unknown(UnclassifiedExpr { reason, .. }) => reason,
-        other => panic!("{policy} should be refused, got {other:?}"),
+        .report();
+    for named in [
+        "restrictive blocklist id in authz.blocked_projects()",
+        "P3 (author_id = user) but not project_id in authz.blocked_projects()",
+    ] {
+        assert!(report.contains(named), "{named}: {report}");
     }
 }
 

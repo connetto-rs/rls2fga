@@ -79,6 +79,19 @@ fn an_owner_minus_a_blocklist_keeps_the_memberships_grade() {
     );
 }
 
+/// The report names a correlated blocklist by the table it reads.
+#[test]
+fn the_report_names_the_blocklist_table() {
+    let report = translate(&schema(&format!("{OWNER} AND NOT {BLOCKED}")))
+        .outputs()
+        .expect("every clause should translate")
+        .report();
+    assert!(
+        report.contains("P3 (owner = user) but not public.blocks"),
+        "{report}"
+    );
+}
+
 #[test]
 fn a_restrictive_blocklist_wrapped_in_a_function_matches_the_inline_clause() {
     let blocked_escaped = BLOCKED.replace("docs.id", "d").replace('\'', "''");
