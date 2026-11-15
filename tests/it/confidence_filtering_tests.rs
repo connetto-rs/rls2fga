@@ -165,8 +165,7 @@ fn a_weak_arm_does_not_drag_the_strong_one_out_of_the_model() {
     );
 }
 
-/// Principle 6, second breach: two strong arms must survive the strictest bar, which the
-/// cap on a composite's grade used to prevent with nothing weak anywhere.
+/// Principle 6, second breach: two strong arms must survive the strictest bar.
 #[test]
 fn two_strong_arms_survive_the_strictest_bar() {
     assert_eq!(
@@ -178,6 +177,33 @@ fn two_strong_arms_survive_the_strictest_bar() {
         can_select_of(OR_INSIDE, ConfidenceLevel::A),
         "define can_select: (owner_a or owner_b) and acting_app_user from request_gate",
         "nothing here is below the bar, so nothing may be dropped"
+    );
+    assert_eq!(
+        summary_of(OR_INSIDE, ConfidenceLevel::A),
+        vec![ConfidenceLevel::A],
+        "OpenFGA's `or` of two exact relations is exact"
+    );
+}
+
+/// A row passes `x AND y` exactly when `OpenFGA`'s `and` of their exact relations holds.
+#[test]
+fn a_conjunction_of_exact_parts_survives_the_strictest_bar() {
+    let sql = "
+CREATE TABLE users (id TEXT PRIMARY KEY);
+CREATE TABLE docs (id TEXT PRIMARY KEY, owner_a TEXT, owner_b TEXT);
+CREATE FUNCTION auth_uid() RETURNS TEXT LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.user_id'')';
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY p ON docs AS RESTRICTIVE FOR SELECT USING (owner_a = auth_uid() AND owner_b = auth_uid());
+CREATE POLICY open ON docs FOR SELECT USING (true);
+";
+    assert_eq!(
+        summary_of(sql, ConfidenceLevel::A),
+        vec![ConfidenceLevel::A; 2]
+    );
+    assert_eq!(
+        can_select_of(sql, ConfidenceLevel::A),
+        "define can_select: public_viewer and owner_a and owner_b and acting_app_user from request_gate",
     );
 }
 
@@ -202,9 +228,7 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_a = auth_uid() AND unreadable(ow
     );
 }
 
-/// One survivor is that arm, not a union of one. A composite's grade is capped at second
-/// best, so wrapping the survivor would drop it at the strictest bar while the same
-/// database written as two policies keeps it.
+/// One survivor is that arm, not a union of one.
 #[test]
 fn one_surviving_arm_keeps_its_own_grade() {
     assert_eq!(
@@ -217,9 +241,6 @@ fn one_surviving_arm_keeps_its_own_grade() {
         "define can_select: owner_a and acting_app_user from request_gate",
         "the surviving arm is what the model carries"
     );
-    // The grade is the observable that separates the two: a union of one is capped at
-    // second best, so reporting B here would tell an operator the ownership arm was
-    // guessed at when it was read exactly.
     assert_eq!(
         summary_of(OR_WITH_UNKNOWN_ARM, ConfidenceLevel::A),
         summary_of(TWO_POLICIES_ONE_UNKNOWN, ConfidenceLevel::A),

@@ -1302,7 +1302,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
     }
 
     #[test]
-    fn classify_or_of_level_a_patterns_becomes_level_b_composite() {
+    fn classify_or_takes_the_grade_of_its_weakest_part() {
         let db = docs_db();
         let registry = caller_registry();
         let expr = parse_expr("owner_id = current_setting('app.user_id') OR is_public = TRUE");
@@ -1387,7 +1387,7 @@ ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
                 parts
             }) if parts.len() == 2
         ));
-        assert_eq!(classified.confidence, ConfidenceLevel::B);
+        assert_eq!(classified.confidence, ConfidenceLevel::A);
     }
 
     #[test]

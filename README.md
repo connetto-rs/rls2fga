@@ -60,7 +60,7 @@ for note in outputs.notes() {
 }
 ```
 
-`outputs()` refuses every note whose severity `diverges_from_database()`, including `Unhandled`, `Partial` and `BelowThreshold`, and `DivergentTranslation::notes()` names each gap. `outputs_accepting_gaps()` deliberately accepts models that may grant what the database denies or deny what it grants. `min_confidence` sets the bar (`A` fully translated, `B` composed or row-decided, `C` a relationship with an unenforced attribute guard, `D` unrecognised), and `Outputs::report()` lists dropped clauses, with dropped `PERMISSIVE` clauses granting nothing and dropped `RESTRICTIVE` clauses becoming `no_access`.
+`outputs()` refuses every note whose severity `diverges_from_database()`, including `Unhandled`, `Partial` and `BelowThreshold`, and `DivergentTranslation::notes()` names each gap. `outputs_accepting_gaps()` deliberately accepts models that may grant what the database denies or deny what it grants. `min_confidence` sets the bar (`A` fully translated, `B` row-decided or read through indirection, `C` a relationship with an unenforced attribute guard, `D` unrecognised), and `Outputs::report()` lists dropped clauses, with dropped `PERMISSIVE` clauses granting nothing and dropped `RESTRICTIVE` clauses becoming `no_access`.
 
 The `sql_traits` `Deployment` names the role a request logs in as, the roles it acts as, and every session setting a policy may read, whether the caller's identity, one value, or a set joined by a delimiter or packed as a JSON array, each with its type and whether a request may leave it unset. A setting it does not declare is refused wherever a policy reads it, and so is a set split on another delimiter than the declared one. The schema has to declare the deployment's roles.
 
@@ -144,7 +144,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P5 | `ParentInheritance` | FK join carrying a parent-side rule | `owner from parent`, gated by the parent's `can_select` |
 | P6 | `BooleanFlag` | `is_public = TRUE` | `[user:*]` |
 | P7 | `AbacAnd` | Relationship check `AND` attribute guard | Relationship half only, guard as a TODO |
-| P8 | `Composite` | `expr OR expr`, `expr AND expr` | Union, intersection |
+| P8 | `Composite` | `expr OR expr`, `expr AND expr` | Union, intersection, graded as its weakest part |
 | P9 | `AttributeCondition` | `status IN ('active', 'pending')`, `team_id IS NULL`, `expires_at > now()` | A row-decided value guards the tuple query, a clock-decided one becomes a condition |
 | P10 | `ConstantBool` | `TRUE`, `FALSE` | `[user:*]`, or no access |
 | P11 | `ArrayMembership` | `current_setting('app.user_id') = ANY (editors)` | Relation named after the column, one tuple per element |

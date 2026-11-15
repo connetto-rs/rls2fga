@@ -204,9 +204,9 @@ impl OracleSubstitution {
 
 /// Offer every refused expression in `policies` to `oracle` and apply what it answers.
 ///
-/// Refusals are found wherever they nest, and every enclosing pattern is regraded
-/// through [`composite_confidence`] so a clause is not dropped for a refusal that no
-/// longer exists. Returns one entry per substitution, in the order they were applied.
+/// Refusals are found wherever they nest, and every enclosing pattern is regraded as
+/// the classifier grades it, so a clause is not dropped for a refusal that no longer
+/// exists. Returns one entry per substitution, in the order they were applied.
 pub fn consult_oracle<O>(policies: &mut [ClassifiedPolicy], oracle: &O) -> Vec<OracleSubstitution>
 where
     O: PolicyOracle + ?Sized,
@@ -280,14 +280,13 @@ where
     let regraded = match &mut expr.pattern {
         PatternClass::P5ParentInheritance(ParentInheritance { inner_pattern, .. }) => {
             consult_expr(inner_pattern, policy_name, clause, oracle, answered)
-                .then(|| composite_confidence([inner_pattern.as_ref()]))
+                .then_some(inner_pattern.confidence)
         }
+        // The attribute guard stays unenforced, so the pair never grades above C.
         PatternClass::P7AbacAnd(AbacAnd {
             relationship_part, ..
         }) => consult_expr(relationship_part, policy_name, clause, oracle, answered)
-            .then(|| composite_confidence([relationship_part.as_ref()])),
-        // The expansion is proven, so the grade stays the body's rather than being
-        // capped as a composite.
+            .then(|| core::cmp::min(relationship_part.confidence, ConfidenceLevel::C)),
         PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) => {
             consult_expr(inner, policy_name, clause, oracle, answered).then_some(inner.confidence)
         }
