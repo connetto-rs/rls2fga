@@ -203,7 +203,10 @@ pub(crate) fn emit_request_formula<DB: DatabaseLike>(
             return emit_constant_bool(&ConstantBool { value: true }, ctx, table_plan)
         }
         RequestFormula::Const(false) => return deny_expr(table_plan),
-        RequestFormula::Atom(_) | RequestFormula::Any(_) | RequestFormula::All(_) => {}
+        RequestFormula::Atom(_)
+        | RequestFormula::Presence(_)
+        | RequestFormula::Any(_)
+        | RequestFormula::All(_) => {}
     }
     let Some(identity_cols) = resolve_row_identity(ctx.source_table, ctx.db) else {
         skip_source_without_row_identity(
@@ -318,6 +321,30 @@ impl GateObject<'_> {
                 });
                 Some(relation)
             }
+            RequestFormula::Presence(presence) => {
+                let condition = declare_condition(self.plan, presence_spec(presence));
+                let subjects = vec![DirectSubject::ConditionalWildcard {
+                    type_name: self.plan.well_known.user.clone(),
+                    condition: condition.clone(),
+                }];
+                let key = formula.key();
+                let relation = self.plan.gate_relation(
+                    &format!("request:{key}"),
+                    request_gate_relation_name(
+                        &format!("{}_{}", presence.request_parameter, presence.state()),
+                        &key,
+                    ),
+                    subjects,
+                );
+                self.entries.push(TupleSource::RequestPresenceEntry {
+                    gate_type: self.plan.type_name.clone(),
+                    gate_object: self.object.to_string(),
+                    relation: relation.clone(),
+                    condition,
+                    presence: presence.clone(),
+                });
+                Some(relation)
+            }
             RequestFormula::Any(children) | RequestFormula::All(children) => {
                 let members = children
                     .iter()
@@ -334,6 +361,27 @@ impl GateObject<'_> {
                 ))
             }
         }
+    }
+}
+
+/// The condition holding where the request carries the value `presence` tests, or where
+/// it leaves that value absent. The value travels in the `settings` map, which holds its
+/// key exactly when the request carries it.
+fn presence_spec(presence: &PresenceAtom) -> ConditionSpec {
+    let key = format!("{}{}{}", '"', presence.request_parameter, '"');
+    let carried = format!("{key} in {SETTINGS_PARAMETER}");
+    ConditionSpec {
+        expression: if presence.carried {
+            carried
+        } else {
+            format!("!({carried})")
+        },
+        parameters: [(
+            SETTINGS_PARAMETER.to_string(),
+            ConditionParameter::MapOf(STRING_PARAMETER_TYPE),
+        )]
+        .into_iter()
+        .collect(),
     }
 }
 

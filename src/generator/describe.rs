@@ -725,6 +725,28 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             },
         }),
 
+        // The condition reads only the request, so the fact carries no value of its own.
+        TupleSource::RequestPresenceEntry {
+            gate_type,
+            gate_object,
+            relation,
+            condition,
+            ..
+        } => Some(RecordDescription {
+            tables: Vec::new(),
+            derivation: RecordDerivation::Constant {
+                record: Record {
+                    object: format!("{gate_type}:{}", encode_part(gate_object)),
+                    relation: relation.clone(),
+                    subject: format!("{}:*", well_known.user),
+                    context: Some(RecordContextValue {
+                        condition: condition.clone(),
+                        values: alloc::collections::BTreeMap::new(),
+                    }),
+                },
+            },
+        }),
+
         // The guard reaches the description as structure, so the evaluator applies
         // the same comparison the query puts in its WHERE.
         TupleSource::AttributeGate {

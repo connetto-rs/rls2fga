@@ -22,12 +22,14 @@ use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
     ClassifiedExpr, ConfidenceLevel, ConstantInCallerSet, FallbackScalarEqualsConstant,
-    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass,
+    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass, RequestValueAbsent,
     RowValueEqualsCallerScalar, RowValueInCallerSet,
 };
-use crate::parser::expr::{function_arg_expr, function_call, unwrap_cast_or_nested, CastChain};
+use crate::parser::expr::{
+    function_arg_expr, function_call, positional_function_arg, unwrap_cast_or_nested, CastChain,
+};
 use crate::parser::function_analyzer::{
-    fallback_source_shape, FallbackSourceShape, FunctionSemantic,
+    empty_sentinel_nullif, fallback_source_shape, FallbackSourceShape, FunctionSemantic,
 };
 use crate::parser::names::builtin_function_name;
 use crate::parser::sql_parser::SetPacking;
@@ -53,6 +55,7 @@ pub fn recognize_session_attribute(
         .or_else(|| scalar_equality(expr, registry))
         .or_else(|| scalar_inequality(expr, registry))
         .or_else(|| scalar_in_constant_list(expr, registry))
+        .or_else(|| absence_test(expr, registry))
         .or_else(|| fallback_comparison(expr, registry))
 }
 
@@ -503,6 +506,100 @@ fn scalar_in_constant_list(expr: &Expr, registry: &FunctionRegistry) -> Option<C
     })
 }
 
+/// `<NULLIF read> IS NULL`, the request leaving a value it may leave unset absent, and
+/// `IS NOT NULL`, the request carrying it.
+///
+/// Only the wrapped read is an absence the request states, since [`nullif_read`] reads
+/// both unset readings as `NULL`, while the bare read is `''` in one of them. A cast that
+/// renames the read raises on the values it cannot spell, so it is refused with them.
+fn absence_test(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedExpr> {
+    let (tested, negated) = match expr {
+        Expr::IsNull(tested) => (tested, false),
+        Expr::IsNotNull(tested) => (tested, true),
+        _ => return None,
+    };
+    let (source, casts) = nullif_read(tested, registry)?;
+    if casts.renaming(Some(&source.canonical_type())).is_some() {
+        return None;
+    }
+    Some(ClassifiedExpr {
+        pattern: PatternClass::P28RequestValueAbsent(RequestValueAbsent {
+            source: source.clone(),
+            negated,
+        }),
+        confidence: grade(source),
+    })
+}
+
+/// Why every `IS NULL` and `IS NOT NULL` in `expr` that tests a declared single value
+/// stays unclassified, where [`absence_test`] does not read it as the request leaving
+/// the value absent or carrying it.
+///
+/// Answers for diagnosis, after recognition failed.
+pub(crate) fn refused_absence_tests(expr: &Expr, registry: &FunctionRegistry) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+        let (Expr::IsNull(tested) | Expr::IsNotNull(tested)) = node else {
+            return core::ops::ControlFlow::<()>::Continue(());
+        };
+        if let Some(reason) = absence_refusal(tested, registry) {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+        core::ops::ControlFlow::Continue(())
+    });
+    reasons
+}
+
+/// Why testing `tested` for `NULL` has no translation, or `None` when it is no declared
+/// single value or [`absence_test`] reads it.
+fn absence_refusal(tested: &Expr, registry: &FunctionRegistry) -> Option<String> {
+    if let Some((casts, wrapped)) = emptied_value(tested) {
+        let AccessorRead { root, path, .. } = accessor_read(wrapped)?;
+        let key = setting_key_read_by(root, registry)?;
+        let source = registry
+            .declared_source(&key, &path)
+            .filter(|source| source.is_scalar())?;
+        return if !path.is_empty() {
+            Some(format!(
+                "NULLIF hides a field of setting '{key}' holding '', which a request may \
+                 carry, so testing it for NULL states nothing the request omits"
+            ))
+        } else if !source.may_be_unset() {
+            Some(format!(
+                "Setting '{key}' is declared set by every request, which may set it to '', \
+                 so testing NULLIF of it for NULL tests no state the request can be in"
+            ))
+        } else {
+            casts
+                .renaming(Some(&source.canonical_type()))
+                .map(|renamed| {
+                    format!(
+                        "Testing setting '{key}' for NULL through a cast to {renamed} raises \
+                         on the values {renamed} cannot spell, which the model would admit"
+                    )
+                })
+        };
+    }
+    let (source, _) = bare_declared_read(tested, registry)?;
+    let key = source.setting_key();
+    Some(if !source.path().is_empty() {
+        format!("A field of setting '{key}' tested for NULL has no translation")
+    } else if source.may_be_unset() {
+        format!(
+            "Setting '{key}' reads as '' rather than NULL once a transaction-local value \
+             has ended, so testing it for NULL misses a request leaving it unset. Test \
+             NULLIF(current_setting('{key}', true), '') instead"
+        )
+    } else {
+        format!(
+            "Setting '{key}' is declared set by every request, so testing it for NULL tests \
+             no state the request can be in"
+        )
+    })
+}
+
 /// What the declared value is being compared against.
 enum TestedValue {
     /// A column of the guarded row, so the row supplies it as tuple context.
@@ -808,10 +905,19 @@ fn undeclared_set_reason(source: &SetSource, registry: &FunctionRegistry) -> Opt
 }
 
 /// The single-value declaration behind whatever `expr` reads and the casts around the
-/// read, however the deployment spelled it. A set is read through [`set_read`], whose
-/// expander takes the parse into `jsonb` as structure, and the caller through its own
-/// readers.
+/// read, however the deployment spelled it, bare or through [`nullif_read`]. A set is
+/// read through [`set_read`], whose expander takes the parse into `jsonb` as structure,
+/// and the caller through its own readers.
 pub(super) fn declared_read<'r>(
+    expr: &Expr,
+    registry: &'r FunctionRegistry,
+) -> Option<(&'r DeclaredSource, CastChain)> {
+    bare_declared_read(expr, registry).or_else(|| nullif_read(expr, registry))
+}
+
+/// As [`declared_read`], for a read no `NULLIF` wraps, which `PostgreSQL` reads as `''`
+/// once a transaction-local value of a setting a request may leave unset has ended.
+pub(super) fn bare_declared_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<(&'r DeclaredSource, CastChain)> {
@@ -821,6 +927,53 @@ pub(super) fn declared_read<'r>(
         .declared_source(&key, &path)
         .filter(|source| source.is_scalar())?;
     Some((source, casts))
+}
+
+/// `NULLIF(<read of a whole declared single value>, '')`, of a setting a request may
+/// leave unset, and the casts around and inside the wrap, outermost first.
+///
+/// `PostgreSQL` reads such a setting as `NULL` on a fresh connection and as `''` once a
+/// transaction-local value has ended, and the wrap reads both as `NULL`. A request
+/// leaving the setting unset omits its key, and one setting it never sends `''`, which
+/// `PostgreSQL` cannot tell from the unset reading, so the wrapped read is the value the
+/// request carries and is absent exactly where the key is. A setting every request sets
+/// may hold `''`, which the wrap would hide, so its wrapped read is refused, and so is a
+/// field of a document, whose own `''` the wrap would hide.
+pub(super) fn nullif_read<'r>(
+    expr: &Expr,
+    registry: &'r FunctionRegistry,
+) -> Option<(&'r DeclaredSource, CastChain)> {
+    let (mut casts, wrapped) = emptied_value(expr)?;
+    let AccessorRead {
+        root,
+        path,
+        casts: inner,
+    } = accessor_read(wrapped)?;
+    if !path.is_empty() {
+        return None;
+    }
+    let key = setting_key_read_by(root, registry)?;
+    let source = registry
+        .declared_source(&key, &[])
+        .filter(|source| source.is_scalar() && source.may_be_unset())?;
+    casts.extend(inner);
+    Some((source, casts))
+}
+
+/// The value `NULLIF(<value>, '')` wraps, under casts and a scalar subquery, and the
+/// casts around the wrap, outermost first.
+fn emptied_value(expr: &Expr) -> Option<(CastChain, &Expr)> {
+    let (mut casts, peeled) = CastChain::peeled(expr);
+    let (inner_casts, wrapped) = match peeled {
+        Expr::Subquery(query) => emptied_value(sole_projection(query)?)?,
+        other => {
+            let function =
+                function_call(other).filter(|function| empty_sentinel_nullif(function))?;
+            (CastChain::default(), positional_function_arg(function, 0)?)
+        }
+    };
+    casts.extend(inner_casts);
+    Some((casts, wrapped))
 }
 
 /// The `current_setting` key a node names, written inline or wrapped in a function whose
@@ -1517,6 +1670,181 @@ mod tests {
             recognize_session_attribute(&parse_expr("auth.role() = 'authenticated'"), &registry)
                 .is_none(),
             "a later source the deployment does not declare"
+        );
+    }
+
+    /// The source a declared `app.mode` scalar a request may leave unset reads.
+    fn unset_mode_source() -> DeclaredSource {
+        DeclaredSources::of(&deployment([scalar("app.mode").may_be_unset()]))
+            .iter()
+            .next()
+            .expect("the declared setting")
+            .clone()
+    }
+
+    /// `NULLIF(<read>, '')` of a setting a request may leave unset reads both unset
+    /// readings as `NULL` and the value a request carries as itself, so it reads as the
+    /// bare read wherever that one is, under casts and a scalar subquery alike.
+    #[test]
+    fn a_nullif_read_of_a_setting_a_request_may_leave_unset_is_the_value() {
+        let registry = registry([scalar("app.mode").may_be_unset()]);
+        let read = |clause: &str| {
+            recognize_session_attribute(&parse_expr(clause), &registry).map(|c| c.pattern)
+        };
+        let equal = PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant {
+            value: "main".to_string(),
+            source: unset_mode_source(),
+        });
+        for clause in [
+            "NULLIF(current_setting('app.mode', true), '') = 'main'",
+            "NULLIF(current_setting('app.mode', true), '')::text = 'main'",
+            "(SELECT NULLIF(current_setting('app.mode', true), '')) = 'main'",
+            "'main' = (SELECT NULLIF(current_setting('app.mode', true)::text, '')::text)",
+        ] {
+            assert_eq!(read(clause), Some(equal.clone()), "{clause}");
+        }
+        assert_eq!(
+            read("NULLIF(current_setting('app.mode', true), '') <> 'main'"),
+            Some(PatternClass::P21CallerScalarUnequalsConstant(
+                CallerScalarUnequalsConstant {
+                    value: "main".to_string(),
+                    source: unset_mode_source(),
+                }
+            ))
+        );
+        assert_eq!(
+            read("mode = NULLIF(current_setting('app.mode', true), '')"),
+            Some(PatternClass::P15RowValueEqualsCallerScalar(
+                RowValueEqualsCallerScalar {
+                    column: ColumnName::from_stored("mode"),
+                    source: unset_mode_source(),
+                }
+            ))
+        );
+    }
+
+    /// A setting every request sets has no unset reading, and `''` is then a value the
+    /// wrap would read as `NULL`, so the wrapped read stays refused. So does a wrap
+    /// against another sentinel, and one around a field of a document.
+    #[test]
+    fn a_nullif_read_the_bare_read_cannot_stand_for_is_refused() {
+        let always = registry([scalar("app.mode")]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr("NULLIF(current_setting('app.mode', true), '') = 'main'"),
+                &always
+            )
+            .is_none(),
+            "a setting every request sets"
+        );
+        let unset = registry([scalar("app.mode").may_be_unset()]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr("NULLIF(current_setting('app.mode', true), 'none') = 'main'"),
+                &unset
+            )
+            .is_none(),
+            "another sentinel than the empty text"
+        );
+        let field = registry([json_field(
+            "request.jwt.claims",
+            &["mode"],
+            SettingValue::Scalar(DataType::Text),
+        )
+        .may_be_unset()]);
+        assert!(
+            recognize_session_attribute(
+                &parse_expr(
+                    "NULLIF(current_setting('request.jwt.claims', true)::jsonb ->> 'mode', '') = 'main'"
+                ),
+                &field
+            )
+            .is_none(),
+            "a field of a document"
+        );
+    }
+
+    /// `IS NULL` on the wrapped read is the request leaving the value absent, and `IS
+    /// NOT NULL` the request carrying it, under casts and a scalar subquery alike.
+    #[test]
+    fn an_absence_test_on_a_nullif_read_is_read() {
+        let registry = registry([scalar("app.mode").may_be_unset()]);
+        let read = |clause: &str| {
+            recognize_session_attribute(&parse_expr(clause), &registry).map(|c| c.pattern)
+        };
+        let absent = |negated: bool| {
+            PatternClass::P28RequestValueAbsent(RequestValueAbsent {
+                source: unset_mode_source(),
+                negated,
+            })
+        };
+        assert_eq!(
+            read("NULLIF(current_setting('app.mode', true), '') IS NULL"),
+            Some(absent(false))
+        );
+        assert_eq!(
+            read("(SELECT NULLIF(current_setting('app.mode', true), '')::text) IS NULL"),
+            Some(absent(false))
+        );
+        assert_eq!(
+            read("NULLIF(current_setting('app.mode', true), '') IS NOT NULL"),
+            Some(absent(true))
+        );
+    }
+
+    /// The bare read is `NULL` on a fresh connection and `''` once a transaction-local
+    /// value has ended, so `IS NULL` on it answers both ways for one request, and a
+    /// setting every request sets is never absent. Each stays refused naming why, and so
+    /// does a cast that renames the wrapped read.
+    #[test]
+    fn an_absence_test_the_request_cannot_answer_is_refused() {
+        let unset = registry([scalar("app.mode").may_be_unset()]);
+        let always = registry([scalar("app.mode")]);
+        for (clause, registry, reason) in [
+            (
+                "current_setting('app.mode', true) IS NULL",
+                &unset,
+                "Test NULLIF(current_setting('app.mode', true), '') instead",
+            ),
+            (
+                "current_setting('app.mode', true) IS NOT NULL",
+                &unset,
+                "Test NULLIF(current_setting('app.mode', true), '') instead",
+            ),
+            (
+                "NULLIF(current_setting('app.mode', true), '')::integer IS NULL",
+                &unset,
+                "through a cast to integer",
+            ),
+            (
+                "NULLIF(current_setting('app.mode', true), '') IS NULL",
+                &always,
+                "declared set by every request",
+            ),
+            (
+                "current_setting('app.mode', true) IS NULL",
+                &always,
+                "declared set by every request",
+            ),
+        ] {
+            let expr = parse_expr(clause);
+            assert!(
+                recognize_session_attribute(&expr, registry).is_none(),
+                "`{clause}` stays refused"
+            );
+            let reasons = refused_absence_tests(&expr, registry);
+            assert!(
+                reasons.len() == 1 && reasons[0].contains(reason),
+                "`{clause}` names why: {reasons:?}"
+            );
+        }
+        assert_eq!(
+            refused_absence_tests(
+                &parse_expr("NULLIF(current_setting('app.mode', true), '') IS NULL"),
+                &unset
+            ),
+            Vec::<String>::new(),
+            "a test the request answers names nothing"
         );
     }
 }

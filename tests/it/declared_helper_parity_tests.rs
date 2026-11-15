@@ -6,11 +6,12 @@
 use core::time::Duration;
 
 use rls2fga::types::ActionStatement;
+use sqlparser::ast::DataType;
 
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_tests::{
-    caller_and_audiences_only, AUDIENCES, EXPIRING, GRANTEES, GROUPS, INSTALLATIONS, LEVELS,
-    ORDERS, OWNER_READS, REQUEST_VALUES,
+    caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EXPIRING, GRANTEES, GROUPS,
+    INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
 };
 use crate::support;
 use crate::support::parity::{
@@ -411,6 +412,93 @@ async fn request_values_behind_helpers_agree_with_postgres_17_and_18() {
             // No link, and an installation never set, read nothing.
             expect("no_links", "docs:d1", false);
             expect("unset_installation", "docs:d1", false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const INSTALLATION_HELPERS: &str = r#"{
+    "authz.installations_allowing": { "kind": "declared_helper" }
+}"#;
+
+/// The installation `docs` may be read through, and one that may only update them.
+const READING_INSTALLATION: &str = "11111111-1111-1111-1111-111111111111";
+const UPDATING_INSTALLATION: &str = "22222222-2222-2222-2222-222222222222";
+
+/// A caller presenting `installation`, `None` leaving it unset.
+fn installed(subject: &str, installation: Option<&str>) -> Principal {
+    let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", subject);
+    if let Some(installation) = installation {
+        principal
+            .session
+            .push(("app.installation_id".into(), installation.into()));
+    }
+    principal
+}
+
+/// [`ABSENT_INSTALLATION`] with one document, which [`READING_INSTALLATION`] may read and
+/// [`UPDATING_INSTALLATION`] may only update.
+fn absent_installation_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-absent-installation-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        ABSENT_INSTALLATION,
+        &[
+            &format!(
+                "INSERT INTO docs VALUES ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa');
+                 INSERT INTO installation_permissions VALUES
+                   ('{READING_INSTALLATION}', 'docs', 'select'),
+                   ('{UPDATING_INSTALLATION}', 'docs', 'update')"
+            ),
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            installed("via_i1", Some(READING_INSTALLATION)),
+            installed("via_i2", Some(UPDATING_INSTALLATION)),
+            installed("via_other", Some("33333333-3333-3333-3333-333333333333")),
+            installed("unset_installation", None),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id"),
+        support::deployment::typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    ])
+    .with_registry(INSTALLATION_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A request leaving the installation unset passes the cap, and one presenting an
+/// installation passes where the helper allows that installation to read.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn an_absent_installation_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = absent_installation_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (subject, allowed) in [
+                ("via_i1", true),
+                ("via_i2", false),
+                ("via_other", false),
+                ("unset_installation", true),
+            ] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    "docs:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
             assert_agrees(&case, &run);
         }
     }

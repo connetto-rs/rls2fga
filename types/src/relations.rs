@@ -114,6 +114,18 @@ pub enum RequestComparison {
 pub enum RequestPredicate {
     /// One test of a request value against a constant the policy names.
     Holds(RequestAtom),
+    /// The request carries a value the deployment lets it leave unset, its key present in
+    /// the `settings` map.
+    Carries {
+        /// Parameter the caller supplies the value as, in every check context.
+        request_parameter: String,
+    },
+    /// The request leaves a value the deployment lets it leave unset absent, its key
+    /// missing from the `settings` map.
+    Omits {
+        /// Parameter the caller would supply the value as.
+        request_parameter: String,
+    },
     /// The request acts as this `PostgreSQL` role, which a check states with the
     /// contextual tuple `(user:<subject>, usage, pg_role:<role>)`.
     ActsAs {

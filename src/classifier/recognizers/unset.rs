@@ -12,7 +12,7 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
 
-use super::session::{declared_read, fallback_read, set_read, sole_projection};
+use super::session::{bare_declared_read, fallback_read, set_read, sole_projection};
 use super::{accessor_read, caller_source, string_literal, unparenthesize};
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::parser::expr::unwrap_cast_or_nested;
@@ -273,11 +273,12 @@ fn compare<'r>(
 }
 
 /// The declaration of the single value `expr` reads, the caller or a scalar, when a
-/// request may leave it unset.
+/// request may leave it unset. A read wrapped in `NULLIF` reads `''` as `NULL` and is
+/// not one.
 fn unset_value<'r>(expr: &Expr, registry: &'r FunctionRegistry) -> Option<&'r DeclaredSource> {
     let caller = accessor_read(expr).and_then(|read| caller_source(&read, registry));
     caller
-        .or_else(|| declared_read(expr, registry).map(|(source, _)| source))
+        .or_else(|| bare_declared_read(expr, registry).map(|(source, _)| source))
         .filter(|source| source.may_be_unset())
 }
 

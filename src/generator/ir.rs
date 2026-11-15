@@ -5,7 +5,7 @@
 //! cannot drift apart.
 
 use crate::classifier::patterns::{AttributePredicate, ResidualPredicates};
-use crate::generator::model_generator::GateAtom;
+use crate::generator::model_generator::{GateAtom, PresenceAtom};
 use crate::generator::notes::SkippedTuples;
 use crate::generator::well_known::member_relation;
 #[cfg(not(feature = "std"))]
@@ -298,6 +298,20 @@ pub(crate) enum TupleSource {
         row_parameter: String,
         /// The test, with the caller contract it states.
         atom: GateAtom,
+    },
+
+    /// One test of whether the request carries a value it may leave unset, held by the
+    /// object standing for one guarded type. Produces `(gate_type:gate_object, relation,
+    /// user:*, condition, {})`, the condition reading only the request.
+    ///
+    /// Names no table, as [`Self::RequestGateEntry`] does not.
+    RequestPresenceEntry {
+        gate_type: TypeName,
+        gate_object: String,
+        relation: RelationName,
+        condition: ConditionName,
+        /// The test, with the caller contract it states.
+        presence: PresenceAtom,
     },
 
     /// A share row keyed on its own primary key, gated by a conditional wildcard comparing
@@ -652,6 +666,13 @@ pub(crate) enum TupleSourceKey<'a> {
         row_parameter: &'a str,
         atom: &'a GateAtom,
     },
+    RequestPresenceEntry {
+        gate_type: &'a TypeName,
+        gate_object: &'a str,
+        relation: &'a RelationName,
+        condition: &'a ConditionName,
+        presence: &'a PresenceAtom,
+    },
     RequestShareGate {
         share_type: &'a TypeName,
         join_table: &'a TableId,
@@ -763,6 +784,7 @@ impl TupleSource {
             | Self::ClosureBridge { .. }
             | Self::ActingKind { .. }
             | Self::RequestGateEntry { .. }
+            | Self::RequestPresenceEntry { .. }
             | Self::OwnerIdentity { .. }
             | Self::ExplicitGrants { .. }
             | Self::TeamMembership { .. }
@@ -856,6 +878,11 @@ impl TupleSource {
             Self::PolicyScope { scope_relation, .. }
             | Self::SingletonScope { scope_relation, .. } => own(scope_relation),
             Self::RequestGateEntry {
+                gate_type,
+                relation,
+                ..
+            }
+            | Self::RequestPresenceEntry {
                 gate_type,
                 relation,
                 ..
@@ -1102,6 +1129,19 @@ impl TupleSource {
                 condition,
                 row_parameter,
                 atom,
+            },
+            Self::RequestPresenceEntry {
+                gate_type,
+                gate_object,
+                relation,
+                condition,
+                presence,
+            } => TupleSourceKey::RequestPresenceEntry {
+                gate_type,
+                gate_object,
+                relation,
+                condition,
+                presence,
             },
             Self::RequestShareGate {
                 join_table,

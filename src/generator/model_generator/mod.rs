@@ -98,8 +98,8 @@ use emit_requests::{
     emit_request_formula, emit_request_gate, RequestSide,
 };
 use emit_roles::{emit_numeric_threshold, emit_role_name_in_list, OwnerScope};
-pub(crate) use request_formula::GateAtom;
 use request_formula::RequestFormula;
+pub(crate) use request_formula::{GateAtom, PresenceAtom};
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
 use simplify::{
     drop_implied_insert_readback, grants_nothing, inline_synthetic_rule_aliases,
@@ -1909,6 +1909,14 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     matches!(atom.comparison, RequestComparison::CallerSetHolds),
                 ));
             }
+            TupleSource::RequestPresenceEntry { presence, .. } => {
+                contracts.insert((
+                    presence.request_parameter.to_string(),
+                    Some(presence.setting_key.clone()),
+                    None,
+                    false,
+                ));
+            }
             _ => {}
         }
     }
@@ -2017,6 +2025,7 @@ fn source_carries_condition(source: &TupleSource) -> bool {
         TupleSource::ConditionalAttributeGate { .. }
             | TupleSource::SessionAttributeGate { .. }
             | TupleSource::RequestGateEntry { .. }
+            | TupleSource::RequestPresenceEntry { .. }
             | TupleSource::RequestShareGate { .. }
             | TupleSource::ExistsMembership { gate: Some(_), .. }
             | TupleSource::HolderMembers { gate: Some(_), .. }
@@ -2809,6 +2818,12 @@ fn translate_pattern<DB: DatabaseLike>(
         ),
         PatternClass::P25FallbackScalarInConstantList(test) => emit_request_formula(
             &RequestFormula::fallback_in_constant_list(test),
+            ctx,
+            table_plan,
+            all_types,
+        ),
+        PatternClass::P28RequestValueAbsent(test) => emit_request_formula(
+            &RequestFormula::Presence(PresenceAtom::of(test)),
             ctx,
             table_plan,
             all_types,
