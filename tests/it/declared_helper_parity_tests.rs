@@ -8,7 +8,9 @@ use core::time::Duration;
 use rls2fga::types::ActionStatement;
 
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
-use crate::declared_helper_tests::{GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS};
+use crate::declared_helper_tests::{
+    EXPIRING, GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
+};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -321,5 +323,240 @@ async fn a_blocklist_through_a_declared_helper_agrees_with_postgres_17_and_18() 
             expect("anonymous", "projects:P2", ActionStatement::Select, false);
             assert_agrees(&case, &run);
         }
+    }
+}
+
+const REQUEST_HELPERS: &str = r#"{
+    "authz.presented_links": { "kind": "declared_helper" },
+    "authz.installations_allowing": { "kind": "declared_helper" }
+}"#;
+
+/// A caller presenting `links` through `installation`, `None` leaving it unset.
+fn presenting(subject: &str, links: &[&str], installation: Option<&str>) -> Principal {
+    let mut principal =
+        Principal::with_setting(subject, "app_reader", "app.link_ids", &links.join(","))
+            .with_context(serde_json::json!({ "app_link_ids": links }));
+    if let Some(installation) = installation {
+        principal
+            .session
+            .push(("app.installation_id".into(), installation.into()));
+    }
+    principal
+}
+
+/// `l2` is revoked, `i1` may read the docs and `i2` may only update them.
+fn request_values_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-request-values-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!("{LEVELS}{OWNER_READS}{REQUEST_VALUES}"),
+        &[
+            "INSERT INTO share_links VALUES ('l1', FALSE), ('l2', TRUE), ('l3', FALSE);
+             INSERT INTO docs VALUES ('d1', 'l1'), ('d2', 'l2'), ('d3', 'l3');
+             INSERT INTO installation_permissions VALUES
+               ('i1', 'docs', 'select'), ('i2', 'docs', 'update')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            presenting("direct", &["l1", "l2"], Some("")),
+            presenting("via_i1", &["l1", "l3"], Some("i1")),
+            presenting("via_i2", &["l1", "l3"], Some("i2")),
+            presenting("no_links", &[], Some("")),
+            presenting("unset_installation", &["l1"], None),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id"),
+        support::deployment::scalar("app.installation_id"),
+        support::deployment::delimited_set("app.link_ids", ","),
+    ])
+    .with_registry(REQUEST_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn request_values_behind_helpers_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = request_values_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            // A presented link reads its docs, a revoked one does not.
+            expect("direct", "docs:d1", true);
+            expect("direct", "docs:d2", false);
+            expect("direct", "docs:d3", false);
+            // An installation approved for reading passes the cap, another does not.
+            expect("via_i1", "docs:d1", true);
+            expect("via_i1", "docs:d3", true);
+            expect("via_i2", "docs:d1", false);
+            // No link, and an installation never set, read nothing.
+            expect("no_links", "docs:d1", false);
+            expect("unset_installation", "docs:d1", false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const EXPIRING_HELPERS: &str = r#"{
+    "authz.projects_granted": { "kind": "declared_helper" }
+}"#;
+
+/// `alice` holds an open grant, `bob` one ending tomorrow, `carol` one that ended
+/// yesterday, `dave` one starting next month, and `erin` one ending in two years.
+fn expiring_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-expiry-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        EXPIRING,
+        &[
+            "INSERT INTO projects VALUES ('P1'), ('P2');
+             INSERT INTO docs VALUES ('d1', 'P1', NULL), ('d2', 'P2', NULL);
+             INSERT INTO project_grants VALUES
+               ('P1', 'alice', now() - interval '1 day', NULL),
+               ('P1', 'bob', now() - interval '1 day', now() + interval '1 day'),
+               ('P1', 'carol', now() - interval '2 days', now() - interval '1 day'),
+               ('P1', 'dave', now() + interval '1 month', NULL),
+               ('P2', 'erin', now() - interval '1 day', now() + interval '2 years')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        ["alice", "bob", "carol", "dave", "erin"]
+            .into_iter()
+            .map(|subject| caller(subject).with_clock())
+            .collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(EXPIRING_HELPERS)
+    .also_at(
+        "1 year",
+        "SELECT g.grantee_id AS subject, 'docs:' || d.id AS object
+         FROM docs d JOIN project_grants g ON g.project_id = d.project_id
+         WHERE g.starts_at <= $1::timestamptz
+           AND (g.expires_at IS NULL OR g.expires_at > $1::timestamptz)",
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn expiring_grants_agree_with_postgres_17_and_18_now_and_a_year_on() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = expiring_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (subject, allowed) in [
+                ("alice", true),
+                ("bob", true),
+                ("carol", false),
+                ("dave", false),
+            ] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    "docs:d1",
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
+            assert_postgres(
+                &case,
+                &run,
+                "erin",
+                "docs:d2",
+                ActionStatement::Select,
+                true,
+            );
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+/// One bound over grant rows that can repeat: `bob` holds one grant that ended and one
+/// ending tomorrow, `frank` one that ended and one with no end.
+fn repeated_expiry_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let schema = EXPIRING
+        .replace(",\n  PRIMARY KEY (project_id, grantee_id)", "")
+        .replace("    AND now() >= pg.starts_at\n", "");
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-repeated-expiry-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &schema,
+        &[
+            "INSERT INTO projects VALUES ('P1');
+             INSERT INTO docs VALUES ('d1', 'P1', NULL);
+             INSERT INTO project_grants VALUES
+               ('P1', 'bob', now(), now() - interval '1 day'),
+               ('P1', 'bob', now(), now() + interval '1 day'),
+               ('P1', 'frank', now(), now() - interval '1 day'),
+               ('P1', 'frank', now(), NULL)",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        ["bob", "frank", "erin"]
+            .into_iter()
+            .map(|subject| caller(subject).with_clock())
+            .collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(EXPIRING_HELPERS)
+    .also_at(
+        "1 year",
+        "SELECT DISTINCT g.grantee_id AS subject, 'docs:' || d.id AS object
+         FROM docs d JOIN project_grants g ON g.project_id = d.project_id
+         WHERE g.expires_at IS NULL OR g.expires_at > $1::timestamptz",
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn repeated_expiring_grants_agree_with_postgres_now_and_a_year_on() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = repeated_expiry_case("18", loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, allowed) in [("bob", true), ("frank", true), ("erin", false)] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                "docs:d1",
+                ActionStatement::Select,
+                allowed,
+            );
+        }
+        assert_agrees(&case, &run);
     }
 }

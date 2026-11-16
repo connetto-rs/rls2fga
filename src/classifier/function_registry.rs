@@ -46,6 +46,11 @@ impl DeclaredSource {
         }
     }
 
+    /// The source reading the whole of `setting`, declared as `value`.
+    pub(crate) fn whole(setting: &SessionSetting, value: SettingValue) -> Self {
+        Self::new(setting, Vec::new(), value)
+    }
+
     /// The `current_setting` name this source reads, lower case as `PostgreSQL` compares
     /// it.
     #[must_use]

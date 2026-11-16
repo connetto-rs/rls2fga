@@ -270,12 +270,9 @@ pub(crate) enum TupleSource {
         atom: GateAtom,
     },
 
-    /// A share row keyed on its own join-table primary key, gated by a conditional
-    /// wildcard: the caller passes only when the row's member value is in the caller's
-    /// set (and any composed clock still holds). Produces
-    /// `(share_type:pk, relation, user:*, condition, context)` per share row, so two
-    /// viewers of one guarded row become two objects rather than colliding on one.
-    CallerSetShareGate {
+    /// A share row keyed on its own primary key, gated by a conditional wildcard comparing
+    /// its member value with a request value as `comparison` specifies.
+    RequestShareGate {
         /// Table whose rows record the grants.
         join_table: TableId,
         /// Primary key of `join_table`, which the share object is keyed on so each row is
@@ -287,7 +284,7 @@ pub(crate) enum TupleSource {
         condition: ConditionName,
         /// Condition parameter the share row supplies.
         row_parameter: String,
-        /// Column of `join_table` holding the value the caller's set must contain.
+        /// Column of `join_table` holding the value compared with the request.
         member_col: ColumnName,
         /// Condition parameter the caller supplies in every check context.
         request_parameter: String,
@@ -295,6 +292,8 @@ pub(crate) enum TupleSource {
         setting_key: String,
         /// Separator the policy splits that setting on, absent for a list source.
         separator: Option<String>,
+        /// How the member value is compared with the request value.
+        comparison: RequestComparison,
         /// Residual filter on the share row.
         extra_predicates: ResidualPredicates,
         /// Temporal comparisons composed into the condition: each carries its row column
@@ -400,13 +399,15 @@ pub(crate) enum TupleSource {
         holder_type: TypeName,
     },
 
-    /// Links the one holder object to each membership row's witness. Produces
-    /// `(holder_type:all, relation, share_type:identity)` per row.
-    HolderShares {
+    /// Links one scope object to each row's own object.
+    ScopeShares {
+        /// Type of the scope object.
+        scope_type: TypeName,
+        /// Object id standing for the scope.
+        scope_object: String,
         member_table: TableId,
         /// Declared row identity of `member_table`, keying each witness subject.
         identity_cols: Vec<ColumnName>,
-        holder_type: TypeName,
         share_type: TypeName,
         relation: RelationName,
     },
@@ -610,7 +611,7 @@ pub(crate) enum TupleSourceKey<'a> {
         row_parameter: &'a str,
         atom: &'a GateAtom,
     },
-    CallerSetShareGate {
+    RequestShareGate {
         share_type: &'a TypeName,
         join_table: &'a TableId,
         identity_cols: &'a [ColumnName],
@@ -619,6 +620,7 @@ pub(crate) enum TupleSourceKey<'a> {
         condition: &'a ConditionName,
         row_parameter: &'a str,
         request_parameter: &'a str,
+        comparison: RequestComparison,
         extra_predicates: ResidualSqlKey<'a>,
         temporal_context: &'a [GateContextColumn],
     },
@@ -649,10 +651,11 @@ pub(crate) enum TupleSourceKey<'a> {
         extra_predicates: ResidualSqlKey<'a>,
         context: &'a [GateContextColumn],
     },
-    HolderShares {
+    ScopeShares {
+        scope_type: &'a TypeName,
+        scope_object: &'a str,
         member_table: &'a TableId,
         identity_cols: &'a [ColumnName],
-        holder_type: &'a TypeName,
         share_type: &'a TypeName,
         relation: &'a RelationName,
     },
@@ -723,9 +726,9 @@ impl TupleSource {
             | Self::ExplicitGrants { .. }
             | Self::TeamMembership { .. }
             | Self::ExistsMembership { .. }
-            | Self::CallerSetShareGate { .. }
+            | Self::RequestShareGate { .. }
             | Self::MembershipShareMembers { .. }
-            | Self::HolderShares { .. }
+            | Self::ScopeShares { .. }
             | Self::HolderMembers { .. }
             | Self::Skipped { .. } => false,
         }
@@ -776,16 +779,16 @@ impl TupleSource {
                 relation,
                 ..
             }
-            | Self::CallerSetShareGate {
+            | Self::RequestShareGate {
                 share_type,
                 relation,
                 ..
             } => vec![(share_type.clone(), relation.clone())],
-            Self::HolderShares {
-                holder_type,
+            Self::ScopeShares {
+                scope_type,
                 relation,
                 ..
-            } => vec![(holder_type.clone(), relation.clone())],
+            } => vec![(scope_type.clone(), relation.clone())],
             Self::TeamMembership { team_type, .. } => {
                 vec![(team_type.clone(), member_relation())]
             }
@@ -1038,7 +1041,7 @@ impl TupleSource {
                 row_parameter,
                 atom,
             },
-            Self::CallerSetShareGate {
+            Self::RequestShareGate {
                 join_table,
                 identity_cols,
                 share_type,
@@ -1047,11 +1050,12 @@ impl TupleSource {
                 condition,
                 row_parameter,
                 request_parameter,
+                comparison,
                 extra_predicates,
                 temporal_context,
                 setting_key: _,
                 separator: _,
-            } => TupleSourceKey::CallerSetShareGate {
+            } => TupleSourceKey::RequestShareGate {
                 share_type,
                 join_table,
                 identity_cols,
@@ -1060,6 +1064,7 @@ impl TupleSource {
                 condition,
                 row_parameter,
                 request_parameter,
+                comparison: *comparison,
                 extra_predicates: ResidualSqlKey::of(
                     extra_predicates,
                     Gated::when(!temporal_context.is_empty()),
@@ -1118,16 +1123,18 @@ impl TupleSource {
                 extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::Yes),
                 context,
             },
-            Self::HolderShares {
+            Self::ScopeShares {
+                scope_type,
+                scope_object,
                 member_table,
                 identity_cols,
-                holder_type,
                 share_type,
                 relation,
-            } => TupleSourceKey::HolderShares {
+            } => TupleSourceKey::ScopeShares {
+                scope_type,
+                scope_object,
                 member_table,
                 identity_cols,
-                holder_type,
                 share_type,
                 relation,
             },
@@ -1462,7 +1469,7 @@ mod tests {
     /// still filters in the query until a clock joins it.
     #[test]
     fn dedup_key_follows_the_share_gate_clock_rather_than_its_request_parameter() {
-        let share = |clock: bool, request_conjunct: bool| TupleSource::CallerSetShareGate {
+        let share = |clock: bool, request_conjunct: bool| TupleSource::RequestShareGate {
             join_table: table("shares"),
             identity_cols: vec![ColumnName::from_stored("id")],
             share_type: TypeName::canonicalized("shares"),
@@ -1473,6 +1480,7 @@ mod tests {
             request_parameter: "subjects".to_string(),
             setting_key: "app.subjects".to_string(),
             separator: Some(",".to_string()),
+            comparison: RequestComparison::CallerSetHolds,
             extra_predicates: ResidualPredicates::new({
                 let mut residual = vec![conjunct("role = 'editor'", false)];
                 if request_conjunct {

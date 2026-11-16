@@ -347,6 +347,7 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
@@ -504,6 +505,7 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
@@ -581,7 +583,7 @@ fn membership_refusal<DB: DatabaseLike>(
 fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<String> {
     call.arms.iter().find_map(|arm| match arm {
         HelperSetArm::Grant(grant) => key_collation_refusal(&grant.table, &grant.object_column, db)
-            .or_else(|| key_collation_refusal(&grant.table, &grant.user_column, db)),
+            .or_else(|| key_collation_refusal(&grant.table, grant.grantee.compared_column(), db)),
         HelperSetArm::Parent(parent) => key_collation_refusal(&call.level, &parent.fk_column, db)
             .or_else(|| helper_call_refusal(&parent.call, db)),
         HelperSetArm::Walk(walk) => key_collation_refusal(&call.level, &walk.fk_column, db),
@@ -1198,6 +1200,9 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
             "membership-through-a-second-table check"
         }
         PatternClass::P20DeclaredHelper(DeclaredHelper { .. }) => "declared-helper check",
+        PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. }) => {
+            "declared caller value among a declared helper's values"
+        }
         PatternClass::Unknown(UnclassifiedExpr { .. }) => "unrecognized expression",
         PatternClass::ExpandedFunction(ExpandedFunction { .. }) => "expanded function call",
         PatternClass::MembershipExclusion(MembershipExclusion { .. }) => {
@@ -1254,6 +1259,7 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
+        | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })

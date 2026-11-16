@@ -1,14 +1,17 @@
 //! A column compared with the set a declared `SECURITY DEFINER` helper returns becomes
 //! the grants the helper's body reads, `role from parent` through each parent arm.
 
+use core::fmt::Write as _;
+
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, GrantRows, HelperSetArm, PatternClass, UnclassifiedExpr,
 };
+use rls2fga::generator::tuple_generator::SkippedTuples;
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::{AttributeLiteral, AttributePredicate, AttributeTest, ConfidenceLevel};
 use rls2fga::types::{ColumnName, TranslationNote};
 
-use crate::support::deployment::{caller, deployment, scalar};
+use crate::support::deployment::{caller, delimited_set, deployment, scalar};
 use crate::support::footgun::{db_of, relation_definition};
 
 /// The request's reduced ownership schema, two levels of grants under the orders.
@@ -276,13 +279,13 @@ fn a_role_column_not_closed_to_literals_keeps_the_body_condition() {
         assert_eq!(
             grant.rows,
             GrantRows::Matching {
-                predicate: Some(AttributePredicate {
+                predicates: vec![AttributePredicate {
                     column: ColumnName::from_stored("role"),
                     test: AttributeTest::In(vec![
                         AttributeLiteral::Text("admin".into()),
                         AttributeLiteral::Text("write".into()),
                     ]),
-                }),
+                }],
             },
             "{case}"
         );
@@ -390,7 +393,7 @@ fn every_unproven_call_is_refused() {
         (
             "projects_read",
             "team_id = ANY (ARRAY(SELECT authz.tenant_teams()))",
-            "not the caller",
+            "reads setting `app.tenant` as the caller, which it is not",
         ),
         (
             "orders_read",
@@ -625,6 +628,317 @@ fn a_column_with_no_foreign_key_is_a_parent_of_each_level_it_is_compared_with() 
     );
 }
 
+/// Share links the request presents and the installation it acts through, each resolved
+/// by a declared helper.
+pub(crate) const REQUEST_VALUES: &str = "
+CREATE TABLE share_links (id TEXT PRIMARY KEY, revoked BOOLEAN NOT NULL DEFAULT FALSE);
+CREATE TABLE installation_permissions (
+  installation_id TEXT NOT NULL,
+  table_name TEXT NOT NULL,
+  action TEXT NOT NULL CHECK (action IN ('select', 'insert', 'update', 'delete')),
+  PRIMARY KEY (installation_id, table_name, action)
+);
+GRANT SELECT ON share_links, installation_permissions TO authz_owner;
+CREATE FUNCTION authz.presented_links() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT l.id FROM public.share_links l
+  WHERE l.id = ANY (string_to_array(current_setting('app.link_ids', true), ',')) AND l.revoked = FALSE
+$$;
+CREATE FUNCTION authz.installations_allowing(target TEXT, command TEXT) RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT ip.installation_id FROM public.installation_permissions ip
+  WHERE ip.table_name = target AND ip.action = command
+$$;
+ALTER FUNCTION authz.presented_links() OWNER TO authz_owner;
+ALTER FUNCTION authz.installations_allowing(TEXT, TEXT) OWNER TO authz_owner;
+CREATE TABLE docs (id TEXT PRIMARY KEY, link_id TEXT NOT NULL REFERENCES share_links (id));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_by_link ON docs FOR SELECT
+  USING (link_id = ANY (ARRAY(SELECT authz.presented_links())));
+CREATE POLICY docs_installation ON docs AS RESTRICTIVE FOR SELECT
+  USING (current_setting('app.installation_id', true) = ''
+         OR current_setting('app.installation_id', true) IN (SELECT authz.installations_allowing('docs', 'select')));
+";
+
+/// The helpers [`REQUEST_VALUES`] reads.
+pub(crate) const REQUEST_HELPERS: &[&str] =
+    &["authz.presented_links", "authz.installations_allowing"];
+
+/// A share link set and an installation scalar the request carries, beside the caller.
+fn request_translator() -> Translator {
+    TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        scalar("app.installation_id"),
+        delimited_set("app.link_ids", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .with_declared_helpers(REQUEST_HELPERS)
+    .build()
+}
+
+/// A helper arm comparing its column with a request set, and a request scalar compared
+/// with the rows a helper returns for literal arguments, both read as request values.
+#[test]
+fn request_values_behind_declared_helpers_translate() {
+    let db = db_of(&format!("{LEVELS}{OWNER_READS}{REQUEST_VALUES}"));
+    let classified = request_translator().classify(&db);
+    for policy in ["docs_by_link", "docs_installation"] {
+        let using = classified
+            .iter()
+            .find(|classified| classified.name() == policy)
+            .unwrap_or_else(|| panic!("{policy} should classify"))
+            .using_classification()
+            .expect("USING should classify");
+        assert_eq!(using.confidence, ConfidenceLevel::A, "{policy}: {using:?}");
+    }
+    // An `OR` reports its parts' count, so a policy of P27 alone shows the pattern.
+    let alone = db_of(&format!(
+        "{LEVELS}{OWNER_READS}{REQUEST_VALUES}
+         CREATE POLICY docs_installed ON docs AS RESTRICTIVE FOR SELECT
+           USING (current_setting('app.installation_id', true)
+                  IN (SELECT authz.installations_allowing('docs', 'select')));"
+    ));
+    let report = request_translator()
+        .translate(&alone)
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate")
+        .report();
+    assert!(
+        report.contains(
+            "P27 (caller value app_installation_id in \
+             authz.installations_allowing('docs', 'select'))"
+        ),
+        "{report}"
+    );
+}
+
+/// A request value behind a helper falls closed where the rows it reads depend on the
+/// request or on the statement time, and a column compared with rows every request
+/// gets alike names no grantee.
+#[test]
+fn request_values_the_gates_cannot_carry_are_refused() {
+    let policy = |using: &str| {
+        format!(
+            "{LEVELS}{OWNER_READS}{REQUEST_VALUES}
+             CREATE TABLE expiring_links (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL);
+             GRANT SELECT ON expiring_links TO authz_owner;
+             CREATE FUNCTION authz.every_link() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT l.id FROM public.share_links l WHERE l.revoked = FALSE
+             $$;
+             CREATE FUNCTION authz.live_links() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT e.id FROM public.expiring_links e
+               WHERE e.id = ANY (string_to_array(current_setting('app.link_ids', true), ','))
+                 AND e.expires_at > now()
+             $$;
+             CREATE FUNCTION authz.live_ids() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT e.id FROM public.expiring_links e WHERE e.expires_at > now()
+             $$;
+             CREATE FUNCTION authz.signed_in_links() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT l.id FROM public.share_links l
+               WHERE l.id = ANY (string_to_array(current_setting('app.link_ids', true), ','))
+                 AND current_setting('app.user_id', true) <> ''
+             $$;
+             ALTER FUNCTION authz.every_link() OWNER TO authz_owner;
+             ALTER FUNCTION authz.live_links() OWNER TO authz_owner;
+             ALTER FUNCTION authz.live_ids() OWNER TO authz_owner;
+             ALTER FUNCTION authz.signed_in_links() OWNER TO authz_owner;
+             CREATE FUNCTION authz.allowing_twice(target TEXT) RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT ip.installation_id FROM public.installation_permissions ip
+               WHERE ip.table_name = target
+             $$;
+             CREATE FUNCTION authz.allowing_twice(target INT) RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT ip.installation_id FROM public.installation_permissions ip
+             $$;
+             CREATE FUNCTION authz.caller_teams() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT g.team_id FROM public.team_grants g
+               WHERE g.principal_id = current_setting('app.user_id', true)
+             $$;
+             CREATE FUNCTION authz.team_projects() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT pg.project_id FROM public.project_grants pg
+               WHERE pg.principal_id IN (SELECT authz.caller_teams())
+             $$;
+             ALTER FUNCTION authz.allowing_twice(TEXT) OWNER TO authz_owner;
+             ALTER FUNCTION authz.allowing_twice(INT) OWNER TO authz_owner;
+             ALTER FUNCTION authz.caller_teams() OWNER TO authz_owner;
+             ALTER FUNCTION authz.team_projects() OWNER TO authz_owner;
+             CREATE TABLE notes (id TEXT PRIMARY KEY,
+               link_id TEXT NOT NULL REFERENCES share_links (id),
+               live_id TEXT NOT NULL REFERENCES expiring_links (id),
+               project_id TEXT REFERENCES projects (id));
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_read ON notes FOR SELECT USING ({using});"
+        )
+    };
+    let helpers = [
+        "authz.presented_links",
+        "authz.installations_allowing",
+        "authz.every_link",
+        "authz.live_links",
+        "authz.live_ids",
+        "authz.signed_in_links",
+        "authz.allowing_twice",
+        "authz.caller_teams",
+        "authz.team_projects",
+    ];
+    let translator = TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        scalar("app.installation_id"),
+        delimited_set("app.link_ids", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .with_declared_helpers(helpers)
+    .build();
+    let cases = [
+        (
+            "current_setting('app.installation_id', true) IN (SELECT authz.presented_links())",
+            "is compared with the request's value 'app.installation_id'",
+        ),
+        (
+            "current_setting('app.installation_id', true) IN (SELECT authz.live_ids())",
+            "keeps the rows of 'public.expiring_links' it compares with a request value by the \
+             statement time",
+        ),
+        (
+            "live_id = ANY (ARRAY(SELECT authz.live_links()))",
+            "keeps the rows of 'public.expiring_links' it compares with a request value by the \
+             statement time",
+        ),
+        (
+            "link_id = ANY (ARRAY(SELECT authz.every_link()))",
+            "to every request alike, and no grantee stands for every caller",
+        ),
+        (
+            "link_id = ANY (ARRAY(SELECT authz.signed_in_links()))",
+            "keeps the rows of 'public.share_links' only while a caller setting is set",
+        ),
+        (
+            "current_setting('app.installation_id', true) IN (SELECT authz.signed_in_links())",
+            "is compared with the request's value 'app.installation_id'",
+        ),
+        (
+            "NOT (current_setting('app.installation_id', true) \
+             IN (SELECT authz.installations_allowing('docs', 'select')))",
+            "NOT applied to declared caller value among a declared helper's values",
+        ),
+        (
+            "current_setting('app.installation_id', true) IN (SELECT authz.allowing_twice('docs'))",
+            "more than one declaration of 'authz.allowing_twice' takes this call's arguments",
+        ),
+        (
+            "project_id = ANY (ARRAY(SELECT authz.team_projects()))",
+            "naming a grantee 'authz.caller_teams' returns",
+        ),
+    ];
+    for (using, reason) in cases {
+        let classified = translator
+            .classify(&db_of(&policy(using)))
+            .into_iter()
+            .find(|classified| classified.name() == "notes_read")
+            .expect("notes_read should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .clone();
+        assert_eq!(classified.confidence, ConfidenceLevel::D, "`{using}`");
+        match classified.pattern {
+            PatternClass::Unknown(UnclassifiedExpr {
+                reason: refused, ..
+            }) => {
+                assert!(refused.contains(reason), "`{using}`: {refused}");
+            }
+            other => panic!("`{using}` should be refused, got {other:?}"),
+        }
+    }
+}
+
+/// A helper reading rows with no identity, or a guarded table with none, loads no share
+/// tuple and no gate link, so the gate it needs is noted as skipped and admits nobody.
+#[test]
+fn request_values_over_rows_without_identity_are_skipped() {
+    let sql = format!(
+        "{LEVELS}{OWNER_READS}{REQUEST_VALUES}
+         CREATE TABLE loose_permissions (installation_id TEXT NOT NULL);
+         CREATE TABLE link_tokens (link_id TEXT NOT NULL REFERENCES share_links (id),
+           token TEXT NOT NULL);
+         GRANT SELECT ON loose_permissions, link_tokens TO authz_owner;
+         CREATE FUNCTION authz.loose_installations() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT lp.installation_id FROM public.loose_permissions lp
+         $$;
+         CREATE FUNCTION authz.tokened_links() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT t.link_id FROM public.link_tokens t
+           WHERE t.token = ANY (string_to_array(current_setting('app.link_ids', true), ','))
+         $$;
+         ALTER FUNCTION authz.loose_installations() OWNER TO authz_owner;
+         ALTER FUNCTION authz.tokened_links() OWNER TO authz_owner;
+         CREATE TABLE notes (id TEXT PRIMARY KEY, link_id TEXT NOT NULL REFERENCES share_links (id));
+         CREATE TABLE loose_notes (body TEXT);
+         ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE loose_notes ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY notes_by_token ON notes FOR SELECT
+           USING (link_id = ANY (ARRAY(SELECT authz.tokened_links())));
+         CREATE POLICY notes_installation ON notes AS RESTRICTIVE FOR SELECT
+           USING (current_setting('app.installation_id', true)
+                  IN (SELECT authz.loose_installations()));
+         CREATE POLICY loose_notes_installation ON loose_notes FOR SELECT
+           USING (current_setting('app.installation_id', true)
+                  IN (SELECT authz.installations_allowing('loose_notes', 'select')));"
+    );
+    let mut helpers = REQUEST_HELPERS.to_vec();
+    helpers.extend(["authz.loose_installations", "authz.tokened_links"]);
+    let outputs = TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        scalar("app.installation_id"),
+        delimited_set("app.link_ids", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .with_declared_helpers(helpers)
+    .build()
+    .translate(&db_of(&sql))
+    .expect("the schema should plan")
+    .outputs_accepting_gaps();
+    let skipped: Vec<(String, String)> = outputs
+        .tuple_queries()
+        .iter()
+        .filter_map(|query| match &query.skipped {
+            Some(SkippedTuples::NoObjectIdentifier { table, what, .. }) => {
+                Some((table.to_string(), what.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    for expected in [
+        ("public.link_tokens", "request value shares"),
+        ("public.loose_permissions", "request value shares"),
+        ("public.loose_notes", "request gate links"),
+    ] {
+        assert!(
+            skipped
+                .iter()
+                .any(|(table, what)| (table.as_str(), what.as_str()) == expected),
+            "{expected:?} should be skipped: {skipped:?}"
+        );
+    }
+    let model = outputs.model();
+    for table in ["notes", "loose_notes"] {
+        let can_select = relation_definition(&model, table, "can_select")
+            .unwrap_or_else(|| panic!("{table} should define can_select:\n{model}"));
+        assert!(
+            can_select.contains("no_access"),
+            "{table} should admit nobody: {can_select}"
+        );
+    }
+}
+
 /// connetto's group tree under the teams, with a helper granting a group and every group
 /// below it through a recursive walk down `parent_id`.
 pub(crate) const GROUPS: &str = "
@@ -759,4 +1073,137 @@ fn each_walk_is_noted_once_with_the_depth_openfga_resolves() {
         [walk("groups_with_read"), walk("groups_with_write")],
         "{notes:#?}"
     );
+}
+
+/// Grants kept from their start while their end is unset or ahead, as the request's
+/// expiring grants are.
+pub(crate) const EXPIRING: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE projects (id TEXT PRIMARY KEY);
+CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects (id),
+  title TEXT);
+CREATE TABLE project_grants (project_id TEXT NOT NULL REFERENCES projects (id),
+  grantee_id TEXT NOT NULL, starts_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ,
+  PRIMARY KEY (project_id, grantee_id));
+GRANT SELECT ON project_grants TO authz_owner;
+CREATE FUNCTION authz.projects_granted() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT pg.project_id FROM public.project_grants pg
+  WHERE pg.grantee_id = current_setting('app.user_id', true)
+    AND now() >= pg.starts_at
+    AND (pg.expires_at IS NULL OR pg.expires_at > now())
+$$;
+ALTER FUNCTION authz.projects_granted() OWNER TO authz_owner;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  project_id = ANY (ARRAY(SELECT authz.projects_granted())));
+";
+
+/// A row with no end meets the end at every instant, so its tuple compares the start
+/// alone, and every other row's tuple compares both with the request clock.
+#[test]
+fn an_expiring_grant_is_a_tuple_conditioned_on_the_request_clock() {
+    let dsl = model(EXPIRING, &["authz.projects_granted"]);
+    let relation = |name: &str| relation_definition(&dsl, "projects", name);
+    assert_eq!(
+        relation("projects_granted").as_deref(),
+        Some("member_1c2a7792 or member_1bf410e4"),
+        "{dsl}"
+    );
+    let conditioned = |relation: Option<String>| {
+        let condition = relation?
+            .strip_prefix("[user with ")?
+            .strip_suffix(']')?
+            .to_string();
+        let (_, body) = dsl.split_once(&format!("condition {condition}("))?;
+        Some(
+            body.split_once("{\n")?
+                .1
+                .split_once('\n')?
+                .0
+                .trim()
+                .to_string(),
+        )
+    };
+    assert_eq!(
+        conditioned(relation("member_1c2a7792")).as_deref(),
+        Some("starts_at <= request_time && expires_at > request_time"),
+        "{dsl}"
+    );
+    assert_eq!(
+        conditioned(relation("member_1bf410e4")).as_deref(),
+        Some("starts_at <= request_time"),
+        "{dsl}"
+    );
+}
+
+/// Two rows of one caller on one project could each meet one bound, and no one tuple
+/// says whether a single row meets both.
+#[test]
+fn several_bounds_over_rows_repeating_a_grant_are_refused() {
+    let sql = EXPIRING.replace(",\n  PRIMARY KEY (project_id, grantee_id)", "");
+    assert!(refusal_of(&sql, &["authz.projects_granted"], "docs_read")
+        .contains("several clock bounds cannot be compressed into one fact"));
+}
+
+/// Four ends that may be unset take fifteen conditions, which a model admits, and five
+/// take thirty-one, which none does.
+#[test]
+fn bounds_keeping_null_stop_at_the_conditions_a_model_admits() {
+    let bounded = |ends: usize| {
+        let mut columns = String::new();
+        let mut conditions = String::new();
+        for end in 1..=ends {
+            let _ = write!(columns, ", ends_{end} TIMESTAMPTZ");
+            let _ = write!(
+                conditions,
+                "\n    AND (pg.ends_{end} IS NULL OR pg.ends_{end} > now())"
+            );
+        }
+        EXPIRING
+            .replace(
+                "expires_at TIMESTAMPTZ,",
+                &format!("expires_at TIMESTAMPTZ{columns},"),
+            )
+            .replace(
+                "    AND now() >= pg.starts_at\n    AND (pg.expires_at IS NULL OR pg.expires_at > now())",
+                &format!("    AND (pg.expires_at IS NULL OR pg.expires_at > now()){conditions}"),
+            )
+    };
+    let helpers = &["authz.projects_granted"];
+    let four_ends = using_of(&bounded(3), helpers, "docs_read");
+    assert_eq!(four_ends.confidence, ConfidenceLevel::A, "{four_ends:?}");
+    assert_eq!(
+        relation_definition(&model(&bounded(3), helpers), "projects", "projects_granted")
+            .map(|union| union.split(" or ").count()),
+        Some(16)
+    );
+    assert!(refusal_of(&bounded(4), helpers, "docs_read")
+        .contains("keeps NULL in 5 clock bounds, which takes more than the 25 conditions"));
+}
+
+/// A bound written either way round compares the column with the request clock the way
+/// the body compares it with `now()`.
+#[test]
+fn each_clock_comparison_keeps_its_direction() {
+    for (bound, compared) in [
+        ("now() < pg.starts_at", "starts_at > request_time"),
+        ("pg.starts_at >= now()", "starts_at >= request_time"),
+        ("pg.starts_at < now()", "starts_at < request_time"),
+        ("now() >= pg.starts_at", "starts_at <= request_time"),
+    ] {
+        let sql = EXPIRING.replace(
+            "    AND now() >= pg.starts_at\n    AND (pg.expires_at IS NULL OR pg.expires_at > now())",
+            &format!("    AND {bound}"),
+        );
+        let dsl = model(&sql, &["authz.projects_granted"]);
+        let condition = dsl
+            .split_once("\ncondition ")
+            .and_then(|(_, body)| body.split_once("{\n"))
+            .and_then(|(_, body)| body.split_once('\n'))
+            .map(|(line, _)| line.trim());
+        assert_eq!(condition, Some(compared), "{bound}: {dsl}");
+    }
 }

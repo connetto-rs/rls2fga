@@ -10,8 +10,8 @@ use crate::classifier::patterns::{
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr,
-    UncorrelatedMembership,
+    RequestValueInHelperSet, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
+    UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -207,6 +207,18 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 "P20 ({column} in {}({}))",
                 call.function,
                 call.arguments.join(", ")
+            )
+        }
+        PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet {
+            source,
+            function,
+            arguments,
+            ..
+        }) => {
+            format!(
+                "P27 (caller value {} in {function}({}))",
+                source.request_parameter(),
+                arguments.join(", ")
             )
         }
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {

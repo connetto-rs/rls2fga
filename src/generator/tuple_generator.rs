@@ -18,7 +18,7 @@ use crate::generator::well_known::{
 use crate::parser::names::{table_id_has_column, table_identity};
 use crate::parser::sql_parser::{ColumnLike, DataTypeLike, DatabaseLike, TableLike};
 use crate::types::{ColumnName, ConditionName, ContextWitness, RelationName, TableId, TypeName};
-use crate::types::{Record, RecordContextValue, RecordDescription};
+use crate::types::{Record, RecordContextValue, RecordDescription, RequestComparison};
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt::Write;
 use sql_traits::utils::scalar_family::ScalarFamily;
@@ -1116,7 +1116,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
 
         // Each share row is its own object, keyed on the join table's own primary key, so
         // two viewers of one guarded row become two objects rather than colliding on one.
-        TupleSource::CallerSetShareGate {
+        TupleSource::RequestShareGate {
             join_table,
             identity_cols,
             share_type,
@@ -1126,6 +1126,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             row_parameter,
             extra_predicates,
             temporal_context,
+            comparison,
             ..
         } => {
             let join_table_sql = join_table.sql_name();
@@ -1151,7 +1152,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 &[],
                 names,
             );
-            // The member the set compares, plus every column a clock comparison carries.
+            // The member compared with the request, plus every column a clock comparison carries.
             let mut context = format!("{parameter_sql}, {member_col_sql}::text");
             for gate in temporal_context {
                 let column_sql = quote_sql_identifier(gate.column.as_str());
@@ -1179,9 +1180,15 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 || format!("\nWHERE {null_guards}"),
                 |e| format!("\nWHERE {null_guards}\nAND ({e})"),
             );
+            let compared = match comparison {
+                RequestComparison::CallerSetHolds => "Caller-set",
+                RequestComparison::CallerValueEquals | RequestComparison::CallerValueUnequals => {
+                    "Caller-value"
+                }
+            };
             Some(TupleQuery {
                 comment: format!(
-                    "-- Caller-set share on {share_type} carrying {join_table}.{member_col}, \
+                    "-- {compared} share on {share_type} carrying {join_table}.{member_col}, \
                      evaluated by condition {condition}"
                 ),
                 sql: format!(
@@ -1467,17 +1474,17 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
-        // One link per membership row, so the holder resolves each row's witness.
-        TupleSource::HolderShares {
+        TupleSource::ScopeShares {
+            scope_type,
+            scope_object,
             member_table,
             identity_cols,
-            holder_type,
             share_type,
             relation,
         } => {
             let member_table_sql = member_table.sql_name();
             let identity_parts = quoted_key_parts(identity_cols);
-            let object_sql = typed_name_literal(holder_type, HOLDER_OBJECT_ID);
+            let object_sql = typed_name_literal(scope_type, scope_object);
             let subject_sql = typed_name_sql(share_type, identity_parts.iter().map(String::as_str));
             let base = identity_parts
                 .iter()
@@ -1495,7 +1502,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             );
             Some(TupleQuery {
                 comment: format!(
-                    "-- The {holder_type} holder links each {member_table} row's witness"
+                    "-- The {scope_type} scope links each {member_table} row's own object"
                 ),
                 sql: format!(
                     "SELECT {object_sql} AS object, '{relation}' AS relation, \
