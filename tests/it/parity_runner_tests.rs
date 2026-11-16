@@ -94,6 +94,7 @@ async fn every_parity_case_agrees() {
             a_clock_guard_holds_on_a_zoned_and_a_dated_column,
             a_cross_row_residual_is_decided_by_rows_the_grant_does_not_name,
             a_composite_key_share_stays_within_its_tenant,
+            a_row_valued_composite_key_share_stays_within_its_tenant,
             a_caller_role_residual_falls_closed,
             a_computed_argument_is_not_captured_by_the_body,
             a_failed_case_leaves_no_role_behind,
@@ -2647,6 +2648,61 @@ CREATE POLICY papers_visible ON tenant_papers FOR SELECT
         ("bob", "tenant_papers:t2|p-shared", true),
         ("bob", "tenant_papers:t1|p-shared", false),
         ("alice", "tenant_papers:t1|p-solo", false),
+    ] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            subject,
+            object,
+            ActionStatement::Select,
+            visible,
+        );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// The same share spelled as a row-value `IN`, the caller carried inside the row and a
+/// share row holding a `NULL` paper beside the caller's real one.
+async fn a_row_valued_composite_key_share_stays_within_its_tenant(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-row-valued-composite-key-membership",
+        "
+CREATE TABLE tenant_papers (
+    tenant_id TEXT NOT NULL,
+    id TEXT NOT NULL,
+    title TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, id)
+);
+CREATE TABLE tenant_shares (tenant_id TEXT, paper_id TEXT, viewer TEXT);
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+ALTER TABLE tenant_papers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY papers_visible ON tenant_papers FOR SELECT
+    USING ((tenant_id, id, auth_current_user_id()) IN (
+        SELECT s.tenant_id, s.paper_id, s.viewer FROM tenant_shares s));
+",
+        &[
+            "INSERT INTO tenant_papers(tenant_id, id, title) VALUES
+                 ('t1', 'p-shared', 'alpha'), ('t2', 'p-shared', 'beta'),
+                 ('t1', 'p-solo', 'gamma');
+             INSERT INTO tenant_shares(tenant_id, paper_id, viewer) VALUES
+                 ('t1', 'p-shared', 'alice'), ('t2', 'p-shared', 'bob'),
+                 ('t1', NULL, 'alice'), (NULL, 'p-solo', 'bob')",
+            "CREATE ROLE app_user LOGIN;
+             GRANT SELECT ON tenant_papers, tenant_shares TO app_user",
+        ],
+        two_setting_readers("alice", "bob"),
+    )
+    .with_registry(ACCESSOR);
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, visible) in [
+        ("alice", "tenant_papers:t1|p-shared", true),
+        ("alice", "tenant_papers:t2|p-shared", false),
+        ("bob", "tenant_papers:t2|p-shared", true),
+        ("bob", "tenant_papers:t1|p-shared", false),
+        ("alice", "tenant_papers:t1|p-solo", false),
+        ("bob", "tenant_papers:t1|p-solo", false),
     ] {
         support::parity::assert_postgres(
             &case,
