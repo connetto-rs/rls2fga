@@ -64,7 +64,7 @@ fn flag_gate_key(column: &ColumnName) -> String {
 ///
 /// `None` for a variant this build cannot name stably, which falls closed rather
 /// than minting a gate whose key could collide with another predicate's.
-fn attribute_gate_key(predicate: &AttributePredicate) -> Option<String> {
+pub(super) fn attribute_gate_key(predicate: &AttributePredicate) -> Option<String> {
     let column = predicate.column.as_str();
     let test = match &predicate.test {
         AttributeTest::Compare { operator, value } => {

@@ -33,10 +33,11 @@ use crate::generator::well_known::{
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
     attribute_gate_relation_name, canonical_fga_type_name, clamp_relation_name,
-    conditional_gate_relation_name, is_owner_like_column_name, lookup_table, lookup_table_id,
-    parent_type_from_fk_column, public_flag_relation_name, request_gate_relation_name,
-    resolve_table_id, row_presence_relation_name, stored_relation_name, table_id_has_column,
-    table_identity, yielded_relation_name, MAX_RELATION_NAME_LEN, MAX_RELATION_RENAME_ATTEMPTS,
+    conditional_gate_relation_name, flag_relation_name, is_owner_like_column_name, lookup_table,
+    lookup_table_id, parent_type_from_fk_column, public_flag_relation_name,
+    request_gate_relation_name, resolve_table_id, row_presence_relation_name, stored_relation_name,
+    table_id_has_column, table_identity, yielded_relation_name, MAX_RELATION_NAME_LEN,
+    MAX_RELATION_RENAME_ATTEMPTS,
 };
 use crate::parser::sql_parser::{
     ColumnLike, DatabaseLike, ForeignKeyLike, IdentifierCase, PolicyLike, TableLike,
@@ -87,12 +88,12 @@ use branches::{
 use dsl::render_dsl;
 use emit_membership::{
     emit_abac_and, emit_blocked_set, emit_composite, emit_declared_helper, emit_exists_membership,
-    emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
+    emit_flagged_row, emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
     emit_request_value_in_helper_set, emit_uncorrelated_membership,
 };
 use emit_ownership::{
-    emit_attribute_condition, emit_boolean_flag, emit_constant_bool, emit_direct_ownership,
-    emit_row_ownership, emit_row_presence_gate, emit_unclassified,
+    attribute_gate_key, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
+    emit_direct_ownership, emit_row_ownership, emit_row_presence_gate, emit_unclassified,
 };
 use emit_requests::{
     conditional_gate_expr, declare_temporal_condition, emit_membership_in_caller_set,
@@ -2760,6 +2761,7 @@ fn translate_pattern<DB: DatabaseLike>(
         PatternClass::P27RequestValueInHelperSet(test) => {
             emit_request_value_in_helper_set(test, ctx, table_plan, all_types)
         }
+        PatternClass::P29FlaggedRow(flag) => emit_flagged_row(flag, ctx, table_plan, all_types),
         PatternClass::ExpandedFunction(expanded) => {
             notes.push(TranslationNote::FunctionExpanded {
                 policy: ctx.policy_name.to_string(),

@@ -1,5 +1,5 @@
-//! Blocklist subtraction from positive grants, correlated memberships and declared
-//! helpers alike.
+//! Blocklist subtraction from positive grants, correlated memberships, declared helpers and
+//! row flags alike.
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
@@ -7,13 +7,16 @@ use crate::no_std_prelude::*;
 use crate::classifier::expansion::{self, ExpansionState};
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
-    exclusion_confidence, ClassifiedExpr, DeclaredHelper, ExcludedSet, ExistsMembership,
-    HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
+    exclusion_confidence, ClassifiedExpr, ConfidenceLevel, ConstantBool, DeclaredHelper,
+    ExcludedSet, ExistsMembership, ExpandedFunction, HelperSetArm, MembershipExclusion,
+    PatternClass, PolicyCommand,
 };
 use crate::classifier::recognizers::{
     diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_excluded_helper,
-    recognize_p4, recognize_p4_in_subquery, renaming_casts, unparenthesize, HelperRefusal,
+    recognize_flagged_row, recognize_p4, recognize_p4_in_subquery, renaming_casts, unparenthesize,
+    FlagRefusal, HelperRefusal,
 };
+use crate::classifier::role_keywords::prepare_clause;
 use crate::parser::names::{lookup_table, lookup_table_id, table_identity};
 use crate::parser::sql_parser::DatabaseLike;
 use crate::types::{ColumnName, TableId};
@@ -34,8 +37,16 @@ pub(crate) enum ExclusionError {
          whose blocklist is not empty"
     )]
     NullableCompared { table: String, column: ColumnName },
+    #[error(
+        "the column '{table}.{column}' passed to a STRICT function must be provably \
+         non-null, since the function returns NULL for a NULL argument, NOT keeps it NULL, \
+         and PostgreSQL hides the row where no tuple flags it"
+    )]
+    NullableStrictArgument { table: String, column: ColumnName },
     #[error(transparent)]
     Helper(#[from] HelperRefusal),
+    #[error(transparent)]
+    Flag(#[from] FlagRefusal),
 }
 
 /// Split a clause into its positive grant and blocklists.
@@ -84,13 +95,25 @@ pub(crate) fn try_membership_exclusion<DB: DatabaseLike>(
     }
 
     let base = match positives.as_slice() {
+        // A flag decides every caller alike, so outside a restrictive clause, which
+        // subtracts from the grants beside it, nothing but flags removes from everyone.
+        [] if !see_through_functions
+            && subtract
+                .iter()
+                .all(|excluded| matches!(excluded, ExcludedSet::Flag(_))) =>
+        {
+            ClassifiedExpr {
+                pattern: PatternClass::P10ConstantBool(ConstantBool { value: true }),
+                confidence: ConfidenceLevel::A,
+            }
+        }
         [] => {
             return Ok(Some(ClassifiedExpr {
+                confidence: exclusion_confidence(None, &subtract),
                 pattern: PatternClass::MembershipExclusion(MembershipExclusion {
                     base: None,
                     subtract,
                 }),
-                confidence: exclusion_confidence(None),
             }));
         }
         [one] => crate::classifier::policy_classifier::classify_expr_depth(
@@ -121,7 +144,7 @@ pub(crate) fn try_membership_exclusion<DB: DatabaseLike>(
             )
         }
     };
-    let confidence = exclusion_confidence(Some(&base));
+    let confidence = exclusion_confidence(Some(&base), &subtract);
     Ok(Some(ClassifiedExpr {
         pattern: PatternClass::MembershipExclusion(MembershipExclusion {
             base: Some(Box::new(base)),
@@ -162,6 +185,7 @@ fn has_exclusion_conjunct(expr: &Expr, depth: u32) -> bool {
         } => matches!(
             unparenthesize(expr),
             Expr::Exists { negated: false, .. }
+                | Expr::Function(_)
                 | Expr::AnyOp {
                     compare_op: BinaryOperator::Eq,
                     ..
@@ -256,13 +280,21 @@ fn collect_conjuncts<DB: DatabaseLike>(
         )?),
         _ => {
             if see_through_functions {
+                // A `STRICT` call over a column that can be `NULL` is `NULL` there, which no
+                // split into grants and blocklists keeps, so it classifies whole instead.
                 if let Some(expansion::Expansion::Body {
                     identity,
                     reads_bypass_rls,
                     expr: body,
                     ..
-                }) = expansion::expand_function_call(expr, db, registry, table, state)
-                {
+                }) = expansion::expand_function_call(expr, db, registry, table, state).filter(
+                    |expansion| match expansion {
+                        expansion::Expansion::Body {
+                            presence_columns, ..
+                        } => nullable_column(db, table, presence_columns).is_none(),
+                        expansion::Expansion::Refused { .. } => true,
+                    },
+                ) {
                     state.enter(identity);
                     if reads_bypass_rls {
                         state.enter_owner_read();
@@ -285,7 +317,7 @@ fn collect_conjuncts<DB: DatabaseLike>(
                     return collected;
                 }
             }
-            match exclusion_conjunct(expr, db, registry, table, state)? {
+            match exclusion_conjunct(expr, db, registry, table, depth, state)? {
                 None => positives.push(expr.clone()),
                 Some(excluded) => subtract.push(excluded),
             }
@@ -294,7 +326,7 @@ fn collect_conjuncts<DB: DatabaseLike>(
     }
 }
 
-fn table_guarded_by_rls<DB: DatabaseLike>(db: &DB, table: &TableId) -> bool {
+pub(crate) fn table_guarded_by_rls<DB: DatabaseLike>(db: &DB, table: &TableId) -> bool {
     use sql_traits::prelude::TableLike;
     let mut frontier = vec![table.clone()];
     let mut seen: alloc::collections::BTreeSet<TableId> = alloc::collections::BTreeSet::new();
@@ -328,6 +360,7 @@ fn exclusion_conjunct<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
     table: &str,
+    depth: u32,
     state: &ExpansionState,
 ) -> Result<Option<ExcludedSet>, ExclusionError> {
     let conjunct = unparenthesize(conjunct);
@@ -353,7 +386,7 @@ fn exclusion_conjunct<DB: DatabaseLike>(
                 subquery: subquery.clone(),
                 negated: false,
             },
-            _ => return Ok(None),
+            other => return excluded_flag(other, db, registry, table, depth, state),
         },
         Expr::In {
             expr: left,
@@ -387,6 +420,11 @@ fn exclusion_conjunct<DB: DatabaseLike>(
         _ => return Ok(None),
     };
 
+    if matches!(positive, Expr::Exists { .. }) {
+        if let Some(flag) = excluded_flag(&positive, db, registry, table, depth, state)? {
+            return Ok(Some(flag));
+        }
+    }
     match membership_from_positive(&positive, db, registry, table, state) {
         None => {
             let renamings = renaming_casts(&positive, registry);
@@ -421,6 +459,105 @@ fn exclusion_conjunct<DB: DatabaseLike>(
             Ok(Some(ExcludedSet::Membership(membership)))
         }
     }
+}
+
+/// The rows `positive` flags as a set to subtract, `None` where it tests no flag.
+///
+/// Refused where a `STRICT` function on the way reads a column that can be `NULL`, since
+/// the function is then `NULL`, which `NOT` keeps and the row is hidden, while no tuple
+/// flags the row.
+fn excluded_flag<DB: DatabaseLike>(
+    positive: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    depth: u32,
+    state: &ExpansionState,
+) -> Result<Option<ExcludedSet>, ExclusionError> {
+    let Some(flag) = classify_flag(positive, db, registry, table, depth, state) else {
+        return Ok(None);
+    };
+    let flag = flag?;
+    let mut expanded = &flag;
+    while let PatternClass::ExpandedFunction(ExpandedFunction {
+        presence_columns,
+        inner,
+        ..
+    }) = &expanded.pattern
+    {
+        if let Some(column) = nullable_column(db, table, presence_columns) {
+            return Err(ExclusionError::NullableStrictArgument {
+                table: table.to_string(),
+                column: column.clone(),
+            });
+        }
+        expanded = inner;
+    }
+    Ok(Some(ExcludedSet::Flag(Box::new(flag))))
+}
+
+/// The first of `columns` of `table` not declared `NOT NULL`.
+fn nullable_column<'c, DB: DatabaseLike>(
+    db: &DB,
+    table: &str,
+    columns: &'c [ColumnName],
+) -> Option<&'c ColumnName> {
+    let guarded = lookup_table(db, table);
+    columns.iter().find(|column| {
+        !guarded.is_some_and(|guarded| declared_not_null(db, guarded, column.as_str()))
+    })
+}
+
+/// The flag `positive` tests, read through the declared functions it calls, `None` where it
+/// tests none.
+fn classify_flag<DB: DatabaseLike>(
+    positive: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    depth: u32,
+    state: &ExpansionState,
+) -> Option<Result<ClassifiedExpr, ExclusionError>> {
+    if depth > crate::classifier::policy_classifier::MAX_CLASSIFY_DEPTH {
+        return None;
+    }
+    let positive = unparenthesize(positive);
+    if let Some(flagged) = recognize_flagged_row(positive, db, table, state) {
+        return Some(
+            flagged
+                .map(crate::classifier::policy_classifier::flagged_row_classified)
+                .map_err(ExclusionError::from),
+        );
+    }
+    let Some(expansion::Expansion::Body {
+        function,
+        identity,
+        reads_bypass_rls,
+        presence_columns,
+        expr: body,
+    }) = expansion::expand_function_call(positive, db, registry, table, state)
+    else {
+        return None;
+    };
+    let lowered = prepare_clause(&body, registry).ok()?;
+    state.enter(identity);
+    if reads_bypass_rls {
+        state.enter_owner_read();
+    }
+    let inner = classify_flag(&lowered, db, registry, table, depth + 1, state);
+    if reads_bypass_rls {
+        state.leave_owner_read();
+    }
+    state.leave();
+    Some(inner?.map(|inner| ClassifiedExpr {
+        confidence: inner.confidence,
+        pattern: PatternClass::ExpandedFunction(ExpandedFunction {
+            function,
+            reads_bypass_rls,
+            presence_columns,
+            inner: Box::new(inner),
+        }),
+    }))
 }
 
 /// `helper` as a set to subtract, refused where `PostgreSQL` would compare a `NULL`.

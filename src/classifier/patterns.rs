@@ -821,7 +821,37 @@ pub struct HelperWalk {
     pub direction: sql_traits::structs::WalkDirection,
 }
 
-/// Caller-identity sets subtracted from a positive grant.
+/// P29: a row of `table` its own columns flag, named by `column` of the guarded row or
+/// reached from that row as an ancestor up `edges`.
+///
+/// `EXISTS (SELECT 1 FROM objects o WHERE o.id = objects.id AND o.archived)`, or the same
+/// test over a `WITH RECURSIVE` walk up edge tables. Only rows decide it, never the
+/// caller, and it is never `NULL`, so `NOT` of it is the subtraction of its rows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlaggedRow {
+    /// Column of the guarded table naming the row the test starts from.
+    pub column: ColumnName,
+    /// The table whose rows carry the flag, keyed by its one primary key column.
+    pub table: TableId,
+    /// Conditions on the flagged row's own columns, all holding at once.
+    pub predicates: Vec<AttributePredicate>,
+    /// The edge tables the test walks up, empty where it reads the named row alone.
+    pub edges: Vec<FlagEdge>,
+}
+
+/// One table of an upward walk, each of its rows making the `parent_column` row a parent
+/// of the `child_column` row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FlagEdge {
+    /// The edge table.
+    pub table: TableId,
+    /// Column naming the row whose parent the edge row names.
+    pub child_column: ColumnName,
+    /// Column naming the parent.
+    pub parent_column: ColumnName,
+}
+
+/// Sets subtracted from a positive grant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MembershipExclusion {
     /// The grant, absent only for a negative-only top-level restrictive clause.
@@ -830,7 +860,7 @@ pub struct MembershipExclusion {
     pub subtract: Vec<ExcludedSet>,
 }
 
-/// One set of rows a blocklist removes for the caller.
+/// One set of rows a blocklist removes.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExcludedSet {
     /// The rows a correlated `P4` membership names, `NOT EXISTS (SELECT 1 FROM blocks
@@ -840,6 +870,21 @@ pub enum ExcludedSet {
     /// `NOT (project_id = ANY (ARRAY(SELECT authz.blocked_projects())))`, with the
     /// column and every value the helper can return proven non-null.
     Helper(DeclaredHelper),
+    /// The rows a [`FlaggedRow`] flags for every caller alike, `NOT authz.is_archived(id)`,
+    /// classified as the positive test, through the calls it expanded.
+    Flag(Box<ClassifiedExpr>),
+}
+
+/// The flag `pattern` tests, through the function calls it expanded.
+#[must_use]
+pub fn flagged_row(pattern: &PatternClass) -> Option<&FlaggedRow> {
+    match pattern {
+        PatternClass::P29FlaggedRow(flagged) => Some(flagged),
+        PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) => {
+            flagged_row(&inner.pattern)
+        }
+        _ => None,
+    }
 }
 
 /// No known pattern matched.
@@ -946,6 +991,10 @@ pub enum PatternClass {
     /// carries it where negated, so no row takes part:
     /// `NULLIF(current_setting('app.installation_id', true), '') IS NULL`.
     P28RequestValueAbsent(RequestValueAbsent),
+    /// P29: A row its own columns flag, named by a column of the guarded row or reached
+    /// from it up edge tables: `EXISTS (SELECT 1 FROM objects o WHERE o.id = objects.id
+    /// AND o.archived)`, usually read through a `SECURITY DEFINER` boolean function.
+    P29FlaggedRow(FlaggedRow),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced
@@ -969,7 +1018,7 @@ pub struct ClassifiedExpr {
 /// `and` and `or` of exact relations admit what `PostgreSQL`'s `AND` and `OR` admit, since a
 /// `NULL` part admits nothing as a `false` one does. That holds only while no `NOT` sits
 /// above the composite, which the classifier guarantees by refusing `NOT` over anything
-/// but a constant.
+/// but a constant or a [`FlaggedRow`], neither of which is ever `NULL`.
 #[must_use]
 pub fn composite_confidence<'a, I>(parts: I) -> ConfidenceLevel
 where
@@ -982,10 +1031,23 @@ where
         .unwrap_or(ConfidenceLevel::D)
 }
 
-/// Confidence of the positive grant, or `A` for a restrictive exclusion.
+/// Confidence of the positive grant, `A` for a restrictive exclusion, lowered to that of
+/// any flag the exclusion subtracts.
 #[must_use]
-pub fn exclusion_confidence(base: Option<&ClassifiedExpr>) -> ConfidenceLevel {
-    base.map_or(ConfidenceLevel::A, |base| base.confidence)
+pub fn exclusion_confidence(
+    base: Option<&ClassifiedExpr>,
+    subtract: &[ExcludedSet],
+) -> ConfidenceLevel {
+    subtract
+        .iter()
+        .filter_map(|excluded| match excluded {
+            ExcludedSet::Flag(flag) => Some(flag.confidence),
+            ExcludedSet::Membership(_) | ExcludedSet::Helper(_) => None,
+        })
+        .fold(
+            base.map_or(ConfidenceLevel::A, |base| base.confidence),
+            Ord::min,
+        )
 }
 
 /// The command a catalog's policy statement restricts, `ALL` when it names none.

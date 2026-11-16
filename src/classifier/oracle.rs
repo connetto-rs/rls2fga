@@ -297,10 +297,13 @@ where
             }
             any.then(|| composite_confidence(parts.iter()))
         }
-        PatternClass::MembershipExclusion(MembershipExclusion { base, .. }) => {
+        PatternClass::MembershipExclusion(MembershipExclusion { base, subtract }) => {
             match base.as_deref_mut() {
-                Some(base) => consult_expr(base, policy_name, clause, oracle, answered)
-                    .then(|| crate::classifier::patterns::exclusion_confidence(Some(base))),
+                Some(base) => {
+                    consult_expr(base, policy_name, clause, oracle, answered).then(|| {
+                        crate::classifier::patterns::exclusion_confidence(Some(base), subtract)
+                    })
+                }
                 None => None,
             }
         }
@@ -327,6 +330,7 @@ where
         | PatternClass::P20DeclaredHelper(_)
         | PatternClass::P27RequestValueInHelperSet(_)
         | PatternClass::P28RequestValueAbsent(_)
+        | PatternClass::P29FlaggedRow(_)
         | PatternClass::P9AttributeCondition(AttributeCondition { .. })
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P11ArrayMembership(ArrayMembership { .. })

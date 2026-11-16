@@ -741,7 +741,7 @@ pub(crate) fn projected_select(query: &Query) -> Option<&Select> {
 
 /// Why a subquery cannot be read as the plain set of rows in the table its `FROM` names.
 #[derive(Clone, Copy)]
-enum SubqueryRefusal {
+pub(super) enum SubqueryRefusal {
     /// A clause thins the rows the subquery returns.
     Shaped(&'static str),
     /// A `WITH` clause binds names inside the subquery, so a name in its `FROM` may be
@@ -796,7 +796,7 @@ pub(super) fn query_binds_its_own_names(query: &Query) -> bool {
 /// direction. The lock strength is deliberately not read: `PostgreSQL` filters all four
 /// alike, and naming them would need a new arm the day `sqlparser` learns the two it still
 /// refuses.
-fn query_locks_its_rows(query: &Query) -> Option<SubqueryRefusal> {
+pub(super) fn query_locks_its_rows(query: &Query) -> Option<SubqueryRefusal> {
     if query.locks.is_empty() {
         return None;
     }

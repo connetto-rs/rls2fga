@@ -1148,6 +1148,14 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
                 MembershipRoute::Parent(MembershipPolarity::Block),
             ),
             ExcludedSet::Helper(helper) => emit_declared_helper(helper, ctx, table_plan, all_types),
+            ExcludedSet::Flag(flag) => translate_pattern(
+                &flag.pattern,
+                ctx,
+                table_plan,
+                all_types,
+                notes,
+                readability,
+            ),
         };
         if grants_nothing(&set, table_plan)
             || notes
@@ -1445,13 +1453,25 @@ pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
     let Some(returned) = helper_call_relation(call, ctx, table_plan, all_types) else {
         return deny_expr(table_plan);
     };
+    reach_level_relation(&call.level, column, returned, ctx, table_plan)
+}
+
+/// `relation` of the `level` row `column` names, as that relation itself where the column is
+/// the guarded row's own key, or through the column's bridge.
+fn reach_level_relation<DB: DatabaseLike>(
+    level: &TableId,
+    column: &ColumnName,
+    relation: RelationName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+) -> UsersetExpr {
     let source_table = ctx.source_table;
-    if call.level == *source_table
+    if level == source_table
         && single_identity_column(source_table, ctx.db).as_ref() == Some(column)
     {
-        return UsersetExpr::Computed(returned);
+        return UsersetExpr::Computed(relation);
     }
-    let level_type = ctx.table_types.resolve(&call.level);
+    let level_type = ctx.table_types.resolve(level);
     let columns = core::slice::from_ref(column);
     if !bridge_is_buildable(table_plan, source_table, columns, &level_type, ctx.db) {
         return deny_expr(table_plan);
@@ -1465,8 +1485,109 @@ pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
     });
     UsersetExpr::TupleToUserset {
         tupleset,
-        computed: returned,
+        computed: relation,
     }
+}
+
+/// The rows `flag` flags, a relation on the flagged table's type reached from the guarded
+/// row as a declared helper's set is.
+///
+/// Every predicate is an attribute gate on the flagged type, and a walk makes the relation
+/// name itself through one link per edge table, filled from that table's rows.
+pub(crate) fn emit_flagged_row<DB: DatabaseLike>(
+    flag: &FlaggedRow,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> UsersetExpr {
+    let Some(flagged) = flag_relation(flag, ctx, table_plan, all_types) else {
+        return deny_expr(table_plan);
+    };
+    reach_level_relation(&flag.table, &flag.column, flagged, ctx, table_plan)
+}
+
+/// The relation holding every row of the flagged type `flag` flags, `None` where no rule
+/// names them.
+fn flag_relation<DB: DatabaseLike>(
+    flag: &FlaggedRow,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<RelationName> {
+    let flagged_type = ctx.table_types.resolve(&flag.table);
+    let Some(identity_cols) = resolve_row_identity(&flag.table, ctx.db) else {
+        skip_source_without_row_identity(table_plan, &flag.table, "row flag tuples", ctx.db);
+        return None;
+    };
+    let mut key = format!("flag:{}:{}", flag.table.to_string().len(), flag.table);
+    let plan = helper_level_plan(&flagged_type, &flag.table, table_plan, all_types);
+    let mut gates = Vec::with_capacity(flag.predicates.len());
+    for predicate in &flag.predicates {
+        let gate_key = attribute_gate_key(predicate)?;
+        let relation = plan.gate_relation(
+            &gate_key,
+            attribute_gate_relation_name(predicate.column.as_str(), &gate_key),
+            vec![DirectSubject::Wildcard(plan.well_known.user.clone())],
+        );
+        plan.add_source(TupleSource::AttributeGate {
+            table: flag.table.clone(),
+            identity_cols: identity_cols.clone(),
+            predicate: predicate.clone(),
+            relation: relation.clone(),
+        });
+        let _ = write!(key, ":{}:{gate_key}", gate_key.len());
+        gates.push(UsersetExpr::Computed(relation));
+    }
+    let flagged = combine_intersection(gates)?;
+    let named_after = flag.predicates.first()?.column.as_str();
+    if flag.edges.is_empty() {
+        return Some(match flagged {
+            UsersetExpr::Computed(relation) => relation,
+            rule => plan.ensure_computed(flag_relation_name(named_after, &key), rule),
+        });
+    }
+    let mut links = Vec::with_capacity(flag.edges.len());
+    for edge in &flag.edges {
+        let FlagEdge {
+            table,
+            child_column,
+            parent_column,
+        } = edge;
+        let edge_key = format!(
+            "flag-edge:{}:{table}:{}:{child_column}:{}:{parent_column}",
+            table.to_string().len(),
+            child_column.as_str().len(),
+            parent_column.as_str().len()
+        );
+        let _ = write!(key, ":{}:{edge_key}", edge_key.len());
+        let link = plan.membership_source_relation(
+            &edge_key,
+            format!("{}_{parent_column}", table.name()),
+            vec![DirectSubject::Type(flagged_type.clone())],
+        );
+        plan.add_source(TupleSource::ClosureBridge {
+            link_table: table.clone(),
+            object_cols: vec![child_column.clone()],
+            subject_cols: vec![parent_column.clone()],
+            guarded_type: flagged_type.clone(),
+            owner_type: flagged_type.clone(),
+            relation: link.clone(),
+            extra_predicates: ResidualPredicates::default(),
+        });
+        links.push(link);
+    }
+    let relation =
+        plan.ensure_walk_computed(flag_relation_name(named_after, &key), vec![flagged], links);
+    plan.walk_notes
+        .entry((
+            relation.clone(),
+            ColumnName::from_stored(named_after.to_string()),
+        ))
+        .or_insert_with(|| TranslationNote::FlagWalkDepth {
+            table: flag.table.clone(),
+            relation: relation.clone(),
+        });
+    Some(relation)
 }
 
 /// The relation holding everyone `call` returns a row for, defined on its level's type

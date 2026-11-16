@@ -323,7 +323,8 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
             column, ..
         })
-        | PatternClass::P20DeclaredHelper(DeclaredHelper { column, .. }) => Some(column),
+        | PatternClass::P20DeclaredHelper(DeclaredHelper { column, .. })
+        | PatternClass::P29FlaggedRow(FlaggedRow { column, .. }) => Some(column),
         PatternClass::P5ParentInheritance(ParentInheritance { fk_column, .. }) => Some(fk_column),
         // Nothing these read belongs to the table being classified: a role function
         // takes the caller, a constant takes no row, a composite's parts and an
@@ -469,7 +470,13 @@ fn compared_key_refusal<DB: DatabaseLike>(
                 ExcludedSet::Helper(DeclaredHelper { column, call }) => {
                     check(guarded, column).or_else(|| helper_call_refusal(call, db))
                 }
+                ExcludedSet::Flag(flag) => flagged_row(&flag.pattern).and_then(|flagged| {
+                    check(guarded, &flagged.column).or_else(|| flagged_row_refusal(flagged, db))
+                }),
             })
+        }
+        PatternClass::P29FlaggedRow(flagged) => {
+            check(guarded, &flagged.column).or_else(|| flagged_row_refusal(flagged, db))
         }
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {
             member_table,
@@ -600,6 +607,29 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
             .or_else(|| helper_call_refusal(&parent.call, db)),
         HelperSetArm::Walk(walk) => key_collation_refusal(&walk.table, &walk.fk_column, db),
     })
+}
+
+/// Why the flagged table's key or an edge column the walk follows cannot be compared in
+/// `OpenFGA`.
+fn flagged_row_refusal<DB: DatabaseLike>(flagged: &FlaggedRow, db: &DB) -> Option<String> {
+    resolve_row_identity(&flagged.table, db)?
+        .iter()
+        .find_map(|key| key_collation_refusal(&flagged.table, key, db))
+        .or_else(|| {
+            flagged.edges.iter().find_map(|edge| {
+                key_collation_refusal(&edge.table, &edge.child_column, db)
+                    .or_else(|| key_collation_refusal(&edge.table, &edge.parent_column, db))
+            })
+        })
+}
+
+/// `flagged` as a classification, graded `B` since its tuples hold the flags as last
+/// loaded.
+pub(crate) fn flagged_row_classified(flagged: FlaggedRow) -> ClassifiedExpr {
+    ClassifiedExpr {
+        pattern: PatternClass::P29FlaggedRow(flagged),
+        confidence: ConfidenceLevel::B,
+    }
 }
 
 fn classify_expr_inner<DB: DatabaseLike>(
@@ -840,6 +870,12 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 confidence: inner_classified.confidence,
             };
         }
+        if let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &inner_classified.pattern {
+            return unknown_d(
+                expr,
+                format!("NOT applied to an expression that does not translate: {reason}"),
+            );
+        }
         let desc = pattern_short_name(&inner_classified.pattern);
         return unknown_d(
             expr,
@@ -963,6 +999,15 @@ fn classify_expr_inner<DB: DatabaseLike>(
         recognizers::recognize_p4_in_subquery(expr, db, registry, table, command, state)
     {
         return classified;
+    }
+
+    // Try P29: a row its own columns flag. After every membership spelling, since a
+    // membership reads the caller and a flag never does.
+    if let Some(flagged) = recognizers::recognize_flagged_row(expr, db, table, state) {
+        return match flagged {
+            Ok(flagged) => flagged_row_classified(flagged),
+            Err(refusal) => unknown_d(expr, refusal.to_string()),
+        };
     }
 
     if let Some(reason) = recognizers::diagnose_p5_parent_inheritance_ambiguity(
@@ -1242,6 +1287,7 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P28RequestValueAbsent(RequestValueAbsent { .. }) => {
             "declared caller value left absent"
         }
+        PatternClass::P29FlaggedRow(FlaggedRow { .. }) => "row flag check",
         PatternClass::Unknown(UnclassifiedExpr { .. }) => "unrecognized expression",
         PatternClass::ExpandedFunction(ExpandedFunction { .. }) => "expanded function call",
         PatternClass::MembershipExclusion(MembershipExclusion { .. }) => {
@@ -1300,6 +1346,8 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
         | PatternClass::P28RequestValueAbsent(RequestValueAbsent { .. })
+        // A flag reads the row, never the caller.
+        | PatternClass::P29FlaggedRow(FlaggedRow { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
