@@ -171,6 +171,7 @@ pub(crate) fn recognize_flagged_row<DB: DatabaseLike>(
     Some(Ok(FlaggedRow {
         column,
         table: flagged_table,
+        key,
         predicates,
         edges,
     }))
@@ -223,9 +224,10 @@ fn names_binding(name: &ObjectName, binding: &str) -> bool {
     name.0.len() == 1 && stored_relation_name(&name.to_string()) == binding
 }
 
-fn select_item_expr(item: &SelectItem) -> Option<&Expr> {
-    match item {
-        SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => Some(expr),
+/// The one expression `select` projects.
+fn single_projection(select: &Select) -> Option<&Expr> {
+    match select.projection.as_slice() {
+        [SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. }] => Some(expr),
         _ => None,
     }
 }
@@ -363,7 +365,11 @@ impl<DB: DatabaseLike> Scope<'_, DB> {
             let column = stored_ident_name(ident);
             if let Anchor::Walk { column: walked, .. } = self.anchor {
                 if column == *walked {
-                    return None;
+                    // Named by both scans, the column is ambiguous and PostgreSQL rejects it.
+                    return self
+                        .flagged_column(&column)
+                        .is_none()
+                        .then_some(Reference::Anchor(None));
                 }
             }
             return self.flagged_column(&column).map(Reference::Flagged);
@@ -475,10 +481,12 @@ struct StripQualifiers;
 impl VisitorMut for StripQualifiers {
     type Break = ();
     fn post_visit_expr(&mut self, expr: &mut Expr) -> ControlFlow<()> {
-        if let Expr::CompoundIdentifier(parts) = expr {
-            if let [_, column] = parts.as_slice() {
-                *expr = Expr::Identifier(column.clone());
-            }
+        let column = match expr {
+            Expr::CompoundIdentifier(parts) => parts.pop(),
+            _ => None,
+        };
+        if let Some(column) = column {
+            *expr = Expr::Identifier(column);
         }
         ControlFlow::Continue(())
     }
@@ -514,10 +522,7 @@ fn walk_of<DB: DatabaseLike>(
     {
         return None;
     }
-    let [projected] = seed.projection.as_slice() else {
-        return None;
-    };
-    let seed = call_argument_column(select_item_expr(projected)?, table)?;
+    let seed = call_argument_column(single_projection(seed)?, table)?;
     let SetExpr::Select(step) = right.as_ref() else {
         return None;
     };
@@ -554,10 +559,7 @@ fn step_edges<DB: DatabaseLike>(
     let [join] = item.joins.as_slice() else {
         return None;
     };
-    let [projected] = step.projection.as_slice() else {
-        return None;
-    };
-    let (qualifier, parent) = qualified_column(select_item_expr(projected)?)?;
+    let (qualifier, parent) = qualified_column(single_projection(step)?)?;
     let walk = WalkColumn {
         visible: &walk_visible,
         column,
@@ -572,15 +574,11 @@ fn step_edges<DB: DatabaseLike>(
                 sample: None,
             },
         ) => {
+            // A valid step names one column of the subquery, and each branch projects one.
             if qualifier != stored_ident_name(&alias.name) {
                 return None;
             }
-            let output = match alias.columns.as_slice() {
-                [] => None,
-                [output] => Some(stored_ident_name(&output.name).into_owned()),
-                _ => return None,
-            };
-            lateral_edges(subquery, output.as_deref().unwrap_or(&parent), &walk, db)
+            lateral_edges(subquery, &walk, db)
         }
         (
             JoinOperator::Join(JoinConstraint::On(on))
@@ -603,11 +601,9 @@ struct WalkColumn<'a> {
     column: &'a str,
 }
 
-/// The edges a lateral `UNION` of edge reads follows, each projecting the parent as the
-/// subquery's `output` column.
+/// The edges a lateral `UNION` of edge reads follows, each branch projecting the parent.
 fn lateral_edges<DB: DatabaseLike>(
     subquery: &Query,
-    output: &str,
     walk: &WalkColumn<'_>,
     db: &DB,
 ) -> Option<Vec<FlagEdge>> {
@@ -617,7 +613,7 @@ fn lateral_edges<DB: DatabaseLike>(
     let mut branches = Vec::new();
     union_branches(&subquery.body, &mut branches)?;
     let mut edges = Vec::with_capacity(branches.len());
-    for (at, branch) in branches.into_iter().enumerate() {
+    for branch in branches {
         if select_result_shaping_clause(branch).is_some() {
             return None;
         }
@@ -628,19 +624,8 @@ fn lateral_edges<DB: DatabaseLike>(
             return None;
         }
         let (edge, edge_visible) = plain_table(&item.relation)?;
-        let [projected] = branch.projection.as_slice() else {
-            return None;
-        };
-        let (qualifier, parent) = qualified_column(select_item_expr(projected)?)?;
+        let (qualifier, parent) = qualified_column(single_projection(branch)?)?;
         if qualifier != edge_visible {
-            return None;
-        }
-        // The first branch names the subquery's columns, and the rest line up by position.
-        let named = match projected {
-            SelectItem::ExprWithAlias { alias, .. } => stored_ident_name(alias).into_owned(),
-            _ => parent.clone(),
-        };
-        if at == 0 && named != output {
             return None;
         }
         let condition = branch.selection.as_ref()?;

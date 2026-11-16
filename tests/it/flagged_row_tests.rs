@@ -4,7 +4,7 @@
 
 use rls2fga::types::ConfidenceLevel;
 
-use crate::declared_helper_tests::{model, refusal_of, translator};
+use crate::declared_helper_tests::{model, refusal_of, translator, using_of};
 use crate::support::footgun::{db_of, relation_definition, relation_definitions};
 
 /// Objects their owner reads, flagged archived by a boolean column read through a definer
@@ -399,4 +399,441 @@ fn a_negated_flag_over_a_case_insensitive_key_is_refused() {
         "archived",
     );
     assert!(reason.contains("collation"), "{reason}");
+}
+
+/// `schema` with the body of its one function replaced by `body`.
+fn with_body(schema: &str, body: &str) -> String {
+    let (head, rest) = schema
+        .split_once("AS $$")
+        .expect("the schema has a function body");
+    let (_, tail) = rest.split_once("$$;").expect("the body closes");
+    format!("{head}AS $$ {body} $$;{tail}")
+}
+
+/// The archive walk seeded with the argument and stepping as `steps`, testing `scan`.
+fn archive_walk(steps: &str, scan: &str) -> String {
+    format!(
+        "WITH RECURSIVE ancestors (id) AS (SELECT resource UNION {steps}) SELECT EXISTS ({scan})"
+    )
+}
+
+/// One step up `resource_parents` joined to the walk.
+const JOIN_STEP: &str = "SELECT edge.parent_id FROM ancestors
+  JOIN public.resource_parents edge ON edge.id = ancestors.id";
+
+/// The archive test on each row the walk reaches.
+const ARCHIVED_SCAN: &str = "SELECT 1 FROM ancestors
+  JOIN public.resources ancestor ON ancestor.id = ancestors.id
+  WHERE ancestor.archived_at IS NOT NULL";
+
+const NEGATED_WALK: &str = "CREATE POLICY resources_archived ON resources AS RESTRICTIVE
+  FOR SELECT USING (NOT authz.is_archived(id));";
+
+/// Every spelling of one step up `resource_parents` walks that one edge table.
+#[test]
+fn every_spelling_of_a_one_edge_walk_inherits_the_flag_up_that_edge() {
+    let spellings = [
+        archive_walk(JOIN_STEP, ARCHIVED_SCAN),
+        archive_walk(
+            "SELECT edge.parent_id FROM ancestors
+               JOIN public.resource_parents edge ON ancestors.id = edge.id",
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            "SELECT parent.id FROM ancestors CROSS JOIN LATERAL (
+               SELECT edge.parent_id FROM public.resource_parents edge
+               WHERE edge.id = ancestors.id) parent (id)",
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            JOIN_STEP,
+            "SELECT 1 FROM ancestors CROSS JOIN public.resources ancestor
+               WHERE ancestor.id = ancestors.id AND ancestor.archived_at IS NOT NULL",
+        ),
+        archive_walk(
+            JOIN_STEP,
+            "SELECT 1 FROM ancestors JOIN public.resources ancestor
+               ON ancestor.id = ancestors.id AND ancestor.archived_at IS NOT NULL",
+        ),
+        "WITH RECURSIVE ancestors (node) AS (
+           SELECT resource
+           UNION
+           SELECT edge.parent_id FROM ancestors
+             JOIN public.resource_parents edge ON edge.id = ancestors.node)
+         SELECT EXISTS (SELECT 1 FROM ancestors JOIN public.resources ancestor ON ancestor.id = node
+                        WHERE archived_at IS NOT NULL)"
+            .to_string(),
+    ];
+    for body in spellings {
+        let schema = format!("{}{NEGATED_WALK}", with_body(RESOURCES, &body));
+        let classified = using_of(&schema, &[], "resources_archived");
+        assert_eq!(
+            classified.confidence,
+            ConfidenceLevel::B,
+            "{body}\n{classified:?}"
+        );
+        let dsl = model(&schema, &[]);
+        let (gate, _) = relation_named_like(&dsl, "resources", "public_where_archived_at_");
+        let (walked, definition) = relation_named_like(&dsl, "resources", "flag_archived_at_");
+        assert_eq!(
+            definition,
+            format!("{gate} or {walked} from resource_parents_parent_id"),
+            "{body}\n{dsl}"
+        );
+        assert_eq!(
+            relation_definition(&dsl, "resources", "can_select").as_deref(),
+            Some(
+                format!("(owner but not {walked}) and acting_app_user from request_gate").as_str()
+            ),
+            "{body}\n{dsl}"
+        );
+    }
+}
+
+/// A walk or flag test the model could not follow row for row is no row flag, so the
+/// helper's body stays untranslated.
+#[test]
+fn a_walk_or_test_outside_the_followed_shapes_is_refused() {
+    let lateral = |branches: &str| {
+        archive_walk(
+            &format!("SELECT parent.id FROM ancestors CROSS JOIN LATERAL ({branches}) parent"),
+            ARCHIVED_SCAN,
+        )
+    };
+    let bodies = [
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (SELECT resource UNION {JOIN_STEP}),
+               unused (id) AS (SELECT 1)
+             SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+        format!(
+            "WITH RECURSIVE ancestors AS (SELECT resource AS id UNION {JOIN_STEP})
+             SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (WITH start (id) AS (SELECT resource)
+               SELECT start.id FROM start UNION {JOIN_STEP})
+             SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (SELECT resource) SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (SELECT resource UNION SELECT resource UNION {JOIN_STEP})
+             SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (
+               SELECT link.parent_id FROM public.resource_parents link WHERE link.id = resource
+               UNION {JOIN_STEP})
+             SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+        archive_walk(&format!("({JOIN_STEP})"), ARCHIVED_SCAN),
+        archive_walk(
+            &format!("{JOIN_STEP} WHERE edge.parent_id <> 'root'"),
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(&format!("{JOIN_STEP}, public.ownables extra"), ARCHIVED_SCAN),
+        archive_walk(
+            "SELECT edge.parent_id FROM public.resource_parents edge
+               JOIN ancestors ON edge.id = ancestors.id",
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            &format!("{JOIN_STEP} JOIN public.ownables kept ON kept.id = edge.parent_id"),
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            "SELECT edge.parent_id FROM ancestors
+               LEFT JOIN public.resource_parents edge ON edge.id = ancestors.id",
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            "SELECT ancestors.id FROM ancestors
+               JOIN public.resource_parents edge ON edge.id = ancestors.id",
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            "SELECT edge.parent_id FROM ancestors
+               JOIN public.resource_parents edge ON edge.id = edge.parent_id",
+            ARCHIVED_SCAN,
+        ),
+        archive_walk(
+            "SELECT ancestors.id FROM ancestors CROSS JOIN LATERAL (
+               SELECT edge.parent_id AS id FROM public.resource_parents edge
+               WHERE edge.id = ancestors.id) parent",
+            ARCHIVED_SCAN,
+        ),
+        lateral(
+            "SELECT edge.parent_id AS id FROM public.resource_parents edge
+             WHERE edge.id = ancestors.id LIMIT 1",
+        ),
+        lateral(
+            "SELECT edge.parent_id AS id FROM public.resource_parents edge
+             WHERE edge.id = ancestors.id GROUP BY edge.parent_id HAVING count(*) > 1",
+        ),
+        lateral(
+            "SELECT edge.parent_id AS id FROM public.resource_parents edge, public.ownables extra
+             WHERE edge.id = ancestors.id",
+        ),
+        lateral(
+            "SELECT edge.parent_id AS id FROM public.resource_parents edge
+               JOIN public.ownables kept ON kept.id = edge.parent_id
+             WHERE edge.id = ancestors.id",
+        ),
+        lateral(
+            "SELECT edge.parent_id AS id, edge.id AS child FROM public.resource_parents edge
+             WHERE edge.id = ancestors.id",
+        ),
+        lateral(
+            "SELECT ancestors.id AS id FROM public.resource_parents edge
+             WHERE edge.id = ancestors.id",
+        ),
+        lateral(
+            "SELECT edge.parent_id AS id FROM public.resource_parents edge
+             WHERE edge.id = ancestors.id
+             INTERSECT
+             SELECT ownable.project_id FROM public.ownables ownable
+             WHERE ownable.id = ancestors.id",
+        ),
+        archive_walk(
+            JOIN_STEP,
+            "SELECT 1 FROM ancestors JOIN public.resources ancestor ON ancestor.id = ancestors.id
+             WHERE ancestor.archived_at IS NOT NULL AND ancestor.owner_id = ancestor.id",
+        ),
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (SELECT resource UNION {JOIN_STEP})
+             SELECT EXISTS (SELECT 1 FROM public.resources ancestor
+                            WHERE ancestor.id = resource AND ancestor.archived_at IS NOT NULL)"
+        ),
+        archive_walk(
+            "SELECT public.resource_parents.parent_id FROM ancestors
+               JOIN public.resource_parents ON resource_parents.id = ancestors.id",
+            ARCHIVED_SCAN,
+        ),
+        format!(
+            "WITH RECURSIVE ancestors (id) AS (SELECT resource UNION BY NAME {JOIN_STEP})
+             SELECT EXISTS ({ARCHIVED_SCAN})"
+        ),
+    ];
+    for body in bodies {
+        let reason = refusal_of(
+            &format!("{}{NEGATED_WALK}", with_body(RESOURCES, &body)),
+            &[],
+            "resources_archived",
+        );
+        assert!(
+            !reason.contains("negation cannot be expressed"),
+            "{body}\n{reason}"
+        );
+    }
+}
+
+/// A body binding a table's own name leaves which of the two a reference reads open.
+#[test]
+fn a_walk_named_after_a_table_is_refused() {
+    let body = "WITH RECURSIVE resources (id) AS (
+                  SELECT resource
+                  UNION
+                  SELECT edge.parent_id FROM resources
+                    JOIN public.resource_parents edge ON edge.id = resources.id)
+                SELECT EXISTS (SELECT 1 FROM resources
+                  JOIN public.resources ancestor ON ancestor.id = resources.id
+                  WHERE ancestor.archived_at IS NOT NULL)";
+    let reason = refusal_of(
+        &format!("{}{NEGATED_WALK}", with_body(RESOURCES, body)),
+        &[],
+        "resources_archived",
+    );
+    assert!(reason.contains("also names a table"), "{reason}");
+}
+
+/// A `char(n)` key compares without its blank padding, which the key of a `text` column
+/// keeps, so the two cannot share one `OpenFGA` key.
+#[test]
+fn a_flag_keyed_by_another_type_than_the_guarded_column_is_refused() {
+    let reason = refusal_of(
+        &format!(
+            "{}
+             CREATE TABLE notes (id TEXT PRIMARY KEY, object_id TEXT NOT NULL);
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_live ON notes AS RESTRICTIVE FOR SELECT
+               USING (NOT authz.is_archived(object_id));",
+            OBJECTS.replace("id TEXT PRIMARY KEY", "id CHAR(8) PRIMARY KEY")
+        ),
+        &[],
+        "notes_live",
+    );
+    assert!(reason.contains("declared types differ"), "{reason}");
+}
+
+/// Objects carrying a text state beside their archive flag.
+fn objects_with_state(test: &str) -> String {
+    with_body(
+        &OBJECTS.replace(
+            "archived BOOLEAN NOT NULL DEFAULT false",
+            "archived BOOLEAN NOT NULL DEFAULT false, state TEXT NOT NULL",
+        ),
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM public.objects object
+                            WHERE object.id = resource AND {test})"
+        ),
+    )
+}
+
+const NEGATED_KEYED: &str = "CREATE POLICY archived ON objects AS RESTRICTIVE FOR SELECT
+  USING (NOT authz.is_archived(id));";
+
+#[test]
+fn a_flag_tested_with_is_true_reads_as_the_bare_column() {
+    let dsl = archive_model(
+        &objects_with_state("object.archived IS TRUE"),
+        NEGATED_KEYED,
+    );
+    let (gate, _) = relation_named_like(&dsl, "objects", "public_where_archived_");
+    assert_eq!(
+        relation_definition(&dsl, "objects", "can_select").as_deref(),
+        Some(format!("(owner but not {gate}) and acting_app_user from request_gate").as_str()),
+        "{dsl}"
+    );
+}
+
+#[test]
+fn a_flag_testing_a_list_of_states_gates_on_the_list() {
+    let dsl = archive_model(
+        &objects_with_state("object.state IN ('closed', 'deleted')"),
+        NEGATED_KEYED,
+    );
+    let (gate, _) = relation_named_like(&dsl, "objects", "public_where_state_");
+    assert_eq!(
+        relation_definition(&dsl, "objects", "can_select").as_deref(),
+        Some(format!("(owner but not {gate}) and acting_app_user from request_gate").as_str()),
+        "{dsl}"
+    );
+}
+
+/// Two tests on the flagged row hold together, so the flag is the intersection of both
+/// gates.
+#[test]
+fn a_flag_testing_two_columns_subtracts_rows_passing_both() {
+    let dsl = archive_model(
+        &objects_with_state("object.archived AND object.state = 'closed'"),
+        NEGATED_KEYED,
+    );
+    let (archived, _) = relation_named_like(&dsl, "objects", "public_where_archived_");
+    let (closed, _) = relation_named_like(&dsl, "objects", "public_where_state_");
+    let (flag, definition) = relation_named_like(&dsl, "objects", "flag_archived_");
+    assert_eq!(definition, format!("{archived} and {closed}"), "{dsl}");
+    assert_eq!(
+        relation_definition(&dsl, "objects", "can_select").as_deref(),
+        Some(format!("(owner but not {flag}) and acting_app_user from request_gate").as_str()),
+        "{dsl}"
+    );
+}
+
+#[test]
+fn a_flag_testing_a_comparison_with_is_true_is_refused() {
+    let reason = refusal_of(
+        &format!(
+            "{}{NEGATED_KEYED}",
+            objects_with_state("(object.state = 'closed') IS TRUE")
+        ),
+        &[],
+        "archived",
+    );
+    assert!(!reason.contains("negation cannot be expressed"), "{reason}");
+}
+
+/// `owner OR NOT flagged` admits the owner's rows and every row not flagged.
+#[test]
+fn a_negated_flag_inside_an_or_grants_every_row_but_the_flagged_ones() {
+    let dsl = archive_model(
+        OBJECTS,
+        "CREATE POLICY live ON objects AS RESTRICTIVE FOR SELECT
+           USING (owner_id = current_setting('app.user_id', true) OR NOT authz.is_archived(id));",
+    );
+    let (gate, _) = relation_named_like(&dsl, "objects", "public_where_archived_");
+    assert_eq!(
+        relation_definition(&dsl, "objects", "can_select").as_deref(),
+        Some(
+            format!(
+                "owner and (owner or (public_viewer but not {gate})) and acting_app_user from \
+                 request_gate"
+            )
+            .as_str()
+        ),
+        "{dsl}"
+    );
+}
+
+/// The report names the flag, the edges it climbs and the key it reads alone, and warns
+/// of the walk's depth.
+#[test]
+fn the_report_names_the_flag_and_the_walk_depth() {
+    let report_of = |schema: String| {
+        translator(ConfidenceLevel::B, &[])
+            .translate(&db_of(&schema))
+            .expect("the schema should plan")
+            .outputs()
+            .expect("every clause should translate")
+            .report()
+    };
+    let walked = report_of(format!("{RESOURCES}{NEGATED_WALK}"));
+    assert!(
+        walked.contains(
+            "P29 (public.resources flagged at id or above it through \
+             public.resource_parents.parent_id, public.ownables.project_id)"
+        ),
+        "{walked}"
+    );
+    assert!(walked.contains("resolveNodeLimit"), "{walked}");
+    let keyed = report_of(format!("{OBJECTS}{NEGATED_KEYED}"));
+    assert!(
+        keyed.contains("P29 (public.objects flagged at id)"),
+        "{keyed}"
+    );
+}
+
+/// `NOT (flag IS TRUE)` shows a row whose `STRICT` flag is `NULL`, which `NOT flag` hides,
+/// so it is no subtraction of the flag, and the refusal says how to spell one.
+#[test]
+fn a_negated_flag_under_is_true_is_refused_without_ruling_out_negation() {
+    let reason = refusal_of(
+        &format!(
+            "{OBJECTS}CREATE POLICY archived ON objects AS RESTRICTIVE FOR SELECT
+               USING (NOT (authz.is_archived(id) IS TRUE));"
+        ),
+        &[],
+        "archived",
+    );
+    assert!(!reason.contains("negation cannot be expressed"), "{reason}");
+    assert!(reason.contains("row flag"), "{reason}");
+}
+
+/// A chain of helpers longer than one clause's expansion budget is refused, never followed
+/// until the stack runs out.
+#[test]
+fn a_flag_behind_too_many_helpers_is_refused() {
+    let chain = (0..70)
+        .map(|at| {
+            format!(
+                "CREATE FUNCTION authz.hop{at}(resource TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
+                 AS $$ SELECT authz.hop{}(resource) $$;",
+                at + 1
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let reason = refusal_of(
+        &format!(
+            "{OBJECTS}{chain}
+             CREATE FUNCTION authz.hop70(resource TEXT) RETURNS BOOLEAN LANGUAGE sql STABLE
+             AS $$ SELECT authz.is_archived(resource) $$;
+             CREATE POLICY archived ON objects AS RESTRICTIVE FOR SELECT
+               USING (NOT authz.hop0(id));"
+        ),
+        &[],
+        "archived",
+    );
+    assert!(reason.contains("expansion budget"), "{reason}");
 }

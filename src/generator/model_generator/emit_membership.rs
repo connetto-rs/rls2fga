@@ -1515,10 +1515,7 @@ fn flag_relation<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<RelationName> {
     let flagged_type = ctx.table_types.resolve(&flag.table);
-    let Some(identity_cols) = resolve_row_identity(&flag.table, ctx.db) else {
-        skip_source_without_row_identity(table_plan, &flag.table, "row flag tuples", ctx.db);
-        return None;
-    };
+    let identity_cols = vec![flag.key.clone()];
     let mut key = format!("flag:{}:{}", flag.table.to_string().len(), flag.table);
     let plan = helper_level_plan(&flagged_type, &flag.table, table_plan, all_types);
     let mut gates = Vec::with_capacity(flag.predicates.len());

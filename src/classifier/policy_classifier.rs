@@ -876,6 +876,14 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 format!("NOT applied to an expression that does not translate: {reason}"),
             );
         }
+        if flagged_row(&inner_classified.pattern).is_some() {
+            return unknown_d(
+                expr,
+                "NOT applied to a row flag in a spelling the exclusion does not read, so write \
+                 NOT directly before the flag or the call that tests it"
+                    .to_string(),
+            );
+        }
         let desc = pattern_short_name(&inner_classified.pattern);
         return unknown_d(
             expr,

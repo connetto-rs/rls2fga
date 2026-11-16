@@ -317,7 +317,7 @@ fn collect_conjuncts<DB: DatabaseLike>(
                     return collected;
                 }
             }
-            match exclusion_conjunct(expr, db, registry, table, depth, state)? {
+            match exclusion_conjunct(expr, db, registry, table, state)? {
                 None => positives.push(expr.clone()),
                 Some(excluded) => subtract.push(excluded),
             }
@@ -360,7 +360,6 @@ fn exclusion_conjunct<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
     table: &str,
-    depth: u32,
     state: &ExpansionState,
 ) -> Result<Option<ExcludedSet>, ExclusionError> {
     let conjunct = unparenthesize(conjunct);
@@ -386,7 +385,7 @@ fn exclusion_conjunct<DB: DatabaseLike>(
                 subquery: subquery.clone(),
                 negated: false,
             },
-            other => return excluded_flag(other, db, registry, table, depth, state),
+            other => return excluded_flag(other, db, registry, table, state),
         },
         Expr::In {
             expr: left,
@@ -421,7 +420,7 @@ fn exclusion_conjunct<DB: DatabaseLike>(
     };
 
     if matches!(positive, Expr::Exists { .. }) {
-        if let Some(flag) = excluded_flag(&positive, db, registry, table, depth, state)? {
+        if let Some(flag) = excluded_flag(&positive, db, registry, table, state)? {
             return Ok(Some(flag));
         }
     }
@@ -471,10 +470,9 @@ fn excluded_flag<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
     table: &str,
-    depth: u32,
     state: &ExpansionState,
 ) -> Result<Option<ExcludedSet>, ExclusionError> {
-    let Some(flag) = classify_flag(positive, db, registry, table, depth, state) else {
+    let Some(flag) = classify_flag(positive, db, registry, table, state) else {
         return Ok(None);
     };
     let flag = flag?;
@@ -515,12 +513,8 @@ fn classify_flag<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
     table: &str,
-    depth: u32,
     state: &ExpansionState,
 ) -> Option<Result<ClassifiedExpr, ExclusionError>> {
-    if depth > crate::classifier::policy_classifier::MAX_CLASSIFY_DEPTH {
-        return None;
-    }
     let positive = unparenthesize(positive);
     if let Some(flagged) = recognize_flagged_row(positive, db, table, state) {
         return Some(
@@ -544,7 +538,7 @@ fn classify_flag<DB: DatabaseLike>(
     if reads_bypass_rls {
         state.enter_owner_read();
     }
-    let inner = classify_flag(&lowered, db, registry, table, depth + 1, state);
+    let inner = classify_flag(&lowered, db, registry, table, state);
     if reads_bypass_rls {
         state.leave_owner_read();
     }

@@ -708,6 +708,8 @@ mod tests {
             ),
             None
         );
+        assert_eq!(body_single_projection("SELECT 1; SELECT 2"), None);
+        assert_eq!(body_single_projection("DELETE FROM t"), None);
     }
 
     /// A body falling back across two declared sources reads as that fallback, the

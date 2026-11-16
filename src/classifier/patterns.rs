@@ -831,8 +831,10 @@ pub struct HelperWalk {
 pub struct FlaggedRow {
     /// Column of the guarded table naming the row the test starts from.
     pub column: ColumnName,
-    /// The table whose rows carry the flag, keyed by its one primary key column.
+    /// The table whose rows carry the flag.
     pub table: TableId,
+    /// The one column naming each row of the flagged table.
+    pub key: ColumnName,
     /// Conditions on the flagged row's own columns, all holding at once.
     pub predicates: Vec<AttributePredicate>,
     /// The edge tables the test walks up, empty where it reads the named row alone.
