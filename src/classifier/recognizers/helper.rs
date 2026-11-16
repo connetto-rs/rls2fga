@@ -443,9 +443,9 @@ fn call_read_in_from(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
     else {
         return None;
     };
-    if !with_hints.is_empty() || !partitions.is_empty() || !index_directives.is_empty() {
-        return None;
-    }
+    // Hints, partitions and index directives are other dialects' syntax, which a
+    // PostgreSQL dump never carries, so any of them leaves the set unproven.
+    let plain = with_hints.is_empty() && partitions.is_empty() && index_directives.is_empty();
     let [SelectItem::UnnamedExpr(projected)
     | SelectItem::ExprWithAlias {
         expr: projected, ..
@@ -455,7 +455,8 @@ fn call_read_in_from(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
     };
     let function = name.0.last()?.as_ident()?;
     let (relation, column) = returned_column(function, alias.as_ref())?;
-    projects_column(unparenthesize(projected), relation, column).then_some((name, args.as_slice()))
+    (plain && projects_column(unparenthesize(projected), relation, column))
+        .then_some((name, args.as_slice()))
 }
 
 /// The relation name and the column name `PostgreSQL` gives the one column a function of
@@ -480,10 +481,10 @@ fn projects_column(projected: &Expr, relation: &Ident, column: &Ident) -> bool {
     let same = |left: &Ident, right: &Ident| stored_ident_name(left) == stored_ident_name(right);
     match projected {
         Expr::Identifier(read) => same(read, column),
-        Expr::CompoundIdentifier(parts) => match parts.as_slice() {
-            [qualifier, read] => same(qualifier, relation) && same(read, column),
-            _ => false,
-        },
+        Expr::CompoundIdentifier(parts) => matches!(
+            parts.as_slice(),
+            [qualifier, read] if same(qualifier, relation) && same(read, column)
+        ),
         _ => false,
     }
 }

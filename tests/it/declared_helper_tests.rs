@@ -177,8 +177,8 @@ fn a_call_in_from_on_the_level_itself_is_the_declared_set() {
     assert!(!reason.contains("recursion"), "{reason}");
 }
 
-/// A subquery over the call that projects or keeps anything but the rows it returns is
-/// another set.
+/// A subquery over the call that projects or keeps anything but the rows it returns, or
+/// that `PostgreSQL` refuses outright, is not read as the helper's set.
 #[test]
 fn a_call_in_from_projecting_or_filtering_its_rows_is_not_the_declared_set() {
     for subquery in [
@@ -188,6 +188,9 @@ fn a_call_in_from_projecting_or_filtering_its_rows_is_not_the_declared_set() {
         "SELECT p FROM authz.projects_with('read') p LIMIT 1",
         "SELECT p FROM authz.projects_with('read') p, projects",
         "SELECT p.id FROM authz.projects_with('read') WITH ORDINALITY p(id, n) WHERE p.n = 1",
+        "SELECT p, p FROM authz.projects_with('read') p",
+        "SELECT p.id FROM authz.projects_with('read') p(id, n)",
+        "SELECT public.p.id FROM authz.projects_with('read') p(id)",
     ] {
         let sql = format!(
             "{LEVELS}{OWNER_READS}
