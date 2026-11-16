@@ -369,6 +369,7 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
                  bypass row level security cannot be known"
             )));
         };
+        let owner_bypasses = owner_bypasses_rls(db, function_owner);
         for spelling in &scan.tables {
             let Some(table) = lookup_table(db, spelling) else {
                 return Some(refused(format!(
@@ -376,12 +377,8 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
                      does not declare"
                 )));
             };
-            if table.has_forced_row_level_security(db) != Ok(false) {
-                return Some(refused(format!(
-                    "'{spelling}' has FORCE ROW LEVEL SECURITY, so the definer's own \
-                     read of it is filtered and the self-referential shape recurses at \
-                     runtime"
-                )));
+            if owner_bypasses {
+                continue;
             }
             let Ok(table_owner) = table.owner(db) else {
                 return Some(refused(format!(
@@ -389,16 +386,21 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
                      '{function_name}' reads it unfiltered cannot be known"
                 )));
             };
-            let owners_match = owners_share_identity(db, function_owner, table_owner);
-            if owners_match || owner_bypasses_rls(db, function_owner) {
-                continue;
+            if !owners_share_identity(db, function_owner, table_owner) {
+                let owner = function_owner.unwrap_or("the schema principal");
+                return Some(refused(format!(
+                    "Function '{function_name}' runs as {owner}, which does not provably \
+                     read '{spelling}' unfiltered, so the rows its body counts cannot be \
+                     known from the schema"
+                )));
             }
-            let owner = function_owner.unwrap_or("the schema principal");
-            return Some(refused(format!(
-                "Function '{function_name}' runs as {owner}, which does not provably \
-                 read '{spelling}' unfiltered, so the rows its body counts cannot be \
-                 known from the schema"
-            )));
+            if table.has_forced_row_level_security(db) != Ok(false) {
+                return Some(refused(format!(
+                    "'{spelling}' has FORCE ROW LEVEL SECURITY and '{function_name}' runs \
+                     as its owner, which does not bypass row security, so the definer's own \
+                     read of it is filtered and the self-referential shape recurses at runtime"
+                )));
+            }
         }
         reads_bypass_rls = true;
     }
@@ -930,10 +932,11 @@ fn owners_share_identity<DB: DatabaseLike>(
     }
 }
 
+/// Whether `owner` reads every table unfiltered, `FORCE ROW LEVEL SECURITY` included.
 fn owner_bypasses_rls<DB: DatabaseLike>(db: &DB, owner: Option<&str>) -> bool {
     owner
         .and_then(|owner| db.role(owner))
-        .is_some_and(RoleLike::can_bypass_rls)
+        .is_some_and(|role| role.is_superuser() || role.can_bypass_rls())
 }
 
 /// Everything the substitution and the ownership gate need to know about the
