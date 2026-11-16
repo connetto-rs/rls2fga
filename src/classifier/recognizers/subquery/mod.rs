@@ -901,6 +901,11 @@ pub fn recognize_p4_in_subquery<DB: DatabaseLike>(
 
 /// `x IN (SELECT y FROM t WHERE p)` as `EXISTS (SELECT y FROM t WHERE p AND t.y = outer.x)`.
 ///
+/// A row value `(x1, x2) IN (SELECT y1, y2 ...)` pairs each tested value with the
+/// projected column in its position, one equality per pair under the same `AND`. In a
+/// clause that is not negated the two agree on every row. The row comparison is true
+/// exactly where every pair is, and a `NULL` in any pair filters either way.
+///
 /// Both operands gain the qualifier the `IN` form leaves to scoping: the projection names
 /// the subquery's own source, the tested value the guarded table. Without them a column
 /// both tables spell alike reads as either, which drops the correlation and grants the
@@ -915,45 +920,61 @@ fn membership_exists_from_in_subquery(
     outer_table: &str,
 ) -> Option<Expr> {
     let (tested, query) = readable_membership_subquery_operands(expr)?;
-    let tested = if is_current_user_expr(tested, registry) {
-        tested.clone()
-    } else if matches!(tested, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
-        qualified_column(tested, outer_table)
-    } else {
-        return None;
+    let tested = match unparenthesize(tested) {
+        Expr::Tuple(values) => values.as_slice(),
+        _ => core::slice::from_ref(tested),
     };
+    let tested = tested
+        .iter()
+        .map(|value| {
+            if is_current_user_expr(value, registry) {
+                Some(value.clone())
+            } else if matches!(value, Expr::Identifier(_) | Expr::CompoundIdentifier(_)) {
+                Some(qualified_column(value, outer_table))
+            } else {
+                None
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
 
     let mut rewritten = query.clone();
     let SetExpr::Select(body) = rewritten.body.as_mut() else {
         return None;
     };
-    let qualifier = match &tested {
-        Expr::CompoundIdentifier(parts) => parts.iter().rev().nth(1),
-        _ => None,
-    };
-    if let Some(qualifier) = qualifier {
-        unshadow_scope(body, &stored_ident_name(qualifier))?;
+    for value in &tested {
+        if let Expr::CompoundIdentifier(parts) = value {
+            if let Some(qualifier) = parts.iter().rev().nth(1) {
+                unshadow_scope(body, &stored_ident_name(qualifier))?;
+            }
+        }
     }
-    let projected = single_projected_column(body)?;
-    let projected = match relation_sources(body).as_slice() {
-        [source] => qualified_column(
-            &projected,
-            source.alias.as_deref().unwrap_or(&source.table_name),
-        ),
-        _ => projected,
+    let projected = projected_columns(body)?;
+    if projected.len() != tested.len() {
+        return None;
+    }
+    let projected: Vec<Expr> = match relation_sources(body).as_slice() {
+        [source] => {
+            let qualifier = source.alias.as_deref().unwrap_or(&source.table_name);
+            projected
+                .into_iter()
+                .map(|column| qualified_column(column, qualifier))
+                .collect()
+        }
+        _ => projected.into_iter().cloned().collect(),
     };
-    let bound = Expr::BinaryOp {
-        left: Box::new(projected),
-        op: BinaryOperator::Eq,
-        right: Box::new(tested),
-    };
-    body.selection = Some(match body.selection.take() {
-        Some(existing) => Expr::BinaryOp {
-            left: Box::new(existing),
-            op: BinaryOperator::And,
-            right: Box::new(bound),
-        },
-        None => bound,
+    let bounds = projected
+        .into_iter()
+        .zip(tested)
+        .map(|(projected, tested)| Expr::BinaryOp {
+            left: Box::new(projected),
+            op: BinaryOperator::Eq,
+            right: Box::new(tested),
+        });
+    let selection = body.selection.take().into_iter().chain(bounds);
+    body.selection = selection.reduce(|left, right| Expr::BinaryOp {
+        left: Box::new(left),
+        op: BinaryOperator::And,
+        right: Box::new(right),
     });
     Some(Expr::Exists {
         subquery: Box::new(rewritten),
@@ -1068,16 +1089,18 @@ fn qualified_column(expr: &Expr, qualifier: &str) -> Expr {
     ])
 }
 
-/// The one column a select projects, qualifier kept. `*`, several items, or anything that
-/// is not a column reference yields `None`.
-fn single_projected_column(select: &Select) -> Option<Expr> {
-    let [item] = select.projection.as_slice() else {
-        return None;
-    };
+/// The columns a select projects in order, qualifiers kept. `*`, or any item that is not
+/// a column reference, yields `None`.
+fn projected_columns(select: &Select) -> Option<Vec<&Expr>> {
+    select.projection.iter().map(projected_column).collect()
+}
+
+/// The column one projection item names, qualifier kept.
+fn projected_column(item: &SelectItem) -> Option<&Expr> {
     let (SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. }) = item else {
         return None;
     };
-    extract_column_name(expr).is_some().then(|| expr.clone())
+    extract_column_name(expr).is_some().then_some(expr)
 }
 
 fn classify_membership_select<DB: DatabaseLike>(
@@ -1692,22 +1715,11 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
         };
     }
 
-    let (lhs, query, refusal) = membership_subquery_operands(expr)?;
+    let (_, query, refusal) = membership_subquery_operands(expr)?;
     if let Some(refusal) = refusal {
         return Some(refusal.reason());
     }
-    // A row-value IN pairs several columns at once. The EXISTS spelling of the same
-    // policy translates through the pairing routes, so the reason names the
-    // respelling rather than a projection problem.
-    if matches!(unparenthesize(lhs), Expr::Tuple(_)) {
-        return Some(
-            "A row-value IN compares several columns at once, which has no translation. \
-             Spell the policy as EXISTS with one equality per column, which translates \
-             when the columns pair onto a key"
-                .to_string(),
-        );
-    }
-    if single_projected_column(query_select(query)?).is_none() {
+    if projected_columns(query_select(query)?).is_none() {
         return Some(
             "Subquery selects an expression rather than a column, so nothing links it to the \
              guarded row, so project the correlating column instead"
