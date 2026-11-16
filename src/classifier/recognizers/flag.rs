@@ -8,9 +8,9 @@
 use crate::no_std_prelude::*;
 use core::ops::ControlFlow;
 use sqlparser::ast::{
-    BinaryOperator, Cte, Expr, Ident, JoinConstraint, JoinOperator, ObjectName, Query, Select,
-    SelectItem, SetExpr, SetOperator, SetQuantifier, TableAlias, TableFactor, Visit, VisitMut,
-    Visitor, VisitorMut,
+    BinaryOperator, Cte, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem, SetExpr, SetOperator,
+    SetQuantifier, TableAlias, TableFactor, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 use super::attribute::conjunct_reads_only_the_row;
@@ -194,7 +194,174 @@ pub(crate) fn recognize_flagged_row<DB: DatabaseLike>(
         key,
         predicates,
         edges,
+        steps: Vec::new(),
     }))
+}
+
+/// A call testing a flag on the parent one edge row names for the guarded row.
+pub(crate) struct ParentFlag {
+    /// The guarded table.
+    guarded: TableId,
+    /// The guarded row's column the edge's child is compared with.
+    column: ColumnName,
+    /// The table holding the edge.
+    pub(crate) edge: TableId,
+    /// The edge table's column compared with `column`.
+    child_column: ColumnName,
+    /// The call, each edge column it reads qualified by the edge table's own name, so it
+    /// classifies as a test on the edge row.
+    pub(crate) call: Expr,
+}
+
+/// The call `expr` tests on a column of the edge row naming the guarded row as its child,
+/// `None` where it is not shaped as one.
+///
+/// `EXISTS (SELECT 1 FROM resource_parents e WHERE e.id = resources.id AND
+/// authz.is_archived(e.parent_id))`. Whether the call tests a flag is for its own
+/// classification against the edge table to tell.
+pub(crate) fn recognize_parent_flag<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    table: &str,
+) -> Option<ParentFlag> {
+    let Expr::Exists {
+        subquery,
+        negated: false,
+    } = unparenthesize(expr)
+    else {
+        return None;
+    };
+    if query_binds_its_own_names(subquery) || !reads_every_row(subquery) {
+        return None;
+    }
+    let select = query_select(subquery)?;
+    if select_result_shaping_clause(select).is_some() {
+        return None;
+    }
+    let [item] = select.from.as_slice() else {
+        return None;
+    };
+    if !item.joins.is_empty() {
+        return None;
+    }
+    let guarded = resolve_table_id(db, table)?;
+    let (name, visible) = plain_table(&item.relation)?;
+    let edge = resolve_table_id(db, &name.to_string())?;
+    let written = edge.to_string();
+    // A bare name reads the edge row wherever the edge has that column, and the guarded row
+    // only otherwise, so only a qualified reference reads the guarded row.
+    let edge_column = |expr: &Expr| {
+        let column = match unparenthesize(expr) {
+            Expr::Identifier(ident) => stored_ident_name(ident).into_owned(),
+            other => match qualified_column(other)? {
+                (qualifier, column) if qualifier == visible => column,
+                _ => return None,
+            },
+        };
+        table_has_column(db, &written, &column).then(|| ColumnName::from_stored(column))
+    };
+    let guarded_column = |expr: &Expr| {
+        let expr = unparenthesize(expr);
+        let Expr::CompoundIdentifier(parts) = expr else {
+            return None;
+        };
+        // The edge's visible name hides the guarded table's wherever the two coincide.
+        let hidden = parts.len() == 2
+            && parts
+                .first()
+                .is_some_and(|qualifier| stored_ident_name(qualifier) == visible);
+        if hidden {
+            return None;
+        }
+        call_argument_column(expr, table)
+    };
+    let mut conjuncts = Vec::new();
+    flatten_and_predicates(select.selection.as_ref()?, &mut conjuncts);
+    let [first, second] = conjuncts.as_slice() else {
+        return None;
+    };
+    let correlation = |conjunct: &Expr| {
+        let (left, right) = equality(conjunct)?;
+        edge_column(left)
+            .zip(guarded_column(right))
+            .or_else(|| edge_column(right).zip(guarded_column(left)))
+    };
+    let ((child_column, column), call) = match (correlation(first), correlation(second)) {
+        (Some(found), None) => (found, second),
+        (None, Some(found)) => (found, first),
+        _ => return None,
+    };
+    let Expr::Function(function) = unparenthesize(call) else {
+        return None;
+    };
+    let mut function = function.clone();
+    let FunctionArguments::List(arguments) = &mut function.args else {
+        return None;
+    };
+    let qualifier = Ident::with_quote('"', edge.name());
+    let mut reads_edge = false;
+    for argument in &mut arguments.args {
+        let FunctionArg::Unnamed(FunctionArgExpr::Expr(value)) = argument else {
+            return None;
+        };
+        if !matches!(value, Expr::Value(_)) {
+            let column = edge_column(value)?;
+            *value = Expr::CompoundIdentifier(vec![
+                qualifier.clone(),
+                Ident::with_quote('"', column.as_str()),
+            ]);
+            reads_edge = true;
+        }
+    }
+    reads_edge.then_some(ParentFlag {
+        guarded,
+        column,
+        edge,
+        child_column,
+        call: Expr::Function(function),
+    })
+}
+
+impl ParentFlag {
+    /// `flagged`, a flag the call tests on the edge row, as tested from the guarded row one
+    /// edge below.
+    pub(crate) fn below<DB: DatabaseLike>(
+        &self,
+        flagged: FlaggedRow,
+        db: &DB,
+        state: &ExpansionState,
+    ) -> Result<FlaggedRow, FlagRefusal> {
+        if !state.reading_as_owner() && table_guarded_by_rls(db, &self.edge) {
+            return Err(FlagRefusal::GuardedRead {
+                table: self.edge.clone(),
+            });
+        }
+        let key_kind = column_kind(&flagged.table, flagged.key.as_str(), db);
+        let compared = [
+            (&self.guarded, &self.column),
+            (&self.edge, &self.child_column),
+        ];
+        for (table, compared) in compared {
+            if column_kind(table, compared.as_str(), db) != key_kind {
+                return Err(FlagRefusal::KeyTypesDiffer {
+                    left: format!("{table}.{compared}"),
+                    right: format!("{}.{}", flagged.table, flagged.key),
+                });
+            }
+        }
+        let mut steps = Vec::with_capacity(flagged.steps.len() + 1);
+        steps.push(TreeEdges {
+            table: self.edge.clone(),
+            child_column: self.child_column.clone(),
+            parent_column: flagged.column,
+        });
+        steps.extend(flagged.steps);
+        Ok(FlaggedRow {
+            column: self.column.clone(),
+            steps,
+            ..flagged
+        })
+    }
 }
 
 /// What the flagged scan's key is compared with.

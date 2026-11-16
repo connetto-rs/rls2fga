@@ -971,3 +971,147 @@ fn a_flag_over_confirmed_attribute_columns_grades_a() {
     assert_eq!(grades(true), expected(ConfidenceLevel::A));
     assert_eq!(grades(false), expected(ConfidenceLevel::B));
 }
+
+/// A resource below an archived one, its parent read up `resource_parents` and tested with
+/// the walk, which leaves the archived resource itself out.
+const BELOW_ARCHIVED: &str = "
+CREATE FUNCTION authz.has_archived_ancestor(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                 WHERE edge.id = resource AND authz.is_archived(edge.parent_id))
+$$;
+ALTER FUNCTION authz.has_archived_ancestor(TEXT) OWNER TO authz_owner;
+";
+
+const NEGATED_BELOW: &str = "CREATE POLICY resources_below_archived ON resources AS RESTRICTIVE
+  FOR SELECT USING (NOT authz.has_archived_ancestor(id));";
+
+/// Both edge tables read as parents, a resource below an archived one through either.
+const BELOW_ARCHIVED_EITHER: &str = "
+CREATE FUNCTION authz.has_archived_ancestor(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                 WHERE edge.id = resource AND authz.is_archived(edge.parent_id))
+    OR EXISTS (SELECT 1 FROM public.ownables ownable
+               WHERE ownable.id = resource AND authz.is_archived(ownable.project_id))
+$$;
+ALTER FUNCTION authz.has_archived_ancestor(TEXT) OWNER TO authz_owner;
+";
+
+/// The relation of `resources` holding the walked flag one `link` edge up.
+fn flag_one_edge_up(dsl: &str, link: &str) -> String {
+    let definitions = relation_definitions(dsl, "resources");
+    let walked = definitions
+        .iter()
+        .find(|(name, definition)| definition.contains(&format!(" or {name} from {link}")))
+        .unwrap_or_else(|| panic!("the walked flag should be defined: {dsl}"))
+        .0
+        .clone();
+    let up = format!("{walked} from {link}");
+    definitions
+        .into_iter()
+        .find(|(_, definition)| *definition == up)
+        .unwrap_or_else(|| panic!("a relation should hold {up}: {dsl}"))
+        .0
+}
+
+/// A flag called on the parent an edge row names is the flag one edge up, so `NOT` of it
+/// subtracts every row below a flagged one and never the flagged row itself.
+#[test]
+fn a_negated_flag_on_the_parents_subtracts_the_flag_one_edge_up() {
+    let dsl = archive_model(RESOURCES, &format!("{BELOW_ARCHIVED}{NEGATED_BELOW}"));
+    let above = flag_one_edge_up(&dsl, "resource_parents_parent_id");
+    assert_eq!(
+        relation_definition(&dsl, "resources", "can_select").as_deref(),
+        Some(format!("(owner but not {above}) and acting_app_user from request_gate").as_str()),
+        "{dsl}"
+    );
+}
+
+/// The flag one edge up grants too, reached from another table through its foreign key.
+#[test]
+fn a_flag_on_the_parents_grants_through_a_foreign_key() {
+    let dsl = archive_model(
+        RESOURCES,
+        &format!(
+            "{BELOW_ARCHIVED}
+             CREATE POLICY grants_below_archived ON grants FOR SELECT
+               USING (authz.has_archived_ancestor(resource_id));"
+        ),
+    );
+    let above = flag_one_edge_up(&dsl, "resource_parents_parent_id");
+    assert_eq!(
+        relation_definition(&dsl, "grants", "can_select").as_deref(),
+        Some(
+            format!("({above} from resources or user) and acting_app_user from request_gate")
+                .as_str()
+        ),
+        "{dsl}"
+    );
+}
+
+/// Parents read over two edge tables, either of them flagged, subtract the union of the
+/// flag one edge up each.
+#[test]
+fn a_negated_flag_on_the_parents_over_two_edge_tables_subtracts_either() {
+    let dsl = archive_model(
+        RESOURCES,
+        &format!("{BELOW_ARCHIVED_EITHER}{NEGATED_BELOW}"),
+    );
+    let parents = flag_one_edge_up(&dsl, "resource_parents_parent_id");
+    let ownables = flag_one_edge_up(&dsl, "ownables_project_id");
+    assert_eq!(
+        relation_definition(&dsl, "resources", "can_select").as_deref(),
+        Some(
+            format!(
+                "(owner but not ({parents} or {ownables})) and acting_app_user from request_gate"
+            )
+            .as_str()
+        ),
+        "{dsl}"
+    );
+}
+
+/// A `NULL` from a `STRICT` flag beside a false one leaves the `OR` `NULL`, which `NOT`
+/// keeps, so the row is hidden where no tuple flags it.
+#[test]
+fn a_negated_union_with_a_strict_flag_over_a_nullable_column_is_refused() {
+    let reason = refusal_of(
+        &format!(
+            "{RESOURCES}
+             CREATE TABLE notes (id TEXT PRIMARY KEY, resource_id TEXT REFERENCES resources (id));
+             CREATE FUNCTION authz.is_archived_strict(resource TEXT) RETURNS BOOLEAN
+             LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = '' AS $$
+               SELECT EXISTS (SELECT 1 FROM public.resources r
+                              WHERE r.id = resource AND r.archived_at IS NOT NULL)
+             $$;
+             ALTER FUNCTION authz.is_archived_strict(TEXT) OWNER TO authz_owner;
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_live ON notes FOR SELECT
+               USING (NOT (authz.is_archived(resource_id)
+                           OR authz.is_archived_strict(resource_id)));"
+        ),
+        &[],
+        "notes_live",
+    );
+    assert!(
+        reason.contains("STRICT") && reason.contains("resource_id"),
+        "{reason}"
+    );
+}
+
+/// An invoker reads the edge table through the caller's own policies, so the parent it
+/// finds is the caller's and no tuple decides it.
+#[test]
+fn a_parent_read_through_the_callers_own_policies_is_refused() {
+    let invoker = BELOW_ARCHIVED.replace(" SECURITY DEFINER", "");
+    let reason = refusal_of(
+        &format!("{RESOURCES}{invoker}{NEGATED_BELOW}"),
+        &[],
+        "resources_below_archived",
+    );
+    assert!(
+        reason.contains("resource_parents") && reason.contains("row level security"),
+        "{reason}"
+    );
+}

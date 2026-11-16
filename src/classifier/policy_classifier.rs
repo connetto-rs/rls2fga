@@ -470,9 +470,14 @@ fn compared_key_refusal<DB: DatabaseLike>(
                 ExcludedSet::Helper(DeclaredHelper { column, call }) => {
                     check(guarded, column).or_else(|| helper_call_refusal(call, db))
                 }
-                ExcludedSet::Flag(flag) => flagged_row(&flag.pattern).and_then(|flagged| {
-                    check(guarded, &flagged.column).or_else(|| flagged_row_refusal(flagged, db))
-                }),
+                ExcludedSet::Flag(flag) => {
+                    flagged_rows(&flag.pattern)?
+                        .into_iter()
+                        .find_map(|flagged| {
+                            check(guarded, &flagged.column)
+                                .or_else(|| flagged_row_refusal(flagged, db))
+                        })
+                }
             })
         }
         PatternClass::P29FlaggedRow(flagged) => {
@@ -658,16 +663,17 @@ fn tree_edges_refusal<DB: DatabaseLike>(edges: &TreeEdges, db: &DB) -> Option<St
         .or_else(|| key_collation_refusal(&edges.table, &edges.parent_column, db))
 }
 
-/// Why the flagged table's key or an edge column the walk follows cannot be compared in
-/// `OpenFGA`.
+/// Why the flagged table's key or an edge column the walk follows or the test climbs cannot
+/// be compared in `OpenFGA`.
 fn flagged_row_refusal<DB: DatabaseLike>(flagged: &FlaggedRow, db: &DB) -> Option<String> {
     resolve_row_identity(&flagged.table, db)?
         .iter()
         .find_map(|key| key_collation_refusal(&flagged.table, key, db))
         .or_else(|| {
             flagged
-                .edges
+                .steps
                 .iter()
+                .chain(&flagged.edges)
                 .find_map(|edges| tree_edges_refusal(edges, db))
         })
 }
@@ -695,6 +701,20 @@ pub(crate) fn flagged_row_classified<DB: DatabaseLike>(
         pattern: PatternClass::P29FlaggedRow(flagged),
         confidence,
     }
+}
+
+/// The flag a call tests on the parent one edge row names for the guarded row, refused as
+/// `D` where it cannot translate, `None` where `expr` tests none.
+fn classify_parent_flag<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    state: &ExpansionState,
+) -> Option<ClassifiedExpr> {
+    let flagged =
+        crate::classifier::exclusion::classify_parent_flag(expr, db, registry, table, state)?;
+    Some(flagged.unwrap_or_else(|refusal| unknown_d(expr, refusal.to_string())))
 }
 
 fn classify_expr_inner<DB: DatabaseLike>(
@@ -941,7 +961,7 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 format!("NOT applied to an expression that does not translate: {reason}"),
             );
         }
-        if flagged_row(&inner_classified.pattern).is_some() {
+        if flagged_rows(&inner_classified.pattern).is_some() {
             return unknown_d(
                 expr,
                 "NOT applied to a row flag in a spelling the exclusion does not read, so write \
@@ -1122,6 +1142,12 @@ fn recognize_leaf<DB: DatabaseLike>(
     // Try P20: a column compared with the set a declared definer helper returns. Before
     // the membership recognizers, whose `IN` and `= ANY` spellings it shares.
     if let Some(classified) = recognizers::recognize_declared_helper(expr, db, registry, table) {
+        return Some(classified);
+    }
+
+    // Try P29 on a flag the parent one edge row names carries. Before P5, whose correlated
+    // `EXISTS` it shares.
+    if let Some(classified) = classify_parent_flag(expr, db, registry, table, state) {
         return Some(classified);
     }
 

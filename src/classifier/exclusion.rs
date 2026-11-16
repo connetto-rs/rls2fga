@@ -7,14 +7,14 @@ use crate::no_std_prelude::*;
 use crate::classifier::expansion::{self, ExpansionState};
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
-    exclusion_confidence, ClassifiedExpr, ConfidenceLevel, ConstantBool, DeclaredHelper,
-    ExcludedSet, ExistsMembership, ExpandedFunction, HelperSetArm, MembershipExclusion,
-    PatternClass, PolicyCommand,
+    composite_confidence, exclusion_confidence, BoolOp, ClassifiedExpr, Composite, ConfidenceLevel,
+    ConstantBool, DeclaredHelper, ExcludedSet, ExistsMembership, ExpandedFunction, HelperSetArm,
+    MembershipExclusion, PatternClass, PolicyCommand,
 };
 use crate::classifier::recognizers::{
     diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_excluded_helper,
-    recognize_flagged_row, recognize_p4, recognize_p4_in_subquery, renaming_casts, unparenthesize,
-    FlagRefusal, HelperRefusal,
+    recognize_flagged_row, recognize_p4, recognize_p4_in_subquery, recognize_parent_flag,
+    renaming_casts, unparenthesize, FlagRefusal, HelperRefusal, ParentFlag,
 };
 use crate::classifier::role_keywords::prepare_clause;
 use crate::parser::names::{lookup_table, lookup_table_id, table_identity};
@@ -186,6 +186,10 @@ fn has_exclusion_conjunct(expr: &Expr, depth: u32) -> bool {
             unparenthesize(expr),
             Expr::Exists { negated: false, .. }
                 | Expr::Function(_)
+                | Expr::BinaryOp {
+                    op: BinaryOperator::Or,
+                    ..
+                }
                 | Expr::AnyOp {
                     compare_op: BinaryOperator::Eq,
                     ..
@@ -464,7 +468,8 @@ fn exclusion_conjunct<DB: DatabaseLike>(
 ///
 /// Refused where a `STRICT` function on the way reads a column that can be `NULL`, since
 /// the function is then `NULL`, which `NOT` keeps and the row is hidden, while no tuple
-/// flags the row.
+/// flags the row. Beside another flag under `OR` a `NULL` stays `NULL` wherever that flag
+/// is false, so every call of a union is held to the same.
 fn excluded_flag<DB: DatabaseLike>(
     positive: &Expr,
     db: &DB,
@@ -476,20 +481,25 @@ fn excluded_flag<DB: DatabaseLike>(
         return Ok(None);
     };
     let flag = flag?;
-    let mut expanded = &flag;
-    while let PatternClass::ExpandedFunction(ExpandedFunction {
-        presence_columns,
-        inner,
-        ..
-    }) = &expanded.pattern
-    {
-        if let Some(column) = nullable_column(db, table, presence_columns) {
-            return Err(ExclusionError::NullableStrictArgument {
-                table: table.to_string(),
-                column: column.clone(),
-            });
+    let mut pending = vec![&flag];
+    while let Some(classified) = pending.pop() {
+        match &classified.pattern {
+            PatternClass::ExpandedFunction(ExpandedFunction {
+                presence_columns,
+                inner,
+                ..
+            }) => {
+                if let Some(column) = nullable_column(db, table, presence_columns) {
+                    return Err(ExclusionError::NullableStrictArgument {
+                        table: table.to_string(),
+                        column: column.clone(),
+                    });
+                }
+                pending.push(inner);
+            }
+            PatternClass::P8Composite(Composite { parts, .. }) => pending.extend(parts),
+            _ => {}
         }
-        expanded = inner;
     }
     Ok(Some(ExcludedSet::Flag(Box::new(flag))))
 }
@@ -506,8 +516,8 @@ fn nullable_column<'c, DB: DatabaseLike>(
     })
 }
 
-/// The flag `positive` tests, read through the declared functions it calls, `None` where it
-/// tests none.
+/// The flag `positive` tests, read through the declared functions it calls, the union of
+/// the flags an `OR` joins, `None` where it tests none.
 fn classify_flag<DB: DatabaseLike>(
     positive: &Expr,
     db: &DB,
@@ -516,6 +526,16 @@ fn classify_flag<DB: DatabaseLike>(
     state: &ExpansionState,
 ) -> Option<Result<ClassifiedExpr, ExclusionError>> {
     let positive = unparenthesize(positive);
+    if let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Or,
+        right,
+    } = positive
+    {
+        let left = classify_flag(left, db, registry, table, state)?;
+        let right = classify_flag(right, db, registry, table, state)?;
+        return Some(left.and_then(|left| right.map(|right| flag_union(vec![left, right]))));
+    }
     if let Some(flagged) = recognize_flagged_row(positive, db, table, state) {
         return Some(
             flagged
@@ -526,6 +546,9 @@ fn classify_flag<DB: DatabaseLike>(
                 })
                 .map_err(ExclusionError::from),
         );
+    }
+    if let Some(flagged) = classify_parent_flag(positive, db, registry, table, state) {
+        return Some(flagged);
     }
     let Some(expansion::Expansion::Body {
         function,
@@ -556,6 +579,81 @@ fn classify_flag<DB: DatabaseLike>(
             inner: Box::new(inner),
         }),
     }))
+}
+
+/// The flag a call tests on the parent one edge row names for the guarded row, `None`
+/// where `expr` tests none.
+///
+/// The call is classified against the edge table, as a flag on the edge row, and that flag
+/// is climbed to from the guarded row one edge below.
+pub(crate) fn classify_parent_flag<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    state: &ExpansionState,
+) -> Option<Result<ClassifiedExpr, ExclusionError>> {
+    let parent = recognize_parent_flag(expr, db, table)?;
+    let edge = parent.edge.to_string();
+    let classified = match classify_flag(&parent.call, db, registry, &edge, state)? {
+        Ok(classified) => classified,
+        Err(refusal) => return Some(Err(refusal)),
+    };
+    flag_below(classified, &parent, db, registry, state)
+}
+
+/// `flag`, the flags a call tests on the edge row, each climbed to from the guarded row one
+/// edge below, `None` where it tests anything else.
+///
+/// The calls the edge row's flags were read through drop out, since inside the `EXISTS` a
+/// `NULL` they return keeps the edge row out as `false` does.
+fn flag_below<DB: DatabaseLike>(
+    flag: ClassifiedExpr,
+    parent: &ParentFlag,
+    db: &DB,
+    registry: &FunctionRegistry,
+    state: &ExpansionState,
+) -> Option<Result<ClassifiedExpr, ExclusionError>> {
+    match flag.pattern {
+        PatternClass::P29FlaggedRow(flagged) => Some(
+            parent
+                .below(flagged, db, state)
+                .map(|flagged| {
+                    crate::classifier::policy_classifier::flagged_row_classified(
+                        flagged, db, registry,
+                    )
+                })
+                .map_err(ExclusionError::from),
+        ),
+        PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) => {
+            flag_below(*inner, parent, db, registry, state)
+        }
+        PatternClass::P8Composite(Composite {
+            op: BoolOp::Or,
+            parts,
+        }) => {
+            let mut below = Vec::with_capacity(parts.len());
+            for part in parts {
+                match flag_below(part, parent, db, registry, state)? {
+                    Ok(part) => below.push(part),
+                    Err(refusal) => return Some(Err(refusal)),
+                }
+            }
+            Some(Ok(flag_union(below)))
+        }
+        _ => None,
+    }
+}
+
+/// The rows any of `flags` flags.
+fn flag_union(flags: Vec<ClassifiedExpr>) -> ClassifiedExpr {
+    ClassifiedExpr {
+        confidence: composite_confidence(&flags),
+        pattern: PatternClass::P8Composite(Composite {
+            op: BoolOp::Or,
+            parts: flags,
+        }),
+    }
 }
 
 /// `helper` as a set to subtract, refused where `PostgreSQL` would compare a `NULL`.

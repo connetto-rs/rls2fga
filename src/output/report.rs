@@ -409,9 +409,17 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
             column,
             table,
             edges,
+            steps,
             ..
         }) => {
             let mut rendered = format!("P29 ({table} flagged at {column}");
+            for step in steps {
+                let _ = write!(
+                    rendered,
+                    " one edge up through {}.{}",
+                    step.table, step.parent_column
+                );
+            }
             if !edges.is_empty() {
                 rendered.push_str(" or above it through ");
                 for (at, edge) in edges.iter().enumerate() {
