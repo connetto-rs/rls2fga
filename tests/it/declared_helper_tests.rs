@@ -2233,6 +2233,131 @@ fn a_capped_arm_against_a_request_value_or_returning_several_columns_is_refused(
     }
 }
 
+/// Teams read through the memberships of their members, kept to active members by a
+/// `JOIN` in one helper and by a `NOT EXISTS` in the other.
+const MEMBERSHIP_STATES: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE memberships (
+  organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'deactivated')),
+  PRIMARY KEY (organization_id, user_id));
+CREATE TABLE teams (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL);
+CREATE TABLE team_members (
+  team_id TEXT NOT NULL REFERENCES teams (id), organization_id TEXT NOT NULL,
+  user_id TEXT NOT NULL, PRIMARY KEY (team_id, user_id),
+  FOREIGN KEY (organization_id, user_id) REFERENCES memberships (organization_id, user_id));
+GRANT SELECT ON memberships, team_members TO authz_owner;
+CREATE FUNCTION authz.joined_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND membership.state = 'active'
+$$;
+CREATE FUNCTION authz.unblocked_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.memberships membership
+      WHERE membership.organization_id = member.organization_id
+        AND membership.user_id = member.user_id
+        AND membership.state = 'deactivated')
+$$;
+CREATE FUNCTION authz.active_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE membership.state = 'active'
+$$;
+CREATE FUNCTION authz.active_team_pairs() RETURNS TABLE (organization_id TEXT, team_id TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.organization_id, member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE membership.state = 'active'
+$$;
+CREATE FUNCTION authz.staffed_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT team.id FROM public.teams team
+  WHERE (team.organization_id, team.id) IN (SELECT * FROM authz.active_team_pairs())
+$$;
+GRANT SELECT ON teams TO authz_owner;
+ALTER FUNCTION authz.joined_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.unblocked_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.active_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.active_team_pairs() OWNER TO authz_owner;
+ALTER FUNCTION authz.staffed_teams() OWNER TO authz_owner;
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+";
+
+/// A grant arm keeping only the rows that name a joined row, or that no row of another
+/// table blocks, is refused, whether a column or a request value is compared with the
+/// helper and whether the arm returns the pairs of a cap, since a relation loaded from
+/// the arm's table alone would grant the teams of a deactivated member.
+#[test]
+fn a_grant_arm_kept_by_a_join_or_an_anti_join_is_refused() {
+    let translator =
+        TranslatorBuilder::new(deployment([caller("app.user_id"), scalar("app.team_id")]))
+            .with_min_confidence(ConfidenceLevel::B)
+            .with_declared_helpers([
+                "authz.joined_teams",
+                "authz.unblocked_teams",
+                "authz.active_teams",
+                "authz.active_team_pairs",
+                "authz.staffed_teams",
+            ])
+            .build();
+    for (using, reason) in [
+        (
+            "id IN (SELECT authz.joined_teams())",
+            "declared helper 'authz.joined_teams' keeps the rows of 'public.team_members' only \
+             where they name a row of 'public.memberships' meeting the join",
+        ),
+        (
+            "id IN (SELECT authz.unblocked_teams())",
+            "declared helper 'authz.unblocked_teams' keeps the rows of 'public.team_members' \
+             only where no row of 'public.memberships' blocks them",
+        ),
+        (
+            "current_setting('app.team_id', true) IN (SELECT authz.active_teams())",
+            "declared helper 'authz.active_teams' keeps the rows of 'public.team_members' only \
+             where they name a row of 'public.memberships' meeting the join",
+        ),
+        (
+            "id IN (SELECT authz.staffed_teams())",
+            "declared helper 'authz.active_team_pairs' keeps the rows of 'public.team_members' \
+             only where they name a row of 'public.memberships' meeting the join",
+        ),
+    ] {
+        let sql = format!(
+            "{MEMBERSHIP_STATES}CREATE POLICY teams_read ON teams FOR SELECT USING ({using});"
+        );
+        let classified = translator
+            .classify(&db_of(&sql))
+            .into_iter()
+            .find(|classified| classified.name() == "teams_read")
+            .expect("teams_read should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .clone();
+        assert_eq!(classified.confidence, ConfidenceLevel::D, "{using}");
+        match classified.pattern {
+            PatternClass::Unknown(UnclassifiedExpr {
+                reason: refused, ..
+            }) => assert!(refused.contains(reason), "{using}: {refused}"),
+            other => panic!("{using} should be refused, got {other:?}"),
+        }
+    }
+}
+
 /// connetto's folder tree, its edges kept in `folder_parents` keyed on the child, and the
 /// projects placed in a folder through `project_folders`, whose own key is a surrogate
 /// and whose child column a `UNIQUE` constraint covers alone.

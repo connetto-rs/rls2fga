@@ -352,6 +352,33 @@ pub(crate) enum HelperRefusal {
         /// The column of the cap's rows it pairs with.
         paired: String,
     },
+    /// A grant arm keeps only the rows naming a joined row that meets the join's
+    /// conditions.
+    #[error(
+        "declared helper '{function}' keeps the rows of '{table}' only where they name a \
+         row of '{joined}' meeting the join, which no grant relation carries"
+    )]
+    Joined {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The table the arm joins.
+        joined: String,
+    },
+    /// A grant arm keeps only the rows no row of another table blocks.
+    #[error(
+        "declared helper '{function}' keeps the rows of '{table}' only where no row of \
+         '{blocking}' blocks them, which no grant relation carries"
+    )]
+    AntiJoined {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The table whose rows block the arm's.
+        blocking: String,
+    },
 }
 
 /// Why the request leaving a setting absent does not decide a cap lifted where the setting
@@ -747,6 +774,7 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
         };
         bounded_by_no_time(&name, grant)?;
         uncapped(&name, grant)?;
+        unjoined(&name, grant)?;
         let column = granted_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
@@ -952,6 +980,7 @@ fn helper_grant<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
+    unjoined(function, grant)?;
     let table = grant.table();
     let grantee = match grant.granted_to() {
         GrantedTo::Request(compared) => {
@@ -1410,6 +1439,30 @@ fn uncapped<DB: DatabaseLike>(
             function: function.to_string(),
             table: table_identity(grant.table()).to_string(),
             cap: cap.function().target_name().to_string(),
+        }),
+    }
+}
+
+/// Refuses an arm keeping only the rows that name a joined row meeting the join, or that
+/// no row of another table blocks, which no relation loaded from the arm's table carries.
+fn unjoined<DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'_, DB>,
+) -> Result<(), HelperRefusal> {
+    let table = || table_identity(grant.table()).to_string();
+    if let Some(joined) = grant.joined_rows().first() {
+        return Err(HelperRefusal::Joined {
+            function: function.to_string(),
+            table: table(),
+            joined: table_identity(joined.table()).to_string(),
+        });
+    }
+    match grant.anti_joins().first() {
+        None => Ok(()),
+        Some(anti_join) => Err(HelperRefusal::AntiJoined {
+            function: function.to_string(),
+            table: table(),
+            blocking: table_identity(anti_join.table()).to_string(),
         }),
     }
 }
