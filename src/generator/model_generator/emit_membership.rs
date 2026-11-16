@@ -8,7 +8,9 @@ use super::*;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
-use crate::generator::tuple_generator::{quote_sql_identifier, render_attribute_test};
+use crate::generator::tuple_generator::{
+    quote_sql_identifier, quote_sql_string_literal, render_attribute_test,
+};
 use crate::generator::well_known::HOLDER_OBJECT_ID;
 use sql_traits::structs::WalkDirection;
 
@@ -1690,9 +1692,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
     let groups = grant_row_groups(&grant.rows, &grant.time_bounds, &unsplit);
     let subjects = match &grant.grantee {
         HelperGrantee::Caller { user_column } => {
-            let Some(excluded) = caller_exclusion(user_column, &grant.excluded) else {
-                return Vec::new();
-            };
+            let excluded = caller_exclusion(user_column, &grant.excluded);
             let aggregate = !row_uniquely_keys(&grant.table, &grant.tuple_key(), ctx.db);
             let plan = helper_level_plan(level_type, level, table_plan, all_types);
             return groups
@@ -1797,35 +1797,39 @@ struct GrantSubject {
     excluded: Vec<String>,
 }
 
-/// `<column> <> '<caller>'` for each of `excluded`. `None` where one has no SQL spelling.
-fn caller_exclusion(column: &ColumnName, excluded: &[String]) -> Option<Vec<ResidualPredicate>> {
-    let kept: Vec<AttributePredicate> = excluded
+/// `<column> <> '<caller>'` for each of `excluded`.
+fn caller_exclusion(column: &ColumnName, excluded: &[String]) -> Vec<ResidualPredicate> {
+    let column_sql = quote_sql_identifier(column.as_str());
+    excluded
         .iter()
-        .map(|caller| AttributePredicate {
-            column: column.clone(),
-            test: AttributeTest::Compare {
-                operator: AttributeOperator::NotEq,
-                value: AttributeLiteral::Text(caller.clone()),
-            },
+        .map(|caller| ResidualPredicate {
+            sql: format!("{column_sql} <> {}", quote_sql_string_literal(caller)),
+            guard: Some(ResidualGuard::Compare(AttributePredicate {
+                column: column.clone(),
+                test: AttributeTest::Compare {
+                    operator: AttributeOperator::NotEq,
+                    value: AttributeLiteral::Text(caller.clone()),
+                },
+            })),
+            request: None,
+            relations: Vec::new(),
         })
-        .collect();
-    attribute_conjuncts(&kept, None)
+        .collect()
 }
 
 impl GrantSubject {
     /// The user `column` names, unless it is one of `excluded`, which no row grants.
-    /// `None` where an exclusion has no SQL spelling.
     fn user(
         column: ColumnName,
         mut joins: Vec<ResidualPredicate>,
         excluded: &[String],
-    ) -> Option<GrantSubject> {
-        joins.extend(caller_exclusion(&column, excluded)?);
-        Some(GrantSubject {
+    ) -> GrantSubject {
+        joins.extend(caller_exclusion(&column, excluded));
+        GrantSubject {
             granted: Granted::User(column),
             joins,
             excluded: Vec::new(),
-        })
+        }
     }
 
     fn direct_subject(&self, well_known: &WellKnownTypes) -> DirectSubject {
@@ -1906,7 +1910,7 @@ fn set_subjects<DB: DatabaseLike>(
             }
         }
         if grant.returns_the_caller() {
-            subjects.extend(GrantSubject::user(
+            subjects.push(GrantSubject::user(
                 grantee_column.clone(),
                 vec![join],
                 &kept_out,

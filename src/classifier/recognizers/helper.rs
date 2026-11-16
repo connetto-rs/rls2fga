@@ -838,21 +838,26 @@ fn excluded_callers(
         SettingContent::Value(SettingValue::Caller(data_type)) => Some(data_type),
         _ => None,
     };
+    // `sql-traits` names each excluded value once.
     let mut excluded = Vec::with_capacity(gate.excluded().len());
     for value in gate.excluded() {
+        let text = match value {
+            Value::SingleQuotedString(text) => Some(text.as_str()),
+            Value::DollarQuotedString(text) => Some(text.value.as_str()),
+            _ => None,
+        };
         // No check sends an empty caller, so `<> ''` excludes nobody.
-        if matches!(value, Value::SingleQuotedString(text) if text.is_empty()) {
+        if text == Some("") {
             continue;
         }
-        let identity = data_type
-            .and_then(|data_type| caller_identity(value, data_type))
+        let identity = text
+            .zip(data_type)
+            .and_then(|(text, data_type)| caller_identity(text, data_type))
             .ok_or_else(|| HelperRefusal::UnnamedCaller {
                 function: function.to_string(),
                 value: value.to_string(),
             })?;
-        if !excluded.contains(&identity) {
-            excluded.push(identity);
-        }
+        excluded.push(identity);
     }
     if !excluded.is_empty() && matches!(grantee, HelperGrantee::RequestSet { .. }) {
         return Err(HelperRefusal::ExcludedFromRequestSet {
@@ -862,17 +867,12 @@ fn excluded_callers(
     Ok(excluded)
 }
 
-/// The identity a check sends for a caller equal to `value`, which the deployment
+/// The identity a check sends for a caller spelled `text`, which the deployment
 /// promises to send in the canonical text of `data_type`.
 ///
-/// `None` where the literal is not that canonical text, since the cast `PostgreSQL`
-/// applies is not read here, and for a type with no such reading.
-fn caller_identity(value: &Value, data_type: &DataType) -> Option<String> {
-    let text = match value {
-        Value::SingleQuotedString(text) => text.as_str(),
-        Value::DollarQuotedString(text) => text.value.as_str(),
-        _ => return None,
-    };
+/// `None` where `text` is not that canonical text, since the cast `PostgreSQL` applies
+/// is not read here, and for a type with no such reading.
+fn caller_identity(text: &str, data_type: &DataType) -> Option<String> {
     let canonical = match data_type {
         DataType::Text | DataType::Varchar(None) | DataType::CharacterVarying(None) => true,
         DataType::Uuid => {

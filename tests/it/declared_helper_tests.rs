@@ -10,8 +10,9 @@ use rls2fga::generator::tuple_generator::SkippedTuples;
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::{AttributeLiteral, AttributePredicate, AttributeTest, ConfidenceLevel};
 use rls2fga::types::{ColumnName, TranslationNote};
+use sqlparser::ast::DataType;
 
-use crate::support::deployment::{caller, delimited_set, deployment, scalar};
+use crate::support::deployment::{caller, delimited_set, deployment, scalar, typed_caller};
 use crate::support::footgun::{db_of, relation_definition};
 
 /// The request's reduced ownership schema, two levels of grants under the orders.
@@ -1162,18 +1163,7 @@ fn a_gate_on_a_caller_that_may_be_unset_is_refused() {
         .with_min_confidence(ConfidenceLevel::B)
         .with_declared_helpers(AUDIENCE_HELPERS)
         .build();
-    let classified = translator
-        .classify(&db_of(AUDIENCES))
-        .into_iter()
-        .find(|classified| classified.name() == "docs_read")
-        .expect("docs_read should classify")
-        .using_classification()
-        .expect("USING should classify")
-        .clone();
-    assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
-    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = classified.pattern else {
-        panic!("docs_read should be refused, got {classified:?}");
-    };
+    let reason = audience_refusal(&translator, AUDIENCES);
     assert!(reason.contains("app.user_id"), "{reason}");
 }
 
@@ -1639,4 +1629,146 @@ fn each_clock_comparison_keeps_its_direction() {
             .map(|(line, _)| line.trim());
         assert_eq!(condition, Some(compared), "{bound}: {dsl}");
     }
+}
+
+/// The audience helper over a deployment sending its caller as `data_type`.
+fn typed_audience_translator(data_type: DataType) -> Translator {
+    TranslatorBuilder::new(deployment([typed_caller("app.user_id", data_type)]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers(AUDIENCE_HELPERS)
+        .build()
+}
+
+/// The tuple queries loading `relation`.
+fn queries_loading(translator: &Translator, sql: &str, relation: &str) -> Vec<String> {
+    let needle = format!("'{relation}' AS relation");
+    translator
+        .translate(&db_of(sql))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate")
+        .tuple_queries()
+        .iter()
+        .filter(|query| query.sql.contains(&needle))
+        .map(|query| query.sql.clone())
+        .collect()
+}
+
+/// The reason `translator` refuses the `USING` clause of `docs_read`.
+fn audience_refusal(translator: &Translator, sql: &str) -> String {
+    let classified = translator
+        .classify(&db_of(sql))
+        .into_iter()
+        .find(|classified| classified.name() == "docs_read")
+        .expect("docs_read should classify")
+        .using_classification()
+        .expect("USING should classify")
+        .clone();
+    assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
+    match classified.pattern {
+        PatternClass::Unknown(UnclassifiedExpr { reason, .. }) => reason,
+        other => panic!("docs_read should be refused, got {other:?}"),
+    }
+}
+
+/// One caller excluded in two spellings is loaded once.
+#[test]
+fn a_caller_excluded_in_two_spellings_is_loaded_once() {
+    let sql = AUDIENCES.replace(
+        "<> 'anonymous'",
+        "<> $q$anonymous$q$ AND current_setting('app.user_id', true) <> 'anonymous'",
+    );
+    let excluded = queries_loading(
+        &translator(ConfidenceLevel::B, AUDIENCE_HELPERS),
+        &sql,
+        "signed_in_excluded",
+    );
+    assert_eq!(excluded.len(), 1, "{excluded:#?}");
+    assert!(
+        excluded[0].contains("'user:anonymous' AS subject"),
+        "{excluded:#?}"
+    );
+}
+
+/// A `uuid` caller is excluded as the lowercase text a check sends, and a constant
+/// spelled any other way is refused, as is a constant excluded from a caller whose
+/// type has no canonical text read here.
+#[test]
+fn a_typed_caller_is_excluded_only_in_its_canonical_spelling() {
+    let lowercase = "00000000-0000-0000-0000-00000000000a";
+    let excluded = queries_loading(
+        &typed_audience_translator(DataType::Uuid),
+        &AUDIENCES.replace("'anonymous'", &format!("'{lowercase}'")),
+        "signed_in_excluded",
+    );
+    assert_eq!(excluded.len(), 1, "{excluded:#?}");
+    assert!(
+        excluded[0].contains(&format!("'user:{lowercase}' AS subject")),
+        "{excluded:#?}"
+    );
+    for (data_type, spelled) in [
+        (DataType::Uuid, "'00000000-0000-0000-0000-00000000000A'"),
+        (DataType::Uuid, "'00000000_0000-0000-0000-00000000000a'"),
+        (DataType::Uuid, "'0000'"),
+        (DataType::Integer(None), "'7'"),
+    ] {
+        let reason = audience_refusal(
+            &typed_audience_translator(data_type),
+            &AUDIENCES.replace("'anonymous'", spelled),
+        );
+        assert!(
+            reason.contains(&format!("excludes the caller {spelled}")),
+            "{reason}"
+        );
+    }
+}
+
+/// An arm keeping every row of a table with no declared roles grants each to every
+/// caller, with no condition on the rows it loads.
+#[test]
+fn an_unfiltered_audience_arm_loads_every_row() {
+    let sql = AUDIENCES
+        .replace(
+            " CHECK (visibility IN ('public', 'signed_in', 'private'))",
+            "",
+        )
+        .replace(" WHERE p.visibility = 'public'", "");
+    let dsl = model(&sql, AUDIENCE_HELPERS);
+    assert_eq!(
+        relation_definition(&dsl, "projects", "projects").as_deref(),
+        Some("[user:*]"),
+        "{dsl}"
+    );
+    let loading = queries_loading(
+        &translator(ConfidenceLevel::B, AUDIENCE_HELPERS),
+        &sql,
+        "projects",
+    );
+    let unfiltered: Vec<&str> = loading
+        .iter()
+        .map(String::as_str)
+        .filter(|query| query.contains("'user:*' AS subject"))
+        .collect();
+    assert_eq!(unfiltered.len(), 1, "{loading:#?}");
+    assert!(!unfiltered[0].contains("\nAND ("), "{}", unfiltered[0]);
+}
+
+/// A role spelled as a number names no relation, so its audiences are named after the
+/// table they read.
+#[test]
+fn an_audience_role_spelled_as_a_number_is_named_after_its_table() {
+    let sql = AUDIENCES
+        .replace(
+            "visibility TEXT NOT NULL CHECK (visibility IN ('public', 'signed_in', 'private'))",
+            "visibility INT NOT NULL CHECK (visibility IN (1, 2, 3))",
+        )
+        .replace("p.visibility = 'public'", "p.visibility = 1")
+        .replace("p.visibility = 'signed_in'", "p.visibility = 2");
+    let dsl = model(&sql, AUDIENCE_HELPERS);
+    let definition = |relation: &str| {
+        relation_definition(&dsl, "projects", relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(definition("projects"), "[user:*]");
+    assert_eq!(definition("projects_everyone"), "[user:*]");
+    assert_eq!(definition("projects_excluded"), "[user]");
 }
