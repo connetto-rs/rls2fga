@@ -1940,8 +1940,13 @@ fn grantee_join(
         table.sql_name(),
         quote_sql_identifier(column.as_str())
     );
-    for conjunct in attribute_conjuncts(predicates, Some(&alias))? {
-        let _ = write!(sql, " AND {}", conjunct.sql);
+    for predicate in predicates {
+        let _ = write!(
+            sql,
+            " AND {alias}.{} {}",
+            quote_sql_identifier(predicate.column.as_str()),
+            render_attribute_test(&predicate.test)?
+        );
     }
     sql.push(')');
     Some(ResidualPredicate {
@@ -2325,35 +2330,6 @@ fn kept_rows(rows: &GrantRows) -> Vec<AttributePredicate> {
         .collect(),
         GrantRows::Matching { predicates } => predicates.clone(),
     }
-}
-
-/// `predicates` as residual conjuncts on the columns of the row `qualifier` names, or
-/// of the query's one table. `None` where one has no SQL spelling.
-fn attribute_conjuncts(
-    predicates: &[AttributePredicate],
-    qualifier: Option<&str>,
-) -> Option<Vec<ResidualPredicate>> {
-    predicates
-        .iter()
-        .map(|predicate| {
-            let column = quote_sql_identifier(predicate.column.as_str());
-            let test = render_attribute_test(&predicate.test)?;
-            Some(match qualifier {
-                Some(qualifier) => ResidualPredicate {
-                    sql: format!("{qualifier}.{column} {test}"),
-                    guard: None,
-                    request: None,
-                    relations: Vec::new(),
-                },
-                None => ResidualPredicate {
-                    sql: format!("{column} {test}"),
-                    guard: Some(ResidualGuard::Compare(predicate.clone())),
-                    request: None,
-                    relations: Vec::new(),
-                },
-            })
-        })
-        .collect()
 }
 
 /// The relations one set of a grant arm's rows holds on the level, each with the
