@@ -204,6 +204,31 @@ fn force_row_level_security_on_the_read_table_refuses() {
     );
 }
 
+/// `FORCE` binds the table owner alone, so a definer owned by a `BYPASSRLS` role or
+/// a superuser reads the membership table unfiltered whether it is forced or not.
+#[test]
+fn a_bypassing_function_owner_expands_over_a_forced_table() {
+    for attribute in ["BYPASSRLS", "SUPERUSER"] {
+        for force in ["", "ALTER TABLE doc_members FORCE ROW LEVEL SECURITY;"] {
+            let sql = format!(
+                "CREATE ROLE svc {attribute};\n{DEFINER_MEMBERSHIP}{force}\
+                 ALTER FUNCTION is_member(UUID) OWNER TO svc;"
+            );
+            let pattern = docs_using_pattern(&sql);
+            assert!(
+                matches!(
+                    pattern,
+                    PatternClass::ExpandedFunction(ExpandedFunction {
+                        reads_bypass_rls: true,
+                        ..
+                    })
+                ),
+                "{attribute} with {force:?} reads every row, got {pattern:?}"
+            );
+        }
+    }
+}
+
 #[test]
 fn a_split_function_owner_refuses() {
     let sql = format!(
