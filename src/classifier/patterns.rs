@@ -799,13 +799,11 @@ pub enum GrantRows {
     },
 }
 
-/// `SELECT <key> FROM <table> WHERE <fk column> IN (SELECT <call>)`.
+/// `SELECT <child> FROM <table> WHERE <parent> IN (SELECT <call>)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperParent {
-    /// The table whose rows the arm returns, the level or one whose key references it.
-    pub table: TableId,
-    /// Column of `table` referencing the rows `call` returns.
-    pub fk_column: ColumnName,
+    /// The rows naming the parent of each row the arm returns.
+    pub edges: TreeEdges,
     /// The call returning the parents.
     pub call: HelperCall,
 }
@@ -813,12 +811,22 @@ pub struct HelperParent {
 /// The recursive term of a `WITH RECURSIVE` body walking a tree of the level's keys.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperWalk {
-    /// The table holding the tree, the level or one whose key references it.
-    pub table: TableId,
-    /// Column of `table` referencing its own key, the row's parent.
-    pub fk_column: ColumnName,
+    /// The rows naming the parent of each row of the tree.
+    pub edges: TreeEdges,
     /// Which way the walk follows the tree.
     pub direction: sql_traits::structs::WalkDirection,
+}
+
+impl HelperWalk {
+    /// The column of the edges whose values the walk adds to the set, each edge's child
+    /// walking down and its parent walking up.
+    #[must_use]
+    pub fn returned_column(&self) -> &ColumnName {
+        match self.direction {
+            sql_traits::structs::WalkDirection::Down => &self.edges.child_column,
+            sql_traits::structs::WalkDirection::Up => &self.edges.parent_column,
+        }
+    }
 }
 
 /// P29: a row of `table` its own columns flag, named by `column` of the guarded row or
@@ -838,18 +846,19 @@ pub struct FlaggedRow {
     /// Conditions on the flagged row's own columns, all holding at once.
     pub predicates: Vec<AttributePredicate>,
     /// The edge tables the test walks up, empty where it reads the named row alone.
-    pub edges: Vec<FlagEdge>,
+    pub edges: Vec<TreeEdges>,
 }
 
-/// One table of an upward walk, each of its rows making the `parent_column` row a parent
-/// of the `child_column` row.
-#[derive(Debug, Clone, PartialEq)]
-pub struct FlagEdge {
-    /// The edge table.
+/// The rows linking a row of a tree to its parent, each naming a child and its parent by
+/// their keys, the tree's own rows where each names its own parent, or an edge table's.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TreeEdges {
+    /// The table holding the edges.
     pub table: TableId,
-    /// Column naming the row whose parent the edge row names.
+    /// Column of `table` naming each edge's child, the table's key where the table is
+    /// the tree itself.
     pub child_column: ColumnName,
-    /// Column naming the parent.
+    /// Column of `table` naming each edge's parent.
     pub parent_column: ColumnName,
 }
 

@@ -709,14 +709,13 @@ fn helper_call<DB: DatabaseLike>(
                 )
             }
             HelperArm::Parent(parent) => (
-                table_identity(parent.table()),
+                table_identity(parent.child_table()),
                 HelperSetArm::Parent(helper_parent(&name, parent, db, registry)?),
             ),
             HelperArm::Walk(walk) => (
-                table_identity(walk.table()),
+                table_identity(walk.tree()),
                 HelperSetArm::Walk(HelperWalk {
-                    table: table_identity(walk.table()),
-                    fk_column: ColumnName::from_stored(walk.column().stored_column_name()),
+                    edges: helper_edges::<DB>(walk.table(), walk.child(), walk.column()),
                     direction: walk.direction(),
                 }),
             ),
@@ -785,7 +784,7 @@ fn helper_parent<DB: DatabaseLike>(
             called: called.target_name().to_string(),
         });
     }
-    let fk_column = ColumnName::from_stored(parent.column().stored_column_name());
+    let edges = helper_edges::<DB>(parent.table(), parent.key(), parent.column());
     // Without a foreign key the parent is the table the called set covers.
     let referenced = rows_named_by(parent.table(), parent.column(), db)?
         .unwrap_or_else(|| table_identity(parent.parent_table()));
@@ -793,16 +792,26 @@ fn helper_parent<DB: DatabaseLike>(
         called,
         parent.arguments(),
         parent.set(),
-        &fk_column,
+        &edges.parent_column,
         &referenced,
         db,
         registry,
     )?;
-    Ok(HelperParent {
-        table: table_identity(parent.table()),
-        fk_column,
-        call,
-    })
+    Ok(HelperParent { edges, call })
+}
+
+/// The edges the rows of `table` draw, each from the row `child` names to the one
+/// `parent` names.
+fn helper_edges<DB: DatabaseLike>(
+    table: &DB::Table,
+    child: &DB::Column,
+    parent: &DB::Column,
+) -> TreeEdges {
+    TreeEdges {
+        table: table_identity(table),
+        child_column: ColumnName::from_stored(child.stored_column_name()),
+        parent_column: ColumnName::from_stored(parent.stored_column_name()),
+    }
 }
 
 fn helper_grant<DB: DatabaseLike>(

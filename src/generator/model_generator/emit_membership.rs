@@ -1545,7 +1545,7 @@ fn flag_relation<DB: DatabaseLike>(
     }
     let mut links = Vec::with_capacity(flag.edges.len());
     for edge in &flag.edges {
-        let FlagEdge {
+        let TreeEdges {
             table,
             child_column,
             parent_column,
@@ -1578,6 +1578,7 @@ fn flag_relation<DB: DatabaseLike>(
     plan.walk_notes
         .entry((
             relation.clone(),
+            flag.table.clone(),
             ColumnName::from_stored(named_after.to_string()),
         ))
         .or_insert_with(|| TranslationNote::FlagWalkDepth {
@@ -1621,16 +1622,8 @@ fn helper_call_relation<DB: DatabaseLike>(
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
                 let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
-                let Some(tupleset) = helper_parent_link(
-                    plan,
-                    &parent.table,
-                    &call.level,
-                    &parent.fk_column,
-                    parent_type,
-                    ctx.db,
-                ) else {
-                    continue;
-                };
+                let tupleset =
+                    helper_parent_link(plan, &parent.edges, &call.level, parent_type, ctx.db);
                 parts.push(UsersetExpr::TupleToUserset {
                     tupleset,
                     computed: parents,
@@ -1651,61 +1644,66 @@ fn helper_call_relation<DB: DatabaseLike>(
     let walks = walked
         .iter()
         .map(|walk| match walk.direction {
-            WalkDirection::Down => helper_parent_link(
-                plan,
-                &walk.table,
-                &call.level,
-                &walk.fk_column,
-                level_type.clone(),
-                ctx.db,
-            ),
-            // `sql-traits` reads a walk up only along a one-column key.
-            WalkDirection::Up => single_identity_column(&walk.table, ctx.db).map(|key| {
-                helper_child_bridge(plan, &walk.table, &walk.fk_column, &level_type, &key)
-            }),
+            WalkDirection::Down => {
+                helper_parent_link(plan, &walk.edges, &call.level, level_type.clone(), ctx.db)
+            }
+            WalkDirection::Up => helper_child_link(plan, &walk.edges, &level_type),
         })
-        .collect::<Option<Vec<_>>>()?;
+        .collect();
     let relation = plan.ensure_walk_computed(name, parts, walks);
     for walk in walked {
         plan.walk_notes
-            .entry((relation.clone(), walk.fk_column.clone()))
+            .entry((
+                relation.clone(),
+                walk.edges.table.clone(),
+                walk.edges.parent_column.clone(),
+            ))
             .or_insert_with(|| TranslationNote::HelperWalkDepth {
                 function: call.function.clone(),
-                table: walk.table.clone(),
-                column: walk.fk_column.clone(),
+                table: walk.edges.table.clone(),
+                column: walk.edges.parent_column.clone(),
                 relation: relation.clone(),
             });
     }
     Some(relation)
 }
 
-/// The tupleset naming, on the level's row sharing each key of `table`, the row of
-/// `parent_type` its `fk_column` names, with the source loading it. `None` where `table`
-/// is not the level and has no one-column key.
+/// The tupleset naming, on the level's row each edge's child names, the row of
+/// `parent_type` the edge's parent names, with the source loading it.
+///
+/// Edges the level keeps on its own rows, each row naming its own parent, load as the
+/// level's parent bridge, and any other edges from their table's rows.
 fn helper_parent_link<DB: DatabaseLike>(
     plan: &mut TypePlan,
-    table: &TableId,
+    edges: &TreeEdges,
     level: &TableId,
-    fk_column: &ColumnName,
     parent_type: TypeName,
     db: &DB,
-) -> Option<RelationName> {
-    if table == level {
-        return Some(helper_parent_bridge(plan, level, fk_column, parent_type));
+) -> RelationName {
+    if edges.table == *level
+        && single_identity_column(level, db).as_ref() == Some(&edges.child_column)
+    {
+        return helper_parent_bridge(plan, level, &edges.parent_column, parent_type);
     }
-    let key = single_identity_column(table, db)?;
-    let columns = core::slice::from_ref(fk_column);
-    let tupleset = parent_bridge_relation(plan, table, columns, &parent_type);
+    let mut source_key = table_source_key("edge_bridge", &edges.table);
+    source_key_part(&mut source_key, edges.child_column.as_str());
+    source_key_part(&mut source_key, edges.parent_column.as_str());
+    source_key_part(&mut source_key, parent_type.as_str());
+    let tupleset = plan.membership_source_relation(
+        &source_key,
+        parent_type.as_str(),
+        vec![DirectSubject::Type(parent_type.clone())],
+    );
     plan.add_source(TupleSource::ClosureBridge {
-        link_table: table.clone(),
-        object_cols: vec![key],
-        subject_cols: columns.to_vec(),
+        link_table: edges.table.clone(),
+        object_cols: vec![edges.child_column.clone()],
+        subject_cols: vec![edges.parent_column.clone()],
         guarded_type: plan.type_name.clone(),
         owner_type: parent_type,
         relation: tupleset.clone(),
         extra_predicates: ResidualPredicates::default(),
     });
-    Some(tupleset)
+    tupleset
 }
 
 /// The tupleset naming each row's parent of `parent_type` through `fk_column` of
@@ -1730,26 +1728,25 @@ fn helper_parent_bridge(
     tupleset
 }
 
-/// The tupleset naming, on each row of `level`, the rows whose `fk_column` names it, with
-/// the source loading it.
-fn helper_child_bridge(
+/// The tupleset naming, on the level's row each edge's parent names, the row of the
+/// level the edge's child names, with the source loading it.
+fn helper_child_link(
     plan: &mut TypePlan,
-    level: &TableId,
-    fk_column: &ColumnName,
+    edges: &TreeEdges,
     level_type: &TypeName,
-    key: &ColumnName,
 ) -> RelationName {
-    let mut source_key = table_source_key("child_bridge", level);
-    source_key_part(&mut source_key, fk_column.as_str());
+    let mut source_key = table_source_key("child_bridge", &edges.table);
+    source_key_part(&mut source_key, edges.parent_column.as_str());
+    source_key_part(&mut source_key, edges.child_column.as_str());
     let tupleset = plan.membership_source_relation(
         &source_key,
         "child",
         vec![DirectSubject::Type(level_type.clone())],
     );
     plan.add_source(TupleSource::ClosureBridge {
-        link_table: level.clone(),
-        object_cols: vec![fk_column.clone()],
-        subject_cols: vec![key.clone()],
+        link_table: edges.table.clone(),
+        object_cols: vec![edges.parent_column.clone()],
+        subject_cols: vec![edges.child_column.clone()],
         guarded_type: level_type.clone(),
         owner_type: level_type.clone(),
         relation: tupleset.clone(),

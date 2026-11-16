@@ -331,10 +331,11 @@ pub(crate) struct TypePlan {
     /// Per command some acting role holds on some columns only, the relations on this
     /// table's gate object naming who holds it on each column.
     pub column_relations: Vec<ColumnRelations>,
-    /// The note each declared helper's walk down this type's parent column carries,
-    /// keyed by the relation resolved through it and that column, and read once pruning
-    /// has settled which relations survive.
-    walk_notes: BTreeMap<(RelationName, ColumnName), TranslationNote>,
+    /// The note each declared helper's walk along this type's edges, or a flagged row's
+    /// walk up them, carries, keyed by the relation resolved through it, the table holding
+    /// the edges or the flags and the column read there, and read once pruning has settled
+    /// which relations survive.
+    walk_notes: BTreeMap<(RelationName, TableId, ColumnName), TranslationNote>,
 }
 
 /// Subjects the generator's own structural relations hold, or `None` when the
@@ -1493,7 +1494,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         notes.extend(
             walks
                 .into_iter()
-                .filter(|((relation, _), _)| plan.computed_relations.contains_key(relation))
+                .filter(|((relation, _, _), _)| plan.computed_relations.contains_key(relation))
                 .map(|(_, note)| note),
         );
     }

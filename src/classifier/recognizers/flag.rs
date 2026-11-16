@@ -218,7 +218,7 @@ struct Flagged {
 /// The seed and steps of a walk.
 struct Walk {
     seed: ColumnName,
-    edges: Vec<FlagEdge>,
+    edges: Vec<TreeEdges>,
 }
 
 /// Whether nothing past `FROM` and `WHERE` decides which rows `query` returns.
@@ -576,7 +576,7 @@ fn step_edges<DB: DatabaseLike>(
     name: &str,
     column: &str,
     db: &DB,
-) -> Option<Vec<FlagEdge>> {
+) -> Option<Vec<TreeEdges>> {
     if step.selection.is_some() || select_result_shaping_clause(step).is_some() {
         return None;
     }
@@ -639,7 +639,7 @@ fn lateral_edges<DB: DatabaseLike>(
     subquery: &Query,
     walk: &WalkColumn<'_>,
     db: &DB,
-) -> Option<Vec<FlagEdge>> {
+) -> Option<Vec<TreeEdges>> {
     if query_binds_its_own_names(subquery) || !reads_every_row(subquery) {
         return None;
     }
@@ -697,7 +697,7 @@ fn edge_of<DB: DatabaseLike>(
     condition: &Expr,
     walk: &WalkColumn<'_>,
     parent: String,
-) -> Option<FlagEdge> {
+) -> Option<TreeEdges> {
     // An edge read under the walk's own name, or read by its name, is the walk.
     if edge_visible == walk.visible || names_binding(edge, walk.name) {
         return None;
@@ -717,7 +717,7 @@ fn edge_of<DB: DatabaseLike>(
     let table = resolve_table_id(db, &edge.to_string())?;
     let written = table.to_string();
     (table_has_column(db, &written, &child) && table_has_column(db, &written, &parent)).then(|| {
-        FlagEdge {
+        TreeEdges {
             table,
             child_column: ColumnName::from_stored(child),
             parent_column: ColumnName::from_stored(parent),
