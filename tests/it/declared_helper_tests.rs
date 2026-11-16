@@ -553,6 +553,83 @@ fn every_unproven_call_is_refused() {
     }
 }
 
+/// Grants scoped to their resource's organization, the grant column's foreign keys
+/// written in place of `keys`, read by `authz.reach()` and the policy on `resources`.
+fn organization_grants(keys: &str) -> String {
+    format!(
+        "CREATE TABLE organizations (id TEXT PRIMARY KEY);
+         CREATE TABLE resources (id TEXT PRIMARY KEY,
+           organization_id TEXT NOT NULL REFERENCES organizations (id), UNIQUE (organization_id, id));
+         CREATE TABLE archives (id TEXT PRIMARY KEY,
+           organization_id TEXT NOT NULL REFERENCES organizations (id), UNIQUE (organization_id, id));
+         CREATE TABLE resource_labels (resource_id TEXT NOT NULL REFERENCES resources (id),
+           label TEXT NOT NULL, PRIMARY KEY (resource_id, label));
+         CREATE TABLE grants (resource_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+           label TEXT NOT NULL, grantee_id TEXT NOT NULL, PRIMARY KEY (resource_id, grantee_id){keys});
+         CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+         CREATE SCHEMA authz;
+         GRANT USAGE ON SCHEMA authz TO authz_owner;
+         GRANT SELECT ON grants TO authz_owner;
+         CREATE FUNCTION authz.reach() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT g.resource_id FROM public.grants g WHERE g.grantee_id = current_setting('app.user_id', true)
+         $$;
+         ALTER FUNCTION authz.reach() OWNER TO authz_owner;
+         ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY resources_read ON resources FOR SELECT USING (id IN (SELECT authz.reach()));"
+    )
+}
+
+/// A grant column held in a foreign key of any width names the rows of the table whose
+/// key column it is paired with, and a pairing with any other column says nothing.
+#[test]
+fn a_grant_column_in_a_composite_key_names_the_rows_its_paired_key_references() {
+    let single = model(
+        &organization_grants(", FOREIGN KEY (resource_id) REFERENCES resources (id)"),
+        &["authz.reach"],
+    );
+    assert_eq!(
+        relation_definition(&single, "resources", "can_select").as_deref(),
+        Some("reach and acting_app_user from request_gate")
+    );
+    for keys in [
+        ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id)",
+        // `resource_labels` has no one key column, so the label key types nothing.
+        ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id),
+           FOREIGN KEY (resource_id, label) REFERENCES resource_labels (resource_id, label)",
+        // Paired with `organization_id`, the column names no resource through this key.
+        ", FOREIGN KEY (resource_id) REFERENCES resources (id),
+           FOREIGN KEY (resource_id, organization_id) REFERENCES resources (organization_id, id)",
+    ] {
+        assert_eq!(
+            model(&organization_grants(keys), &["authz.reach"]),
+            single,
+            "{keys}"
+        );
+    }
+}
+
+/// A grant column whose composite keys pair it with the key columns of two tables, or
+/// whose only composite key pairs it with no key column, names no one table's rows.
+#[test]
+fn a_grant_column_its_keys_pair_with_no_one_table_key_is_refused() {
+    for keys in [
+        ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id),
+           FOREIGN KEY (organization_id, resource_id) REFERENCES archives (organization_id, id)",
+        ", FOREIGN KEY (resource_id, organization_id) REFERENCES resources (organization_id, id)",
+    ] {
+        let refused = refusal_of(
+            &organization_grants(keys),
+            &["authz.reach"],
+            "resources_read",
+        );
+        assert!(
+            refused.contains("column 'resource_id' of 'public.grants' names no row of one table"),
+            "{keys}: {refused}"
+        );
+    }
+}
+
 /// A call keeping no role the closed column can hold returns nothing, through its
 /// parent arm too, and a compared table whose rows have no key has nothing to bridge.
 #[test]
