@@ -6,7 +6,7 @@ use rls2fga::types::ConfidenceLevel;
 use sqlparser::ast::DataType;
 
 use crate::support::deployment::{deployment, principal, typed_caller};
-use crate::support::footgun::db_of;
+use crate::support::footgun::{db_of, relation_definition, type_names};
 
 /// Organizations a member reads, and the notes of those organizations, capped by the literal
 /// kind `organization` while an app installation acts for the member, and the resources a
@@ -152,10 +152,61 @@ fn caps_by_a_literal_kind_or_by_the_row_kind_translate() {
         .expect("the schema translates");
 }
 
+/// A table already named like a cap's pair type keeps its type, and the pairs move to a
+/// type of their own, holding whoever the cap returns them to.
+#[test]
+fn a_pair_type_named_like_a_table_takes_a_name_of_its_own() {
+    let schema =
+        format!("{INSTALLATION_CAPS}CREATE TABLE capped_kinds_reader_pair (id UUID PRIMARY KEY);");
+    let dsl = installation_translator(CAP_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model()
+        .clone();
+    assert_eq!(
+        relation_definition(&dsl, "capped_kinds_reader_pair", "capped_kinds_reader"),
+        None,
+        "{dsl}"
+    );
+    let pairs: Vec<String> = type_names(&dsl)
+        .into_iter()
+        .filter(|name| name.starts_with("capped_kinds_reader_pair_"))
+        .collect();
+    let [pairs] = pairs.as_slice() else {
+        panic!("one renamed pair type expected, got {pairs:?}\n{dsl}");
+    };
+    assert_eq!(
+        relation_definition(&dsl, pairs, "capped_kinds_reader").as_deref(),
+        Some("actor from member_installation"),
+        "{dsl}"
+    );
+    assert_eq!(
+        relation_definition(&dsl, "organizations", pairs).as_deref(),
+        Some(format!("[{pairs}]").as_str()),
+        "{dsl}"
+    );
+}
+
 /// A cap the model cannot keep is refused naming why, never dropped.
 #[test]
 fn caps_with_no_pair_relation_are_refused() {
     let lifted = "authz.acting_installation_id() IS NULL";
+    let capped = "(SELECT * FROM authz.capped_kinds('reader'))";
+    let reader_kinds = |condition: &str| {
+        format!(
+            "{INSTALLATION_CAPS}CREATE FUNCTION authz.reader_kinds()
+RETURNS TABLE (organization_id UUID, kind authz.resource_kind)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT permission.organization_id, permission.kind FROM public.installation_permissions permission
+  WHERE {condition}
+$$;
+ALTER FUNCTION authz.reader_kinds() OWNER TO authz_owner;
+"
+        )
+        .replace(capped, "(SELECT * FROM authz.reader_kinds())")
+    };
     let notes = "CREATE TABLE kind_notes (
   organization_id UUID NOT NULL REFERENCES organizations (id),
   kind authz.resource_kind NOT NULL,
@@ -208,8 +259,89 @@ CREATE POLICY organizations_noted ON organizations FOR SELECT
              'public.kind_notes' with the rows 'authz.capped_kinds' returns, while several rows \
              of 'public.kind_notes' can return one row",
         ),
+        (
+            reader_kinds("permission.installation_id = authz.acting_installation_id()")
+                .replace("authz.reader_kinds", "authz.undeclared_kinds"),
+            "organizations_select",
+            "declared helper 'authz.member_organizations' calls 'authz.undeclared_kinds', \
+             which is not declared",
+        ),
+        (
+            reader_kinds(
+                "(permission.organization_id, permission.kind) \
+                 IN (SELECT * FROM authz.capped_kinds('admin'))",
+            ),
+            "organizations_select",
+            "declared helper 'authz.member_organizations' is capped by 'authz.reader_kinds', \
+             whose own rows 'authz.capped_kinds' caps",
+        ),
+        (
+            INSTALLATION_CAPS.replace(
+                lifted,
+                "NULLIF(current_setting('app.user_id', true), '')::uuid IS NULL",
+            ),
+            "organizations_select",
+            "declared helper 'authz.member_organizations' lifts its cap where setting \
+             'app.user_id' reads NULL, which the deployment does not declare as one value a \
+             request may leave unset",
+        ),
+        (
+            INSTALLATION_CAPS.replace(
+                "'organization'::authz.resource_kind)",
+                "NULL::authz.resource_kind)",
+            ),
+            "organizations_select",
+            "declared helper 'authz.member_organizations' pairs 'NULL' with the rows \
+             'authz.capped_kinds' returns, which is no literal a pair is named by",
+        ),
+        (
+            format!(
+                "{INSTALLATION_CAPS}CREATE FUNCTION authz.installation_organizations()
+RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT installation.organization_id FROM public.app_installations installation
+  WHERE installation.id = authz.acting_installation_id()
+$$;
+CREATE FUNCTION authz.installation_resources() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT resource.id FROM public.resources resource
+  WHERE resource.organization_id IN (SELECT authz.installation_organizations())
+$$;
+GRANT SELECT ON app_installations TO authz_owner;
+ALTER FUNCTION authz.installation_organizations() OWNER TO authz_owner;
+ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
+"
+            )
+            .replace(
+                "(resource.organization_id, resource.kind) \
+                 IN (SELECT * FROM authz.capped_kinds('writer'))",
+                "resource.id IN (SELECT authz.installation_resources())",
+            ),
+            "resources_select",
+            "declared helper 'authz.owned_resources' is capped by \
+             'authz.installation_resources', which returns pairs through a parent or a walk",
+        ),
+        (
+            INSTALLATION_CAPS.replace(
+                "kind authz.resource_kind NOT NULL,\n  owner_id",
+                "kind TEXT NOT NULL,\n  owner_id",
+            ),
+            "resources_select",
+            "declared helper 'authz.owned_resources' pairs column 'kind' of 'public.resources' \
+             with column 'kind' of the rows 'authz.capped_kinds' returns, and the two are not \
+             of one type",
+        ),
     ] {
-        let helpers = [CAP_HELPERS, &["authz.noted_organizations"]].concat();
+        let helpers = [
+            CAP_HELPERS,
+            &[
+                "authz.noted_organizations",
+                "authz.reader_kinds",
+                "authz.installation_organizations",
+                "authz.installation_resources",
+            ],
+        ]
+        .concat();
         let using = using_of(&rewritten, &helpers, policy);
         assert_eq!(using.confidence, ConfidenceLevel::D, "{reason}");
         match using.pattern {
