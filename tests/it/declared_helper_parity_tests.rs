@@ -13,8 +13,8 @@ use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UN
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, GRANTEES,
-    GROUPS, INSTALLATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES,
-    RESOURCES,
+    GROUPS, INSTALLATIONS, INVITATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
+    REQUEST_VALUES, RESOURCES,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::row_cap_tests::INSTALLATION_CAPS;
@@ -1076,6 +1076,162 @@ async fn expiring_grants_agree_with_postgres_17_and_18_now_and_a_year_on() {
                 ActionStatement::Select,
                 true,
             );
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const INVITATION_HELPERS: &str = r#"{
+    "authz.pending_invitations": { "kind": "declared_helper" },
+    "authz.claimable": { "kind": "declared_helper" },
+    "authz.addressed": { "kind": "declared_helper" },
+    "authz.live_links": { "kind": "declared_helper" }
+}"#;
+
+/// The callers of [`invitations_case`], each with the address it presents, `None`
+/// leaving it unset, and the links it presents.
+const INVITEES: [(&str, Option<&str>, &str); 5] = [
+    ("ann", Some("Ann@Example.com"), "l1"),
+    ("emile", Some("ÉMILE@EXAMPLE.COM"), "l2"),
+    ("bob", Some("bob@example.com"), "l3"),
+    ("carol", Some("carol@example.com"), ""),
+    ("unset", None, "l1,l2"),
+];
+
+/// `ann`'s invitation ends tomorrow and `emile`'s in two years, `bob` accepted his,
+/// and `carol`'s ended yesterday. `l1` ends tomorrow, `l2` in two years and `l3`
+/// ended yesterday.
+fn invitations_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let principals = INVITEES
+        .iter()
+        .map(|(subject, email, links)| {
+            let mut principal = Principal::as_role(subject, "app_reader")
+                .with_context(serde_json::json!({
+                    "app_link_ids": links.split(',').filter(|link| !link.is_empty()).collect::<Vec<_>>()
+                }))
+                .with_clock();
+            if let Some(email) = email {
+                principal
+                    .session
+                    .push(("app.verified_email".into(), (*email).into()));
+            }
+            principal
+                .session
+                .push(("app.link_ids".into(), (*links).into()));
+            principal
+        })
+        .collect();
+    let callers = INVITEES
+        .iter()
+        .map(|(subject, email, links)| {
+            format!(
+                "('{subject}', {}, '{links}')",
+                email.map_or_else(|| "NULL::text".to_string(), |email| format!("'{email}'"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-invitations-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        INVITATIONS,
+        &[
+            "INSERT INTO invitations VALUES
+               ('i1', 'ann@example.com', NULL, now() + interval '1 day'),
+               ('i2', 'émile@example.com', NULL, now() + interval '2 years'),
+               ('i3', 'bob@example.com', 'bob', now() + interval '1 day'),
+               ('i4', 'carol@example.com', NULL, now() - interval '1 day');
+             INSERT INTO share_links VALUES
+               ('l1', now() + interval '1 day'),
+               ('l2', now() + interval '2 years'),
+               ('l3', now() - interval '1 day');
+             INSERT INTO memberships VALUES
+               ('m1', 'i1'), ('m2', 'i2'), ('m3', 'i3'), ('m4', 'i4'), ('m5', NULL);
+             INSERT INTO claims VALUES ('c1', 'i1'), ('c2', 'i2'), ('c3', 'i3'), ('c4', 'i4');
+             INSERT INTO notices VALUES ('n1', 'i1'), ('n3', 'i3'), ('n4', 'i4');
+             INSERT INTO docs VALUES ('d1', 'l1'), ('d2', 'l2'), ('d3', 'l3')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON memberships, claims, notices, docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        principals,
+    )
+    .with_settings([
+        support::deployment::scalar("app.verified_email").may_be_unset(),
+        support::deployment::delimited_set("app.link_ids", ","),
+    ])
+    .with_registry(INVITATION_HELPERS)
+    .also_at(
+        "1 year",
+        &format!(
+            "WITH callers (subject, email, links) AS (VALUES {callers}),
+                  presented AS (
+                    SELECT c.subject, i.id, i.accepted_by, i.expires_at, i.email = lower(c.email) AS lowered,
+                           i.email = c.email AS exact
+                    FROM callers c JOIN invitations i ON i.email IN (lower(c.email), c.email))
+             SELECT p.subject, 'memberships:' || m.id AS object
+             FROM presented p JOIN memberships m ON m.invitation_id = p.id
+             WHERE p.lowered AND p.accepted_by IS NULL AND p.expires_at > $1::timestamptz
+             UNION ALL
+             SELECT p.subject, 'claims:' || c.id FROM presented p JOIN claims c ON c.invitation_id = p.id
+             WHERE p.lowered
+             UNION ALL
+             SELECT p.subject, 'notices:' || n.id FROM presented p JOIN notices n ON n.invitation_id = p.id
+             WHERE p.exact
+             UNION ALL
+             SELECT c.subject, 'docs:' || d.id
+             FROM callers c JOIN share_links l ON l.id = ANY (string_to_array(c.links, ','))
+               JOIN docs d ON d.link_id = l.id
+             WHERE l.expires_at > $1::timestamptz"
+        ),
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A grant arm comparing its column with the lowered request address, through the
+/// accessor and inline, or with the address as sent, and a set kept while its rows last,
+/// agree with `PostgreSQL` now and a year on.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn request_values_behind_helpers_agree_with_postgres_17_and_18_now_and_a_year_on() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = invitations_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (subject, object, allowed) in [
+                ("ann", "memberships:m1", true),
+                ("ann", "claims:c1", true),
+                ("ann", "notices:n1", false),
+                ("ann", "docs:d1", true),
+                ("emile", "memberships:m2", true),
+                ("emile", "claims:c2", true),
+                ("emile", "docs:d2", true),
+                ("bob", "memberships:m3", false),
+                ("bob", "claims:c3", true),
+                ("bob", "notices:n3", true),
+                ("bob", "docs:d3", false),
+                ("carol", "memberships:m4", false),
+                ("carol", "claims:c4", true),
+                ("carol", "notices:n4", true),
+                ("unset", "memberships:m1", false),
+                ("unset", "claims:c1", false),
+                ("unset", "docs:d1", true),
+            ] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
             assert_agrees(&case, &run);
         }
     }

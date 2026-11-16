@@ -8,7 +8,7 @@
 
 use crate::prelude::*;
 use crate::ConfidenceLevel;
-use crate::{ColumnName, RelationName, TableId, TypeName};
+use crate::{ColumnName, RelationName, RequestNormalization, TableId, TypeName};
 use alloc::borrow::Cow;
 use core::fmt;
 use serde::{Deserialize, Serialize};
@@ -452,6 +452,9 @@ pub enum TranslationNote {
         separator: Option<String>,
         /// Whether the parameter holds a list of values rather than one value.
         is_list: bool,
+        /// The function the policy applies to the setting's value, whose result the
+        /// parameter carries in place of the value.
+        normalization: Option<RequestNormalization>,
     },
     /// The membership table grants no reads, so no membership row is visible.
     MembershipTableGrantsNoReads {
@@ -689,6 +692,7 @@ impl fmt::Display for TranslationNote {
                 setting_key,
                 separator,
                 is_list,
+                normalization,
             } => {
                 let refuse = "Omitting it makes the service refuse the check outright, \
                               where PostgreSQL would have hidden the row";
@@ -708,15 +712,26 @@ impl fmt::Display for TranslationNote {
                          {refuse}, so send exactly the elements of the JSON array {key} \
                          holds, and an empty list where {key} is unset"
                     ),
-                    (Some(key), _, false) => write!(
-                        f,
-                        "Every check context must carry the `settings` map. {refuse}, so \
-                         put the value of {key} in it under the key '{parameter}', exactly \
-                         as PostgreSQL renders it, and no key where {key} is unset. An \
-                         absent key reads as PostgreSQL reads an unset setting, so never \
-                         send an empty string in its place, which the model reads as a \
-                         value where PostgreSQL may read it as unset"
-                    ),
+                    (Some(key), _, false) => {
+                        let value = match normalization {
+                            Some(normalization) => format!(
+                                "what {}({key}) returns, computed by the database the \
+                                 policies run in, since its result follows that database's \
+                                 collation,",
+                                normalization.function_name()
+                            ),
+                            None => format!("the value of {key}"),
+                        };
+                        write!(
+                            f,
+                            "Every check context must carry the `settings` map. {refuse}, \
+                             so put {value} in it under the key '{parameter}', exactly as \
+                             PostgreSQL renders it, and no key where {key} is unset. An \
+                             absent key reads as PostgreSQL reads an unset setting, so \
+                             never send an empty string in its place, which the model reads \
+                             as a value where PostgreSQL may read it as unset"
+                        )
+                    }
                     _ => write!(f, "Every check context must carry '{parameter}'. {refuse}"),
                 }
             }

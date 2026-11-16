@@ -60,6 +60,7 @@ pub(crate) fn session_attribute_expr<DB: DatabaseLike>(
         column: column.clone(),
         request_parameter: request_parameter.to_string(),
         setting_key: source.setting_key().to_string(),
+        normalization: source.normalization(),
         separator: separator.map(str::to_string),
         comparison,
     });
@@ -769,6 +770,7 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
         member_col: member_column.clone(),
         request_parameter: request_parameter.to_string(),
         setting_key: source.setting_key().to_string(),
+        normalization: source.normalization(),
         separator: separator.clone(),
         comparison: RequestComparison::CallerSetHolds,
         extra_predicates: extra_predicates.clone(),

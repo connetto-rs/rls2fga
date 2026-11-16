@@ -8,6 +8,7 @@
 
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
+use alloc::borrow::Cow;
 use core::ops::ControlFlow;
 
 use sqlparser::ast::{BinaryOperator, Expr, InTarget};
@@ -147,7 +148,9 @@ fn request_read(node: &Expr, registry: &FunctionRegistry) -> Option<RequestRead>
             }
         }
     }
-    let (source, casts) = declared_read(node, registry).or_else(|| set_read(node, registry))?;
+    let (source, casts) = declared_read(node, registry).or_else(|| {
+        set_read(node, registry).map(|(source, casts)| (Cow::Borrowed(source), casts))
+    })?;
     Some(RequestRead {
         subject: format!("current_setting('{}')", source.setting_key()),
         declarable: Some(source.setting_key().to_string()),

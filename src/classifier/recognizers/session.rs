@@ -10,6 +10,7 @@
 //! never copied into tuples. The row supplies its own value as tuple context, the request
 //! supplies what only it knows, and a condition relates them.
 
+use alloc::borrow::Cow;
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
@@ -33,7 +34,7 @@ use crate::parser::function_analyzer::{
 };
 use crate::parser::names::builtin_function_name;
 use crate::parser::sql_parser::SetPacking;
-use crate::types::{ColumnName, FallbackStep};
+use crate::types::{ColumnName, FallbackStep, RequestNormalization};
 
 use super::casts::other_side_renaming;
 use super::{
@@ -395,24 +396,26 @@ fn scalar_equality(expr: &Expr, registry: &FunctionRegistry) -> Option<Classifie
         return None;
     }
 
+    let confidence = grade(&source);
+    let source = source.into_owned();
     let pattern = match tested_value(tested) {
         TestedValue::Column(column) => {
             PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
                 column,
-                source: source.clone(),
+                source,
             })
         }
         TestedValue::Constant(value) => {
             PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant {
                 value,
-                source: source.clone(),
+                source,
             })
         }
         TestedValue::Neither => return None,
     };
     Some(ClassifiedExpr {
         pattern,
-        confidence: grade(source),
+        confidence,
     })
 }
 
@@ -438,18 +441,15 @@ fn scalar_inequality(expr: &Expr, registry: &FunctionRegistry) -> Option<Classif
         return None;
     }
 
-    let pattern = match tested_value(tested) {
-        TestedValue::Constant(value) => {
-            PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
-                value,
-                source: source.clone(),
-            })
-        }
-        _ => return None,
+    let TestedValue::Constant(value) = tested_value(tested) else {
+        return None;
     };
     Some(ClassifiedExpr {
-        pattern,
-        confidence: grade(source),
+        confidence: grade(&source),
+        pattern: PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant {
+            value,
+            source: source.into_owned(),
+        }),
     })
 }
 
@@ -497,12 +497,12 @@ fn scalar_in_constant_list(expr: &Expr, registry: &FunctionRegistry) -> Option<C
         .map(string_literal)
         .collect::<Option<Vec<_>>>()?;
     Some(ClassifiedExpr {
+        confidence: grade(&source),
         pattern: PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList {
             values,
             negated,
-            source: source.clone(),
+            source: source.into_owned(),
         }),
-        confidence: grade(source),
     })
 }
 
@@ -633,7 +633,7 @@ pub(super) fn grade(source: &DeclaredSource) -> ConfidenceLevel {
 pub(super) fn declared_scalar<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r DeclaredSource, CastChain)> {
+) -> Option<(Cow<'r, DeclaredSource>, CastChain)> {
     declared_read(expr, registry)
         .filter(|(source, casts)| casts.renaming(Some(&source.canonical_type())).is_none())
 }
@@ -905,14 +905,60 @@ fn undeclared_set_reason(source: &SetSource, registry: &FunctionRegistry) -> Opt
 }
 
 /// The single-value declaration behind whatever `expr` reads and the casts around the
-/// read, however the deployment spelled it, bare or through [`nullif_read`]. A set is
-/// read through [`set_read`], whose expander takes the parse into `jsonb` as structure,
-/// and the caller through its own readers.
+/// read, however the deployment spelled it, bare, through [`nullif_read`] or through
+/// [`lowered_read`]. A set is read through [`set_read`], whose expander takes the parse
+/// into `jsonb` as structure, and the caller through its own readers.
 pub(super) fn declared_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
-) -> Option<(&'r DeclaredSource, CastChain)> {
-    bare_declared_read(expr, registry).or_else(|| nullif_read(expr, registry))
+) -> Option<(Cow<'r, DeclaredSource>, CastChain)> {
+    match bare_declared_read(expr, registry).or_else(|| nullif_read(expr, registry)) {
+        Some((source, casts)) => Some((Cow::Borrowed(source), casts)),
+        None => lowered_read(expr, registry).map(|(source, casts)| (Cow::Owned(source), casts)),
+    }
+}
+
+/// `lower(<read of a declared single value>)`, the read bare or through [`nullif_read`],
+/// as the value of its own the caller sends in the value's place, and the casts around
+/// the call, outermost first.
+///
+/// `lower` follows the database's collation, which CEL cannot read, so the model never
+/// applies it and the caller sends what the database returns. The caller lowers the
+/// value it carries, so a cast inside the call that renames the value is refused, and so
+/// is a key a declared source already takes.
+fn lowered_read(expr: &Expr, registry: &FunctionRegistry) -> Option<(DeclaredSource, CastChain)> {
+    let (casts, argument) = lowered_value(expr)?;
+    let (source, inner) =
+        bare_declared_read(argument, registry).or_else(|| nullif_read(argument, registry))?;
+    if inner.renaming(Some(&source.canonical_type())).is_some() {
+        return None;
+    }
+    let lowered = registry
+        .sources()
+        .normalized(source, RequestNormalization::Lower)?;
+    Some((lowered, casts))
+}
+
+/// The value `pg_catalog.lower(<value>)` lowers, under casts and a scalar subquery, and
+/// the casts around the call, outermost first.
+pub(super) fn lowered_value(expr: &Expr) -> Option<(CastChain, &Expr)> {
+    let (mut casts, peeled) = CastChain::peeled(expr);
+    let (inner_casts, argument) = match peeled {
+        Expr::Subquery(query) => lowered_value(sole_projection(query)?)?,
+        other => {
+            let function = function_call(other)
+                .filter(|function| builtin_function_name(function).as_deref() == Some("lower"))?;
+            let FunctionArguments::List(list) = &function.args else {
+                return None;
+            };
+            let [argument] = list.args.as_slice() else {
+                return None;
+            };
+            (CastChain::default(), function_arg_expr(argument)?)
+        }
+    };
+    casts.extend(inner_casts);
+    Some((casts, argument))
 }
 
 /// As [`declared_read`], for a read no `NULLIF` wraps, which `PostgreSQL` reads as `''`
@@ -1869,5 +1915,80 @@ mod tests {
             Vec::<String>::new(),
             "a test the request answers names nothing"
         );
+    }
+
+    /// The value `lower` makes of the one setting `setting` declares.
+    fn lowered_source(setting: SessionSetting) -> DeclaredSource {
+        let sources = DeclaredSources::of(&deployment([setting]));
+        let declared = sources.iter().next().expect("the declared setting");
+        sources
+            .normalized(declared, RequestNormalization::Lower)
+            .expect("a key no declared source takes")
+    }
+
+    /// `lower` of a declared single value is a value of its own, which the caller sends
+    /// under a key of its own, read bare, through `NULLIF`, under a cast that renames
+    /// nothing and inside a scalar subquery alike.
+    #[test]
+    fn a_lowered_declared_value_is_a_request_value_of_its_own() {
+        let registry = registry([scalar("app.email").may_be_unset()]);
+        let lowered = lowered_source(scalar("app.email").may_be_unset());
+        assert_eq!(lowered.request_parameter(), "app_email_lower");
+        assert_eq!(lowered.normalization(), Some(RequestNormalization::Lower));
+        assert_eq!(lowered.setting_key(), "app.email");
+        let read = |clause: &str| {
+            recognize_session_attribute(&parse_expr(clause), &registry).map(|c| c.pattern)
+        };
+        let compared_with_row =
+            PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar {
+                column: ColumnName::from_stored("email"),
+                source: lowered.clone(),
+            });
+        for clause in [
+            "email = lower(NULLIF(current_setting('app.email', true), ''))",
+            "lower(current_setting('app.email', true)) = email",
+            "email = (SELECT lower(NULLIF(current_setting('app.email', true), '')))",
+            "email = pg_catalog.lower(current_setting('app.email', true)::text)::text",
+        ] {
+            assert_eq!(read(clause), Some(compared_with_row.clone()), "{clause}");
+        }
+        assert_eq!(
+            read("lower(current_setting('app.email', true)) = 'ann@example.com'"),
+            Some(PatternClass::P17CallerScalarEqualsConstant(
+                CallerScalarEqualsConstant {
+                    value: "ann@example.com".to_string(),
+                    source: lowered,
+                }
+            ))
+        );
+    }
+
+    /// A cast inside the call that renames the value lowers a value the caller never
+    /// sent, a cast outside it renames what `lower` returns, and a `lower` the schema
+    /// defines is not `PostgreSQL`'s. Each stays refused, and so does `lower` of a set,
+    /// of the caller, and of a value whose key a declared setting already takes.
+    #[test]
+    fn a_lowered_read_the_caller_cannot_send_is_refused() {
+        let registry = registry([
+            scalar("app.email"),
+            scalar("app.alias"),
+            scalar("app.alias_lower"),
+            delimited_set("app.emails", ","),
+            caller("app.user_id"),
+        ]);
+        for clause in [
+            "email = lower(current_setting('app.email', true)::integer::text)",
+            "id = lower(current_setting('app.email', true))::uuid",
+            "email = app.lower(current_setting('app.email', true))",
+            "email = upper(current_setting('app.email', true))",
+            "email = lower(current_setting('app.alias', true))",
+            "email = lower(current_setting('app.emails', true))",
+            "email = lower(current_setting('app.user_id', true))",
+        ] {
+            assert!(
+                recognize_session_attribute(&parse_expr(clause), &registry).is_none(),
+                "`{clause}` stays refused"
+            );
+        }
     }
 }

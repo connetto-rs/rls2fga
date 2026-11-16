@@ -23,7 +23,7 @@ use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use testcontainers::{ContainerAsync, GenericImage};
 
-use rls2fga::classifier::function_registry::DeclaredSources;
+use rls2fga::classifier::function_registry::{DeclaredSource, DeclaredSources};
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ColumnCommand, ColumnName,
@@ -815,8 +815,8 @@ struct Model<'run> {
     translation: &'run rls2fga::translator::Translation,
     /// For the case's name, which every refusal reports.
     case: &'run ParityCase,
-    /// The declared sources a check's `settings` map is built from.
-    sources: &'run DeclaredSources,
+    /// The `settings` map each principal's checks carry, by subject.
+    settings: &'run BTreeMap<String, serde_json::Value>,
 }
 
 /// The clock parameters a check at `instant` carries, computed as a checker computes them
@@ -1250,12 +1250,13 @@ async fn run_in(
         diesel::sql_query("SELECT to_char(now(), 'YYYY-MM-DD\"T\"HH24:MI:SSOF:00') AS instant")
             .get_result(&mut *conn)
             .expect("reading now() should succeed");
+    let settings = settings_maps(conn, case, planned.translation(), &sources);
     let model = Model {
         client: &client,
         answers: &answers,
         translation: planned.translation(),
         case,
-        sources: &sources,
+        settings: &settings,
     };
     let mutations = resolved_mutations(case, &naming);
 
@@ -1452,7 +1453,7 @@ async fn compare_every_pair(
                 let Some(openfga) = openfga_allows(
                     model,
                     principal,
-                    &asked_context(principal, &clock, model.sources),
+                    &asked_context(principal, &clock, &model.settings[&principal.subject]),
                     object,
                     statement,
                     candidate,
@@ -1494,14 +1495,14 @@ async fn compare_every_pair(
 fn asked_context(
     principal: &Principal,
     clock: &serde_json::Map<String, serde_json::Value>,
-    sources: &DeclaredSources,
+    settings: &serde_json::Value,
 ) -> serde_json::Value {
     let mut context = principal.context.clone();
     if let Some(entries) = context.as_object_mut() {
         if principal.carries_request_time {
             entries.extend(clock.clone());
         }
-        entries.insert("settings".to_string(), settings_map(sources, principal));
+        entries.insert("settings".to_string(), settings.clone());
     }
     context
 }
@@ -1511,24 +1512,8 @@ fn asked_context(
 /// `PostgreSQL`'s `NULL`.
 pub(crate) fn settings_map(sources: &DeclaredSources, principal: &Principal) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for source in sources.iter() {
-        if !source.is_scalar() {
-            continue;
-        }
-        let Some(value) = principal
-            .session
-            .iter()
-            .find(|(name, _)| name.trim().to_ascii_lowercase() == source.setting_key())
-            .map(|(_, value)| value.as_str())
-        else {
-            continue;
-        };
-        let text = if source.path().is_empty() {
-            Some(value.to_string())
-        } else {
-            jsonb_text(value, source.path())
-        };
-        if let Some(text) = text {
+    for source in sources.iter().filter(|source| source.is_scalar()) {
+        if let Some(text) = session_text(source, principal) {
             map.insert(
                 source.request_parameter().to_string(),
                 serde_json::Value::String(text),
@@ -1536,6 +1521,75 @@ pub(crate) fn settings_map(sources: &DeclaredSources, principal: &Principal) -> 
         }
     }
     serde_json::Value::Object(map)
+}
+
+/// The `settings` map of every principal by subject, holding beside [`settings_map`] what
+/// each normalization a note asks for makes of a value the principal set, computed by the
+/// database `conn` reaches, as a checker asks the database the policies run in.
+fn settings_maps(
+    conn: &mut PgConnection,
+    case: &ParityCase,
+    translation: &rls2fga::translator::Translation,
+    sources: &DeclaredSources,
+) -> BTreeMap<String, serde_json::Value> {
+    let normalized: Vec<_> = translation
+        .notes()
+        .iter()
+        .filter_map(|note| match note {
+            TranslationNote::CallerSuppliesConditionParameter {
+                parameter,
+                normalization: Some(normalization),
+                ..
+            } => sources
+                .iter()
+                .filter_map(|source| sources.normalized(source, *normalization))
+                .find(|normalized| normalized.request_parameter() == parameter),
+            _ => None,
+        })
+        .collect();
+    let mut maps = BTreeMap::new();
+    for principal in &case.principals {
+        let mut map = settings_map(sources, principal);
+        for source in &normalized {
+            let Some(text) = session_text(source, principal) else {
+                continue;
+            };
+            let function = source
+                .normalization()
+                .expect("a normalized source")
+                .function_name();
+            let value: String = diesel::select(
+                diesel::dsl::sql::<diesel::sql_types::Text>(&format!("{function}("))
+                    .bind::<diesel::sql_types::Text, _>(&text)
+                    .sql(")"),
+            )
+            .get_result(conn)
+            .unwrap_or_else(|error| panic!("{}: {function} of {text:?}: {error}", case.name));
+            map.as_object_mut()
+                .expect("the settings map is an object")
+                .insert(
+                    source.request_parameter().to_string(),
+                    serde_json::Value::String(value),
+                );
+        }
+        maps.insert(principal.subject.clone(), map);
+    }
+    maps
+}
+
+/// The text `principal` set for `source`, the whole setting or the field the source
+/// takes out of it, absent where it set none.
+fn session_text(source: &DeclaredSource, principal: &Principal) -> Option<String> {
+    let value = principal
+        .session
+        .iter()
+        .find(|(name, _)| name.trim().to_ascii_lowercase() == source.setting_key())
+        .map(|(_, value)| value.as_str())?;
+    if source.path().is_empty() {
+        Some(value.to_string())
+    } else {
+        jsonb_text(value, source.path())
+    }
 }
 
 /// `document` read at `path` rendered as `->>` would, so the map holds the same text
@@ -1769,7 +1823,7 @@ async fn compare_at_future_instant(
                 entries.extend(clock.clone());
                 entries.insert(
                     "settings".to_string(),
-                    settings_map(model.sources, principal),
+                    model.settings[&principal.subject].clone(),
                 );
             }
             let Some(openfga) = openfga_allows(

@@ -17,7 +17,8 @@ use crate::classifier::patterns::{
     FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass, RequestValueAbsent,
 };
 use crate::types::{
-    ConditionParameterName, FallbackStep, RequestAtom, RequestComparison, RequestPredicate,
+    ConditionParameterName, FallbackStep, RequestAtom, RequestComparison, RequestNormalization,
+    RequestPredicate,
 };
 
 /// Whether the request carries a value the deployment lets it leave unset, with the caller
@@ -80,6 +81,9 @@ pub(crate) struct GateAtom {
     pub(crate) value: String,
     /// Session setting the caller's value mirrors.
     pub(crate) setting_key: String,
+    /// The function the policy applies to that setting, whose result the caller supplies
+    /// in its place.
+    pub(crate) normalization: Option<RequestNormalization>,
     /// Separator the policy splits that setting on, for a set.
     pub(crate) separator: Option<String>,
     /// The settings the caller's value falls back across, one per setting in the order the
@@ -100,6 +104,7 @@ impl GateAtom {
             comparison: RequestComparison::CallerSetHolds,
             value: value.clone(),
             setting_key: source.setting_key().to_string(),
+            normalization: source.normalization(),
             separator: separator.clone(),
             fallback: vec![],
         }
@@ -130,6 +135,7 @@ impl GateAtom {
             comparison,
             value: value.to_string(),
             setting_key: source.setting_key().to_string(),
+            normalization: source.normalization(),
             separator: None,
             fallback: vec![],
         }
@@ -170,6 +176,7 @@ impl GateAtom {
             comparison,
             value: value.to_string(),
             setting_key: first.setting_key.clone(),
+            normalization: None,
             separator: None,
             fallback,
         }
@@ -443,6 +450,7 @@ mod tests {
             comparison: RequestComparison::CallerSetHolds,
             value: value.to_string(),
             setting_key: "app.bot_list".to_string(),
+            normalization: None,
             separator: Some(",".to_string()),
             fallback: vec![],
         })
@@ -454,6 +462,7 @@ mod tests {
             comparison: RequestComparison::CallerValueEquals,
             value: value.to_string(),
             setting_key: "app.tier".to_string(),
+            normalization: None,
             separator: None,
             fallback: vec![],
         })

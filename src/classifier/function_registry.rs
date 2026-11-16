@@ -13,12 +13,13 @@ use crate::parser::sql_parser::{
     DatabaseLike, Deployment, FunctionLike, SessionSetting, SetPacking, SettingContent,
     SettingPresence, SettingValue,
 };
-use crate::types::{ConditionParameterName, TableRef};
+use crate::types::{ConditionParameterName, RequestNormalization, TableRef};
 use sql_traits::structs::{IdentifierCase, TargetName};
 use sqlparser::ast::FunctionSecurity;
 
 /// One value a policy may read from the request as the deployment declares it, a whole
-/// custom setting or one field of a setting holding a JSON document.
+/// custom setting or one field of a setting holding a JSON document, or the result of a
+/// [`RequestNormalization`] of one.
 ///
 /// Built only from a [`Deployment`], so the declaration a policy is read against is the
 /// one every other consumer of that deployment reads. A function whose body reads the
@@ -30,6 +31,7 @@ pub struct DeclaredSource {
     path: Vec<String>,
     value: SettingValue,
     presence: SettingPresence,
+    normalization: Option<RequestNormalization>,
     parameter: ConditionParameterName,
 }
 
@@ -42,6 +44,7 @@ impl DeclaredSource {
             path,
             value,
             presence: setting.presence(),
+            normalization: None,
             parameter,
         }
     }
@@ -76,10 +79,18 @@ impl DeclaredSource {
         self.presence
     }
 
-    /// The condition parameter the caller supplies, the source spelled as an identifier.
+    /// The condition parameter the caller supplies, the source spelled as an identifier,
+    /// followed by the function a normalized source applies.
     #[must_use]
     pub fn request_parameter(&self) -> &str {
         self.parameter.as_str()
+    }
+
+    /// The function the policy applies to the declared value, whose result the caller
+    /// supplies in its place, or `None` for the value itself.
+    #[must_use]
+    pub fn normalization(&self) -> Option<RequestNormalization> {
+        self.normalization
     }
 
     pub(crate) fn condition_parameter(&self) -> &ConditionParameterName {
@@ -129,8 +140,12 @@ impl DeclaredSource {
     }
 
     /// The type the value, or each element of a set, arrives canonical for, spelled as a
-    /// cast names it. A cast to it renames nothing.
+    /// cast names it. A cast to it renames nothing. A normalized value is the `text` its
+    /// function returns.
     pub(crate) fn canonical_type(&self) -> String {
+        if self.normalization.is_some() {
+            return "text".to_string();
+        }
         let data_type = match &self.value {
             SettingValue::Set { element, .. } => element,
             SettingValue::Caller(data_type)
@@ -228,6 +243,39 @@ impl DeclaredSources {
     /// Every source, ordered by setting and field path.
     pub fn iter(&self) -> impl Iterator<Item = &DeclaredSource> {
         self.0.values()
+    }
+
+    /// The value `normalization` makes of the single value `source`, which travels under
+    /// a key of its own, or `None` where a declared source already takes that key, since
+    /// the caller could not send both.
+    ///
+    /// A checker matches a `CallerSuppliesConditionParameter` note naming a normalization
+    /// to the source whose normalized parameter it names.
+    #[must_use]
+    pub fn normalized(
+        &self,
+        source: &DeclaredSource,
+        normalization: RequestNormalization,
+    ) -> Option<DeclaredSource> {
+        if !source.is_scalar() || source.normalization.is_some() {
+            return None;
+        }
+        let parameter = ConditionParameterName::derived(&format!(
+            "{}_{}",
+            source.parameter,
+            normalization.function_name()
+        ));
+        if self.iter().any(|declared| declared.parameter == parameter) {
+            return None;
+        }
+        Some(DeclaredSource {
+            key: source.key.clone(),
+            path: source.path.clone(),
+            value: source.value.clone(),
+            presence: source.presence,
+            normalization: Some(normalization),
+            parameter,
+        })
     }
 }
 
