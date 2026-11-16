@@ -89,6 +89,18 @@ fn a_column_of_a_domain_over_an_array_is_refused() {
     assert!(reason.contains("'<@'"), "{reason}");
 }
 
+/// Only a set built from a subquery is read, so containment in any other array keeps
+/// its refusal.
+#[test]
+fn a_set_not_built_from_a_subquery_is_refused() {
+    let reason = refusal_of(
+        &reading("ARRAY[id, parent_id] <@ string_to_array('f1,f2', ',')"),
+        OWNED,
+        "folders_read",
+    );
+    assert!(reason.contains("'<@'"), "{reason}");
+}
+
 /// `NOT` turns the `false` a `NULL` key makes into `true`, which no conjunction of
 /// memberships answers.
 #[test]
