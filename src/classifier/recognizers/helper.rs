@@ -173,6 +173,46 @@ pub(crate) enum HelperRefusal {
         /// The helper returning the grantees.
         grantees: String,
     },
+    /// An arm keeps the rows naming a principal other than the caller.
+    #[error(
+        "declared helper '{function}' keeps the rows of '{table}' whose '{column}' holds \
+         the request's {kind}, which no grant to the caller stands for"
+    )]
+    PrincipalGrantee {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The column holding the principal.
+        column: String,
+        /// The type of the principal.
+        kind: String,
+    },
+    /// An arm returns more than the one key column a grant relation names rows by.
+    #[error(
+        "declared helper '{function}' returns {columns} columns of '{table}', and only a \
+         helper returning one column translates"
+    )]
+    SeveralColumns {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// How many columns the arm returns.
+        columns: usize,
+    },
+    /// An arm keeps only the rows another helper's rows cap, a condition no grant
+    /// relation carries.
+    #[error(
+        "declared helper '{function}' caps the rows of '{table}' by the rows another \
+         helper returns, which no grant relation carries"
+    )]
+    RowCapped {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+    },
     /// A grant arm bounds its rows against the clock more than once, while several of
     /// its rows can grant one caller one row, so no one tuple carries the bounds of the
     /// row that meets them all.
@@ -569,9 +609,10 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
             }
         };
         bounded_by_no_time(&name, grant)?;
+        let key = key_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
-            value_column: ColumnName::from_stored(grant.column().stored_column_name()),
+            value_column: ColumnName::from_stored(key.stored_column_name()),
             predicates: grant.restrictions().iter().map(restriction).collect(),
         });
     }
@@ -596,6 +637,29 @@ fn bounded_by_no_time<DB: DatabaseLike>(
         function: function.to_string(),
         table: table_identity(grant.table()).to_string(),
     })
+}
+
+/// The one column `grant` returns, refusing an arm returning several, which no relation
+/// names rows by, and an arm capped by another helper's rows, which no relation carries.
+fn key_column<'db, DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'db, DB>,
+) -> Result<&'db DB::Column, HelperRefusal> {
+    let table = || table_identity(grant.table()).to_string();
+    if !grant.caps().is_empty() {
+        return Err(HelperRefusal::RowCapped {
+            function: function.to_string(),
+            table: table(),
+        });
+    }
+    match grant.columns() {
+        [key] => Ok(key),
+        columns => Err(HelperRefusal::SeveralColumns {
+            function: function.to_string(),
+            table: table(),
+            columns: columns.len(),
+        }),
+    }
 }
 
 /// The literal arguments of one call of `function` and the set it returns for them.
@@ -643,11 +707,14 @@ fn helper_call<DB: DatabaseLike>(
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
-            HelperArm::Grant(grant) => (
-                rows_named_by(grant.table(), grant.column(), db)?
-                    .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
-                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db)?)),
-            ),
+            HelperArm::Grant(grant) => {
+                let key = key_column(&name, grant)?;
+                (
+                    rows_named_by(grant.table(), key, db)?
+                        .ok_or_else(|| names_no_rows(grant.table(), key))?,
+                    HelperSetArm::Grant(Box::new(helper_grant(&name, grant, key, db)?)),
+                )
+            }
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
                 HelperSetArm::Parent(helper_parent(&name, parent, db, registry)?),
@@ -709,6 +776,7 @@ fn helper_parent<DB: DatabaseLike>(
 fn helper_grant<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
+    key: &DB::Column,
     db: &DB,
 ) -> Result<HelperGrant, HelperRefusal> {
     let table = grant.table();
@@ -736,8 +804,8 @@ fn helper_grant<DB: DatabaseLike>(
         }
     };
     let column = ColumnName::from_stored(compared.column().stored_column_name());
-    // `sql-traits` compares a column with the caller or with the elements of a whole
-    // setting declared as a set.
+    // `sql-traits` compares a column with the caller, another principal or the elements
+    // of a whole setting declared as a set.
     let grantee = match compared.setting().content() {
         SettingContent::Value(value @ SettingValue::Set { .. }) => {
             bounded_by_no_time(function, grant)?;
@@ -746,13 +814,21 @@ fn helper_grant<DB: DatabaseLike>(
                 source: DeclaredSource::whole(compared.setting(), value.clone()),
             }
         }
+        SettingContent::Value(SettingValue::Principal { kind, .. }) => {
+            return Err(HelperRefusal::PrincipalGrantee {
+                function: function.to_string(),
+                table: refused_table(),
+                column: column.to_string(),
+                kind: kind.clone(),
+            })
+        }
         _ => HelperGrantee::Caller {
             user_column: column,
         },
     };
     let grant = HelperGrant {
         table: table_identity(table),
-        object_column: ColumnName::from_stored(grant.column().stored_column_name()),
+        object_column: ColumnName::from_stored(key.stored_column_name()),
         grantee,
         rows: grant_rows(table, grant.restrictions(), db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),

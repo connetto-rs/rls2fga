@@ -100,7 +100,9 @@ impl DeclaredSource {
     pub(crate) fn packing(&self) -> Option<&SetPacking> {
         match &self.value {
             SettingValue::Set { packing, .. } => Some(packing),
-            SettingValue::Caller(_) | SettingValue::Scalar(_) => None,
+            SettingValue::Caller(_) | SettingValue::Principal { .. } | SettingValue::Scalar(_) => {
+                None
+            }
         }
     }
 
@@ -116,11 +118,15 @@ impl DeclaredSource {
     /// The type the value, or each element of a set, arrives canonical for, spelled as a
     /// cast names it. A cast to it renames nothing.
     pub(crate) fn canonical_type(&self) -> String {
-        let (SettingValue::Caller(data_type)
-        | SettingValue::Scalar(data_type)
-        | SettingValue::Set {
-            element: data_type, ..
-        }) = &self.value;
+        let data_type = match &self.value {
+            SettingValue::Set { element, .. } => element,
+            SettingValue::Caller(data_type)
+            | SettingValue::Principal {
+                identity: data_type,
+                ..
+            }
+            | SettingValue::Scalar(data_type) => data_type,
+        };
         cast_type_name(data_type)
     }
 
@@ -134,6 +140,7 @@ impl DeclaredSource {
     pub(crate) fn declared_as(&self) -> String {
         match &self.value {
             SettingValue::Caller(_) => "the caller".to_string(),
+            SettingValue::Principal { kind, .. } => format!("the identity of a {kind}"),
             SettingValue::Scalar(_) => "one value".to_string(),
             SettingValue::Set {
                 packing: SetPacking::Delimited(separator),

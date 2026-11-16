@@ -7,9 +7,11 @@ use rls2fga::classifier::patterns::{
     ClassifiedExpr, GrantRows, HelperSetArm, PatternClass, UnclassifiedExpr,
 };
 use rls2fga::generator::tuple_generator::SkippedTuples;
+use rls2fga::parser::sql_parser::{SessionSetting, SettingValue};
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::{AttributeLiteral, AttributePredicate, AttributeTest, ConfidenceLevel};
 use rls2fga::types::{ColumnName, TranslationNote};
+use sqlparser::ast::DataType;
 
 use crate::support::deployment::{caller, delimited_set, deployment, scalar};
 use crate::support::footgun::{db_of, relation_definition};
@@ -457,7 +459,8 @@ fn every_unproven_call_is_refused() {
         (
             "projects_read",
             "team_id = ANY (ARRAY(SELECT authz.tenant_teams()))",
-            "reads setting `app.tenant` as the caller, which it is not",
+            "compares a column with setting `app.tenant` as the identity of a principal, \
+             which it is not",
         ),
         (
             "orders_read",
@@ -1270,4 +1273,94 @@ fn each_clock_comparison_keeps_its_direction() {
             .map(|(line, _)| line.trim());
         assert_eq!(condition, Some(compared), "{bound}: {dsl}");
     }
+}
+
+/// An arm comparing a column with another principal than the caller, and an arm capped
+/// by another helper's rows, each keep other rows than a grant to the caller, so each is
+/// refused.
+#[test]
+fn principal_and_capped_arms_are_refused() {
+    let sql = "
+        CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+        CREATE SCHEMA authz;
+        GRANT USAGE ON SCHEMA authz TO authz_owner;
+        CREATE TABLE resources (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
+          kind TEXT NOT NULL, owner_id TEXT NOT NULL);
+        CREATE TABLE resource_grants (resource_id TEXT NOT NULL REFERENCES resources (id),
+          principal_id TEXT NOT NULL, role TEXT NOT NULL,
+          PRIMARY KEY (resource_id, principal_id));
+        CREATE TABLE installation_permissions (installation_id TEXT NOT NULL,
+          organization_id TEXT NOT NULL, kind TEXT NOT NULL,
+          PRIMARY KEY (installation_id, organization_id, kind));
+        GRANT SELECT ON resources, resource_grants, installation_permissions TO authz_owner;
+        CREATE FUNCTION authz.installation_resources() RETURNS SETOF TEXT
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+          SELECT g.resource_id FROM public.resource_grants g
+          WHERE g.principal_id = current_setting('app.installation_id', true)
+        $$;
+        CREATE FUNCTION authz.capped_kinds() RETURNS TABLE (organization_id TEXT, kind TEXT)
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+          SELECT p.organization_id, p.kind FROM public.installation_permissions p
+          WHERE p.installation_id = current_setting('app.installation_id', true)
+        $$;
+        CREATE FUNCTION authz.owned_resources() RETURNS SETOF TEXT
+        LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+          SELECT r.id FROM public.resources r
+          WHERE r.owner_id = current_setting('app.user_id', true)
+            AND (current_setting('app.installation_id', true) IS NULL
+              OR (r.organization_id, r.kind) IN (SELECT * FROM authz.capped_kinds()))
+        $$;
+        ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
+        ALTER FUNCTION authz.capped_kinds() OWNER TO authz_owner;
+        ALTER FUNCTION authz.owned_resources() OWNER TO authz_owner;
+        CREATE TABLE notes (id TEXT PRIMARY KEY, resource_id TEXT NOT NULL REFERENCES resources (id));
+        ALTER TABLE notes ENABLE ROW LEVEL SECURITY;";
+    let installation = SessionSetting::value(
+        "app.installation_id",
+        SettingValue::Principal {
+            kind: "installation".to_string(),
+            identity: DataType::Text,
+        },
+    )
+    .expect("a custom setting name");
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id"), installation]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers([
+            "authz.installation_resources",
+            "authz.capped_kinds",
+            "authz.owned_resources",
+        ])
+        .build();
+    let cases = [
+        (
+            "resource_id = ANY (ARRAY(SELECT authz.installation_resources()))",
+            "keeps the rows of 'public.resource_grants' whose 'principal_id' holds the \
+             request's installation",
+        ),
+        (
+            "resource_id = ANY (ARRAY(SELECT authz.owned_resources()))",
+            "caps the rows of 'public.resources' by the rows another helper returns",
+        ),
+    ];
+    let mut mismatches = String::new();
+    for (using, reason) in cases {
+        let schema =
+            format!("{sql}\nCREATE POLICY notes_read ON notes FOR SELECT USING ({using});");
+        let classified = translator
+            .classify(&db_of(&schema))
+            .into_iter()
+            .find(|classified| classified.name() == "notes_read")
+            .expect("notes_read should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .clone();
+        match classified.pattern {
+            PatternClass::Unknown(UnclassifiedExpr {
+                reason: refused, ..
+            }) if refused.contains(reason) => {}
+            other => writeln!(mismatches, "`{using}` should be refused, got {other:?}")
+                .expect("writing to a String"),
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches}");
 }
