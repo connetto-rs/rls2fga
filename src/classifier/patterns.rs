@@ -671,13 +671,16 @@ pub enum HelperSetArm {
     Walk(HelperWalk),
 }
 
-/// `SELECT <object column> FROM <table> WHERE <grantee> [AND <rows>] [AND <time bounds>]`.
+/// `SELECT <object columns> FROM <table> WHERE <grantee> [AND <rows>] [AND <time bounds>]
+/// [AND <caps>]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperGrant {
     /// The grant table.
     pub table: TableId,
-    /// Column naming the level's row each grant is on.
-    pub object_column: ColumnName,
+    /// Columns naming the object each grant is on, the one naming the level's row for an
+    /// arm of a call, and one per column the helper returns for an arm of a cap, naming
+    /// the pair it returns.
+    pub object_columns: Vec<ColumnName>,
     /// Whose rows the arm keeps.
     pub grantee: HelperGrantee,
     /// The callers the arm keeps no row for, each as the caller identity a check sends,
@@ -688,19 +691,62 @@ pub struct HelperGrant {
     /// The bounds a kept row meets against the statement time, all of them, which the
     /// request completes per check.
     pub time_bounds: Vec<HelperTimeBound>,
+    /// The caps a kept row meets, all of them.
+    pub caps: Vec<HelperCap>,
 }
 
 impl HelperGrant {
     /// The columns keying one tuple of the arm's relations, its object, the column naming
     /// its grantee where one does and, for a relation per role, its role.
     pub(crate) fn tuple_key(&self) -> Vec<&ColumnName> {
-        let mut key = vec![&self.object_column];
+        let mut key: Vec<&ColumnName> = self.object_columns.iter().collect();
         key.extend(self.grantee.compared_column());
         if let GrantRows::Roles { column, .. } = &self.rows {
             key.push(column);
         }
         key
     }
+}
+
+/// `[<lift> IS NULL OR] (<operands>) IN (SELECT * FROM <function>(<arguments>))` in a grant
+/// arm's condition, keeping a row only where the pair its operands name is one the helper
+/// returns, unless the request leaves the lifting value absent.
+///
+/// Each pair the helper returns is an object of its own, holding whoever the cap's rows
+/// grant it to, and each row of the level reaches the pair its operands name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperCap {
+    /// The helper returning the pairs, as declared.
+    pub function: String,
+    /// Its arguments, each a literal as SQL spells it.
+    pub arguments: Vec<String>,
+    /// The rows returning the pairs, each keyed by its columns in the order the helper
+    /// returns them, none where the helper returns nothing.
+    pub arms: Vec<HelperGrant>,
+    /// The rows naming the pair each row of the level reaches.
+    pub link: CapLink,
+    /// The declared single value whose absence lifts the cap, `None` where it holds for
+    /// every request.
+    pub lift: Option<DeclaredSource>,
+}
+
+/// Which rows name the pair a row of the level reaches.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CapLink {
+    /// The capped arm's own row, whose `columns` hold the pair in the order the helper
+    /// returns it, and whose object columns name the level's row.
+    Row {
+        /// The operands, columns of the arm's table.
+        columns: Vec<ColumnName>,
+    },
+    /// Each pair the cap returns, whose column at `object` holds the level's row the arm
+    /// returns, and whose other columns hold the literals the operands name there.
+    Pair {
+        /// The position of the operand naming the level's row.
+        object: usize,
+        /// Each literal operand beside its position.
+        literals: Vec<(usize, AttributeLiteral)>,
+    },
 }
 
 /// `<column> <operator> now() [OR <column> IS NULL]` in a grant arm's condition, on a
@@ -717,7 +763,8 @@ impl HelperGrant {
     /// Whether the arm returns the caller itself, `SELECT g.id FROM grantees g WHERE g.id =
     /// <caller>`, so a grant naming one of its rows names that user.
     pub(crate) fn returns_the_caller(&self) -> bool {
-        matches!(&self.grantee, HelperGrantee::Caller { user_column } if *user_column == self.object_column)
+        matches!(&self.grantee, HelperGrantee::Caller { user_column }
+            if matches!(self.object_columns.as_slice(), [object] if object == user_column))
     }
 }
 

@@ -581,15 +581,23 @@ fn excluded_helper<DB: DatabaseLike>(
     }
     for arm in &helper.call.arms {
         let (returned_from, returned) = match arm {
-            HelperSetArm::Grant(grant) => (&grant.table, &grant.object_column),
-            HelperSetArm::Parent(parent) => (&parent.edges.table, &parent.edges.child_column),
-            HelperSetArm::Walk(walk) => (&walk.edges.table, walk.returned_column()),
+            HelperSetArm::Grant(grant) => (&grant.table, grant.object_columns.as_slice()),
+            HelperSetArm::Parent(parent) => (
+                &parent.edges.table,
+                core::slice::from_ref(&parent.edges.child_column),
+            ),
+            HelperSetArm::Walk(walk) => (
+                &walk.edges.table,
+                core::slice::from_ref(walk.returned_column()),
+            ),
         };
-        if !column_proven_not_null(db, returned_from, returned.as_str()) {
-            return Err(ExclusionError::NullableProjection {
-                table: returned_from.clone(),
-                column: returned.clone(),
-            });
+        for returned in returned {
+            if !column_proven_not_null(db, returned_from, returned.as_str()) {
+                return Err(ExclusionError::NullableProjection {
+                    table: returned_from.clone(),
+                    column: returned.clone(),
+                });
+            }
         }
     }
     Ok(helper)

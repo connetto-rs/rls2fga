@@ -591,23 +591,45 @@ fn membership_refusal<DB: DatabaseLike>(
 /// `OpenFGA`.
 fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<String> {
     call.arms.iter().find_map(|arm| match arm {
-        HelperSetArm::Grant(grant) => key_collation_refusal(&grant.table, &grant.object_column, db)
-            .or_else(|| {
-                let compared = grant.grantee.compared_column()?;
-                key_collation_refusal(&grant.table, compared, db)
-            })
-            .or_else(|| match &grant.grantee {
-                HelperGrantee::Set { call, .. } => helper_call_refusal(call, db),
-                HelperGrantee::Caller { .. }
-                | HelperGrantee::Principal { .. }
-                | HelperGrantee::RequestSet { .. }
-                | HelperGrantee::Anyone => None,
-            }),
+        HelperSetArm::Grant(grant) => helper_grant_refusal(grant, db),
         HelperSetArm::Parent(parent) => {
             tree_edges_refusal(&parent.edges, db).or_else(|| helper_call_refusal(&parent.call, db))
         }
         HelperSetArm::Walk(walk) => tree_edges_refusal(&walk.edges, db),
     })
+}
+
+/// Why a column a grant arm names its object or its grantee by, or one its caps pair,
+/// cannot be compared in `OpenFGA`.
+fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Option<String> {
+    grant
+        .object_columns
+        .iter()
+        .chain(grant.grantee.compared_column())
+        .find_map(|column| key_collation_refusal(&grant.table, column, db))
+        .or_else(|| match &grant.grantee {
+            HelperGrantee::Set { call, .. } => helper_call_refusal(call, db),
+            HelperGrantee::Caller { .. }
+            | HelperGrantee::Principal { .. }
+            | HelperGrantee::RequestSet { .. }
+            | HelperGrantee::Anyone => None,
+        })
+        .or_else(|| {
+            grant.caps.iter().find_map(|cap| {
+                let linked = match &cap.link {
+                    CapLink::Row { columns } => columns.as_slice(),
+                    CapLink::Pair { .. } => &[],
+                };
+                linked
+                    .iter()
+                    .find_map(|column| key_collation_refusal(&grant.table, column, db))
+                    .or_else(|| {
+                        cap.arms
+                            .iter()
+                            .find_map(|arm| helper_grant_refusal(arm, db))
+                    })
+            })
+        })
 }
 
 /// Why either end of the edges a declared helper's parent or walk arm reads, or an edge a
