@@ -1215,6 +1215,13 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return unknown_d(expr, refused_absences.join(". "));
     }
 
+    // A declared value read through `NULLIF(_, '')` that the request may send as `''` is
+    // refused naming why, since the accessor or `NULLIF` is not what is missing.
+    let refused_emptied = recognizers::refused_emptied_reads(expr, registry);
+    if !refused_emptied.is_empty() {
+        return unknown_d(expr, refused_emptied.join(". "));
+    }
+
     // A call whose function no body reads names that body or its absence, since the
     // registry entry the blame below would ask for is not what is missing.
     let unread_calls = recognizers::unread_function_calls(expr, registry);

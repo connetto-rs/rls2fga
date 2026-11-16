@@ -12,8 +12,8 @@ pub use crate::parser::expr::extract_column_name;
 pub(crate) use crate::parser::expr::unwrap_cast_or_nested;
 use crate::parser::expr::{extract_column_name_through_coalesce, is_coalesce_wrapped, CastChain};
 use crate::parser::expr::{function_arg_expr, function_call, positional_function_arg};
-use crate::parser::function_analyzer::current_setting_literal_key;
 use crate::parser::function_analyzer::FunctionSemantic;
+use crate::parser::function_analyzer::{current_setting_literal_key, empty_sentinel_nullif};
 use crate::parser::names::{
     builtin_function_name, folded_function_name, is_current_user_keyword_name,
     is_public_flag_column_name, lookup_table, parse_target, stored_ident_name,
@@ -61,7 +61,8 @@ pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use owner_expression::recognize_owner_expression;
 pub use session::recognize_session_attribute;
 pub(crate) use session::{
-    caller_set, caller_set_in_subquery, refused_absence_tests, row_valued_set, undeclared_set_reads,
+    caller_set, caller_set_in_subquery, refused_absence_tests, refused_emptied_reads,
+    row_valued_set, undeclared_set_reads,
 };
 pub(crate) use subquery::owner_key_of;
 pub(crate) use subquery::projected_select;
@@ -984,9 +985,36 @@ pub(super) fn caller_source<'r>(
     registry.sources().caller(&key, &read.path)
 }
 
+/// The read `expr` makes, seen through `NULLIF(<read>, '')` around the whole read of a
+/// caller a request may leave unset, with every cast around and inside the wrap,
+/// outermost first.
+///
+/// A request carrying such a caller never sends `''`, so the wrap turns only the unset
+/// readings into `NULL` and the wrapped read names the caller the bare one does. On a
+/// caller every request sets `''` is a caller the wrap would hide, and so is a field's
+/// `''`, so either read stays the wrap.
+fn caller_read_of<'e>(expr: &'e Expr, registry: &FunctionRegistry) -> Option<AccessorRead<'e>> {
+    let read = accessor_read(expr)?;
+    let Expr::Function(function) = read.root else {
+        return Some(read);
+    };
+    if !read.path.is_empty() || !empty_sentinel_nullif(function) {
+        return Some(read);
+    }
+    let inner = accessor_read(positional_function_arg(function, 0)?)?;
+    if !inner.path.is_empty()
+        || caller_source(&inner, registry).is_none_or(|source| !source.may_be_unset())
+    {
+        return Some(read);
+    }
+    let mut casts = read.casts;
+    casts.extend(inner.casts);
+    Some(AccessorRead { casts, ..inner })
+}
+
 /// Whether `expr` reads a source the deployment declares as the caller.
 fn reads_declared_caller(expr: &Expr, registry: &FunctionRegistry) -> bool {
-    accessor_read(expr).is_some_and(|read| caller_source(&read, registry).is_some())
+    caller_read_of(expr, registry).is_some_and(|read| caller_source(&read, registry).is_some())
 }
 
 /// The cast on `expr`'s read of the caller that can rename the caller, inside the casts
@@ -1000,7 +1028,7 @@ fn caller_renaming_cast(
     outer: &CastChain,
     registry: &FunctionRegistry,
 ) -> Option<String> {
-    let read = accessor_read(expr)?;
+    let read = caller_read_of(expr, registry)?;
     let declared = caller_source(&read, registry)
         .map(DeclaredSource::canonical_type)
         .or_else(|| accessor_return_type(read.root, registry).map(str::to_string));
