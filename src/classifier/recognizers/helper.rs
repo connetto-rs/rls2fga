@@ -1032,7 +1032,7 @@ fn helper_grant<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
-    let (joined, blocked) = arm_joins(function, grant, db)?;
+    let joins = arm_joins(function, grant, db)?;
     let table = grant.table();
     let grantee = match grant.granted_to() {
         GrantedTo::Request(compared) => {
@@ -1131,8 +1131,7 @@ fn helper_grant<DB: DatabaseLike>(
         rows: grant_rows(table, grant.restrictions(), db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
         caps,
-        joined,
-        blocked,
+        joins,
     };
     if grant.time_bounds.len() > 1 && !row_uniquely_keys(&grant.table, &grant.tuple_key(), db) {
         return Err(HelperRefusal::MixedTimeBounds {
@@ -1523,22 +1522,23 @@ fn unjoined<DB: DatabaseLike>(
 }
 
 /// The rows `grant` joins and the rows that block it, each named by columns of the arm's
-/// own row, refused unless a key names one row of the arm's table and of each other table.
+/// own row, `None` where it names none, and refused unless a key names one row of the
+/// arm's table and of each other table.
 fn arm_joins<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
     db: &DB,
-) -> Result<(Vec<HelperJoin>, Vec<HelperJoin>), HelperRefusal> {
+) -> Result<Option<HelperJoins>, HelperRefusal> {
     if grant.joined_rows().is_empty() && grant.anti_joins().is_empty() {
-        return Ok((Vec::new(), Vec::new()));
+        return Ok(None);
     }
     let table = table_identity(grant.table());
-    if resolve_row_identity(&table, db).is_none() {
+    let Some(identity) = resolve_row_identity(&table, db) else {
         return Err(HelperRefusal::JoinedTableUnkeyed {
             function: function.to_string(),
             table: table.to_string(),
         });
-    }
+    };
     let joined = grant
         .joined_rows()
         .iter()
@@ -1587,7 +1587,11 @@ fn arm_joins<DB: DatabaseLike>(
             Ok(blocked)
         })
         .collect::<Result<_, _>>()?;
-    Ok((joined, blocked))
+    Ok(Some(HelperJoins {
+        identity,
+        joined,
+        blocked,
+    }))
 }
 
 /// The row of `other` the arm's row names through `columns`, each an arm column beside the
@@ -1628,6 +1632,7 @@ fn helper_join<DB: DatabaseLike>(
         .collect::<Result<_, _>>()?;
     Ok(HelperJoin {
         table: other,
+        identity,
         columns,
         predicates: restrictions.iter().map(restriction).collect(),
     })
