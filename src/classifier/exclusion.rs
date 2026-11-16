@@ -7,9 +7,9 @@ use crate::no_std_prelude::*;
 use crate::classifier::expansion::{self, ExpansionState};
 use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
-    composite_confidence, exclusion_confidence, BoolOp, ClassifiedExpr, Composite, ConfidenceLevel,
-    ConstantBool, DeclaredHelper, ExcludedSet, ExistsMembership, ExpandedFunction, HelperSetArm,
-    MembershipExclusion, PatternClass, PolicyCommand,
+    composite_confidence, exclusion_confidence, flagged_rows, BoolOp, ClassifiedExpr, Composite,
+    ConfidenceLevel, ConstantBool, DeclaredHelper, ExcludedSet, ExistsMembership, ExpandedFunction,
+    HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
 };
 use crate::classifier::recognizers::{
     diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_excluded_helper,
@@ -605,8 +605,9 @@ pub(crate) fn classify_parent_flag<DB: DatabaseLike>(
 /// `flag`, the flags a call tests on the edge row, each climbed to from the guarded row one
 /// edge below, `None` where it tests anything else.
 ///
-/// The calls the edge row's flags were read through drop out, since inside the `EXISTS` a
-/// `NULL` they return keeps the edge row out as `false` does.
+/// A `STRICT` call is `NULL` on an edge row lacking an argument, which keeps the edge row
+/// out, so a nullable argument is refused unless it is the edge's child or the one column
+/// every flag inside climbs, whose `NULL` links no parent either.
 fn flag_below<DB: DatabaseLike>(
     flag: ClassifiedExpr,
     parent: &ParentFlag,
@@ -625,7 +626,31 @@ fn flag_below<DB: DatabaseLike>(
                 })
                 .map_err(ExclusionError::from),
         ),
-        PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) => {
+        PatternClass::ExpandedFunction(ExpandedFunction {
+            presence_columns,
+            inner,
+            ..
+        }) => {
+            let climbed: Vec<&ColumnName> = flagged_rows(&inner.pattern)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|flagged| &flagged.column)
+                .collect();
+            let undecided: Vec<ColumnName> = presence_columns
+                .iter()
+                .filter(|column| {
+                    **column != parent.child_column
+                        && (climbed.is_empty() || climbed.iter().any(|read| *read != *column))
+                })
+                .cloned()
+                .collect();
+            let edge = parent.edge.to_string();
+            if let Some(column) = nullable_column(db, &edge, &undecided) {
+                return Some(Err(ExclusionError::NullableStrictArgument {
+                    table: edge,
+                    column: column.clone(),
+                }));
+            }
             flag_below(*inner, parent, db, registry, state)
         }
         PatternClass::P8Composite(Composite {

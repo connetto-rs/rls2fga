@@ -1115,3 +1115,136 @@ fn a_parent_read_through_the_callers_own_policies_is_refused() {
         "{reason}"
     );
 }
+
+/// Resources whose edge rows may also name a previous parent, with `STRICT` archive tests
+/// on one resource or either of two.
+fn with_previous_parent() -> String {
+    format!(
+        "{}
+CREATE FUNCTION authz.is_archived_strict(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resources r
+                 WHERE r.id = resource AND r.archived_at IS NOT NULL)
+$$;
+ALTER FUNCTION authz.is_archived_strict(TEXT) OWNER TO authz_owner;
+CREATE FUNCTION authz.either_archived(one TEXT, other TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resources r WHERE r.id = one AND r.archived_at IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM public.resources r WHERE r.id = other AND r.archived_at IS NOT NULL)
+$$;
+ALTER FUNCTION authz.either_archived(TEXT, TEXT) OWNER TO authz_owner;
+",
+        RESOURCES.replace(
+            "parent_id TEXT NOT NULL REFERENCES resources (id));",
+            "parent_id TEXT NOT NULL REFERENCES resources (id),
+  previous_parent_id TEXT REFERENCES resources (id));",
+        )
+    )
+}
+
+/// Grants on resources below a parent `call` flags, the edge read by a definer.
+fn grants_below(schema: &str, call: &str) -> String {
+    format!(
+        "{schema}
+CREATE FUNCTION authz.below_archived(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                 WHERE edge.id = resource AND {call})
+$$;
+ALTER FUNCTION authz.below_archived(TEXT) OWNER TO authz_owner;
+CREATE POLICY grants_below_archived ON grants FOR SELECT
+  USING (authz.below_archived(resource_id));"
+    )
+}
+
+/// A `STRICT` call is `NULL` where the edge row lacks a previous parent, which hides the row,
+/// while the flag on the parent alone grants it.
+#[test]
+fn a_parent_flag_beside_a_nullable_strict_argument_is_refused() {
+    let reason = refusal_of(
+        &grants_below(
+            &with_previous_parent(),
+            "authz.either_archived(edge.parent_id, edge.previous_parent_id)",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(
+        reason.contains("STRICT") && reason.contains("previous_parent_id"),
+        "{reason}"
+    );
+}
+
+/// A `STRICT` call on the one nullable column it climbs is `NULL` exactly where no edge links
+/// a parent, so the flag on that parent decides it.
+#[test]
+fn a_strict_parent_flag_over_its_own_nullable_column_translates() {
+    let classified = using_of(
+        &grants_below(
+            &with_previous_parent(),
+            "authz.is_archived_strict(edge.previous_parent_id)",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert_ne!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
+}
+
+/// Every flag of a union a parent call tests is compared by its own edge column, so a
+/// nondeterministic collation on it is refused.
+#[test]
+fn a_union_of_parent_flags_over_a_case_insensitive_edge_is_refused() {
+    let schema = with_previous_parent().replace(
+        "parent_id TEXT NOT NULL REFERENCES",
+        "parent_id TEXT COLLATE ci NOT NULL REFERENCES",
+    );
+    let reason = refusal_of(
+        &grants_below(
+            &format!(
+                "CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', \
+                 deterministic = false);
+                 {schema}"
+            ),
+            "authz.either_archived(edge.parent_id, edge.parent_id)",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(reason.contains("collation"), "{reason}");
+}
+
+/// A parent the caller reads through its own policies is inherited from, whatever it tests.
+#[test]
+fn a_flagged_parent_read_under_its_policies_is_inherited() {
+    let classified = using_of(
+        "CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+         CREATE SCHEMA authz;
+         GRANT USAGE ON SCHEMA authz TO authz_owner;
+         CREATE TABLE projects (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+           archived BOOLEAN NOT NULL, locked BOOLEAN NOT NULL);
+         CREATE TABLE docs (id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL REFERENCES projects (id));
+         GRANT SELECT ON projects TO authz_owner;
+         CREATE FUNCTION authz.held(project TEXT) RETURNS BOOLEAN
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project AND p.archived)
+               OR EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project AND p.locked)
+         $$;
+         ALTER FUNCTION authz.held(TEXT) OWNER TO authz_owner;
+         ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY projects_owner ON projects FOR SELECT
+           USING (owner_id = current_setting('app.user_id', true));
+         CREATE POLICY docs_held ON docs FOR SELECT USING (EXISTS (
+           SELECT 1 FROM projects p WHERE p.id = docs.project_id AND authz.held(p.id)));",
+        &[],
+        "docs_held",
+    );
+    assert!(
+        matches!(
+            classified.pattern,
+            rls2fga::classifier::patterns::PatternClass::P5ParentInheritance(_)
+        ),
+        "{classified:?}"
+    );
+}

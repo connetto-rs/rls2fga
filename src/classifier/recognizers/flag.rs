@@ -207,7 +207,7 @@ pub(crate) struct ParentFlag {
     /// The table holding the edge.
     pub(crate) edge: TableId,
     /// The edge table's column compared with `column`.
-    child_column: ColumnName,
+    pub(crate) child_column: ColumnName,
     /// The call, each edge column it reads qualified by the edge table's own name, so it
     /// classifies as a test on the edge row.
     pub(crate) call: Expr,
