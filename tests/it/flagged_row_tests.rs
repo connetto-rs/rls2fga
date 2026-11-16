@@ -223,8 +223,10 @@ fn a_negated_archive_walk_over_a_foreign_key_subtracts_through_the_named_row() {
     );
 }
 
+/// Each edge row links the child it names to its parent, so the parent's flag reaches the
+/// child and never the reverse.
 #[test]
-fn the_edge_links_load_each_edge_row() {
+fn the_edge_links_load_each_edge_row_from_child_to_parent() {
     let outputs = translator(ConfidenceLevel::B, &[])
         .translate(&db_of(&format!(
             "{RESOURCES}
@@ -242,7 +244,20 @@ fn the_edge_links_load_each_edge_row() {
         .sql
         .clone();
     assert!(link.contains("FROM \"public\".\"ownables\""), "{link}");
-    assert!(link.contains("\"project_id\" IS NOT NULL"), "{link}");
+    let (object, rest) = link
+        .split_once(" AS object")
+        .expect("the link names an object");
+    let (_, subject) = rest
+        .split_once(" AS relation, ")
+        .expect("the link names a relation");
+    let (subject, _) = subject
+        .split_once(" AS subject")
+        .expect("the link names a subject");
+    assert!(
+        object.contains("\"id\"") && !object.contains("project_id"),
+        "{link}"
+    );
+    assert!(subject.contains("\"project_id\""), "{link}");
 }
 
 /// A walk keeping a depth column stops where its bound does, which nothing proves covers
@@ -836,4 +851,123 @@ fn a_flag_behind_too_many_helpers_is_refused() {
         "archived",
     );
     assert!(reason.contains("expansion budget"), "{reason}");
+}
+
+/// A text literal compared with a `timestamptz` column reads in the loader session's time
+/// zone, so the session, not the row, decides the flag.
+#[test]
+fn a_flag_comparing_a_zoned_column_with_text_is_refused() {
+    let schema = with_body(
+        &OBJECTS.replace(
+            "archived BOOLEAN NOT NULL DEFAULT false",
+            "archived BOOLEAN NOT NULL DEFAULT false, archived_at TIMESTAMPTZ",
+        ),
+        "SELECT EXISTS (SELECT 1 FROM public.objects object
+                        WHERE object.id = resource AND object.archived_at < '2024-01-01')",
+    );
+    refusal_of(&format!("{schema}{NEGATED_KEYED}"), &[], "archived");
+}
+
+/// A key whose text form does not name its value apart keys two rows `PostgreSQL` finds
+/// equal as two `OpenFGA` objects, or the reverse.
+#[test]
+fn a_flag_keyed_by_a_type_without_one_text_form_is_refused() {
+    for (key, compared) in [
+        ("CITEXT", "CITEXT"),
+        ("REAL", "DOUBLE PRECISION"),
+        ("NUMERIC", "NUMERIC"),
+    ] {
+        let reason = refusal_of(
+            &format!(
+                "CREATE EXTENSION citext;
+                 CREATE TABLE objects (id {key} PRIMARY KEY, archived BOOLEAN NOT NULL);
+                 CREATE TABLE notes (id TEXT PRIMARY KEY, object_id {compared} NOT NULL,
+                   author_id TEXT NOT NULL);
+                 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+                 CREATE POLICY notes_author ON notes FOR SELECT
+                   USING (author_id = current_setting('app.user_id', true));
+                 CREATE POLICY notes_live ON notes AS RESTRICTIVE FOR SELECT USING (NOT EXISTS (
+                   SELECT 1 FROM objects o WHERE o.id = notes.object_id AND o.archived));"
+            ),
+            &[],
+            "notes_live",
+        );
+        assert!(reason.contains("objects.id"), "{key}: {reason}");
+    }
+}
+
+/// A policy's own walk named after a table hides that table wherever a one-part name reads
+/// it, the flagged scan and the edges alike.
+#[test]
+fn a_walk_hiding_a_table_is_never_read_as_that_table() {
+    let schema = "
+CREATE TABLE objects (id TEXT PRIMARY KEY, archived BOOLEAN NOT NULL);
+CREATE TABLE edges (child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
+CREATE TABLE notes (id TEXT PRIMARY KEY, object_id TEXT NOT NULL, author_id TEXT NOT NULL);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_author ON notes FOR SELECT
+  USING (author_id = current_setting('app.user_id', true));
+";
+    for walk in [
+        "WITH RECURSIVE objects (id) AS (SELECT notes.object_id UNION
+           SELECT e.parent_id FROM objects JOIN edges e ON e.child_id = objects.id)
+         SELECT 1 FROM objects walk JOIN objects o ON o.id = walk.id WHERE o.id = 'root'",
+        "WITH RECURSIVE edges (id) AS (SELECT notes.object_id UNION
+           SELECT e.parent_id FROM edges JOIN edges e ON e.child_id = edges.id)
+         SELECT 1 FROM edges JOIN objects o ON o.id = edges.id WHERE o.archived",
+    ] {
+        refusal_of(
+            &format!(
+                "{schema}CREATE POLICY notes_live ON notes AS RESTRICTIVE FOR SELECT
+                   USING (NOT EXISTS ({walk}));"
+            ),
+            &[],
+            "notes_live",
+        );
+    }
+}
+
+/// A flag over columns the deployment confirms as row attributes grades as the same test
+/// on the guarded row does.
+#[test]
+fn a_flag_over_confirmed_attribute_columns_grades_a() {
+    use rls2fga::classifier::function_registry::FunctionRegistry;
+    use rls2fga::translator::TranslatorBuilder;
+
+    use crate::support::deployment::{caller, deployment};
+
+    let grades = |confirm: bool| {
+        let mut registry = FunctionRegistry::new();
+        if confirm {
+            registry.register_attribute_column("objects", "archived");
+        }
+        TranslatorBuilder::new(deployment([caller("app.user_id")]))
+            .with_registry(registry)
+            .build()
+            .classify(&db_of(&format!(
+                "{OBJECTS}{NEGATED_KEYED}
+                 CREATE POLICY archive_positive ON objects FOR SELECT
+                   USING (authz.is_archived(id));"
+            )))
+            .into_iter()
+            .filter(|policy| policy.name() != "objects_owner")
+            .map(|policy| {
+                (
+                    policy.name().to_string(),
+                    policy
+                        .using_classification()
+                        .expect("USING classifies")
+                        .confidence,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
+    let expected = |grade| {
+        vec![
+            ("archive_positive".to_string(), grade),
+            ("archived".to_string(), grade),
+        ]
+    };
+    assert_eq!(grades(true), expected(ConfidenceLevel::A));
+    assert_eq!(grades(false), expected(ConfidenceLevel::B));
 }

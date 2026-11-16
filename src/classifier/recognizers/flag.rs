@@ -13,9 +13,10 @@ use sqlparser::ast::{
     Visitor, VisitorMut,
 };
 
+use super::attribute::conjunct_reads_only_the_row;
 use super::subquery::{
     query_binds_its_own_names, query_locks_its_rows, query_select, select_result_shaping_clause,
-    set_limiting_clause,
+    session_zoned_columns, set_limiting_clause, stored_column_names,
 };
 use super::{attribute_literal_predicate, flatten_and_predicates, unparenthesize};
 use crate::classifier::exclusion::table_guarded_by_rls;
@@ -23,10 +24,10 @@ use crate::classifier::expansion::{call_argument_column, ExpansionState};
 use crate::classifier::patterns::*;
 use crate::generator::db_lookup::{column_kind, single_identity_column};
 use crate::parser::names::{
-    resolve_table_id, stored_ident_name, stored_relation_name, table_has_column,
+    lookup_table_id, resolve_table_id, stored_ident_name, stored_relation_name, table_has_column,
 };
 use crate::parser::sql_parser::DatabaseLike;
-use crate::types::{ColumnName, TableId};
+use crate::types::{ColumnKind, ColumnName, TableId};
 
 /// Why a test shaped as a row flag does not translate.
 #[derive(Debug, thiserror::Error)]
@@ -72,6 +73,16 @@ pub(crate) enum FlagRefusal {
         left: String,
         /// The other key, as `table.column`.
         right: String,
+    },
+    /// The key's type gives one value more than one text, which names `OpenFGA` objects.
+    #[error(
+        "the flag names rows by '{key}', whose type PostgreSQL compares by value while \
+         OpenFGA compares the text naming each row, and two equal values can be spelled \
+         differently"
+    )]
+    KeyWithoutOneSpelling {
+        /// The key, as `table.column`.
+        key: String,
     },
 }
 
@@ -154,6 +165,15 @@ pub(crate) fn recognize_flagged_row<DB: DatabaseLike>(
         }
     }
     let key_kind = column_kind(&flagged_table, key.as_str(), db);
+    // Rows are named by their key's text, which these kinds can spell two ways for one value.
+    if matches!(
+        key_kind,
+        ColumnKind::Unsupported | ColumnKind::Decimal | ColumnKind::Json
+    ) {
+        return Some(Err(FlagRefusal::KeyWithoutOneSpelling {
+            key: format!("{flagged_table}.{key}"),
+        }));
+    }
     let compared = core::iter::once((&guarded, &column)).chain(edges.iter().flat_map(|edge| {
         [
             (&edge.table, &edge.child_column),
@@ -292,10 +312,11 @@ fn flagged_select<DB: DatabaseLike>(
     for factor in factors {
         let (name, visible) = plain_table(factor)?;
         match anchor {
-            Anchor::Walk { name: walk, .. }
-                if walk_visible.is_none() && names_binding(name, walk) =>
-            {
-                walk_visible = Some(visible);
+            Anchor::Walk { name: walk, .. } if names_binding(name, walk) => {
+                // A second read of the walk is the walk too, never the table it hides.
+                if walk_visible.replace(visible).is_some() {
+                    return None;
+                }
             }
             _ if flagged.is_none() => {
                 flagged = Some((resolve_table_id(db, &name.to_string())?, visible));
@@ -304,12 +325,15 @@ fn flagged_select<DB: DatabaseLike>(
         }
     }
     let (table, flagged_visible) = flagged?;
+    let declared = lookup_table_id(db, &table)?;
     let scope = Scope {
         db,
         flagged: &table,
         flagged_visible: &flagged_visible,
         anchor,
         walk_visible: walk_visible.as_deref(),
+        columns: stored_column_names(declared, db),
+        zoned_columns: session_zoned_columns(declared, db),
     };
     if matches!(anchor, Anchor::Walk { .. }) && scope.walk_visible.is_none() {
         return None;
@@ -344,6 +368,10 @@ struct Scope<'s, DB> {
     flagged_visible: &'s str,
     anchor: &'s Anchor<'s>,
     walk_visible: Option<&'s str>,
+    /// Every column of the flagged table.
+    columns: Vec<String>,
+    /// The flagged table's columns a literal compares with in the session's time zone.
+    zoned_columns: Vec<String>,
 }
 
 /// What one column reference in the flagged scan reads.
@@ -410,6 +438,9 @@ impl<DB: DatabaseLike> Scope<'_, DB> {
         let mut bare = conjunct.clone();
         let _ = VisitMut::visit(&mut bare, &mut StripQualifiers);
         let bare = unparenthesize(&bare);
+        if !conjunct_reads_only_the_row(bare, &self.columns, &self.zoned_columns) {
+            return None;
+        }
         let predicate = match bare {
             Expr::Identifier(ident) => boolean_true(ident),
             Expr::IsTrue(inner) => match unparenthesize(inner) {
@@ -456,7 +487,7 @@ fn boolean_true(ident: &Ident) -> AttributePredicate {
     }
 }
 
-/// Whether the row alone decides `test`, apart from the session's time zone and locale.
+/// Whether `test` compares with a literal no session setting reads differently.
 fn decided_by_the_row(test: &AttributeTest) -> bool {
     let plain = |literal: &AttributeLiteral| {
         matches!(
@@ -561,6 +592,7 @@ fn step_edges<DB: DatabaseLike>(
     };
     let (qualifier, parent) = qualified_column(single_projection(step)?)?;
     let walk = WalkColumn {
+        name,
         visible: &walk_visible,
         column,
     };
@@ -597,6 +629,7 @@ fn step_edges<DB: DatabaseLike>(
 
 /// The walk's column as a step reads it.
 struct WalkColumn<'a> {
+    name: &'a str,
     visible: &'a str,
     column: &'a str,
 }
@@ -665,8 +698,8 @@ fn edge_of<DB: DatabaseLike>(
     walk: &WalkColumn<'_>,
     parent: String,
 ) -> Option<FlagEdge> {
-    // An edge read under the walk's own name hides the walk inside the branch.
-    if edge_visible == walk.visible {
+    // An edge read under the walk's own name, or read by its name, is the walk.
+    if edge_visible == walk.visible || names_binding(edge, walk.name) {
         return None;
     }
     let (left, right) = equality(condition)?;

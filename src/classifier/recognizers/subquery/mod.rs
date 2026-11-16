@@ -1346,7 +1346,7 @@ pub(crate) fn session_zoned_columns<DB: DatabaseLike>(table: &DB::Table, db: &DB
 }
 
 /// The names of `table`'s columns, as the schema stores them.
-fn stored_column_names<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> Vec<String> {
+pub(crate) fn stored_column_names<DB: DatabaseLike>(table: &DB::Table, db: &DB) -> Vec<String> {
     table
         .columns(db)
         .into_iter()

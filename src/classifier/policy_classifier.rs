@@ -623,12 +623,28 @@ fn flagged_row_refusal<DB: DatabaseLike>(flagged: &FlaggedRow, db: &DB) -> Optio
         })
 }
 
-/// `flagged` as a classification, graded `B` since its tuples hold the flags as last
-/// loaded.
-pub(crate) fn flagged_row_classified(flagged: FlaggedRow) -> ClassifiedExpr {
+/// `flagged` as a classification, graded as the same literal checks on the guarded row are,
+/// `A` once the deployment confirms every column it tests on the flagged table.
+pub(crate) fn flagged_row_classified<DB: DatabaseLike>(
+    flagged: FlaggedRow,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> ClassifiedExpr {
+    let table = flagged.table.to_string();
+    let confidence = flagged
+        .predicates
+        .iter()
+        .fold(ConfidenceLevel::A, |grade, predicate| {
+            grade.min(literal_attribute_confidence(
+                db,
+                registry,
+                &table,
+                &predicate.column,
+            ))
+        });
     ClassifiedExpr {
         pattern: PatternClass::P29FlaggedRow(flagged),
-        confidence: ConfidenceLevel::B,
+        confidence,
     }
 }
 
@@ -1013,7 +1029,7 @@ fn classify_expr_inner<DB: DatabaseLike>(
     // membership reads the caller and a flag never does.
     if let Some(flagged) = recognizers::recognize_flagged_row(expr, db, table, state) {
         return match flagged {
-            Ok(flagged) => flagged_row_classified(flagged),
+            Ok(flagged) => flagged_row_classified(flagged, db, registry),
             Err(refusal) => unknown_d(expr, refusal.to_string()),
         };
     }

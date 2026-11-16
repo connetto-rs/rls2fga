@@ -519,7 +519,11 @@ fn classify_flag<DB: DatabaseLike>(
     if let Some(flagged) = recognize_flagged_row(positive, db, table, state) {
         return Some(
             flagged
-                .map(crate::classifier::policy_classifier::flagged_row_classified)
+                .map(|flagged| {
+                    crate::classifier::policy_classifier::flagged_row_classified(
+                        flagged, db, registry,
+                    )
+                })
                 .map_err(ExclusionError::from),
         );
     }
