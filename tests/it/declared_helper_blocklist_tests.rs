@@ -233,6 +233,113 @@ fn a_helper_returning_a_nullable_column_is_refused() {
     );
 }
 
+/// A walk down an edge table keyed on the child returns that `NOT NULL` key, so a
+/// blocklist through it subtracts every folder below a blocked one.
+#[test]
+fn a_blocklist_walking_down_an_edge_table_subtracts_every_row_below() {
+    let sql = format!(
+        "{BLOCKS}
+         CREATE TABLE folders (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL);
+         CREATE TABLE folder_parents (folder_id TEXT PRIMARY KEY REFERENCES folders (id),
+           parent_id TEXT NOT NULL REFERENCES folders (id));
+         CREATE TABLE folder_blocks (folder_id TEXT NOT NULL REFERENCES folders (id),
+           principal_id TEXT NOT NULL, PRIMARY KEY (folder_id, principal_id));
+         GRANT SELECT ON folder_parents, folder_blocks TO authz_owner;
+         CREATE FUNCTION authz.blocked_folders() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           WITH RECURSIVE reached (id) AS (
+             SELECT b.folder_id FROM public.folder_blocks b
+             WHERE b.principal_id = current_setting('app.user_id', true)
+             UNION
+             SELECT fp.folder_id FROM public.folder_parents fp JOIN reached ON fp.parent_id = reached.id
+           )
+           SELECT id FROM reached
+         $$;
+         ALTER FUNCTION authz.blocked_folders() OWNER TO authz_owner;
+         ALTER TABLE folders ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY folders_owner ON folders FOR SELECT
+           USING (owner_id = current_setting('app.user_id', true));
+         CREATE POLICY folders_unblocked ON folders AS RESTRICTIVE FOR SELECT
+           USING (id NOT IN (SELECT authz.blocked_folders()));"
+    );
+    let dsl = crate::declared_helper_tests::model(&sql, &["authz.blocked_folders"]);
+    assert_eq!(
+        relation_definition(&dsl, "folders", "can_select").as_deref(),
+        Some("(owner but not blocked_folders) and acting_app_user from request_gate"),
+        "{dsl}"
+    );
+    assert!(
+        relation_definition(&dsl, "folders", "blocked_folders")
+            .is_some_and(|rule| rule.ends_with(" or blocked_folders from folders")),
+        "{dsl}"
+    );
+}
+
+/// A parent arm through an edge table returns the edge table's child column, which a
+/// `UNIQUE` constraint lets hold `NULL`, so the column has to be proven `NOT NULL`.
+#[test]
+fn an_edge_table_returning_a_nullable_child_is_refused() {
+    let sql = format!(
+        "{BLOCKS}
+         CREATE TABLE project_marks (id TEXT PRIMARY KEY,
+           project_id TEXT UNIQUE REFERENCES projects (id),
+           organization_id TEXT NOT NULL REFERENCES organizations (id));
+         GRANT SELECT ON project_marks TO authz_owner;
+         CREATE FUNCTION authz.marked_projects() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT m.project_id FROM public.project_marks m
+           WHERE m.organization_id IN (SELECT authz.blocking_organizations())
+         $$;
+         ALTER FUNCTION authz.marked_projects() OWNER TO authz_owner;
+         CREATE POLICY projects_unblocked ON projects AS RESTRICTIVE FOR SELECT
+           USING (id NOT IN (SELECT authz.marked_projects()));"
+    );
+    let reason = refusal_of(
+        &sql,
+        &["authz.blocking_organizations", "authz.marked_projects"],
+        "projects_unblocked",
+    );
+    assert!(
+        reason.contains("project_marks.project_id") && reason.contains("provably non-null"),
+        "{reason}"
+    );
+}
+
+/// A walk up adds the parent column of every row it reaches, the `NULL` of a root
+/// included, so the parent column has to be proven `NOT NULL`.
+#[test]
+fn a_walk_up_to_a_nullable_parent_is_refused() {
+    let sql = format!(
+        "{BLOCKS}
+         CREATE TABLE units (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES units (id),
+           owner_id TEXT NOT NULL);
+         CREATE TABLE unit_blocks (unit_id TEXT NOT NULL REFERENCES units (id),
+           principal_id TEXT NOT NULL, PRIMARY KEY (unit_id, principal_id));
+         GRANT SELECT ON units, unit_blocks TO authz_owner;
+         CREATE FUNCTION authz.blocked_units() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           WITH RECURSIVE reached (id) AS (
+             SELECT b.unit_id FROM public.unit_blocks b
+             WHERE b.principal_id = current_setting('app.user_id', true)
+             UNION
+             SELECT u.parent_id FROM public.units u JOIN reached ON u.id = reached.id
+           )
+           SELECT id FROM reached
+         $$;
+         ALTER FUNCTION authz.blocked_units() OWNER TO authz_owner;
+         ALTER TABLE units ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY units_owner ON units FOR SELECT
+           USING (owner_id = current_setting('app.user_id', true));
+         CREATE POLICY units_unblocked ON units AS RESTRICTIVE FOR SELECT
+           USING (id NOT IN (SELECT authz.blocked_units()));"
+    );
+    let reason = refusal_of(&sql, &["authz.blocked_units"], "units_unblocked");
+    assert!(
+        reason.contains("units.parent_id") && reason.contains("provably non-null"),
+        "{reason}"
+    );
+}
+
 /// The refusal names why the helper does not translate rather than refusing negation.
 #[test]
 fn an_untranslatable_helper_keeps_its_own_reason() {

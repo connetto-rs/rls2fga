@@ -408,19 +408,20 @@ pub enum TranslationNote {
         /// Characters the key may render, once encoded, before the row is left out.
         budget: usize,
     },
-    /// A declared helper walks its table's own parent column, down to every row below
-    /// or up to every row above, which `PostgreSQL` follows to any depth and `OpenFGA`
-    /// resolves only as deep as its `resolveNodeLimit` allows.
+    /// A declared helper walks a tree along the parent column of a table holding its
+    /// edges, the tree itself or an edge table, down to every row below or up to every
+    /// row above, which `PostgreSQL` follows to any depth and `OpenFGA` resolves only as
+    /// deep as its `resolveNodeLimit` allows.
     ///
     /// Stated as a contract rather than a list, since the translator never sees how deep
     /// the tree goes.
     HelperWalkDepth {
         /// The helper.
         function: String,
-        /// The table it walks.
+        /// The table holding the edges it walks.
         #[serde(with = "table_id_as_str")]
         table: TableId,
-        /// The column naming each row's parent.
+        /// The column naming each edge's parent.
         column: ColumnName,
         /// The relation resolved once per parent or child.
         relation: RelationName,

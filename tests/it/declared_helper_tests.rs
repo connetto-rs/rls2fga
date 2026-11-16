@@ -16,7 +16,7 @@ use sqlparser::ast::DataType;
 use crate::support::deployment::{
     caller, delimited_set, deployment, scalar, typed_caller, typed_scalar,
 };
-use crate::support::footgun::{db_of, relation_definition};
+use crate::support::footgun::{db_of, relation_definition, relation_definitions};
 
 /// The request's reduced ownership schema, two levels of grants under the orders.
 pub(crate) const LEVELS: &str = "
@@ -2205,4 +2205,312 @@ fn a_grant_arm_kept_by_a_cap_or_returning_several_columns_is_refused() {
             other => panic!("`{using}` should be refused, got {other:?}"),
         }
     }
+}
+
+/// connetto's folder tree, its edges kept in `folder_parents` keyed on the child, and the
+/// projects placed in a folder through `project_folders`, whose own key is a surrogate
+/// and whose child column a `UNIQUE` constraint covers alone.
+pub(crate) const EDGE_FOLDERS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE folders (id TEXT PRIMARY KEY);
+CREATE TABLE folder_parents (
+  folder_id TEXT PRIMARY KEY REFERENCES folders (id),
+  parent_id TEXT NOT NULL REFERENCES folders (id));
+CREATE TABLE projects (id TEXT PRIMARY KEY);
+CREATE TABLE project_folders (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL UNIQUE REFERENCES projects (id),
+  folder_id TEXT NOT NULL REFERENCES folders (id));
+CREATE TABLE folder_grants (folder_id TEXT NOT NULL REFERENCES folders (id),
+  user_id TEXT NOT NULL, PRIMARY KEY (folder_id, user_id));
+GRANT SELECT ON folder_parents, project_folders, folder_grants TO authz_owner;
+CREATE FUNCTION authz.folders_reached() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  WITH RECURSIVE reached (id) AS (
+    SELECT fg.folder_id FROM public.folder_grants fg
+    WHERE fg.user_id = current_setting('app.user_id', true)
+    UNION
+    SELECT fp.folder_id FROM public.folder_parents fp JOIN reached ON fp.parent_id = reached.id
+  )
+  SELECT id FROM reached
+$$;
+CREATE FUNCTION authz.projects_reached() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT pf.project_id FROM public.project_folders pf
+  WHERE pf.folder_id IN (SELECT authz.folders_reached())
+$$;
+ALTER FUNCTION authz.folders_reached() OWNER TO authz_owner;
+ALTER FUNCTION authz.projects_reached() OWNER TO authz_owner;
+ALTER TABLE folders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY folders_select ON folders FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.folders_reached())));
+CREATE POLICY projects_select ON projects FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.projects_reached())));
+";
+
+pub(crate) const EDGE_FOLDER_HELPERS: &[&str] =
+    &["authz.folders_reached", "authz.projects_reached"];
+
+/// connetto's resource hierarchy, one tree of folders, projects and ownables whose edges
+/// two tables keep, each naming child and parent through a foreign key on the resource's
+/// key and its kind, with one helper walking down both at once and one walking up.
+pub(crate) const RESOURCES: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE resources (id TEXT PRIMARY KEY, kind TEXT NOT NULL, title TEXT, UNIQUE (id, kind));
+CREATE TABLE resource_parents (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('folder', 'project')),
+  parent_id TEXT NOT NULL,
+  parent_kind TEXT NOT NULL DEFAULT 'folder' CHECK (parent_kind = 'folder'),
+  FOREIGN KEY (id, kind) REFERENCES resources (id, kind),
+  FOREIGN KEY (parent_id, parent_kind) REFERENCES resources (id, kind));
+CREATE TABLE ownables (
+  id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'ownable' CHECK (kind = 'ownable'),
+  project_id TEXT NOT NULL,
+  project_kind TEXT NOT NULL DEFAULT 'project' CHECK (project_kind = 'project'),
+  FOREIGN KEY (id, kind) REFERENCES resources (id, kind),
+  FOREIGN KEY (project_id, project_kind) REFERENCES resources (id, kind));
+CREATE TABLE resource_grants (resource_id TEXT NOT NULL REFERENCES resources (id),
+  user_id TEXT NOT NULL, PRIMARY KEY (resource_id, user_id));
+GRANT SELECT ON resource_parents, ownables, resource_grants TO authz_owner;
+CREATE FUNCTION authz.resources_below() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  WITH RECURSIVE reached (id) AS (
+    SELECT g.resource_id FROM public.resource_grants g
+    WHERE g.user_id = current_setting('app.user_id', true)
+    UNION
+    SELECT child.id FROM reached CROSS JOIN LATERAL (
+      SELECT p.id FROM public.resource_parents p WHERE p.parent_id = reached.id
+      UNION ALL
+      SELECT o.id FROM public.ownables o WHERE o.project_id = reached.id
+    ) child
+  )
+  SELECT id FROM reached
+$$;
+CREATE FUNCTION authz.resources_above() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  WITH RECURSIVE reached (id) AS (
+    SELECT g.resource_id FROM public.resource_grants g
+    WHERE g.user_id = current_setting('app.user_id', true)
+    UNION
+    SELECT parent.id FROM reached, LATERAL (
+      SELECT p.parent_id FROM public.resource_parents p WHERE p.id = reached.id
+      UNION
+      SELECT o.project_id FROM public.ownables o WHERE reached.id = o.id
+    ) parent (id)
+  )
+  SELECT id FROM reached
+$$;
+ALTER FUNCTION authz.resources_below() OWNER TO authz_owner;
+ALTER FUNCTION authz.resources_above() OWNER TO authz_owner;
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+CREATE POLICY resources_read ON resources FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_below())));
+CREATE POLICY resources_update ON resources FOR UPDATE
+  USING (id = ANY (ARRAY(SELECT authz.resources_above())))
+  WITH CHECK (id = ANY (ARRAY(SELECT authz.resources_above())));
+";
+
+pub(crate) const RESOURCE_HELPERS: &[&str] = &["authz.resources_above", "authz.resources_below"];
+
+/// The tuple queries reading `table`.
+fn queries_reading<'o>(outputs: &'o rls2fga::translator::Outputs, table: &str) -> Vec<&'o str> {
+    let from = format!("FROM \"public\".\"{table}\"");
+    outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .filter(|sql| sql.contains(&from))
+        .collect()
+}
+
+/// The spelling a tuple query gives an object of `type_name` keyed by `column`.
+fn naming(type_name: &str, column: &str) -> String {
+    format!("'{type_name}:' || CASE WHEN \"{column}\"")
+}
+
+/// Whether `edges` holds no relation and no tuple names one of its rows, so nothing
+/// resolves on the edge table itself.
+fn relates_nothing(outputs: &rls2fga::translator::Outputs, dsl: &str, edges: &str) -> bool {
+    relation_definitions(dsl, edges).is_empty()
+        && outputs
+            .tuple_queries()
+            .iter()
+            .all(|query| !query.sql.contains(&format!("'{edges}:'")))
+}
+
+/// A walk through an edge table resolves on the tree its rows link, each edge row naming
+/// a tree row's parent, so no relation ever sits on the edge table.
+#[test]
+fn an_edge_table_walk_resolves_on_the_tree_and_never_on_the_edge_table() {
+    let outputs = translator(ConfidenceLevel::B, EDGE_FOLDER_HELPERS)
+        .translate(&db_of(EDGE_FOLDERS))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    let definition = |type_name: &str, relation: &str| {
+        relation_definition(&dsl, type_name, relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    let folders_reached = definition("folders", "folders_reached");
+    assert!(
+        folders_reached.starts_with("member_")
+            && folders_reached.ends_with(" or folders_reached from folders"),
+        "{dsl}"
+    );
+    assert_eq!(definition("folders", "folders"), "[folders]");
+    assert_eq!(
+        definition("folders", "can_select"),
+        "folders_reached and acting_app_user from request_gate"
+    );
+    for edges in ["folder_parents", "project_folders"] {
+        assert!(relates_nothing(&outputs, &dsl, edges), "{edges}: {dsl}");
+    }
+    let [walk] = queries_reading(&outputs, "folder_parents")[..] else {
+        panic!("{:#?}", outputs.tuple_queries());
+    };
+    assert!(
+        walk.starts_with(&format!("SELECT {}", naming("folders", "folder_id")))
+            && walk.contains(&naming("folders", "parent_id")),
+        "{walk}"
+    );
+}
+
+/// A parent arm through an edge table names each child by the column the body returns,
+/// never by the edge row's own key, and a project in no folder inherits nothing.
+#[test]
+fn a_parent_arm_through_an_edge_table_names_the_child_by_the_returned_column() {
+    let outputs = translator(ConfidenceLevel::B, EDGE_FOLDER_HELPERS)
+        .translate(&db_of(EDGE_FOLDERS))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    assert_eq!(
+        relation_definition(&dsl, "projects", "projects_reached").as_deref(),
+        Some("folders_reached from folders"),
+        "{dsl}"
+    );
+    let [placed] = queries_reading(&outputs, "project_folders")[..] else {
+        panic!("{:#?}", outputs.tuple_queries());
+    };
+    assert!(
+        placed.starts_with(&format!("SELECT {}", naming("projects", "project_id")))
+            && placed.contains(&naming("folders", "folder_id"))
+            && !placed.contains("\"id\""),
+        "{placed}"
+    );
+}
+
+/// A lateral step reads one walk per edge table its union reads, each resolving on the
+/// resources through the edge table's own child and parent columns, down for one helper
+/// and up for the other.
+#[test]
+fn a_lateral_walk_follows_every_edge_table_its_union_reads() {
+    let outputs = translator(ConfidenceLevel::B, RESOURCE_HELPERS)
+        .translate(&db_of(RESOURCES))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    for edges in ["resource_parents", "ownables"] {
+        assert!(relates_nothing(&outputs, &dsl, edges), "{edges}: {dsl}");
+    }
+    for (relation, step) in [
+        ("resources_below", "resources"),
+        ("resources_above", "child"),
+    ] {
+        let rule =
+            relation_definition(&dsl, "resources", relation).unwrap_or_else(|| panic!("{dsl}"));
+        let arms: Vec<&str> = rule.split(" or ").collect();
+        let [grant, first, second] = arms[..] else {
+            panic!("{relation} should hold its grant and two walks: {dsl}");
+        };
+        assert!(grant.starts_with("member_"), "{dsl}");
+        for walk in [first, second] {
+            let tupleset = walk
+                .strip_prefix(&format!("{relation} from "))
+                .unwrap_or_else(|| panic!("{walk} should walk {relation}: {dsl}"));
+            assert!(tupleset.starts_with(step), "{walk}: {dsl}");
+            assert_eq!(
+                relation_definition(&dsl, "resources", tupleset).as_deref(),
+                Some("[resources]"),
+                "{dsl}"
+            );
+        }
+    }
+    // Walking down, each edge names its child as the object, and walking up its parent.
+    for (edges, parent) in [
+        ("resource_parents", "parent_id"),
+        ("ownables", "project_id"),
+    ] {
+        let mut objects: Vec<&str> = queries_reading(&outputs, edges)
+            .into_iter()
+            .map(|query| {
+                if query.starts_with(&format!("SELECT {}", naming("resources", "id")))
+                    && query.contains(&naming("resources", parent))
+                {
+                    "id"
+                } else if query.starts_with(&format!("SELECT {}", naming("resources", parent)))
+                    && query.contains(&naming("resources", "id"))
+                {
+                    parent
+                } else {
+                    panic!("{edges} should load an edge of the resources: {query}")
+                }
+            })
+            .collect();
+        objects.sort_unstable();
+        let mut expected = ["id", parent];
+        expected.sort_unstable();
+        assert_eq!(objects, expected, "{edges}");
+    }
+}
+
+/// Each edge table a walk reads is noted on that table and the parent column it follows.
+#[test]
+fn each_edge_table_a_walk_reads_is_noted() {
+    let notes = translator(ConfidenceLevel::B, RESOURCE_HELPERS)
+        .translate(&db_of(RESOURCES))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate")
+        .notes()
+        .to_vec();
+    let mut walks: Vec<(String, String, String)> = notes
+        .iter()
+        .filter_map(|note| match note {
+            TranslationNote::HelperWalkDepth {
+                function,
+                table,
+                column,
+                ..
+            } => Some((function.clone(), table.to_string(), column.to_string())),
+            _ => None,
+        })
+        .collect();
+    walks.sort();
+    let walk = |function: &str, table: &str, column: &str| {
+        (
+            function.to_string(),
+            format!("public.{table}"),
+            column.to_string(),
+        )
+    };
+    assert_eq!(
+        walks,
+        [
+            walk("authz.resources_above", "ownables", "project_id"),
+            walk("authz.resources_above", "resource_parents", "parent_id"),
+            walk("authz.resources_below", "ownables", "project_id"),
+            walk("authz.resources_below", "resource_parents", "parent_id"),
+        ],
+        "{notes:#?}"
+    );
 }

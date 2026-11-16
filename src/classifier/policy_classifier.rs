@@ -603,10 +603,18 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
                 | HelperGrantee::RequestSet { .. }
                 | HelperGrantee::Anyone => None,
             }),
-        HelperSetArm::Parent(parent) => key_collation_refusal(&parent.table, &parent.fk_column, db)
-            .or_else(|| helper_call_refusal(&parent.call, db)),
-        HelperSetArm::Walk(walk) => key_collation_refusal(&walk.table, &walk.fk_column, db),
+        HelperSetArm::Parent(parent) => {
+            tree_edges_refusal(&parent.edges, db).or_else(|| helper_call_refusal(&parent.call, db))
+        }
+        HelperSetArm::Walk(walk) => tree_edges_refusal(&walk.edges, db),
     })
+}
+
+/// Why either end of the edges a declared helper's parent or walk arm reads, or an edge a
+/// flagged row's walk follows, cannot be compared in `OpenFGA`.
+fn tree_edges_refusal<DB: DatabaseLike>(edges: &TreeEdges, db: &DB) -> Option<String> {
+    key_collation_refusal(&edges.table, &edges.child_column, db)
+        .or_else(|| key_collation_refusal(&edges.table, &edges.parent_column, db))
 }
 
 /// Why the flagged table's key or an edge column the walk follows cannot be compared in
@@ -616,10 +624,10 @@ fn flagged_row_refusal<DB: DatabaseLike>(flagged: &FlaggedRow, db: &DB) -> Optio
         .iter()
         .find_map(|key| key_collation_refusal(&flagged.table, key, db))
         .or_else(|| {
-            flagged.edges.iter().find_map(|edge| {
-                key_collation_refusal(&edge.table, &edge.child_column, db)
-                    .or_else(|| key_collation_refusal(&edge.table, &edge.parent_column, db))
-            })
+            flagged
+                .edges
+                .iter()
+                .find_map(|edges| tree_edges_refusal(edges, db))
         })
 }
 

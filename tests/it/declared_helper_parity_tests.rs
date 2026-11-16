@@ -11,8 +11,8 @@ use sqlparser::ast::DataType;
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
-    caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EXPIRING, GRANTEES, GROUPS,
-    INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
+    caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, GRANTEES,
+    GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::support;
@@ -242,6 +242,176 @@ async fn a_walk_down_the_group_tree_agrees_with_postgres_17_and_18() {
             // No grant, and no caller at all, read nothing.
             expect("erin", "docs:d_squad", ActionStatement::Select, false);
             expect("anonymous", "docs:d_org", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const EDGE_FOLDER_HELPERS: &str = r#"{
+    "authz.folders_reached": { "kind": "declared_helper" },
+    "authz.projects_reached": { "kind": "declared_helper" }
+}"#;
+
+/// `root` holds `mid`, which holds `leaf`, and `other` stands alone, each edge a row of
+/// `folder_parents`. `p_leaf`, `p_mid` and `p_other` sit in the folder they name, and
+/// `p_loose` in none.
+fn edge_folders_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-edges-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        EDGE_FOLDERS,
+        &[
+            "INSERT INTO folders VALUES ('root'), ('mid'), ('leaf'), ('other');
+             INSERT INTO folder_parents VALUES ('mid', 'root'), ('leaf', 'mid');
+             INSERT INTO projects VALUES ('p_leaf'), ('p_mid'), ('p_other'), ('p_loose');
+             INSERT INTO project_folders VALUES
+               ('pf1', 'p_leaf', 'leaf'), ('pf2', 'p_mid', 'mid'), ('pf3', 'p_other', 'other');
+             INSERT INTO folder_grants VALUES ('root', 'alice'), ('mid', 'bob'), ('other', 'carol')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON folders, projects TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("carol"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(EDGE_FOLDER_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_walk_and_a_parent_arm_through_edge_tables_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = edge_folders_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            // A grant on the root reaches the whole chain and the projects in it, and a
+            // project in no folder inherits nothing.
+            expect("alice", "folders:root", true);
+            expect("alice", "folders:leaf", true);
+            expect("alice", "folders:other", false);
+            expect("alice", "projects:p_leaf", true);
+            expect("alice", "projects:p_mid", true);
+            expect("alice", "projects:p_loose", false);
+            // A grant in the middle reaches below it, not above.
+            expect("bob", "folders:root", false);
+            expect("bob", "folders:leaf", true);
+            expect("bob", "projects:p_leaf", true);
+            expect("bob", "projects:p_other", false);
+            // A folder with no edge is a tree of its own.
+            expect("carol", "projects:p_other", true);
+            expect("carol", "projects:p_leaf", false);
+            // No grant, and no caller at all, read nothing.
+            expect("erin", "folders:root", false);
+            expect("anonymous", "projects:p_leaf", false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const RESOURCE_HELPERS: &str = r#"{
+    "authz.resources_above": { "kind": "declared_helper" },
+    "authz.resources_below": { "kind": "declared_helper" }
+}"#;
+
+/// The folder `f_team` under `f_root`, the project `p1` under `f_team`, the project
+/// `p_other` under no folder, and the ownables `o1` in `p1` and `o2` in `p_other`, read
+/// through the walk down both edge tables and changed through the walk up them.
+fn resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-lateral-edges-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        RESOURCES,
+        &[
+            "INSERT INTO resources (id, kind) VALUES ('f_root', 'folder'), ('f_team', 'folder'),
+               ('p1', 'project'), ('p_other', 'project'), ('o1', 'ownable'), ('o2', 'ownable');
+             INSERT INTO resource_parents (id, kind, parent_id) VALUES
+               ('f_team', 'folder', 'f_root'), ('p1', 'project', 'f_team');
+             INSERT INTO ownables (id, project_id) VALUES ('o1', 'p1'), ('o2', 'p_other');
+             INSERT INTO resource_grants VALUES
+               ('f_team', 'alice'), ('f_root', 'bob'), ('p_other', 'carol'), ('o1', 'dave')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT, UPDATE ON resources TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("carol"),
+            caller("dave"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(RESOURCE_HELPERS)
+    .writing(
+        "resources",
+        Mutations {
+            update_set: Some("title = 'changed'".into()),
+            check_neutral: true,
+        },
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn lateral_walks_over_composite_key_edge_tables_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = resources_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, statement, allowed| {
+                assert_postgres(&case, &run, subject, object, statement, allowed);
+            };
+            // Walking down both edge tables, a folder's grant reaches its projects and
+            // their ownables, and a project's grant only its own ownables.
+            expect("alice", "resources:f_team", ActionStatement::Select, true);
+            expect("alice", "resources:o1", ActionStatement::Select, true);
+            expect("alice", "resources:f_root", ActionStatement::Select, false);
+            expect("bob", "resources:o1", ActionStatement::Select, true);
+            expect("carol", "resources:o2", ActionStatement::Select, true);
+            expect("carol", "resources:o1", ActionStatement::Select, false);
+            expect("dave", "resources:p1", ActionStatement::Select, false);
+            // Walking up both, a grant reaches every row above it, which a change needs
+            // beside reading the row.
+            expect("dave", "resources:o1", ActionStatement::Update, true);
+            expect("alice", "resources:f_team", ActionStatement::Update, true);
+            expect("alice", "resources:p1", ActionStatement::Update, false);
+            expect("bob", "resources:f_root", ActionStatement::Update, true);
+            expect("bob", "resources:f_team", ActionStatement::Update, false);
+            // No grant, and no caller at all, read nothing.
+            expect("erin", "resources:f_root", ActionStatement::Select, false);
+            expect("anonymous", "resources:o1", ActionStatement::Select, false);
             assert_agrees(&case, &run);
         }
     }

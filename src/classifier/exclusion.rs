@@ -563,8 +563,9 @@ fn classify_flag<DB: DatabaseLike>(
 /// `NOT (x = ANY (s))` is `NULL`, which hides the row, both where `x` is `NULL` and
 /// where `s` holds one while not holding `x`. A row without a value in `x` has no tuple
 /// naming it, so it would stay visible to every caller, and a `NULL` the helper returns
-/// has no tuple either, so it would hide nothing. A parent or walk arm returns its
-/// table's primary key, so only a grant arm's column needs proving.
+/// has no tuple either, so it would hide nothing. So every column an arm returns has to
+/// be proven `NOT NULL`, a grant arm's object column, the child column of the edges a
+/// parent arm or a walk down reads, and the parent column of the edges a walk up reads.
 fn excluded_helper<DB: DatabaseLike>(
     helper: DeclaredHelper,
     db: &DB,
@@ -579,13 +580,16 @@ fn excluded_helper<DB: DatabaseLike>(
         });
     }
     for arm in &helper.call.arms {
-        if let HelperSetArm::Grant(grant) = arm {
-            if !column_proven_not_null(db, &grant.table, grant.object_column.as_str()) {
-                return Err(ExclusionError::NullableProjection {
-                    table: grant.table.clone(),
-                    column: grant.object_column.clone(),
-                });
-            }
+        let (returned_from, returned) = match arm {
+            HelperSetArm::Grant(grant) => (&grant.table, &grant.object_column),
+            HelperSetArm::Parent(parent) => (&parent.edges.table, &parent.edges.child_column),
+            HelperSetArm::Walk(walk) => (&walk.edges.table, walk.returned_column()),
+        };
+        if !column_proven_not_null(db, returned_from, returned.as_str()) {
+            return Err(ExclusionError::NullableProjection {
+                table: returned_from.clone(),
+                column: returned.clone(),
+            });
         }
     }
     Ok(helper)
