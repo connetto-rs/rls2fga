@@ -494,12 +494,13 @@ impl TypePlan {
         relation
     }
 
-    /// Each source's tuples satisfy only its own membership relation.
+    /// Each source's tuples satisfy only its own membership relation, which accepts
+    /// `subjects`.
     fn membership_source_relation(
         &mut self,
         key: &str,
         base: impl Into<String>,
-        subject: DirectSubject,
+        subjects: Vec<DirectSubject>,
     ) -> RelationName {
         if let Some(relation) = self.membership_source_relations.get(key) {
             return relation.clone();
@@ -524,8 +525,7 @@ impl TypePlan {
             relation = RelationName::canonicalized(format!("{head}{suffix}"));
             counter += 1;
         }
-        self.direct_relations
-            .insert(relation.clone(), vec![subject]);
+        self.direct_relations.insert(relation.clone(), subjects);
         self.membership_source_relations
             .insert(key.to_string(), relation.clone());
         relation

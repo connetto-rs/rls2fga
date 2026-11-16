@@ -689,10 +689,10 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
         let gate_relation = share_plan.membership_source_relation(
             &key,
             conditional_gate_relation_name(policy_name),
-            DirectSubject::ConditionalWildcard {
+            vec![DirectSubject::ConditionalWildcard {
                 type_name: ctx.settings.well_known.user.clone(),
                 condition: condition.clone(),
-            },
+            }],
         );
         (gate_relation, condition)
     };

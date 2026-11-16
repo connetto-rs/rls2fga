@@ -408,9 +408,9 @@ pub enum TranslationNote {
         /// Characters the key may render, once encoded, before the row is left out.
         budget: usize,
     },
-    /// A declared helper walks down its table's own parent column, which `PostgreSQL`
-    /// follows to any depth and `OpenFGA` resolves only as deep as its
-    /// `resolveNodeLimit` allows.
+    /// A declared helper walks its table's own parent column, down to every row below
+    /// or up to every row above, which `PostgreSQL` follows to any depth and `OpenFGA`
+    /// resolves only as deep as its `resolveNodeLimit` allows.
     ///
     /// Stated as a contract rather than a list, since the translator never sees how deep
     /// the tree goes.
@@ -422,7 +422,7 @@ pub enum TranslationNote {
         table: TableId,
         /// The column naming each row's parent.
         column: ColumnName,
-        /// The relation resolved once per parent.
+        /// The relation resolved once per parent or child.
         relation: RelationName,
     },
     /// A condition parameter the caller has to put in every check context.
