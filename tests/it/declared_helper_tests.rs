@@ -360,6 +360,60 @@ fn a_role_column_not_closed_to_literals_keeps_the_body_condition() {
     }
 }
 
+/// A grant arm keeping only the rows whose column is `NULL`, or not `NULL`, keeps that
+/// test among its row predicates. Dropped, the arm would grant revoked or unaccepted rows.
+#[test]
+fn a_null_test_on_a_grant_column_keeps_its_rows() {
+    let sql = format!("{LEVELS}{OWNER_READS}{ORDERS}")
+        .replace(
+            "PRIMARY KEY (project_id, principal_id)",
+            "revoked_at TIMESTAMPTZ, accepted_at TIMESTAMPTZ, PRIMARY KEY (project_id, principal_id)",
+        )
+        .replace(
+            "SELECT g.project_id FROM public.project_grants g
+  WHERE g.principal_id = current_setting('app.user_id', true)",
+            "SELECT g.project_id FROM public.project_grants g
+  WHERE g.principal_id = current_setting('app.user_id', true)
+    AND g.revoked_at IS NULL AND g.accepted_at IS NOT NULL",
+        );
+    let PatternClass::P20DeclaredHelper(helper) = using_of(&sql, BOTH, "orders_read").pattern
+    else {
+        panic!("orders_read should translate");
+    };
+    let HelperSetArm::Grant(grant) = &helper.call.arms[0] else {
+        panic!("the first arm reads the project grants");
+    };
+    let (GrantRows::Roles { predicates, .. } | GrantRows::Matching { predicates }) = &grant.rows;
+    let tested = |column: &str, test: AttributeTest| AttributePredicate {
+        column: ColumnName::from_stored(column),
+        test,
+    };
+    for kept in [
+        tested("revoked_at", AttributeTest::IsNull),
+        tested("accepted_at", AttributeTest::IsNotNull),
+    ] {
+        assert!(predicates.contains(&kept), "{kept:?} in {predicates:?}");
+    }
+    let outputs = translator(ConfidenceLevel::B, BOTH)
+        .translate(&db_of(&sql))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let grants: Vec<&str> = outputs
+        .tuple_queries()
+        .iter()
+        .map(|query| query.sql.as_str())
+        .filter(|sql| sql.contains("FROM \"public\".\"project_grants\""))
+        .collect();
+    assert!(!grants.is_empty(), "the project grants load");
+    for sql in grants {
+        assert!(
+            sql.contains("\"revoked_at\" IS NULL") && sql.contains("\"accepted_at\" IS NOT NULL"),
+            "every grant row loaded is unrevoked and accepted: {sql}"
+        );
+    }
+}
+
 /// `pg_dump` writes the role check as `= ANY (ARRAY[...])`, every literal cast to `text`,
 /// and the policy with the literal cast and the call aliased.
 #[test]

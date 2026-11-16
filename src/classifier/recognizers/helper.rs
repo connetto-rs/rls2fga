@@ -30,7 +30,7 @@ use crate::parser::names::{
 };
 use crate::parser::sql_parser::{
     CallerGate, CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike,
-    GrantArm, GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent,
+    GrantArm, GrantedTo, HelperArm, HelperSet, ParentArm, Restriction, SettingContent,
     SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
 };
 use crate::types::{ColumnName, TypeName};
@@ -947,7 +947,7 @@ fn time_bound<DB: DatabaseLike>(bound: &TimeBound<'_, DB>) -> HelperTimeBound {
 /// The rows `restrictions` keep of `table`, split by its role column where it has one.
 fn grant_rows<DB: DatabaseLike>(
     table: &DB::Table,
-    restrictions: &[LiteralSet<'_, DB>],
+    restrictions: &[Restriction<'_, DB>],
     db: &DB,
 ) -> Result<GrantRows, HelperRefusal> {
     let (role_column, mut roles) = split_column(table, db)?.unzip();
@@ -1062,15 +1062,23 @@ fn caller_identity(text: &str, data_type: &DataType) -> Option<String> {
     canonical.then(|| text.to_string())
 }
 
-/// `<column> IN (<values>)`, the values one restriction keeps.
+/// The test one restriction puts on its column, `IN` its values, `IS NULL` or
+/// `IS NOT NULL`.
 ///
 /// `sql-traits` keeps only the literal kinds [`literal`] reads, and a value it ever
 /// kept otherwise is dropped, which narrows, since the relations load no row for an
 /// empty list.
-fn restriction<DB: DatabaseLike>(kept: &LiteralSet<'_, DB>) -> AttributePredicate {
+fn restriction<DB: DatabaseLike>(kept: &Restriction<'_, DB>) -> AttributePredicate {
+    let test = match kept {
+        Restriction::In(set) => {
+            AttributeTest::In(set.values().iter().filter_map(literal).collect())
+        }
+        Restriction::Null(_) => AttributeTest::IsNull,
+        Restriction::NotNull(_) => AttributeTest::IsNotNull,
+    };
     AttributePredicate {
         column: ColumnName::from_stored(kept.column().stored_column_name()),
-        test: AttributeTest::In(kept.values().iter().filter_map(literal).collect()),
+        test,
     }
 }
 
