@@ -461,7 +461,7 @@ fn every_unproven_call_is_refused() {
         (
             "projects_read",
             "team_id = ANY (ARRAY(SELECT authz.tenant_teams()))",
-            "reads setting `app.tenant` as the caller, which it is not",
+            "compares a column with setting `app.tenant` as the identity of a principal, which it is not",
         ),
         (
             "orders_read",
@@ -810,7 +810,7 @@ CREATE POLICY docs_installation ON docs AS RESTRICTIVE FOR SELECT
 ";
 
 /// The caller, and an installation the request carries or leaves unset.
-fn absent_installation_translator(installation: SessionSetting) -> Translator {
+pub(crate) fn absent_installation_translator(installation: SessionSetting) -> Translator {
     TranslatorBuilder::new(deployment([caller("app.user_id"), installation]))
         .with_min_confidence(ConfidenceLevel::B)
         .with_declared_helpers(["authz.installations_allowing"])

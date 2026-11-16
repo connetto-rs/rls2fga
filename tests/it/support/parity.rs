@@ -851,9 +851,11 @@ async fn openfga_allows(
     let Model {
         client,
         answers,
+        translation,
         case,
         ..
     } = model;
+    let principals = translation.request_principals();
     let type_name = object
         .name
         .split_once(':')
@@ -878,6 +880,7 @@ async fn openfga_allows(
                     let granted = openfga::check_as(
                         client,
                         &principal.login_role,
+                        principals,
                         &user,
                         relations.relation(column).as_str(),
                         &answer.gate,
@@ -909,6 +912,7 @@ async fn openfga_allows(
                 let granted = openfga::check_as(
                     client,
                     &principal.login_role,
+                    principals,
                     &user,
                     judgement.relation.as_str(),
                     &object.name,

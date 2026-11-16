@@ -214,6 +214,13 @@ pub fn blocked_relation() -> RelationName {
     RelationName::canonicalized("blocked")
 }
 
+/// Relation on a principal's type holding whoever acts for that principal, which a check
+/// states with a contextual tuple.
+#[must_use]
+pub fn actor_relation() -> RelationName {
+    RelationName::canonicalized("actor")
+}
+
 /// Alias an unnested list element takes in generated SQL.
 ///
 /// Deliberately not `member`: it is a column alias, not the [`member_relation`],

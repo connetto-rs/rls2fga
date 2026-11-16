@@ -33,7 +33,7 @@ use crate::parser::sql_parser::{
     GrantArm, GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent,
     SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
 };
-use crate::types::ColumnName;
+use crate::types::{ColumnName, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
 
 /// Why a call to a declared helper does not translate.
@@ -143,6 +143,28 @@ pub(crate) enum HelperRefusal {
     ExcludedFromRequestSet {
         /// The helper.
         function: String,
+    },
+    /// A gate excludes callers from rows admitting whoever acts for a principal they name.
+    #[error(
+        "declared helper '{function}' excludes callers from rows naming the {kind} the \
+         request acts for"
+    )]
+    ExcludedFromPrincipal {
+        /// The helper.
+        function: String,
+        /// The type of the principal the rows name.
+        kind: String,
+    },
+    /// An arm names a principal whose type no `OpenFGA` type name spells.
+    #[error(
+        "declared helper '{function}' keeps rows naming a principal of type '{kind}', \
+         which no type name spells"
+    )]
+    UnspellablePrincipalType {
+        /// The helper.
+        function: String,
+        /// The principal's type, as the deployment declares it.
+        kind: String,
     },
     /// A request value is compared with arms whose rows depend on the request.
     #[error(
@@ -793,14 +815,26 @@ fn helper_grant<DB: DatabaseLike>(
     let grantee = match grant.granted_to() {
         GrantedTo::Request(compared) => {
             let column = ColumnName::from_stored(compared.column().stored_column_name());
-            // `sql-traits` compares a column with the caller or with the elements of a
-            // whole setting declared as a set.
+            // `sql-traits` compares a column with the caller, with another principal the
+            // deployment declares, or with the elements of a whole setting declared as a
+            // set.
             match compared.setting().content() {
                 SettingContent::Value(value @ SettingValue::Set { .. }) => {
                     bounded_by_no_time(function, grant)?;
                     HelperGrantee::RequestSet {
                         value_column: column,
                         source: DeclaredSource::whole(compared.setting(), value.clone()),
+                    }
+                }
+                SettingContent::Value(SettingValue::Principal { kind, .. }) => {
+                    HelperGrantee::Principal {
+                        principal_column: column,
+                        principal_type: TypeName::try_from(kind.clone()).map_err(|_| {
+                            HelperRefusal::UnspellablePrincipalType {
+                                function: function.to_string(),
+                                kind: kind.clone(),
+                            }
+                        })?,
                     }
                 }
                 _ => HelperGrantee::Caller {
@@ -986,10 +1020,21 @@ fn excluded_callers(
             })?;
         excluded.push(identity);
     }
-    if !excluded.is_empty() && matches!(grantee, HelperGrantee::RequestSet { .. }) {
-        return Err(HelperRefusal::ExcludedFromRequestSet {
-            function: function.to_string(),
-        });
+    if !excluded.is_empty() {
+        match grantee {
+            HelperGrantee::RequestSet { .. } => {
+                return Err(HelperRefusal::ExcludedFromRequestSet {
+                    function: function.to_string(),
+                })
+            }
+            HelperGrantee::Principal { principal_type, .. } => {
+                return Err(HelperRefusal::ExcludedFromPrincipal {
+                    function: function.to_string(),
+                    kind: principal_type.to_string(),
+                })
+            }
+            HelperGrantee::Caller { .. } | HelperGrantee::Set { .. } | HelperGrantee::Anyone => {}
+        }
     }
     Ok(excluded)
 }

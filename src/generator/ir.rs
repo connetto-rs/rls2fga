@@ -161,14 +161,16 @@ pub(crate) enum TupleSource {
         team_type: TypeName,
     },
 
-    /// P4 membership, from `EXISTS` or an `IN` subquery.
-    /// Produces `(parent_type:fk_cols, relation, user:user_col)`.
+    /// P4 membership, from `EXISTS` or an `IN` subquery, and a declared helper's grant
+    /// arm. Produces `(parent_type:fk_cols, relation, subject_type:user_col)`.
     ExistsMembership {
         join_table: TableId,
         /// Columns of `join_table` naming the parent resource, in the parent
         /// key's order.
         fk_cols: Vec<ColumnName>,
         user_col: ColumnName,
+        /// The type `user_col` names, the caller's or another principal's.
+        subject_type: TypeName,
         /// Resolved from the table the columns reference, not from their names.
         parent_type: TypeName,
         /// The relation the member tuple feeds, kept per source so positive
@@ -597,6 +599,7 @@ pub(crate) enum TupleSourceKey<'a> {
         join_table: &'a TableId,
         fk_cols: &'a [ColumnName],
         user_col: &'a ColumnName,
+        subject_type: &'a TypeName,
         parent_type: &'a TypeName,
         relation: &'a RelationName,
         extra_predicates: ResidualSqlKey<'a>,
@@ -994,6 +997,7 @@ impl TupleSource {
                 join_table,
                 fk_cols,
                 user_col,
+                subject_type,
                 parent_type,
                 relation,
                 extra_predicates,
@@ -1002,6 +1006,7 @@ impl TupleSource {
                 join_table,
                 fk_cols,
                 user_col,
+                subject_type,
                 parent_type,
                 relation,
                 extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::when(gate.is_some())),
@@ -1401,6 +1406,7 @@ mod tests {
             join_table: table("members"),
             fk_cols: vec![ColumnName::from_stored("project_id")],
             user_col: ColumnName::from_stored("user_id"),
+            subject_type: TypeName::canonicalized("user"),
             parent_type: TypeName::canonicalized("projects"),
             relation: member_relation(),
             extra_predicates: ResidualPredicates::default(),
@@ -1410,6 +1416,7 @@ mod tests {
             join_table: table("members"),
             fk_cols: vec![ColumnName::from_stored("project_id")],
             user_col: ColumnName::from_stored("member_id"),
+            subject_type: TypeName::canonicalized("user"),
             parent_type: TypeName::canonicalized("projects"),
             relation: member_relation(),
             extra_predicates: ResidualPredicates::default(),
@@ -1419,6 +1426,7 @@ mod tests {
             join_table: table("members"),
             fk_cols: vec![ColumnName::from_stored("project_id")],
             user_col: ColumnName::from_stored("user_id"),
+            subject_type: TypeName::canonicalized("user"),
             parent_type: TypeName::canonicalized("projects"),
             relation: member_relation(),
             extra_predicates: ResidualPredicates::new(vec![ResidualPredicate {
@@ -1439,6 +1447,7 @@ mod tests {
             join_table: table("blocks"),
             fk_cols: vec![ColumnName::from_stored("doc_id")],
             user_col: ColumnName::from_stored("user_id"),
+            subject_type: TypeName::canonicalized("user"),
             parent_type: TypeName::canonicalized("docs"),
             relation,
             extra_predicates: ResidualPredicates::default(),
@@ -1548,6 +1557,7 @@ mod tests {
                 join_table: table("members"),
                 fk_cols: vec![ColumnName::from_stored("doc_id")],
                 user_col: ColumnName::from_stored("user_id"),
+                subject_type: TypeName::canonicalized("user"),
                 parent_type: TypeName::canonicalized("docs"),
                 relation: member_relation(),
                 extra_predicates: ResidualPredicates::new(residual),

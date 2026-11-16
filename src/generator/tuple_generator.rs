@@ -1035,6 +1035,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             join_table,
             fk_cols,
             user_col,
+            subject_type,
             parent_type,
             relation,
             extra_predicates,
@@ -1052,7 +1053,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 .collect::<Vec<_>>()
                 .join(" AND ");
             let object_sql = typed_name_sql(parent_type, fk_parts.iter().map(String::as_str));
-            let subject_sql = typed_name_sql(&well_known.user, [user_col_sql.as_str()]);
+            let subject_sql = typed_name_sql(subject_type, [user_col_sql.as_str()]);
             let null_guards = join_row_is_nameable(
                 &null_guards,
                 &object_sql,

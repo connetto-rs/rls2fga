@@ -5,6 +5,7 @@ use openfga_client::client::{
     ReadAuthorizationModelRequest, TupleKey, TupleKeyWithoutCondition,
 };
 use openfga_client::tonic::transport::Channel;
+use rls2fga::types::RequestPrincipal;
 
 pub(crate) type GrpcClient = OpenFgaServiceClient<Channel>;
 
@@ -155,6 +156,7 @@ pub(crate) async fn check_allowed_with_context(
     check_as(
         client,
         super::deployment::ACTING_ROLE,
+        &[],
         user,
         relation,
         object,
@@ -163,11 +165,36 @@ pub(crate) async fn check_allowed_with_context(
     .await
 }
 
-/// Check with a request context as a request acting as the role `kind`. Only a subject of
-/// the caller type states a kind, since `pg_role#usage` admits no other.
+/// The contextual tuples stating that `user` acts for each of `principals` whose identity
+/// the check's `settings` map carries.
+fn acting_for(
+    user: &str,
+    principals: &[RequestPrincipal],
+    context: &serde_json::Value,
+) -> Vec<TupleKey> {
+    principals
+        .iter()
+        .filter_map(|principal| {
+            let identity = context
+                .get("settings")?
+                .get(&principal.request_parameter)?
+                .as_str()?;
+            Some(make_tuple(
+                &principal.object(identity),
+                principal.relation.as_str(),
+                user,
+            ))
+        })
+        .collect()
+}
+
+/// Check with a request context as a request acting as the role `kind` and for each of
+/// `principals` the context carries. Only a subject of the caller type states a kind or a
+/// principal, since `pg_role#usage` and a principal's relation admit no other.
 pub(crate) async fn check_as(
     client: &OpenFgaClient<Channel>,
     kind: &str,
+    principals: &[RequestPrincipal],
     user: &str,
     relation: &str,
     object: &str,
@@ -176,6 +203,13 @@ pub(crate) async fn check_as(
     let is_caller = user
         .split_once(':')
         .is_some_and(|(type_name, _)| type_name == rls2fga::generator::well_known::USER_TYPE);
+    let contextual = if is_caller {
+        let mut contextual = acting_for(user, principals, &context);
+        contextual.push(acting_kind(user, kind));
+        contextual
+    } else {
+        Vec::new()
+    };
     client
         .check(
             TupleKeyWithoutCondition {
@@ -183,11 +217,7 @@ pub(crate) async fn check_as(
                 relation: relation.to_string(),
                 object: object.to_string(),
             },
-            if is_caller {
-                vec![acting_kind(user, kind)]
-            } else {
-                Vec::new()
-            },
+            contextual,
             to_struct(context),
             false,
         )

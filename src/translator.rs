@@ -26,7 +26,8 @@ use crate::output::formatter::{write_output, WriteError};
 use crate::output::report::build_report;
 use crate::parser::sql_parser::{DatabaseLike, Deployment};
 use crate::types::{
-    ActionRelations, NoteSeverity, Record, RelationShapes, RowNaming, TranslationNote,
+    ActionRelations, NoteSeverity, Record, RelationShapes, RequestPrincipal, RowNaming,
+    TranslationNote,
 };
 use crate::types::{ConditionParameterName, ConditionParameterNameError, PolicyReads};
 use sql_values::postgres::{PgTimeZone, PgTimestampTz};
@@ -323,6 +324,18 @@ impl Translation {
     #[must_use]
     pub fn action_relations(&self) -> &[ActionRelations] {
         &self.plan.action_relations
+    }
+
+    /// The principals other than the caller a request may act for, each with the object
+    /// a check names it as and the relation holding whoever acts for it.
+    ///
+    /// A check whose request sets a principal's setting sends the contextual tuple
+    /// `(user:<caller>, <relation>, <principal object>)`, so the grants naming that
+    /// principal reach the caller. A check whose request leaves it unset sends none, and
+    /// those grants answer nothing.
+    #[must_use]
+    pub fn request_principals(&self) -> &[RequestPrincipal] {
+        &self.plan.principals
     }
 
     /// The tables each policy's clauses read, one entry per translated policy ordered by

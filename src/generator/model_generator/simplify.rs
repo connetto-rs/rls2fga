@@ -711,6 +711,7 @@ mod tests {
             confidence_summary: Vec::new(),
             conditions: BTreeMap::new(),
             clocks: Vec::new(),
+            principals: Vec::new(),
             well_known,
             action_relations: Vec::new(),
         }

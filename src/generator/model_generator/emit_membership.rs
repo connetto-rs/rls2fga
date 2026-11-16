@@ -11,7 +11,7 @@ use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, M
 use crate::generator::tuple_generator::{
     quote_sql_identifier, quote_sql_string_literal, render_attribute_test,
 };
-use crate::generator::well_known::HOLDER_OBJECT_ID;
+use crate::generator::well_known::{actor_relation, HOLDER_OBJECT_ID};
 use sql_traits::structs::WalkDirection;
 
 pub(super) struct MembershipSourceGate<'a> {
@@ -850,6 +850,7 @@ fn emit_membership<DB: DatabaseLike>(
             join_table: join_table.clone(),
             fk_cols,
             user_col: user_column.clone(),
+            subject_type: table_plan.well_known.user.clone(),
             parent_type: parent_type.clone(),
             relation: member_rel.clone(),
             extra_predicates: extra_predicates.clone(),
@@ -1682,9 +1683,9 @@ fn helper_grant_parts<DB: DatabaseLike>(
     // A grant row naming the caller is the one membership the generic name stands for,
     // and a grant row naming another grantee is named after its table.
     let unsplit = match grant.grantee {
-        HelperGrantee::Caller { .. } | HelperGrantee::RequestSet { .. } => {
-            member_relation().to_string()
-        }
+        HelperGrantee::Caller { .. }
+        | HelperGrantee::Principal { .. }
+        | HelperGrantee::RequestSet { .. } => member_relation().to_string(),
         HelperGrantee::Set { .. } | HelperGrantee::Anyone => {
             stored_relation_name(grant.table.name())
         }
@@ -1695,12 +1696,13 @@ fn helper_grant_parts<DB: DatabaseLike>(
             let excluded = caller_exclusion(user_column, &grant.excluded);
             let aggregate = !row_uniquely_keys(&grant.table, &grant.tuple_key(), ctx.db);
             let plan = helper_level_plan(level_type, level, table_plan, all_types);
+            let user = plan.well_known.user.clone();
             return groups
                 .into_iter()
                 .filter_map(|(base, extra_predicates)| {
                     caller_grant_relation(
                         grant,
-                        user_column,
+                        (user_column, &user),
                         level_type,
                         plan,
                         ctx,
@@ -1709,6 +1711,33 @@ fn helper_grant_parts<DB: DatabaseLike>(
                     )
                 })
                 .map(UsersetExpr::Computed)
+                .collect();
+        }
+        // The rows name the principal, so the level holds it, and the caller reaches it
+        // as the principal's actor, which the check states while the request acts for it.
+        HelperGrantee::Principal {
+            principal_column,
+            principal_type,
+        } => {
+            let aggregate = !row_uniquely_keys(&grant.table, &grant.tuple_key(), ctx.db);
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
+            return groups
+                .into_iter()
+                .filter_map(|(base, extra_predicates)| {
+                    caller_grant_relation(
+                        grant,
+                        (principal_column, principal_type),
+                        level_type,
+                        plan,
+                        ctx,
+                        (format!("{base}_{principal_type}"), extra_predicates),
+                        aggregate,
+                    )
+                })
+                .map(|tupleset| UsersetExpr::TupleToUserset {
+                    tupleset,
+                    computed: actor_relation(),
+                })
                 .collect();
         }
         HelperGrantee::RequestSet {
@@ -2065,13 +2094,14 @@ fn grant_row_conjuncts(
     Some(ResidualPredicates::new(conjuncts))
 }
 
-/// The relation holding the caller `user_column` names in each grant row the group keeps,
-/// named `base` and kept by `extra_predicates`, with the source loading it, conditioned on
-/// the request clock where a conjunct compares with it, and `None` where that condition
-/// cannot be declared.
+/// The relation holding the subject of `subject_type` that `subject_column` names in each
+/// grant row the group keeps, the caller or another principal the request acts for, named
+/// `base` and kept by `extra_predicates`, with the source loading it, conditioned on the
+/// request clock where a conjunct compares with it, and `None` where that condition cannot
+/// be declared.
 fn caller_grant_relation<DB: DatabaseLike>(
     grant: &HelperGrant,
-    user_column: &ColumnName,
+    (subject_column, subject_type): (&ColumnName, &TypeName),
     level_type: &TypeName,
     plan: &mut TypePlan,
     ctx: &PatternCtx<'_, DB>,
@@ -2095,26 +2125,31 @@ fn caller_grant_relation<DB: DatabaseLike>(
         None
     };
     let fk_cols = vec![grant.object_column.clone()];
-    let key = membership_source_key(
+    let mut key = membership_source_key(
         &grant.table,
         &fk_cols,
-        user_column,
+        subject_column,
         &extra_predicates,
         gate.as_ref().map(MembershipSourceGate::from),
     );
-    let user = plan.well_known.user.clone();
+    // One column names the caller in one arm and another principal in the next, and the
+    // two relations hold different types.
+    if *subject_type != plan.well_known.user {
+        source_key_part(&mut key, subject_type.as_str());
+    }
     let subject = match &gate {
         Some(gate) => DirectSubject::ConditionalType {
-            type_name: user,
+            type_name: subject_type.clone(),
             condition: gate.condition.clone(),
         },
-        None => DirectSubject::Type(user),
+        None => DirectSubject::Type(subject_type.clone()),
     };
     let relation = plan.membership_source_relation(&key, base, vec![subject]);
     plan.add_source(TupleSource::ExistsMembership {
         join_table: grant.table.clone(),
         fk_cols,
-        user_col: user_column.clone(),
+        user_col: subject_column.clone(),
+        subject_type: subject_type.clone(),
         parent_type: level_type.clone(),
         relation: relation.clone(),
         extra_predicates,
@@ -2350,6 +2385,7 @@ fn grant_relation_exprs(
     let fk_cols = vec![grant.object_column.clone()];
     let compared = grantees.map_or(&grant.object_column, |(column, _)| column);
     let mut key = membership_source_key(&grant.table, &fk_cols, compared, rows, None);
+    let user_type = plan.well_known.user.clone();
     match grantees {
         Some((_, call)) => {
             source_key_part(&mut key, "grantees");
@@ -2378,6 +2414,7 @@ fn grant_relation_exprs(
             join_table: grant.table.clone(),
             fk_cols: fk_cols.clone(),
             user_col: column.clone(),
+            subject_type: user_type.clone(),
             parent_type: level_type.clone(),
             relation: relation.clone(),
             extra_predicates: predicates(subject),

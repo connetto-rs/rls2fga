@@ -22,12 +22,13 @@ use crate::generator::notes::SkippedTuples;
 use crate::generator::role_relations::{sorted_role_relation_names, RoleRelationName};
 use crate::generator::tuple_generator::{resolve_bridge_columns, UnboundedColumns};
 use crate::generator::well_known::{
-    blocked_relation, can_delete_relation, can_insert_relation, can_insert_returning_relation,
-    can_select_for_update_relation, can_select_relation, can_update_check_relation,
-    can_update_relation, can_update_using_relation, can_update_without_reading_check_relation,
-    can_update_without_reading_relation, deny_relation, member_relation, owner_team_relation,
-    owner_user_relation, public_relation, request_gate_link_relation, WellKnownTypes,
-    REQUEST_TIME_PARAMETER, SETTINGS_PARAMETER, STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
+    actor_relation, blocked_relation, can_delete_relation, can_insert_relation,
+    can_insert_returning_relation, can_select_for_update_relation, can_select_relation,
+    can_update_check_relation, can_update_relation, can_update_using_relation,
+    can_update_without_reading_check_relation, can_update_without_reading_relation, deny_relation,
+    member_relation, owner_team_relation, owner_user_relation, public_relation,
+    request_gate_link_relation, WellKnownTypes, REQUEST_TIME_PARAMETER, SETTINGS_PARAMETER,
+    STRING_PARAMETER_TYPE, TIMESTAMP_PARAMETER_TYPE,
 };
 use crate::parser::function_analyzer::FunctionSemantic;
 use crate::parser::names::{
@@ -42,8 +43,8 @@ use crate::parser::sql_parser::{
 };
 use crate::types::{
     stable_hex_suffix, ColumnCommand, ColumnKind, ColumnName, ColumnRelations, ConditionName,
-    ConditionParameterName, ContextWitness, FallbackStep, RelationName, RequestComparison, TableId,
-    TranslationNote, TypeName,
+    ConditionParameterName, ContextWitness, FallbackStep, RelationName, RequestComparison,
+    RequestPrincipal, TableId, TranslationNote, TypeName,
 };
 
 /// The kind a request acts as, joined to every row.
@@ -727,6 +728,8 @@ pub(crate) struct SchemaPlan {
     pub conditions: BTreeMap<ConditionName, ConditionSpec>,
     /// The clock parameters those conditions read, ordered by name.
     pub clocks: Vec<ClockParameter>,
+    /// The principals other than the caller a request may carry.
+    pub principals: Vec<RequestPrincipal>,
     pub well_known: WellKnownTypes,
     /// Permission answers for modeled tables with a read gate, settled before pruning.
     pub action_relations: Vec<crate::types::ActionRelations>,
@@ -750,6 +753,37 @@ pub enum PlanningError {
         setting: &'static str,
         /// The type name both sides tried to use.
         type_name: TypeName,
+    },
+    /// A table claimed the type of a principal the deployment declares.
+    #[error("table '{table}' takes type '{type_name}' of the principal setting '{setting}' holds")]
+    PrincipalTypeName {
+        /// Table whose canonical name claims the principal's type.
+        table: String,
+        /// Setting holding the principal.
+        setting: String,
+        /// The type name both sides tried to use.
+        type_name: TypeName,
+    },
+    /// A principal the deployment declares takes a well-known type's name.
+    #[error(
+        "setting '{setting}' holds a principal of type '{type_name}', configured well-known \
+         type '{well_known}' holds that name"
+    )]
+    PrincipalTakesWellKnownType {
+        /// Setting holding the principal.
+        setting: String,
+        /// Setting that chose the well-known type name.
+        well_known: &'static str,
+        /// The type name both sides tried to use.
+        type_name: TypeName,
+    },
+    /// A principal the deployment declares has a type no `OpenFGA` type name spells.
+    #[error("setting '{setting}' holds a principal of type '{kind}', which no type name spells")]
+    InvalidPrincipalType {
+        /// Setting holding the principal.
+        setting: String,
+        /// The principal's type, as the deployment declares it.
+        kind: String,
     },
     /// Two request sources were configured under one condition parameter.
     #[error("condition parameter `{parameter}` aliases request sources `{first}` and `{second}`")]
@@ -1150,7 +1184,8 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     let by_table = group_policies_by_table(policies, db, scope);
     let declared_permissive = catalog_policies.then(|| declared_permissive_policies(db));
 
-    let table_types = TableTypes::assign(db, scope, &settings.well_known, &mut notes)?;
+    let principals = request_principals(registry, &settings.well_known)?;
+    let table_types = TableTypes::assign(db, scope, &settings.well_known, &principals, &mut notes)?;
     // One branch per role a request may act as, each reading its own classifications and
     // answering which membership tables it reads once per table.
     let mut branches = if catalog_policies {
@@ -1471,6 +1506,9 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
             &settings.well_known,
         );
     }
+    // Every check whose request carries a principal states it, so the type it names is
+    // declared whether or not a grant reads it.
+    ensure_principal_types(&mut all_types, &principals, &settings.well_known);
 
     // After pruning, so a model with nothing to deny carries no such type, and only then,
     // since a denial that survives has to name a type the model declares.
@@ -1508,6 +1546,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         confidence_summary,
         conditions,
         clocks,
+        principals,
         well_known: settings.well_known.clone(),
         action_relations: answers.entries,
     };
@@ -2274,23 +2313,56 @@ struct TableTypes {
     by_identity: BTreeMap<TableId, TypeName>,
     owners: BTreeMap<TypeName, TypeOwner>,
     reserved: BTreeMap<TypeName, &'static str>,
+    /// The type of each principal the deployment declares, with the setting holding it.
+    principals: BTreeMap<TypeName, String>,
 }
 
 impl TableTypes {
-    fn new(well_known: &WellKnownTypes) -> Self {
+    fn new(well_known: &WellKnownTypes, principals: &[RequestPrincipal]) -> Self {
         Self {
             reserved: well_known
                 .reserved()
                 .into_iter()
                 .map(|(setting, type_name)| (type_name.clone(), setting))
                 .collect(),
+            principals: principals
+                .iter()
+                .map(|principal| {
+                    (
+                        principal.principal_type.clone(),
+                        principal.setting_key.clone(),
+                    )
+                })
+                .collect(),
             ..Self::default()
         }
     }
 
-    /// Whether a table or reserved generator type already holds this type name.
+    /// Whether a table, a reserved generator type or a principal already holds this type
+    /// name.
     fn claims(&self, type_name: &TypeName) -> bool {
-        self.owners.contains_key(type_name) || self.reserved.contains_key(type_name)
+        self.owners.contains_key(type_name)
+            || self.reserved.contains_key(type_name)
+            || self.principals.contains_key(type_name)
+    }
+
+    /// Refuses `table` taking `type_name` where the generator or a principal holds it.
+    fn refuse_held(&self, table: &str, type_name: &TypeName) -> Result<(), PlanningError> {
+        if let Some(setting) = self.reserved.get(type_name) {
+            return Err(PlanningError::ReservedTypeName {
+                table: table.to_string(),
+                setting,
+                type_name: type_name.clone(),
+            });
+        }
+        if let Some(setting) = self.principals.get(type_name) {
+            return Err(PlanningError::PrincipalTypeName {
+                table: table.to_string(),
+                setting: setting.clone(),
+                type_name: type_name.clone(),
+            });
+        }
+        Ok(())
     }
 }
 
@@ -2305,9 +2377,10 @@ impl TableTypes {
         db: &DB,
         scope: PlanScope<'_>,
         well_known: &WellKnownTypes,
+        principals: &[RequestPrincipal],
         notes: &mut Vec<TranslationNote>,
     ) -> Result<Self, PlanningError> {
-        let mut types = Self::new(well_known);
+        let mut types = Self::new(well_known, principals);
         let mut policied: BTreeSet<TableId> = BTreeSet::new();
         for policy in db.policies() {
             if let Some(table) = lookup_table(db, &policy.target_table_name().to_string()) {
@@ -2342,26 +2415,14 @@ impl TableTypes {
 
             let spelling = identity.to_string();
             let base = canonical_fga_type_name(&spelling);
-            if let Some(setting) = types.reserved.get(&base) {
-                return Err(PlanningError::ReservedTypeName {
-                    table: spelling.clone(),
-                    setting,
-                    type_name: base.clone(),
-                });
-            }
+            types.refuse_held(&spelling, &base)?;
             let assigned = match types.owners.get(&base) {
                 Some(prior) => {
                     let disambiguated = canonical_fga_type_name(&format!(
                         "{base}_{}",
                         stable_hex_suffix(&spelling)
                     ));
-                    if let Some(setting) = types.reserved.get(&disambiguated) {
-                        return Err(PlanningError::ReservedTypeName {
-                            table: spelling.clone(),
-                            setting,
-                            type_name: disambiguated.clone(),
-                        });
-                    }
+                    types.refuse_held(&spelling, &disambiguated)?;
                     if matches!(scope, PlanScope::Policies) || forced.as_ref() == Some(identity) {
                         notes.push(TranslationNote::TypeNameCollision {
                             spelling: identity.clone(),
@@ -2954,6 +3015,60 @@ fn ensure_pg_role_relation(
     well_known: &WellKnownTypes,
 ) {
     ensure_user_direct(all_types, &well_known.pg_role, relation, well_known);
+}
+
+/// Every principal other than the caller the deployment declares, each an object whose
+/// `actor` relation holds whoever acts for it.
+fn request_principals(
+    registry: &FunctionRegistry,
+    well_known: &WellKnownTypes,
+) -> Result<Vec<RequestPrincipal>, PlanningError> {
+    let mut principals = Vec::new();
+    for source in registry.sources().iter() {
+        let Some(kind) = source.principal_kind() else {
+            continue;
+        };
+        let principal_type = TypeName::try_from(kind.to_string()).map_err(|_| {
+            PlanningError::InvalidPrincipalType {
+                setting: source.setting_key().to_string(),
+                kind: kind.to_string(),
+            }
+        })?;
+        if let Some((setting, _)) = well_known
+            .reserved()
+            .into_iter()
+            .find(|(_, reserved)| **reserved == principal_type)
+        {
+            return Err(PlanningError::PrincipalTakesWellKnownType {
+                setting: source.setting_key().to_string(),
+                well_known: setting,
+                type_name: principal_type,
+            });
+        }
+        principals.push(RequestPrincipal {
+            setting_key: source.setting_key().to_string(),
+            request_parameter: source.request_parameter().to_string(),
+            principal_type,
+            relation: actor_relation(),
+        });
+    }
+    Ok(principals)
+}
+
+/// Declares each principal's type with the relation naming whoever acts for it.
+fn ensure_principal_types(
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+    principals: &[RequestPrincipal],
+    well_known: &WellKnownTypes,
+) {
+    for principal in principals {
+        ensure_user_direct(
+            all_types,
+            &principal.principal_type,
+            &principal.relation,
+            well_known,
+        );
+    }
 }
 
 /// Bind a parent type to the table whose rows it names, in the spelling the plan groups

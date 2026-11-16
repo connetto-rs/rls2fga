@@ -91,16 +91,31 @@ impl DeclaredSource {
         matches!(self.value, SettingValue::Caller(_))
     }
 
-    /// Whether the source is one value the request carries, other than the caller.
+    /// Whether the source is one value the request carries other than the caller, another
+    /// principal's identity included.
     pub fn is_scalar(&self) -> bool {
-        matches!(self.value, SettingValue::Scalar(_))
+        matches!(
+            self.value,
+            SettingValue::Scalar(_) | SettingValue::Principal { .. }
+        )
+    }
+
+    /// The type of the principal the source identifies, when it identifies one other than
+    /// the caller.
+    pub(crate) fn principal_kind(&self) -> Option<&str> {
+        match &self.value {
+            SettingValue::Principal { kind, .. } => Some(kind),
+            _ => None,
+        }
     }
 
     /// How a set's elements are packed, or `None` for a single value.
     pub(crate) fn packing(&self) -> Option<&SetPacking> {
         match &self.value {
             SettingValue::Set { packing, .. } => Some(packing),
-            SettingValue::Caller(_) | SettingValue::Scalar(_) => None,
+            SettingValue::Caller(_) | SettingValue::Principal { .. } | SettingValue::Scalar(_) => {
+                None
+            }
         }
     }
 
@@ -116,11 +131,15 @@ impl DeclaredSource {
     /// The type the value, or each element of a set, arrives canonical for, spelled as a
     /// cast names it. A cast to it renames nothing.
     pub(crate) fn canonical_type(&self) -> String {
-        let (SettingValue::Caller(data_type)
-        | SettingValue::Scalar(data_type)
-        | SettingValue::Set {
-            element: data_type, ..
-        }) = &self.value;
+        let data_type = match &self.value {
+            SettingValue::Set { element, .. } => element,
+            SettingValue::Caller(data_type)
+            | SettingValue::Principal {
+                identity: data_type,
+                ..
+            }
+            | SettingValue::Scalar(data_type) => data_type,
+        };
         cast_type_name(data_type)
     }
 
@@ -134,6 +153,7 @@ impl DeclaredSource {
     pub(crate) fn declared_as(&self) -> String {
         match &self.value {
             SettingValue::Caller(_) => "the caller".to_string(),
+            SettingValue::Principal { kind, .. } => format!("the identity of a {kind}"),
             SettingValue::Scalar(_) => "one value".to_string(),
             SettingValue::Set {
                 packing: SetPacking::Delimited(separator),

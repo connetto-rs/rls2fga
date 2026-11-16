@@ -12,11 +12,11 @@ use crate::clock::ClockThreshold;
 use crate::parser::column_type_casts::without_column_type_casts;
 use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, IdentifierCase, PolicyLike};
-use crate::types::FallbackStep;
 pub(crate) use crate::types::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ColumnName,
     ConfidenceLevel, PolicyCommand, RolePrivilege, TableId,
 };
+use crate::types::{FallbackStep, TypeName};
 
 /// Policy combination mode in `PostgreSQL` RLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -737,6 +737,15 @@ pub enum HelperGrantee {
         /// The declared set, carrying the parameter the caller supplies.
         source: DeclaredSource,
     },
+    /// `<principal column> = current_setting(<principal>)`, each row admitting whoever
+    /// acts for the principal of the declared type it names, such as the installation a
+    /// user acts through.
+    Principal {
+        /// Column holding the principal.
+        principal_column: ColumnName,
+        /// The principal's type, as the deployment declares it.
+        principal_type: TypeName,
+    },
     /// `<grantee column> IN (SELECT <call>)`, the rows naming one of the grantees the
     /// call returns.
     Set {
@@ -750,12 +759,16 @@ pub enum HelperGrantee {
 }
 
 impl HelperGrantee {
-    /// The grant table's column compared with the caller, with a set the request carries
-    /// or with the grantees a set holds, `None` for an arm naming nobody.
+    /// The grant table's column compared with the caller, with another principal the
+    /// request acts for, with a set the request carries or with the grantees a set holds,
+    /// `None` for an arm naming nobody.
     #[must_use]
     pub fn compared_column(&self) -> Option<&ColumnName> {
         match self {
             Self::Caller { user_column } => Some(user_column),
+            Self::Principal {
+                principal_column, ..
+            } => Some(principal_column),
             Self::RequestSet { value_column, .. } => Some(value_column),
             Self::Set { grantee_column, .. } => Some(grantee_column),
             Self::Anyone => None,

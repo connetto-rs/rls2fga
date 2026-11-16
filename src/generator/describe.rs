@@ -452,6 +452,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             join_table,
             fk_cols,
             user_col,
+            subject_type,
             parent_type,
             relation,
             extra_predicates,
@@ -487,7 +488,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                     parent_type,
                     ObjectKey::new(key_parts(join_table, fk_cols, db)),
                     relation,
-                    &well_known.user,
+                    subject_type,
                     value_column(join_table, user_col, db),
                     guards,
                 ));
@@ -538,7 +539,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                     object_type: parent_type.clone(),
                     object_key: ObjectKey::new(key_parts(join_table, fk_cols, db)),
                     relation: relation.clone(),
-                    subject_type: well_known.user.clone(),
+                    subject_type: subject_type.clone(),
                     subject_key: subject_column(join_table, user_col, db),
                     context: Some(RecordContext {
                         condition: gate.condition.clone(),
