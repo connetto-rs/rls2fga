@@ -165,6 +165,12 @@ pub(crate) fn request_predicate_holds(
                 request_fallback_holds(atom, context)
             }
         }
+        RequestPredicate::Carries { request_parameter } => context["settings"]
+            .get(request_parameter.as_str())
+            .is_some(),
+        RequestPredicate::Omits { request_parameter } => context["settings"]
+            .get(request_parameter.as_str())
+            .is_none(),
         RequestPredicate::ActsAs { role } => role == acting_role,
         RequestPredicate::Any(children) => children
             .iter()

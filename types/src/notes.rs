@@ -699,9 +699,9 @@ impl fmt::Display for TranslationNote {
                         "Every check context must carry the `settings` map. {refuse}, so \
                          put the value of {key} in it under the key '{parameter}', exactly \
                          as PostgreSQL renders it, and no key where {key} is unset. An \
-                         absent key reads as NULL, which admits least, so never send an \
-                         empty string in its place, which is a value that admits what \
-                         NULL does not"
+                         absent key reads as PostgreSQL reads an unset setting, so never \
+                         send an empty string in its place, which the model reads as a \
+                         value where PostgreSQL may read it as unset"
                     ),
                     _ => write!(f, "Every check context must carry '{parameter}'. {refuse}"),
                 }

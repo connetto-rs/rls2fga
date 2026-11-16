@@ -14,9 +14,60 @@ use crate::classifier::function_registry::DeclaredSource;
 use crate::classifier::patterns::{
     BoolOp, CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
     Composite, ConstantBool, ConstantInCallerSet, FallbackScalarEqualsConstant,
-    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass,
+    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass, RequestValueAbsent,
 };
-use crate::types::{ConditionParameterName, FallbackStep, RequestAtom, RequestComparison};
+use crate::types::{
+    ConditionParameterName, FallbackStep, RequestAtom, RequestComparison, RequestPredicate,
+};
+
+/// Whether the request carries a value the deployment lets it leave unset, with the caller
+/// contract it states.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct PresenceAtom {
+    /// Parameter the caller supplies its value as, missing from the map when unset.
+    pub(crate) request_parameter: ConditionParameterName,
+    /// Session setting the caller's value mirrors.
+    pub(crate) setting_key: String,
+    /// Whether the test holds where the request carries the value, rather than where it
+    /// leaves it absent.
+    pub(crate) carried: bool,
+}
+
+impl PresenceAtom {
+    /// `<NULLIF read> IS NULL`, or `IS NOT NULL` where negated.
+    pub(crate) fn of(test: &RequestValueAbsent) -> Self {
+        Self {
+            request_parameter: test.source.condition_parameter().clone(),
+            setting_key: test.source.setting_key().to_string(),
+            carried: test.negated,
+        }
+    }
+
+    /// The test as the recipe states it.
+    pub(crate) fn request_predicate(&self) -> RequestPredicate {
+        let request_parameter = self.request_parameter.to_string();
+        if self.carried {
+            RequestPredicate::Carries { request_parameter }
+        } else {
+            RequestPredicate::Omits { request_parameter }
+        }
+    }
+
+    /// The word naming which state of the value the test holds in.
+    pub(crate) fn state(&self) -> &'static str {
+        if self.carried {
+            "carried"
+        } else {
+            "absent"
+        }
+    }
+
+    /// Exact structural identity, which no atom's key shares, since a parameter holds
+    /// no parenthesis.
+    fn key(&self) -> String {
+        format!("{}({})", self.state(), self.request_parameter)
+    }
+}
 
 /// One test of a request value against a constant the policy names, with the caller
 /// contract it states.
@@ -170,6 +221,7 @@ impl GateAtom {
 pub(crate) enum RequestFormula {
     Const(bool),
     Atom(GateAtom),
+    Presence(PresenceAtom),
     Any(Vec<RequestFormula>),
     All(Vec<RequestFormula>),
 }
@@ -208,6 +260,9 @@ impl RequestFormula {
             }
             PatternClass::P25FallbackScalarInConstantList(test) => {
                 Some(Self::fallback_in_constant_list(test))
+            }
+            PatternClass::P28RequestValueAbsent(test) => {
+                Some(Self::Presence(PresenceAtom::of(test)))
             }
             PatternClass::P8Composite(Composite { op, parts }) => {
                 let children = parts
@@ -300,6 +355,7 @@ impl RequestFormula {
         match self {
             Self::Const(value) => value.to_string(),
             Self::Atom(atom) => atom.key(),
+            Self::Presence(presence) => presence.key(),
             Self::Any(children) => format!("any({})", child_keys(children)),
             Self::All(children) => format!("all({})", child_keys(children)),
         }

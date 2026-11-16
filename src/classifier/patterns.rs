@@ -508,6 +508,17 @@ pub struct CallerScalarInConstantList {
     pub source: DeclaredSource,
 }
 
+/// The request leaves a declared single value it may leave unset absent, so no row takes
+/// part: `NULLIF(current_setting('app.installation_id', true), '') IS NULL`, or carries
+/// it where negated, as `IS NOT NULL` does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestValueAbsent {
+    /// The declared source, carrying the parameter the caller supplies.
+    pub source: DeclaredSource,
+    /// Whether the policy tests for the value instead, as `IS NOT NULL` does.
+    pub negated: bool,
+}
+
 /// The value a fallback read hands over equals a constant the policy names: Supabase's
 /// `auth.role() = 'authenticated'`, whose body reads
 /// `COALESCE(NULLIF(current_setting('request.jwt.claim.role', true), ''), NULLIF
@@ -918,6 +929,10 @@ pub enum PatternClass {
     /// `current_setting('app.installation_id', true) IN (SELECT
     /// authz.installations_allowing('docs', 'select'))`.
     P27RequestValueInHelperSet(RequestValueInHelperSet),
+    /// P28: The request leaves a declared single value it may leave unset absent, or
+    /// carries it where negated, so no row takes part:
+    /// `NULLIF(current_setting('app.installation_id', true), '') IS NULL`.
+    P28RequestValueAbsent(RequestValueAbsent),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

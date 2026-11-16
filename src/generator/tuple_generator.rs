@@ -1832,6 +1832,33 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
+        TupleSource::RequestPresenceEntry {
+            gate_type,
+            gate_object,
+            relation,
+            condition,
+            presence,
+        } => {
+            let object_sql = typed_name_literal(gate_type, gate_object);
+            Some(TupleQuery {
+                comment: format!(
+                    "-- Gate {gate_object} holds where the request's {} is {}, which the \
+                     policy decides rather than any row, evaluated by condition {condition}",
+                    presence.setting_key,
+                    presence.state()
+                ),
+                sql: format!(
+                    "SELECT {object_sql} AS object, '{relation}' AS relation, \
+                     {wildcard_subject} AS subject,\n\
+                     \x20 '{condition}' AS condition, '{{}}'::jsonb AS context;"
+                ),
+                description: None,
+                condition: Some(condition.clone()),
+                skipped: None,
+                monetary_locale: None,
+            })
+        }
+
         TupleSource::ConstantTrue {
             table,
             identity_cols,

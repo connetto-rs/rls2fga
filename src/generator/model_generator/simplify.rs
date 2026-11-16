@@ -359,6 +359,11 @@ fn drop_unlinked_gate_entries(all_types: &mut BTreeMap<TypeName, TypePlan>) {
                 gate_type,
                 gate_object,
                 ..
+            }
+            | TupleSource::RequestPresenceEntry {
+                gate_type,
+                gate_object,
+                ..
             } => linked
                 .get(gate_type)
                 .is_some_and(|objects| objects.contains(gate_object)),
@@ -586,6 +591,12 @@ fn constant_leaf(
                 known = true;
             }
             TupleSource::RequestGateEntry {
+                gate_type,
+                gate_object,
+                relation: held,
+                ..
+            }
+            | TupleSource::RequestPresenceEntry {
                 gate_type,
                 gate_object,
                 relation: held,

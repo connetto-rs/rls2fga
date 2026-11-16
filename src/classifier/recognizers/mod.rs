@@ -55,7 +55,7 @@ pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use owner_expression::recognize_owner_expression;
 pub use session::recognize_session_attribute;
 pub(crate) use session::{
-    caller_set, caller_set_in_subquery, row_valued_set, undeclared_set_reads,
+    caller_set, caller_set_in_subquery, refused_absence_tests, row_valued_set, undeclared_set_reads,
 };
 pub(crate) use subquery::owner_key_of;
 pub(crate) use subquery::projected_select;

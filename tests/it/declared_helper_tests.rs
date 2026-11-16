@@ -7,12 +7,15 @@ use rls2fga::classifier::patterns::{
     ClassifiedExpr, GrantRows, HelperSetArm, PatternClass, UnclassifiedExpr,
 };
 use rls2fga::generator::tuple_generator::SkippedTuples;
+use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::{AttributeLiteral, AttributePredicate, AttributeTest, ConfidenceLevel};
-use rls2fga::types::{ColumnName, TranslationNote};
+use rls2fga::types::{ColumnName, RequestPredicate, RowDecision, TranslationNote};
 use sqlparser::ast::DataType;
 
-use crate::support::deployment::{caller, delimited_set, deployment, scalar, typed_caller};
+use crate::support::deployment::{
+    caller, delimited_set, deployment, scalar, typed_caller, typed_scalar,
+};
 use crate::support::footgun::{db_of, relation_definition};
 
 /// The request's reduced ownership schema, two levels of grants under the orders.
@@ -712,6 +715,221 @@ fn request_values_behind_declared_helpers_translate() {
         ),
         "{report}"
     );
+}
+
+/// Documents every request may read, capped by an installation the request may leave
+/// unset, which the cap then lets through.
+pub(crate) const ABSENT_INSTALLATION: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE docs (id UUID PRIMARY KEY);
+CREATE TABLE installation_permissions (
+  installation_id UUID NOT NULL,
+  table_name TEXT NOT NULL,
+  action TEXT NOT NULL,
+  PRIMARY KEY (installation_id, table_name, action)
+);
+GRANT SELECT ON installation_permissions TO authz_owner;
+CREATE FUNCTION authz.installations_allowing(target TEXT, command TEXT) RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT ip.installation_id FROM public.installation_permissions ip
+  WHERE ip.table_name = target AND ip.action = command
+$$;
+ALTER FUNCTION authz.installations_allowing(TEXT, TEXT) OWNER TO authz_owner;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (TRUE);
+CREATE POLICY docs_installation ON docs AS RESTRICTIVE FOR SELECT
+  USING ((SELECT NULLIF(current_setting('app.installation_id', true), '')::uuid) IS NULL
+    OR (SELECT NULLIF(current_setting('app.installation_id', true), '')::uuid)
+       IN (SELECT authz.installations_allowing('docs', 'select')));
+";
+
+/// The caller, and an installation the request carries or leaves unset.
+fn absent_installation_translator(installation: SessionSetting) -> Translator {
+    TranslatorBuilder::new(deployment([caller("app.user_id"), installation]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers(["authz.installations_allowing"])
+        .build()
+}
+
+/// `NULLIF(<read>, '')` of an installation the request may leave unset reads as the
+/// request value, and testing it for `NULL` as the request leaving it out, so the cap
+/// becomes an `or` of the request omitting the installation and the helper allowing it.
+#[test]
+fn an_installation_the_request_may_leave_unset_caps_through_its_absence() {
+    let translator = absent_installation_translator(
+        typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    );
+    let outputs = translator
+        .translate(&db_of(ABSENT_INSTALLATION))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let model = outputs.model();
+    let select = relation_definition(&model, "docs", "can_select").expect("docs is readable");
+    assert!(
+        select.contains(" or app_installation_id_absent_")
+            && select.contains("app_installation_id_in_installations_allo"),
+        "{model}"
+    );
+    assert!(
+        model.contains("!(\"app_installation_id\" in settings)"),
+        "{model}"
+    );
+    // An `OR` reports its parts' count, so each half alone shows its pattern.
+    for (using, part) in [
+        (
+            "(SELECT NULLIF(current_setting('app.installation_id', true), '')::uuid) IS NOT NULL",
+            "P28 (caller value app_installation_id carried)",
+        ),
+        (
+            "NULLIF(current_setting('app.installation_id', true), '')::uuid \
+             IN (SELECT authz.installations_allowing('docs', 'select'))",
+            "P27 (caller value app_installation_id in \
+             authz.installations_allowing('docs', 'select'))",
+        ),
+    ] {
+        let alone = db_of(&format!(
+            "{ABSENT_INSTALLATION}
+             CREATE POLICY docs_alone ON docs AS RESTRICTIVE FOR SELECT USING ({using});"
+        ));
+        let report = translator
+            .translate(&alone)
+            .expect("the schema should plan")
+            .outputs()
+            .expect("every clause should translate")
+            .report();
+        assert!(report.contains(part), "{report}");
+    }
+}
+
+/// The relation report states an absence test as the request omitting the key, and its
+/// negation as the request carrying it, which a consumer decides from the check context
+/// alone.
+#[test]
+fn an_absence_test_reports_the_key_the_request_omits_or_carries() {
+    let translator = absent_installation_translator(
+        typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    );
+    let db = db_of(
+        "CREATE TABLE unset_notes (id UUID PRIMARY KEY);
+         CREATE TABLE set_notes (id UUID PRIMARY KEY);
+         ALTER TABLE unset_notes ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE set_notes ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY unset_read ON unset_notes FOR SELECT
+           USING (NULLIF(current_setting('app.installation_id', true), '') IS NULL);
+         CREATE POLICY set_read ON set_notes FOR SELECT
+           USING (NULLIF(current_setting('app.installation_id', true), '') IS NOT NULL);",
+    );
+    let translation = translator.translate(&db).expect("the schema should plan");
+    let gate = |table: &str| {
+        let decision = translation
+            .relations()
+            .iter()
+            .find(|entry| {
+                entry.type_name.as_str() == table && entry.relation.as_str() == "can_select"
+            })
+            .and_then(|entry| entry.decision.clone())
+            .unwrap_or_else(|| panic!("the request decides {table}#can_select"));
+        request_predicates(&decision)
+    };
+    let parameter = "app_installation_id".to_string();
+    let acting = RequestPredicate::ActsAs {
+        role: "app_user".to_string(),
+    };
+    assert_eq!(
+        gate("unset_notes"),
+        [
+            RequestPredicate::Omits {
+                request_parameter: parameter.clone()
+            },
+            acting.clone()
+        ]
+    );
+    assert_eq!(
+        gate("set_notes"),
+        [
+            RequestPredicate::Carries {
+                request_parameter: parameter
+            },
+            acting
+        ]
+    );
+}
+
+/// The predicates of every request gate in `decision`.
+fn request_predicates(decision: &RowDecision) -> Vec<RequestPredicate> {
+    match decision {
+        RowDecision::Any(children) | RowDecision::All(children) => {
+            children.iter().flat_map(request_predicates).collect()
+        }
+        RowDecision::Request { predicate, .. } => vec![predicate.clone()],
+        _ => Vec::new(),
+    }
+}
+
+/// An installation every request sets may hold `''`, which `NULLIF` would read as
+/// absent, so the cap stays refused, naming why.
+#[test]
+fn an_installation_every_request_sets_refuses_the_absence_test() {
+    let translator =
+        absent_installation_translator(typed_scalar("app.installation_id", DataType::Uuid));
+    let classified = translator.classify(&db_of(ABSENT_INSTALLATION));
+    let using = classified
+        .iter()
+        .find(|classified| classified.name() == "docs_installation")
+        .expect("the cap should classify")
+        .using_classification()
+        .expect("USING should classify");
+    assert_eq!(using.confidence, ConfidenceLevel::D, "{using:?}");
+    let shown = format!("{using:?}");
+    assert!(
+        shown.contains("'app.installation_id' is declared set by every request"),
+        "{shown}"
+    );
+}
+
+/// `NOT` around an absence test is the opposite test, since an absence test is never
+/// `NULL`.
+#[test]
+fn a_negated_absence_test_is_the_opposite_test() {
+    let translator = absent_installation_translator(
+        typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    );
+    for (using, carried) in [
+        (
+            "NOT (NULLIF(current_setting('app.installation_id', true), '') IS NULL)",
+            true,
+        ),
+        (
+            "NOT NOT (NULLIF(current_setting('app.installation_id', true), '') IS NULL)",
+            false,
+        ),
+        (
+            "NOT (NULLIF(current_setting('app.installation_id', true), '') IS NOT NULL)",
+            false,
+        ),
+    ] {
+        let classified = translator.classify(&db_of(&format!(
+            "{ABSENT_INSTALLATION}
+             CREATE POLICY docs_negated ON docs AS RESTRICTIVE FOR SELECT USING ({using});"
+        )));
+        let pattern = &classified
+            .iter()
+            .find(|classified| classified.name() == "docs_negated")
+            .expect("the negation should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .pattern;
+        assert!(
+            matches!(
+                pattern,
+                PatternClass::P28RequestValueAbsent(test) if test.negated == carried
+            ),
+            "`{using}`: {pattern:?}"
+        );
+    }
 }
 
 /// A request value behind a helper falls closed where the rows it reads depend on the

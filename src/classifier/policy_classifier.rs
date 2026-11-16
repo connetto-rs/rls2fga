@@ -348,6 +348,7 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
+        | PatternClass::P28RequestValueAbsent(RequestValueAbsent { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
@@ -506,6 +507,7 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
+        | PatternClass::P28RequestValueAbsent(RequestValueAbsent { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
@@ -820,6 +822,18 @@ fn classify_expr_inner<DB: DatabaseLike>(
         }
         let inner_classified =
             classify_expr_depth(inner, db, registry, table, command, depth + 1, state);
+        // An absence test is never `NULL`, so its negation is the opposite test.
+        if let PatternClass::P28RequestValueAbsent(RequestValueAbsent { source, negated }) =
+            inner_classified.pattern
+        {
+            return ClassifiedExpr {
+                pattern: PatternClass::P28RequestValueAbsent(RequestValueAbsent {
+                    source,
+                    negated: !negated,
+                }),
+                confidence: inner_classified.confidence,
+            };
+        }
         let desc = pattern_short_name(&inner_classified.pattern);
         return unknown_d(
             expr,
@@ -1070,6 +1084,13 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return unknown_d(expr, undeclared_sets.join(". "));
     }
 
+    // A declared value tested for `NULL` that names no request state is refused naming
+    // why, since `current_setting` and `NULLIF` are not what is missing.
+    let refused_absences = recognizers::refused_absence_tests(expr, registry);
+    if !refused_absences.is_empty() {
+        return unknown_d(expr, refused_absences.join(". "));
+    }
+
     // A call whose function no body reads names that body or its absence, since the
     // registry entry the blame below would ask for is not what is missing.
     let unread_calls = recognizers::unread_function_calls(expr, registry);
@@ -1212,6 +1233,9 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. }) => {
             "declared caller value among a declared helper's values"
         }
+        PatternClass::P28RequestValueAbsent(RequestValueAbsent { .. }) => {
+            "declared caller value left absent"
+        }
         PatternClass::Unknown(UnclassifiedExpr { .. }) => "unrecognized expression",
         PatternClass::ExpandedFunction(ExpandedFunction { .. }) => "expanded function call",
         PatternClass::MembershipExclusion(MembershipExclusion { .. }) => {
@@ -1269,6 +1293,7 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })
         | PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. })
+        | PatternClass::P28RequestValueAbsent(RequestValueAbsent { .. })
         | PatternClass::P21CallerScalarUnequalsConstant(CallerScalarUnequalsConstant { .. })
         | PatternClass::P22CallerScalarInConstantList(CallerScalarInConstantList { .. })
         | PatternClass::P23FallbackScalarEqualsConstant(FallbackScalarEqualsConstant { .. })
