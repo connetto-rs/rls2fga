@@ -112,6 +112,19 @@ pub(crate) fn typed_scalar(name: &str, data_type: DataType) -> SessionSetting {
     SessionSetting::value(name, SettingValue::Scalar(data_type)).expect("a custom setting name")
 }
 
+/// The setting `name` holding the identity, of `data_type`, of a principal of type `kind`
+/// the request acts for beside the caller.
+pub(crate) fn principal(name: &str, kind: &str, data_type: DataType) -> SessionSetting {
+    SessionSetting::value(
+        name,
+        SettingValue::Principal {
+            kind: kind.to_string(),
+            identity: data_type,
+        },
+    )
+    .expect("a custom setting name and a principal type")
+}
+
 /// The setting `name` holding a set of text joined by `separator`.
 pub(crate) fn delimited_set(name: &str, separator: &str) -> SessionSetting {
     SessionSetting::value(name, delimited(separator)).expect("a custom setting name")

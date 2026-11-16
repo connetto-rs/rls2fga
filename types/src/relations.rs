@@ -177,3 +177,37 @@ pub struct RequestAtom {
     /// in the order the policy reads them. Empty for one single read.
     pub fallback: Vec<FallbackStep>,
 }
+
+/// A principal other than the caller a request acts for, such as the app installation
+/// acting for a user.
+///
+/// A check whose `settings` map carries [`Self::request_parameter`] states the principal
+/// with the contextual tuple `(<caller>, <relation>, <object>)`, the caller being the
+/// check's own subject and the object [`Self::object`] of the identity the map carries. A
+/// check whose map leaves it out sends no such tuple, and a grant to the principal then
+/// reaches nobody, as `PostgreSQL` keeps no row comparing a column with `NULL`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RequestPrincipal {
+    /// Setting carrying the principal's identity, as the deployment spells it.
+    pub setting_key: String,
+    /// Parameter the identity travels under in the check's `settings` map, in the canonical
+    /// text of the type the deployment declares it in.
+    pub request_parameter: String,
+    /// The type the principal is an object of.
+    pub principal_type: TypeName,
+    /// The relation on that type holding whoever acts for the principal.
+    pub relation: RelationName,
+}
+
+impl RequestPrincipal {
+    /// The object naming the principal whose identity is `identity`, spelled as the tuple
+    /// loader spells the grants naming it.
+    #[must_use]
+    pub fn object(&self, identity: &str) -> String {
+        format!(
+            "{}:{}",
+            self.principal_type,
+            crate::identity::encode_part(identity)
+        )
+    }
+}

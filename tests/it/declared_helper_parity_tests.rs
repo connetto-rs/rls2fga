@@ -13,6 +13,7 @@ use crate::declared_helper_tests::{
     caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EXPIRING, GRANTEES, GROUPS,
     INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
 };
+use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -323,6 +324,105 @@ async fn a_blocklist_through_a_declared_helper_agrees_with_postgres_17_and_18() 
             // No grant, and no caller at all, read nothing.
             expect("erin", "projects:P2", ActionStatement::Select, false);
             expect("anonymous", "projects:P2", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+/// A request acting as `subject`, through `installation` where it names one, the empty
+/// string standing for a pooled connection that once carried one.
+fn acting(subject: &str, caller: Option<&str>, installation: Option<&str>) -> Principal {
+    let mut principal = Principal::as_role(subject, "app_reader").with_clock();
+    for (setting, value) in [
+        ("app.user_id", caller),
+        ("app.installation_id", installation),
+    ] {
+        if let Some(value) = value {
+            principal.session.push((setting.into(), value.into()));
+        }
+    }
+    principal
+}
+
+/// `O1` blocks the caller `alice` and the installation `i1`, `O2` blocked `i2` until
+/// yesterday, blocks `i3` until tomorrow and blocks `i4` for good.
+fn principal_blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-principal-blocks-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &principal_blocks(&format!(
+            "{CALLER_OR_INSTALLATION} AND (b.expires_at IS NULL OR b.expires_at > now())"
+        )),
+        &[
+            "INSERT INTO organizations VALUES ('O1'), ('O2');
+             INSERT INTO projects VALUES ('P1', 'O1'), ('P2', 'O2');
+             INSERT INTO organization_blocks VALUES
+               ('O1', 'alice', NULL), ('O1', 'i1', NULL),
+               ('O2', 'i2', now() - interval '1 day'), ('O2', 'i3', now() + interval '1 day'),
+               ('O2', 'i4', NULL)",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON projects TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            acting("alice", Some("alice"), None),
+            acting("bob", Some("bob"), Some("i1")),
+            acting("carol", Some("carol"), Some("i2")),
+            acting("dave", Some("dave"), Some("i3")),
+            acting("erin", Some("erin"), Some("")),
+            acting("i4", Some("i4"), None),
+            acting("anonymous", None, Some("i1")),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id").may_be_unset(),
+        support::deployment::principal("app.installation_id", "installation", DataType::Text)
+            .may_be_unset(),
+    ])
+    .with_registry(PRINCIPAL_BLOCK_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+const PRINCIPAL_BLOCK_HELPERS: &str = r#"{
+    "authz.blocking_organizations": { "kind": "declared_helper" }
+}"#;
+
+/// A block on the installation a request acts through hides the organization's projects
+/// as a block on the caller does, for a user acting through it, for no user at all, and
+/// for an installation acting as the caller itself.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn blocks_on_the_acting_installation_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = principal_blocks_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (subject, p1, p2) in [
+                ("alice", false, true),
+                ("bob", false, true),
+                ("carol", true, true),
+                ("dave", true, false),
+                ("erin", true, true),
+                ("i4", true, false),
+                ("anonymous", false, true),
+            ] {
+                for (object, allowed) in [("projects:P1", p1), ("projects:P2", p2)] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        object,
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                }
+            }
             assert_agrees(&case, &run);
         }
     }

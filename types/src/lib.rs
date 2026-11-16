@@ -63,7 +63,8 @@ pub use records::{
     SubjectKey, ValueSource,
 };
 pub use relations::{
-    FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestPredicate, RowDecision,
+    FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestPredicate,
+    RequestPrincipal, RowDecision,
 };
 pub use row_naming::RowNaming;
 
