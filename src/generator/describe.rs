@@ -549,7 +549,8 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             ))
         }
 
-        // Replayed through its query, which evaluates every conjunct.
+        // Replayed through its query, which evaluates every conjunct, the joins typing an
+        // inline grantee among them.
         TupleSource::GranteeGrant {
             join_table,
             fk_cols,

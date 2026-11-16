@@ -21,7 +21,9 @@ use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::generator::db_lookup::{row_uniquely_keys, single_identity_column};
 use crate::generator::model_bounds::MAX_CONDITIONS;
 use crate::parser::expr::CastChain;
-use crate::parser::names::{lookup_table, stored_ident_name, stored_relation_name, table_identity};
+use crate::parser::names::{
+    lookup_table, lookup_table_id, stored_ident_name, stored_relation_name, table_identity,
+};
 use crate::parser::sql_parser::{
     CallerGate, CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike,
     GrantArm, GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent,
@@ -43,10 +45,7 @@ pub(crate) enum HelperRefusal {
         source: HelperSetError,
     },
     /// A helper the body calls was never declared.
-    #[error(
-        "declared helper '{function}' reads '{called}' through a parent arm, and '{called}' \
-         is not declared"
-    )]
+    #[error("declared helper '{function}' calls '{called}', which is not declared")]
     UndeclaredCallee {
         /// The helper whose body calls it.
         function: String,
@@ -165,29 +164,16 @@ pub(crate) enum HelperRefusal {
         /// The table the arm reads.
         table: String,
     },
-    /// An arm keeping every caller keeps its rows by the statement time.
+    /// An arm naming a set of grantees or everyone keeps its rows by the statement time.
     #[error(
-        "declared helper '{function}' keeps the rows of '{table}' for everyone by the \
-         statement time, which a grant to everyone does not carry"
+        "declared helper '{function}' keeps the rows of '{table}' naming a set of grantees \
+         or everyone by the statement time, which those grants do not carry"
     )]
-    TimeBoundedAudience {
+    TimeBoundedGrantees {
         /// The helper.
         function: String,
         /// The table the arm reads.
         table: String,
-    },
-    /// An arm keeps the rows naming a grantee another helper returns.
-    #[error(
-        "declared helper '{function}' keeps the rows of '{table}' naming a grantee \
-         '{grantees}' returns, which no grant relation reads yet"
-    )]
-    GranteeSet {
-        /// The helper.
-        function: String,
-        /// The table the arm reads.
-        table: String,
-        /// The helper returning the grantees.
-        grantees: String,
     },
     /// A grant arm bounds its rows against the clock more than once, while several of
     /// its rows can grant one caller one row, so no one tuple carries the bounds of the
@@ -554,7 +540,7 @@ fn answered_call<'db, DB: DatabaseLike>(
 }
 
 /// One call and what it returns, refused unless every arm returns keys of `level`, the
-/// table whose rows `compared` names.
+/// table whose rows `compared` names, or of a table whose key references `level`'s.
 fn helper_call<DB: DatabaseLike>(
     function: &DB::Function,
     arguments: &[Value],
@@ -565,13 +551,14 @@ fn helper_call<DB: DatabaseLike>(
     registry: &FunctionRegistry,
 ) -> Result<HelperCall, HelperRefusal> {
     let name = registry.resolved_target_name(&function.target_name());
+    let arguments: Vec<String> = arguments.iter().map(ToString::to_string).collect();
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
             HelperArm::Grant(grant) => (
                 rows_named_by(grant.table(), grant.column(), db)?
                     .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
-                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db)?)),
+                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db, registry)?)),
             ),
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
@@ -580,11 +567,13 @@ fn helper_call<DB: DatabaseLike>(
             HelperArm::Walk(walk) => (
                 table_identity(walk.table()),
                 HelperSetArm::Walk(HelperWalk {
+                    table: table_identity(walk.table()),
                     fk_column: ColumnName::from_stored(walk.column().stored_column_name()),
+                    direction: walk.direction(),
                 }),
             ),
         };
-        if returned != *level {
+        if !keys_name_rows_of(&returned, level, db)? {
             return Err(HelperRefusal::OtherLevel {
                 column: compared.to_string(),
                 named: level.to_string(),
@@ -596,10 +585,43 @@ fn helper_call<DB: DatabaseLike>(
     }
     Ok(HelperCall {
         function: name,
-        arguments: arguments.iter().map(ToString::to_string).collect(),
+        arguments,
         level: level.clone(),
         arms,
     })
+}
+
+/// Whether every key of `table` is a key of `level`, its one-column key referencing
+/// `level`'s through a chain of such keys, as an organization's key is a grantee's.
+fn keys_name_rows_of<DB: DatabaseLike>(
+    table: &TableId,
+    level: &TableId,
+    db: &DB,
+) -> Result<bool, HelperRefusal> {
+    let mut reached = table.clone();
+    let mut visited = Vec::new();
+    while reached != *level {
+        if visited.contains(&reached) {
+            return Ok(false);
+        }
+        let (Some(held), Some(key)) = (
+            lookup_table_id(db, &reached),
+            single_identity_column(&reached, db),
+        ) else {
+            return Ok(false);
+        };
+        let Some(key) = held
+            .columns(db)?
+            .find(|column| column.stored_column_name() == key.as_str())
+        else {
+            return Ok(false);
+        };
+        let Some(named) = rows_named_by(held, key, db)? else {
+            return Ok(false);
+        };
+        visited.push(core::mem::replace(&mut reached, named));
+    }
+    Ok(true)
 }
 
 fn helper_parent<DB: DatabaseLike>(
@@ -628,13 +650,18 @@ fn helper_parent<DB: DatabaseLike>(
         db,
         registry,
     )?;
-    Ok(HelperParent { fk_column, call })
+    Ok(HelperParent {
+        table: table_identity(parent.table()),
+        fk_column,
+        call,
+    })
 }
 
 fn helper_grant<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
     db: &DB,
+    registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
     let table = grant.table();
     let grantee = match grant.granted_to() {
@@ -656,16 +683,43 @@ fn helper_grant<DB: DatabaseLike>(
             }
         }
         GrantedTo::Set(set) => {
-            return Err(HelperRefusal::GranteeSet {
-                function: function.to_string(),
-                table: table_identity(table).to_string(),
-                grantees: set.function().target_name().to_string(),
-            })
+            let called = set.function();
+            if !registry.declares_helper(called) {
+                return Err(HelperRefusal::UndeclaredCallee {
+                    function: function.to_string(),
+                    called: called.target_name().to_string(),
+                });
+            }
+            let grantee_column = ColumnName::from_stored(set.column().stored_column_name());
+            // Without a foreign key the grantees are rows of the table the set covers.
+            let named = match rows_named_by(table, set.column(), db)? {
+                Some(named) => named,
+                None => set
+                    .set()
+                    .covered_table()
+                    .map(table_identity)
+                    .ok_or_else(|| names_no_rows(table, set.column()))?,
+            };
+            let call = helper_call(
+                called,
+                set.arguments(),
+                set.set(),
+                &grantee_column,
+                &named,
+                db,
+                registry,
+            )?;
+            HelperGrantee::Set {
+                grantee_column,
+                call,
+            }
         }
         GrantedTo::Anyone => HelperGrantee::Anyone,
     };
-    if !grant.time_bounds().is_empty() && grantee == HelperGrantee::Anyone {
-        return Err(HelperRefusal::TimeBoundedAudience {
+    if !grant.time_bounds().is_empty()
+        && matches!(grantee, HelperGrantee::Set { .. } | HelperGrantee::Anyone)
+    {
+        return Err(HelperRefusal::TimeBoundedGrantees {
             function: function.to_string(),
             table: table_identity(table).to_string(),
         });

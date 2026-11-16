@@ -586,10 +586,16 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
             .or_else(|| {
                 let compared = grant.grantee.compared_column()?;
                 key_collation_refusal(&grant.table, compared, db)
+            })
+            .or_else(|| match &grant.grantee {
+                HelperGrantee::Set { call, .. } => helper_call_refusal(call, db),
+                HelperGrantee::Caller { .. }
+                | HelperGrantee::RequestSet { .. }
+                | HelperGrantee::Anyone => None,
             }),
-        HelperSetArm::Parent(parent) => key_collation_refusal(&call.level, &parent.fk_column, db)
+        HelperSetArm::Parent(parent) => key_collation_refusal(&parent.table, &parent.fk_column, db)
             .or_else(|| helper_call_refusal(&parent.call, db)),
-        HelperSetArm::Walk(walk) => key_collation_refusal(&call.level, &walk.fk_column, db),
+        HelperSetArm::Walk(walk) => key_collation_refusal(&walk.table, &walk.fk_column, db),
     })
 }
 
