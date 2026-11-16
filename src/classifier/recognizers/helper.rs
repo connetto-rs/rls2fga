@@ -202,6 +202,33 @@ pub(crate) enum HelperRefusal {
         /// The bounds keeping `NULL`.
         bounds: usize,
     },
+    /// A grant arm returns several columns, which no one relation names.
+    #[error(
+        "declared helper '{function}' returns {columns} columns of '{table}' from one arm, \
+         while a relation names one"
+    )]
+    SeveralColumns {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// How many columns the arm returns.
+        columns: usize,
+    },
+    /// A grant arm keeps only the rows whose columns pair with the rows another helper
+    /// returns.
+    #[error(
+        "declared helper '{function}' keeps the rows of '{table}' only where they pair with \
+         the rows '{cap}' returns, which no grant relation carries"
+    )]
+    Capped {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The helper returning the pairs.
+        cap: String,
+    },
 }
 
 /// Recognize `<column> = ANY (ARRAY(SELECT h(...)))`, `<column> = ANY (SELECT h(...))`
@@ -575,9 +602,10 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
             }
         };
         bounded_by_no_time(&name, grant)?;
+        let column = granted_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
-            value_column: ColumnName::from_stored(grant.column().stored_column_name()),
+            value_column: ColumnName::from_stored(column.stored_column_name()),
             predicates: grant.restrictions().iter().map(restriction).collect(),
         });
     }
@@ -650,11 +678,14 @@ fn helper_call<DB: DatabaseLike>(
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
-            HelperArm::Grant(grant) => (
-                rows_named_by(grant.table(), grant.column(), db)?
-                    .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
-                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db, registry)?)),
-            ),
+            HelperArm::Grant(grant) => {
+                let column = granted_column(&name, grant)?;
+                (
+                    rows_named_by(grant.table(), column, db)?
+                        .ok_or_else(|| names_no_rows(grant.table(), column))?,
+                    HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db, registry)?)),
+                )
+            }
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
                 HelperSetArm::Parent(helper_parent(&name, parent, db, registry)?),
@@ -823,9 +854,10 @@ fn helper_grant<DB: DatabaseLike>(
         None => Vec::new(),
         Some(gate) => excluded_callers(function, gate, &grantee)?,
     };
+    let object_column = granted_column(function, grant)?;
     let grant = HelperGrant {
         table: table_identity(table),
-        object_column: ColumnName::from_stored(grant.column().stored_column_name()),
+        object_column: ColumnName::from_stored(object_column.stored_column_name()),
         grantee,
         excluded,
         rows: grant_rows(table, grant.restrictions(), db)?,
@@ -1140,6 +1172,30 @@ fn same_literal(left: &AttributeLiteral, right: &AttributeLiteral) -> bool {
                 )
         }
         _ => left == right,
+    }
+}
+
+/// The one column `grant` returns, refused where it returns several or where a cap
+/// keeps only some of its rows, which no relation loaded from the arm carries.
+fn granted_column<'db, DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'db, DB>,
+) -> Result<&'db DB::Column, HelperRefusal> {
+    let table = || table_identity(grant.table()).to_string();
+    if let Some(cap) = grant.caps().first() {
+        return Err(HelperRefusal::Capped {
+            function: function.to_string(),
+            table: table(),
+            cap: cap.function().target_name().to_string(),
+        });
+    }
+    match grant.columns() {
+        [column] => Ok(column),
+        columns => Err(HelperRefusal::SeveralColumns {
+            function: function.to_string(),
+            table: table(),
+            columns: columns.len(),
+        }),
     }
 }
 

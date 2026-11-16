@@ -2054,3 +2054,101 @@ fn an_audience_role_spelled_as_a_number_is_named_after_its_table() {
     assert_eq!(definition("projects_everyone"), "[user:*]");
     assert_eq!(definition("projects_excluded"), "[user]");
 }
+
+/// Resources capped to the organization and kind pairs a table approves, the cap read
+/// through a helper returning `TABLE (organization_id, kind)`.
+const CAPS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE resources (
+  id TEXT PRIMARY KEY, organization_id TEXT NOT NULL, kind TEXT NOT NULL, owner_id TEXT NOT NULL);
+CREATE TABLE approved_kinds (
+  organization_id TEXT NOT NULL, kind TEXT NOT NULL, PRIMARY KEY (organization_id, kind));
+GRANT SELECT ON resources, approved_kinds TO authz_owner;
+CREATE FUNCTION authz.capped_kinds() RETURNS TABLE (organization_id TEXT, kind TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT approved.organization_id, approved.kind FROM public.approved_kinds approved
+$$;
+CREATE FUNCTION authz.capped_resources() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT resource.id FROM public.resources resource
+  WHERE (resource.organization_id, resource.kind) IN (SELECT * FROM authz.capped_kinds())
+$$;
+CREATE FUNCTION authz.owned_resources() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT resource.id FROM public.resources resource
+  WHERE resource.owner_id = current_setting('app.user_id', true)
+    AND (resource.organization_id, resource.kind) IN (SELECT * FROM authz.capped_kinds())
+$$;
+ALTER FUNCTION authz.capped_kinds() OWNER TO authz_owner;
+ALTER FUNCTION authz.capped_resources() OWNER TO authz_owner;
+ALTER FUNCTION authz.owned_resources() OWNER TO authz_owner;
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+";
+
+/// A grant arm keeping only the rows a cap pairs with another helper's rows is refused,
+/// whether a column or a request value is compared with the helper, since a relation
+/// loaded from the arm alone would grant the rows the cap leaves out. So is an arm
+/// returning several columns, which no one relation names.
+#[test]
+fn a_grant_arm_kept_by_a_cap_or_returning_several_columns_is_refused() {
+    let helpers = [
+        "authz.capped_kinds",
+        "authz.capped_resources",
+        "authz.owned_resources",
+    ];
+    let translator = TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        scalar("app.installation_id"),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .with_declared_helpers(helpers)
+    .build();
+    let capped = |helper: &str| {
+        format!(
+            "declared helper '{helper}' keeps the rows of 'public.resources' only where they \
+             pair with the rows 'authz.capped_kinds' returns"
+        )
+    };
+    for (using, reason) in [
+        (
+            "id = ANY (ARRAY(SELECT authz.capped_resources()))",
+            capped("authz.capped_resources"),
+        ),
+        (
+            "id = ANY (ARRAY(SELECT authz.owned_resources()))",
+            capped("authz.owned_resources"),
+        ),
+        (
+            "current_setting('app.installation_id', true) IN (SELECT authz.capped_resources())",
+            capped("authz.capped_resources"),
+        ),
+        (
+            "id IN (SELECT authz.capped_kinds())",
+            "declared helper 'authz.capped_kinds' returns 2 columns of 'public.approved_kinds' \
+             from one arm"
+                .to_string(),
+        ),
+    ] {
+        let sql =
+            format!("{CAPS}CREATE POLICY resources_read ON resources FOR SELECT USING ({using});");
+        let classified = translator
+            .classify(&db_of(&sql))
+            .into_iter()
+            .find(|classified| classified.name() == "resources_read")
+            .expect("resources_read should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .clone();
+        assert_eq!(classified.confidence, ConfidenceLevel::D, "`{using}`");
+        match classified.pattern {
+            PatternClass::Unknown(UnclassifiedExpr {
+                reason: refused, ..
+            }) => {
+                assert!(refused.contains(&reason), "`{using}`: {refused}");
+            }
+            other => panic!("`{using}` should be refused, got {other:?}"),
+        }
+    }
+}
