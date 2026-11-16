@@ -165,12 +165,13 @@ pub(crate) fn request_predicate_holds(
                 request_fallback_holds(atom, context)
             }
         }
+        // An empty value is the `''` the `NULLIF` read reads as `NULL`.
         RequestPredicate::Carries { request_parameter } => context["settings"]
             .get(request_parameter.as_str())
-            .is_some(),
+            .is_some_and(|value| value != ""),
         RequestPredicate::Omits { request_parameter } => context["settings"]
             .get(request_parameter.as_str())
-            .is_none(),
+            .is_none_or(|value| value == ""),
         RequestPredicate::ActsAs { role } => role == acting_role,
         RequestPredicate::Any(children) => children
             .iter()

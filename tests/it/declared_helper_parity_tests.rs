@@ -3,6 +3,7 @@
 
 #![cfg(all(not(target_os = "windows"), feature = "client"))]
 
+use core::fmt::Write as _;
 use core::time::Duration;
 
 use rls2fga::types::ActionStatement;
@@ -15,6 +16,7 @@ use crate::declared_helper_tests::{
     GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
+use crate::row_cap_tests::INSTALLATION_CAPS;
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -734,6 +736,7 @@ fn absent_installation_case(major: &str, loading_from_rows: bool) -> ParityCase 
             installed("via_i2", Some(UPDATING_INSTALLATION)),
             installed("via_other", Some("33333333-3333-3333-3333-333333333333")),
             installed("unset_installation", None),
+            installed("empty_installation", Some("")),
         ],
     )
     .with_settings([
@@ -745,7 +748,8 @@ fn absent_installation_case(major: &str, loading_from_rows: bool) -> ParityCase 
     case
 }
 
-/// A request leaving the installation unset passes the cap, and one presenting an
+/// A request leaving the installation unset passes the cap, as does one whose pooled
+/// connection reads it as `''`, which `NULLIF` reads as `NULL`, and one presenting an
 /// installation passes where the helper allows that installation to read.
 #[tokio::test]
 #[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
@@ -760,6 +764,7 @@ async fn an_absent_installation_agrees_with_postgres_17_and_18() {
                 ("via_i2", false),
                 ("via_other", false),
                 ("unset_installation", true),
+                ("empty_installation", true),
             ] {
                 assert_postgres(
                     &case,
@@ -1198,6 +1203,167 @@ async fn contained_row_keys_agree_with_postgres_17_and_18() {
             expect("bob", "folders:f3", ActionStatement::Select, false);
             expect("erin", "folders:f2", ActionStatement::Select, false);
             expect("anonymous", "folders:f2", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const CAP_HELPERS: &str = r#"{
+    "authz.capped_kinds": { "kind": "declared_helper" },
+    "authz.member_organizations": { "kind": "declared_helper" },
+    "authz.owned_resources": { "kind": "declared_helper" }
+}"#;
+
+/// The two organizations, `…a1` and `…a2`.
+const ORGANIZATIONS: [&str; 2] = [
+    "0a000000-0000-4000-8000-0000000000a1",
+    "0a000000-0000-4000-8000-0000000000a2",
+];
+
+/// Installations `…f1` and `…f2` in the first organization and `…f3` in the second.
+const INSTALLATIONS_ACTING: [&str; 3] = [
+    "0f000000-0000-4000-8000-0000000000f1",
+    "0f000000-0000-4000-8000-0000000000f2",
+    "0f000000-0000-4000-8000-0000000000f3",
+];
+
+/// The member reading with `installation` set, `None` leaving it unset and `""` standing
+/// for a pooled connection that once carried one.
+const CAPPED_MEMBERS: [(&str, Option<&str>); 5] = [
+    ("0b000000-0000-4000-8000-000000000001", None),
+    ("0b000000-0000-4000-8000-000000000002", Some("")),
+    (
+        "0b000000-0000-4000-8000-000000000003",
+        Some(INSTALLATIONS_ACTING[0]),
+    ),
+    (
+        "0b000000-0000-4000-8000-000000000004",
+        Some(INSTALLATIONS_ACTING[1]),
+    ),
+    (
+        "0b000000-0000-4000-8000-000000000005",
+        Some(INSTALLATIONS_ACTING[2]),
+    ),
+];
+
+/// The resource member `member` owns in `organization` of `kind`, numbered as the three
+/// [`row_caps_case`] seeds.
+fn owned_resource(member: usize, resource: usize) -> String {
+    format!("0c000000-0000-4000-8000-0000000000{member}{resource}")
+}
+
+/// Every member belongs to both organizations, each holding a note and three resources.
+/// `…f1` holds `organization` as reader and `project` as writer, `…f2` holds
+/// `organization` as admin and `project` as reader, both in the first organization, and
+/// `…f3` holds `project` as admin in the second.
+fn row_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let [a1, a2] = ORGANIZATIONS;
+    let [f1, f2, f3] = INSTALLATIONS_ACTING;
+    let mut seed = format!(
+        "INSERT INTO organizations VALUES ('{a1}'), ('{a2}');
+         INSERT INTO organization_notes VALUES
+           ('0d000000-0000-4000-8000-0000000000a1', '{a1}'),
+           ('0d000000-0000-4000-8000-0000000000a2', '{a2}');
+         INSERT INTO app_installations VALUES ('{f1}', '{a1}'), ('{f2}', '{a1}'), ('{f3}', '{a2}');
+         INSERT INTO installation_permissions (installation_id, organization_id, kind, max_role)
+         VALUES
+           ('{f1}', '{a1}', 'organization', 'reader'), ('{f1}', '{a1}', 'project', 'writer'),
+           ('{f2}', '{a1}', 'organization', 'admin'), ('{f2}', '{a1}', 'project', 'reader'),
+           ('{f3}', '{a2}', 'project', 'admin');"
+    );
+    for (index, (member, _)) in CAPPED_MEMBERS.iter().enumerate() {
+        let number = index + 1;
+        let _ = write!(
+            seed,
+            "INSERT INTO memberships VALUES ('{a1}', '{member}'), ('{a2}', '{member}');
+             INSERT INTO resources VALUES
+               ('{}', '{a1}', 'project', '{member}'),
+               ('{}', '{a1}', 'organization', '{member}'),
+               ('{}', '{a2}', 'project', '{member}');",
+            owned_resource(number, 1),
+            owned_resource(number, 2),
+            owned_resource(number, 3),
+        );
+    }
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-row-caps-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        INSTALLATION_CAPS,
+        &[
+            &seed,
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON organizations, organization_notes, resources TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        CAPPED_MEMBERS
+            .iter()
+            .map(|(member, installation)| acting(member, Some(member), *installation))
+            .collect(),
+    )
+    .with_settings([
+        support::deployment::typed_caller("app.user_id", DataType::Uuid).may_be_unset(),
+        support::deployment::principal("app.installation_id", "installation", DataType::Uuid)
+            .may_be_unset(),
+    ])
+    .with_registry(CAP_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A request leaving the installation unset or empty reads every organization, note and
+/// resource of its member. One acting through an installation reads an organization and
+/// its notes where the installation holds `organization` there at reader or above, and a
+/// resource where it holds the resource's kind in the resource's organization at writer or
+/// above.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn row_caps_agree_with_postgres_17_and_18() {
+    let [a1, a2] = ORGANIZATIONS;
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = row_caps_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (index, (member, organizations, resources)) in [
+                (CAPPED_MEMBERS[0].0, [true, true], [true, true, true]),
+                (CAPPED_MEMBERS[1].0, [true, true], [true, true, true]),
+                (CAPPED_MEMBERS[2].0, [true, false], [true, false, false]),
+                (CAPPED_MEMBERS[3].0, [true, false], [false, true, false]),
+                (CAPPED_MEMBERS[4].0, [false, false], [false, false, true]),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let expect = |object: String, allowed| {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        member,
+                        &object,
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                };
+                for ((organization, note), allowed) in
+                    [(a1, "a1"), (a2, "a2")].into_iter().zip(organizations)
+                {
+                    expect(format!("organizations:{organization}"), allowed);
+                    expect(
+                        format!("organization_notes:0d000000-0000-4000-8000-0000000000{note}"),
+                        allowed,
+                    );
+                }
+                for (resource, allowed) in (1..=3).zip(resources) {
+                    expect(
+                        format!("resources:{}", owned_resource(index + 1, resource)),
+                        allowed,
+                    );
+                }
+            }
             assert_agrees(&case, &run);
         }
     }

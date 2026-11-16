@@ -892,7 +892,9 @@ fn an_installation_the_request_may_leave_unset_caps_through_its_absence() {
         "{model}"
     );
     assert!(
-        model.contains("!(\"app_installation_id\" in settings)"),
+        model.contains(
+            "!(\"app_installation_id\" in settings && settings[\"app_installation_id\"] != '')"
+        ),
         "{model}"
     );
     // An `OR` reports its parts' count, so each half alone shows its pattern.
@@ -2141,12 +2143,49 @@ ALTER FUNCTION authz.owned_resources() OWNER TO authz_owner;
 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
 ";
 
-/// A grant arm keeping only the rows a cap pairs with another helper's rows is refused,
-/// whether a column or a request value is compared with the helper, since a relation
-/// loaded from the arm alone would grant the rows the cap leaves out. So is an arm
-/// returning several columns, which no one relation names.
+/// A grant arm a cap keeps only some rows of translates against a column, the cap
+/// holding for every request where nothing lifts it.
 #[test]
-fn a_grant_arm_kept_by_a_cap_or_returning_several_columns_is_refused() {
+fn a_grant_arm_kept_by_an_unlifted_cap_translates() {
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id")]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers([
+            "authz.capped_kinds",
+            "authz.capped_resources",
+            "authz.owned_resources",
+        ])
+        .build();
+    for helper in ["authz.capped_resources", "authz.owned_resources"] {
+        let sql = format!(
+            "{CAPS}CREATE POLICY resources_read ON resources FOR SELECT \
+             USING (id = ANY (ARRAY(SELECT {helper}())));"
+        );
+        let classified = translator
+            .classify(&db_of(&sql))
+            .into_iter()
+            .find(|classified| classified.name() == "resources_read")
+            .expect("resources_read should classify")
+            .using_classification()
+            .expect("USING should classify")
+            .clone();
+        assert!(
+            !matches!(classified.pattern, PatternClass::Unknown(_)),
+            "{helper}: {:?}",
+            classified.pattern
+        );
+        translator
+            .translate(&db_of(&sql))
+            .expect("the schema plans")
+            .outputs()
+            .expect("the schema translates");
+    }
+}
+
+/// A request value compared with a helper whose grant arm a cap keeps only some rows of is
+/// refused, since no request-value gate carries the cap. So is an arm returning several
+/// columns, which no one relation names.
+#[test]
+fn a_capped_arm_against_a_request_value_or_returning_several_columns_is_refused() {
     let helpers = [
         "authz.capped_kinds",
         "authz.capped_resources",
@@ -2159,30 +2198,17 @@ fn a_grant_arm_kept_by_a_cap_or_returning_several_columns_is_refused() {
     .with_min_confidence(ConfidenceLevel::B)
     .with_declared_helpers(helpers)
     .build();
-    let capped = |helper: &str| {
-        format!(
-            "declared helper '{helper}' keeps the rows of 'public.resources' only where they \
-             pair with the rows 'authz.capped_kinds' returns"
-        )
-    };
     for (using, reason) in [
         (
-            "id = ANY (ARRAY(SELECT authz.capped_resources()))",
-            capped("authz.capped_resources"),
-        ),
-        (
-            "id = ANY (ARRAY(SELECT authz.owned_resources()))",
-            capped("authz.owned_resources"),
-        ),
-        (
             "current_setting('app.installation_id', true) IN (SELECT authz.capped_resources())",
-            capped("authz.capped_resources"),
+            "declared helper 'authz.capped_resources' keeps the rows of 'public.resources' only \
+             where they pair with the rows 'authz.capped_kinds' returns, which no request-value \
+             gate carries",
         ),
         (
             "id IN (SELECT authz.capped_kinds())",
             "declared helper 'authz.capped_kinds' returns 2 columns of 'public.approved_kinds' \
-             from one arm"
-                .to_string(),
+             from one arm",
         ),
     ] {
         let sql =
@@ -2200,7 +2226,7 @@ fn a_grant_arm_kept_by_a_cap_or_returning_several_columns_is_refused() {
             PatternClass::Unknown(UnclassifiedExpr {
                 reason: refused, ..
             }) => {
-                assert!(refused.contains(&reason), "`{using}`: {refused}");
+                assert!(refused.contains(reason), "`{using}`: {refused}");
             }
             other => panic!("`{using}` should be refused, got {other:?}"),
         }

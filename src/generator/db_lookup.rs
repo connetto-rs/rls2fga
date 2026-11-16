@@ -212,10 +212,14 @@ const fn column_kind_from_scalar_family(family: Option<ScalarFamily>) -> ColumnK
 }
 
 /// The modelled kind of one declared type, `char(n)` apart from the rest of its family
-/// because it compares and prints without its blank padding.
+/// because it compares and prints without its blank padding, and an enum's as text, since
+/// a label prints as its text and equals only itself.
 fn data_type_kind<DB: DatabaseLike>(data_type: &DB::DataType, db: &DB) -> ColumnKind {
     if data_type.normalized_name(db) == "CHAR" {
         return ColumnKind::Bpchar;
+    }
+    if data_type.enumeration(db).is_some() {
+        return ColumnKind::Text;
     }
     column_kind_from_scalar_family(data_type.scalar_family(db))
 }
@@ -482,11 +486,13 @@ CREATE TABLE temporal (
     fn sql_traits_scalar_families_decide_column_kinds() {
         let db = parse_schema(
             r"
+CREATE TYPE mood AS ENUM ('calm', 'busy');
 CREATE TABLE family_columns (
     label CHAR(8),
     balance MONEY,
     clock TIMETZ,
-    labels CHAR(8)[]
+    labels CHAR(8)[],
+    state mood
 );
 ",
         )
@@ -496,6 +502,7 @@ CREATE TABLE family_columns (
         assert_eq!(column_kind(&columns, "label", &db), ColumnKind::Bpchar);
         assert_eq!(column_kind(&columns, "balance", &db), ColumnKind::Decimal);
         assert_eq!(column_kind(&columns, "clock", &db), ColumnKind::Time);
+        assert_eq!(column_kind(&columns, "state", &db), ColumnKind::Text);
         assert_eq!(
             list_element_kind(&columns, "labels", &db),
             ColumnKind::Bpchar

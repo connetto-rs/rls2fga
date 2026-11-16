@@ -208,19 +208,35 @@ pub(crate) fn emit_request_formula<DB: DatabaseLike>(
         | RequestFormula::Any(_)
         | RequestFormula::All(_) => {}
     }
-    let Some(identity_cols) = resolve_row_identity(ctx.source_table, ctx.db) else {
-        skip_source_without_row_identity(
-            table_plan,
-            ctx.source_table,
-            "request gate links",
-            ctx.db,
-        );
+    let Some((gated, entries)) =
+        request_gate_on(formula, ctx.source_table, ctx, table_plan, all_types)
+    else {
         return deny_expr(table_plan);
+    };
+    for entry in entries {
+        table_plan.add_source(entry);
+    }
+    gated
+}
+
+/// `formula` stated on the request-gate object standing for `plan`'s type, which each row
+/// of `rows` links to, with the tuples it writes on that object. `None` for a constant, or
+/// where no tuple names a row of `rows`.
+pub(crate) fn request_gate_on<DB: DatabaseLike>(
+    formula: &RequestFormula,
+    rows: &TableId,
+    ctx: &PatternCtx<'_, DB>,
+    plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<(UsersetExpr, Vec<TupleSource>)> {
+    let Some(identity_cols) = resolve_row_identity(rows, ctx.db) else {
+        skip_source_without_row_identity(plan, rows, "request gate links", ctx.db);
+        return None;
     };
 
     let well_known = &ctx.settings.well_known;
     let gate_type = well_known.request_gate.clone();
-    let gate_object = table_plan.type_name.to_string();
+    let gate_object = plan.type_name.to_string();
     let mut entries = Vec::new();
     let relation = {
         let gate_plan = all_types
@@ -232,30 +248,27 @@ pub(crate) fn emit_request_formula<DB: DatabaseLike>(
             condition_parameters: ctx.condition_parameters,
             entries: &mut entries,
         };
-        gate.relation(formula)
+        gate.relation(formula)?
     };
-    let Some(relation) = relation else {
-        return deny_expr(table_plan);
-    };
-    for entry in entries {
-        table_plan.add_source(entry);
-    }
 
-    let link = table_plan.ensure_direct(
+    let link = plan.ensure_direct(
         request_gate_link_relation(),
         vec![DirectSubject::Type(gate_type.clone())],
     );
-    table_plan.add_source(TupleSource::PolicyScope {
-        table: ctx.source_table.clone(),
+    plan.add_source(TupleSource::PolicyScope {
+        table: rows.clone(),
         identity_cols,
         scope_relation: link.clone(),
         scope_type: gate_type,
         scope_object: gate_object,
     });
-    UsersetExpr::TupleToUserset {
-        tupleset: link,
-        computed: relation,
-    }
+    Some((
+        UsersetExpr::TupleToUserset {
+            tupleset: link,
+            computed: relation,
+        },
+        entries,
+    ))
 }
 
 /// The request-gate object standing for one guarded type, while a formula is stated on it.
@@ -365,11 +378,12 @@ impl GateObject<'_> {
 }
 
 /// The condition holding where the request carries the value `presence` tests, or where
-/// it leaves that value absent. The value travels in the `settings` map, which holds its
-/// key exactly when the request carries it.
+/// it leaves that value absent. The value travels in the `settings` map under its key,
+/// and the `NULLIF` read the test stands for reads `''` as `NULL` too, so an empty value
+/// there is absent.
 fn presence_spec(presence: &PresenceAtom) -> ConditionSpec {
     let key = format!("{}{}{}", '"', presence.request_parameter, '"');
-    let carried = format!("{key} in {SETTINGS_PARAMETER}");
+    let carried = format!("{key} in {SETTINGS_PARAMETER} && {SETTINGS_PARAMETER}[{key}] != ''");
     ConditionSpec {
         expression: if presence.carried {
             carried

@@ -115,13 +115,14 @@ pub enum RequestPredicate {
     /// One test of a request value against a constant the policy names.
     Holds(RequestAtom),
     /// The request carries a value the deployment lets it leave unset, its key present in
-    /// the `settings` map.
+    /// the `settings` map with a value other than `''`.
     Carries {
         /// Parameter the caller supplies the value as, in every check context.
         request_parameter: String,
     },
     /// The request leaves a value the deployment lets it leave unset absent, its key
-    /// missing from the `settings` map.
+    /// missing from the `settings` map or holding `''`, which the policy's `NULLIF` read
+    /// reads as `NULL`.
     Omits {
         /// Parameter the caller would supply the value as.
         request_parameter: String,

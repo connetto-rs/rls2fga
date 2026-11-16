@@ -3,7 +3,7 @@
 //! Membership through a join table, a membership naming no column of the guarded table, a
 //! parent rule through a foreign key, and the two shapes that combine other patterns.
 
-use super::emit_requests::{declare_condition, request_comparison_spec};
+use super::emit_requests::{declare_condition, request_comparison_spec, request_gate_on};
 use super::*;
 
 use crate::classifier::expansion::ExpansionState;
@@ -1517,7 +1517,7 @@ fn flag_relation<DB: DatabaseLike>(
     let flagged_type = ctx.table_types.resolve(&flag.table);
     let identity_cols = vec![flag.key.clone()];
     let mut key = format!("flag:{}:{}", flag.table.to_string().len(), flag.table);
-    let plan = helper_level_plan(&flagged_type, &flag.table, table_plan, all_types);
+    let plan = helper_level_plan(&flagged_type, Some(&flag.table), table_plan, all_types);
     let mut gates = Vec::with_capacity(flag.predicates.len());
     for predicate in &flag.predicates {
         let gate_key = attribute_gate_key(predicate)?;
@@ -1607,7 +1607,7 @@ fn helper_call_relation<DB: DatabaseLike>(
     let mut walked = Vec::new();
     for arm in &call.arms {
         match arm {
-            HelperSetArm::Grant(grant) => parts.extend(helper_grant_parts(
+            HelperSetArm::Grant(grant) => parts.extend(capped_grant_parts(
                 grant,
                 &call.level,
                 &level_type,
@@ -1621,7 +1621,7 @@ fn helper_call_relation<DB: DatabaseLike>(
                     continue;
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
-                let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
+                let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
                 let tupleset =
                     helper_parent_link(plan, &parent.edges, &call.level, parent_type, ctx.db);
                 parts.push(UsersetExpr::TupleToUserset {
@@ -1636,7 +1636,7 @@ fn helper_call_relation<DB: DatabaseLike>(
     if parts.is_empty() {
         return None;
     }
-    let plan = helper_level_plan(&level_type, &call.level, table_plan, all_types);
+    let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
     let name = helper_call_relation_name(&call.function, &call.arguments);
     if walked.is_empty() {
         return combine_union(parts).map(|returned| plan.ensure_computed(name, returned));
@@ -1756,10 +1756,10 @@ fn helper_child_link(
 }
 
 /// The plan of the type a helper's level names, which is the guarded table's own plan
-/// when the two coincide.
+/// when the two coincide. A level of no table is a type of pairs a cap returns.
 fn helper_level_plan<'p>(
     level_type: &TypeName,
-    level: &TableId,
+    level: Option<&TableId>,
     table_plan: &'p mut TypePlan,
     all_types: &'p mut BTreeMap<TypeName, TypePlan>,
 ) -> &'p mut TypePlan {
@@ -1769,7 +1769,9 @@ fn helper_level_plan<'p>(
     let plan = all_types.entry(level_type.clone()).or_insert_with(|| {
         TypePlan::new_with_well_known(level_type.clone(), &table_plan.well_known)
     });
-    plan.names_rows_of(level);
+    if let Some(level) = level {
+        plan.names_rows_of(level);
+    }
     plan
 }
 
@@ -1789,7 +1791,7 @@ fn helper_call_relation_name(function: &str, arguments: &[String]) -> String {
 /// less them.
 fn helper_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
-    level: &TableId,
+    level: Option<&TableId>,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
@@ -1879,7 +1881,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
                 &ShareRows {
                     join_table: &grant.table,
                     identity_cols: &identity_cols,
-                    fk_cols: core::slice::from_ref(&grant.object_column),
+                    fk_cols: &grant.object_columns,
                     share_type: &share_type,
                 },
             );
@@ -1923,6 +1925,201 @@ fn helper_grant_parts<DB: DatabaseLike>(
             grant_relation_exprs(grant, grantees, &base, &rows, &subjects, level_type, plan)
         })
         .collect()
+}
+
+/// The rows of the level a grant arm returns, as [`helper_grant_parts`] reads them, kept
+/// by each cap on the arm as one relation.
+///
+/// A cap's operands are the level's row or the arm's own row where the level's row keys it,
+/// so the rows keeping the pair are the ones granting the level's row.
+fn capped_grant_parts<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
+    let parts = helper_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types);
+    if grant.caps.is_empty() {
+        return parts;
+    }
+    let Some(granted) = combine_union(parts) else {
+        return Vec::new();
+    };
+    let mut kept = vec![granted];
+    let mut name = stored_relation_name(grant.table.name());
+    for cap in &grant.caps {
+        let Some(capped) = cap_expr(cap, grant, level, level_type, ctx, table_plan, all_types)
+        else {
+            return Vec::new();
+        };
+        name.push_str("_within_");
+        name.push_str(&helper_call_relation_name(&cap.function, &cap.arguments));
+        kept.push(capped);
+    }
+    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    vec![UsersetExpr::Computed(
+        plan.ensure_computed(name, UsersetExpr::Intersection(kept)),
+    )]
+}
+
+/// The rows of the level `cap` keeps among those `grant` returns, `None` where it keeps
+/// none.
+///
+/// Each pair the cap returns is an object of its own, holding whoever the cap's arms
+/// return it to, and each row of the level links to the pairs its operands name. While the
+/// request leaves the lifting value absent, every row of the level is kept.
+fn cap_expr<DB: DatabaseLike>(
+    cap: &HelperCap,
+    grant: &HelperGrant,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<UsersetExpr> {
+    let pair_type = cap_pair_type_name(cap, ctx.table_types);
+    let mut held = Vec::new();
+    for arm in &cap.arms {
+        held.extend(helper_grant_parts(
+            arm, None, &pair_type, ctx, table_plan, all_types,
+        ));
+    }
+    let holder = combine_union(held).map(|held| {
+        helper_level_plan(&pair_type, None, table_plan, all_types).ensure_computed(
+            helper_call_relation_name(&cap.function, &cap.arguments),
+            held,
+        )
+    });
+    let mut kept = Vec::with_capacity(2);
+    if let Some(lift) = &cap.lift {
+        let absent = RequestFormula::Presence(PresenceAtom::of(&RequestValueAbsent {
+            source: lift.clone(),
+            negated: false,
+        }));
+        // The gate object stands for the level's type, so its plan leaves `all_types` while
+        // the request-gate plan there takes the formula.
+        let gated = if table_plan.type_name == *level_type {
+            request_gate_on(&absent, level, ctx, table_plan, all_types)
+        } else {
+            let mut plan = all_types.remove(level_type).unwrap_or_else(|| {
+                TypePlan::new_with_well_known(level_type.clone(), &table_plan.well_known)
+            });
+            plan.names_rows_of(level);
+            let gated = request_gate_on(&absent, level, ctx, &mut plan, all_types);
+            all_types.insert(level_type.clone(), plan);
+            gated
+        };
+        if let Some((lifted, entries)) = gated {
+            for entry in entries {
+                table_plan.add_source(entry);
+            }
+            kept.push(lifted);
+        }
+    }
+    if let Some(holder) = holder {
+        let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+        let link = cap_link(cap, grant, &pair_type, plan);
+        kept.push(UsersetExpr::TupleToUserset {
+            tupleset: link,
+            computed: holder,
+        });
+    }
+    combine_union(kept)
+}
+
+/// The type whose objects are the pairs `cap` returns, named after the call.
+fn cap_pair_type_name(cap: &HelperCap, table_types: &TableTypes) -> TypeName {
+    let call = helper_call_relation_name(&cap.function, &cap.arguments);
+    let base = canonical_fga_type_name(&format!("{call}_pair"));
+    if table_types.claims(&base) {
+        let mut key = cap.function.clone();
+        for argument in &cap.arguments {
+            source_key_part(&mut key, argument);
+        }
+        return canonical_fga_type_name(&format!("{base}_{}", stable_hex_suffix(&key)));
+    }
+    base
+}
+
+/// The tupleset naming, on each row of the level, the pairs of `pair_type` its operands
+/// name, with the sources loading it.
+///
+/// Operands of the arm's own row name the pair its columns hold. Literals beside the level's
+/// row name every pair the cap's rows hold with that row and those literals.
+fn cap_link(
+    cap: &HelperCap,
+    grant: &HelperGrant,
+    pair_type: &TypeName,
+    plan: &mut TypePlan,
+) -> RelationName {
+    let level_type = plan.type_name.clone();
+    let links: Vec<(
+        &TableId,
+        Vec<ColumnName>,
+        Vec<ColumnName>,
+        ResidualPredicates,
+    )> = match &cap.link {
+        CapLink::Row { columns } => vec![(
+            &grant.table,
+            grant.object_columns.clone(),
+            columns.clone(),
+            ResidualPredicates::default(),
+        )],
+        CapLink::Pair { object, literals } => cap
+            .arms
+            .iter()
+            .filter_map(|arm| {
+                let held = literals
+                    .iter()
+                    .map(|(position, value)| {
+                        Some(AttributePredicate {
+                            column: arm.object_columns.get(*position)?.clone(),
+                            test: AttributeTest::Compare {
+                                operator: AttributeOperator::Eq,
+                                value: value.clone(),
+                            },
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some((
+                    &arm.table,
+                    vec![arm.object_columns.get(*object)?.clone()],
+                    arm.object_columns.clone(),
+                    grant_row_conjuncts(&held, &[], 0)?,
+                ))
+            })
+            .collect(),
+    };
+    let mut key = format!("cap:{pair_type}");
+    for (table, object_cols, subject_cols, predicates) in &links {
+        let mut part = table_source_key("cap_link", table);
+        for column in object_cols.iter().chain(subject_cols) {
+            source_key_part(&mut part, column.as_str());
+        }
+        if let Some(sql) = predicates.sql() {
+            source_key_part(&mut part, &sql);
+        }
+        source_key_part(&mut key, &part);
+    }
+    let link = plan.membership_source_relation(
+        &key,
+        pair_type.as_str(),
+        vec![DirectSubject::Type(pair_type.clone())],
+    );
+    for (table, object_cols, subject_cols, extra_predicates) in links {
+        plan.add_source(TupleSource::ClosureBridge {
+            link_table: table.clone(),
+            object_cols,
+            subject_cols,
+            guarded_type: level_type.clone(),
+            owner_type: pair_type.clone(),
+            relation: link.clone(),
+            extra_predicates,
+        });
+    }
+    link
 }
 
 /// Who a grant row grants.
@@ -2018,7 +2215,8 @@ fn set_subjects<DB: DatabaseLike>(
     );
     let inline = call.arms.iter().all(|arm| {
         matches!(arm, HelperSetArm::Grant(grant)
-            if grant.returns_the_caller() || grant.grantee == HelperGrantee::Anyone)
+            if grant.caps.is_empty()
+                && (grant.returns_the_caller() || grant.grantee == HelperGrantee::Anyone))
     });
     if !inline {
         return helper_call_relation(call, ctx, table_plan, all_types)
@@ -2039,12 +2237,10 @@ fn set_subjects<DB: DatabaseLike>(
         let HelperSetArm::Grant(grant) = arm else {
             continue;
         };
-        let Some(join) = grantee_join(
-            &grant.table,
-            &grant.object_column,
-            &outer,
-            &kept_rows(&grant.rows),
-        ) else {
+        let [object] = grant.object_columns.as_slice() else {
+            continue;
+        };
+        let Some(join) = grantee_join(&grant.table, object, &outer, &kept_rows(&grant.rows)) else {
             continue;
         };
         let mut kept_out = grant.excluded.clone();
@@ -2239,7 +2435,7 @@ fn caller_grant_relation<DB: DatabaseLike>(
     } else {
         None
     };
-    let fk_cols = vec![grant.object_column.clone()];
+    let fk_cols = grant.object_columns.clone();
     let mut key = membership_source_key(
         &grant.table,
         &fk_cols,
@@ -2497,8 +2693,11 @@ fn grant_relation_exprs(
     level_type: &TypeName,
     plan: &mut TypePlan,
 ) -> Vec<UsersetExpr> {
-    let fk_cols = vec![grant.object_column.clone()];
-    let compared = grantees.map_or(&grant.object_column, |(column, _)| column);
+    let fk_cols = grant.object_columns.clone();
+    // A grant arm returns at least one column.
+    let Some(compared) = grantees.map(|(column, _)| column).or(fk_cols.first()) else {
+        return Vec::new();
+    };
     let mut key = membership_source_key(&grant.table, &fk_cols, compared, rows, None);
     let user_type = plan.well_known.user.clone();
     match grantees {

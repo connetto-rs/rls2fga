@@ -22,18 +22,19 @@ use crate::classifier::recognizers::subquery::{
 };
 use crate::classifier::recognizers::{projected_select, unparenthesize};
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
-use crate::generator::db_lookup::{row_uniquely_keys, single_identity_column};
+use crate::generator::db_lookup::{column_kind, row_uniquely_keys, single_identity_column};
 use crate::generator::model_bounds::MAX_CONDITIONS;
 use crate::parser::expr::CastChain;
 use crate::parser::names::{
     lookup_table, lookup_table_id, stored_ident_name, stored_relation_name, table_identity,
 };
 use crate::parser::sql_parser::{
-    CallerGate, CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike,
-    GrantArm, GrantedTo, HelperArm, HelperSet, ParentArm, Restriction, SettingContent,
-    SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
+    CallerGate, CapLift, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike,
+    ForeignKeyLike, FunctionLike, GrantArm, GrantedTo, HelperArm, HelperSet, ParentArm,
+    Restriction, RowCap, SettingContent, SettingPresence, SettingValue, TableLike, TimeBound,
+    TimeComparison,
 };
-use crate::types::{ColumnName, TypeName};
+use crate::types::{ColumnKind, ColumnName, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
 
 /// Why a call to a declared helper does not translate.
@@ -237,11 +238,11 @@ pub(crate) enum HelperRefusal {
         /// How many columns the arm returns.
         columns: usize,
     },
-    /// A grant arm keeps only the rows whose columns pair with the rows another helper
-    /// returns.
+    /// A grant arm compared with a request value keeps only the rows whose columns pair
+    /// with the rows another helper returns.
     #[error(
         "declared helper '{function}' keeps the rows of '{table}' only where they pair with \
-         the rows '{cap}' returns, which no grant relation carries"
+         the rows '{cap}' returns, which no request-value gate carries"
     )]
     Capped {
         /// The helper.
@@ -251,6 +252,127 @@ pub(crate) enum HelperRefusal {
         /// The helper returning the pairs.
         cap: String,
     },
+    /// A cap returns some of its pairs through a parent or a walk, which no row keys.
+    #[error(
+        "declared helper '{function}' is capped by '{cap}', which returns pairs through a \
+         parent or a walk, while a pair is read from the row returning it"
+    )]
+    CapByParentOrWalk {
+        /// The capped helper.
+        function: String,
+        /// The helper returning the pairs.
+        cap: String,
+    },
+    /// The rows returning a cap's pairs are capped in turn.
+    #[error(
+        "declared helper '{function}' is capped by '{cap}', whose own rows '{nested}' caps, \
+         while a pair object carries no cap"
+    )]
+    CappedCap {
+        /// The capped helper.
+        function: String,
+        /// The helper returning the pairs.
+        cap: String,
+        /// The helper capping the cap's rows.
+        nested: String,
+    },
+    /// A cap is lifted by a read the request's absence does not decide.
+    #[error(
+        "declared helper '{function}' lifts its cap where setting '{setting}' reads NULL, \
+         {reason}"
+    )]
+    Lift {
+        /// The capped helper.
+        function: String,
+        /// The setting the lift reads.
+        setting: String,
+        /// Why its absence does not decide the lift.
+        reason: LiftRefusal,
+    },
+    /// A cap operand is neither a column nor a literal the model spells.
+    #[error(
+        "declared helper '{function}' pairs '{operand}' with the rows '{cap}' returns, which \
+         is no literal a pair is named by"
+    )]
+    CapOperand {
+        /// The capped helper.
+        function: String,
+        /// The helper returning the pairs.
+        cap: String,
+        /// The operand as written.
+        operand: String,
+    },
+    /// A cap pairs a column other than the returned one, while several rows of the arm's
+    /// table can name one returned row.
+    #[error(
+        "declared helper '{function}' pairs column '{column}' of '{table}' with the rows \
+         '{cap}' returns, while several rows of '{table}' can return one row, each with its \
+         own pair"
+    )]
+    CapOnSeveralRows {
+        /// The capped helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The paired column.
+        column: String,
+        /// The helper returning the pairs.
+        cap: String,
+    },
+    /// A cap pairs literals with no column, or beside a column other than the returned one.
+    #[error(
+        "declared helper '{function}' pairs literals with the rows '{cap}' returns beside no \
+         column of '{table}', or beside one other than the column it returns, so no pair \
+         names the row it returns"
+    )]
+    CapLiteralsBeside {
+        /// The capped helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The helper returning the pairs.
+        cap: String,
+    },
+    /// A cap pairs columns whose types differ, or whose text spelling does not decide
+    /// equality.
+    #[error(
+        "declared helper '{function}' pairs column '{column}' of '{table}' with column \
+         '{paired}' of the rows '{cap}' returns, and the two are not of one type whose text \
+         spelling decides equality, which names a pair"
+    )]
+    CapUnlikeTypes {
+        /// The capped helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The paired column of the arm's table.
+        column: String,
+        /// The helper returning the pairs.
+        cap: String,
+        /// The column of the cap's rows it pairs with.
+        paired: String,
+    },
+}
+
+/// Why the request leaving a setting absent does not decide a cap lifted where the setting
+/// reads `NULL`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum LiftRefusal {
+    /// `current_setting(name)` raises `42704` on a setting the request never set.
+    #[error(
+        "but reads it through current_setting without missing_ok, which raises 42704 where \
+         a request never set it"
+    )]
+    RaisesWhenUnset,
+    /// The read is `''` on a pooled connection whose earlier transaction set it.
+    #[error(
+        "but reads it without NULLIF(..., ''), so the '' a pooled connection reads for an \
+         unset setting keeps the cap a request leaving it absent lifts"
+    )]
+    ReadBare,
+    /// The deployment declares the setting no single value a request may leave unset.
+    #[error("which the deployment does not declare as one value a request may leave unset")]
+    NotMaybeUnset,
 }
 
 /// Recognize `<column> = ANY (ARRAY(SELECT h(...)))`, `<column> = ANY (SELECT h(...))`
@@ -624,6 +746,7 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
             }
         };
         bounded_by_no_time(&name, grant)?;
+        uncapped(&name, grant)?;
         let column = granted_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
@@ -705,7 +828,13 @@ fn helper_call<DB: DatabaseLike>(
                 (
                     rows_named_by(grant.table(), column, db)?
                         .ok_or_else(|| names_no_rows(grant.table(), column))?,
-                    HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db, registry)?)),
+                    HelperSetArm::Grant(Box::new(helper_grant(
+                        &name,
+                        grant,
+                        core::slice::from_ref(&column),
+                        db,
+                        registry,
+                    )?)),
                 )
             }
             HelperArm::Parent(parent) => (
@@ -814,9 +943,12 @@ fn helper_edges<DB: DatabaseLike>(
     }
 }
 
+/// The grant `grant` makes on the object `objects` name, the one row of the level for an
+/// arm of a call and the pair for an arm of a cap.
 fn helper_grant<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
+    objects: &[&DB::Column],
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
@@ -897,14 +1029,27 @@ fn helper_grant<DB: DatabaseLike>(
         None => Vec::new(),
         Some(gate) => excluded_callers(function, gate, &grantee)?,
     };
-    let object_column = granted_column(function, grant)?;
+    let caps = match objects {
+        [object] => grant
+            .caps()
+            .iter()
+            .map(|cap| helper_cap(function, grant, object, cap, db, registry))
+            .collect::<Result<_, _>>()?,
+        // Only an arm of a cap returns several columns, and `helper_cap` refuses one
+        // carrying caps of its own.
+        _ => Vec::new(),
+    };
     let grant = HelperGrant {
         table: table_identity(table),
-        object_column: ColumnName::from_stored(object_column.stored_column_name()),
+        object_columns: objects
+            .iter()
+            .map(|object| ColumnName::from_stored(object.stored_column_name()))
+            .collect(),
         grantee,
         excluded,
         rows: grant_rows(table, grant.restrictions(), db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
+        caps,
     };
     if grant.time_bounds.len() > 1 && !row_uniquely_keys(&grant.table, &grant.tuple_key(), db) {
         return Err(HelperRefusal::MixedTimeBounds {
@@ -1237,27 +1382,235 @@ fn same_literal(left: &AttributeLiteral, right: &AttributeLiteral) -> bool {
     }
 }
 
-/// The one column `grant` returns, refused where it returns several or where a cap
-/// keeps only some of its rows, which no relation loaded from the arm carries.
+/// The one column `grant` returns, refused where it returns several, which no one relation
+/// names.
 fn granted_column<'db, DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'db, DB>,
 ) -> Result<&'db DB::Column, HelperRefusal> {
-    let table = || table_identity(grant.table()).to_string();
-    if let Some(cap) = grant.caps().first() {
-        return Err(HelperRefusal::Capped {
-            function: function.to_string(),
-            table: table(),
-            cap: cap.function().target_name().to_string(),
-        });
-    }
     match grant.columns() {
         [column] => Ok(column),
         columns => Err(HelperRefusal::SeveralColumns {
             function: function.to_string(),
-            table: table(),
+            table: table_identity(grant.table()).to_string(),
             columns: columns.len(),
         }),
+    }
+}
+
+/// Refuses an arm a cap keeps only some rows of, read where every row the arm's other
+/// conditions keep is a value the request is compared with.
+fn uncapped<DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'_, DB>,
+) -> Result<(), HelperRefusal> {
+    match grant.caps().first() {
+        None => Ok(()),
+        Some(cap) => Err(HelperRefusal::Capped {
+            function: function.to_string(),
+            table: table_identity(grant.table()).to_string(),
+            cap: cap.function().target_name().to_string(),
+        }),
+    }
+}
+
+/// The cap `cap` puts on the rows `grant` returns of `object`, its pairs read from the
+/// cap's own arms.
+fn helper_cap<DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'_, DB>,
+    object: &DB::Column,
+    cap: &RowCap<'_, DB>,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<HelperCap, HelperRefusal> {
+    let called = cap.function();
+    if !registry.declares_helper(called) {
+        return Err(HelperRefusal::UndeclaredCallee {
+            function: function.to_string(),
+            called: called.target_name().to_string(),
+        });
+    }
+    let name = registry.resolved_target_name(&called.target_name());
+    let mut arms = Vec::with_capacity(cap.set().arms().len());
+    let mut pairs = Vec::with_capacity(cap.set().arms().len());
+    for arm in cap.set().arms() {
+        let HelperArm::Grant(rows) = arm else {
+            return Err(HelperRefusal::CapByParentOrWalk {
+                function: function.to_string(),
+                cap: name,
+            });
+        };
+        if let Some(nested) = rows.caps().first() {
+            return Err(HelperRefusal::CappedCap {
+                function: function.to_string(),
+                cap: name,
+                nested: nested.function().target_name().to_string(),
+            });
+        }
+        arms.push(helper_grant(&name, rows, rows.columns(), db, registry)?);
+        pairs.push(rows);
+    }
+    let paired = PairedCap {
+        function,
+        cap: &name,
+        arm: grant.table(),
+        pairs: &pairs,
+    };
+    let link = paired.link(object, cap.operands(), db)?;
+    let lift = cap
+        .lift()
+        .map(|lift| lifting_source(function, lift, registry))
+        .transpose()?;
+    Ok(HelperCap {
+        arguments: cap.arguments().iter().map(ToString::to_string).collect(),
+        function: name,
+        arms,
+        link,
+        lift,
+    })
+}
+
+/// The declared value whose absence lifts a cap, read only through `NULLIF(<read>, '')`
+/// with `missing_ok`, which reads both states of an unset setting as `NULL`.
+fn lifting_source(
+    function: &str,
+    lift: &CapLift<'_>,
+    registry: &FunctionRegistry,
+) -> Result<DeclaredSource, HelperRefusal> {
+    let setting = lift.setting().name();
+    let refusal = |reason: LiftRefusal| HelperRefusal::Lift {
+        function: function.to_string(),
+        setting: setting.to_string(),
+        reason,
+    };
+    if lift.raises_when_unset() {
+        return Err(refusal(LiftRefusal::RaisesWhenUnset));
+    }
+    if !lift.lifts_on_empty() {
+        return Err(refusal(LiftRefusal::ReadBare));
+    }
+    registry
+        .declared_source(setting, &[])
+        .filter(|source| source.is_scalar() && source.may_be_unset())
+        .cloned()
+        .ok_or_else(|| refusal(LiftRefusal::NotMaybeUnset))
+}
+
+/// A cap's operands beside the arms returning its pairs, for the refusals naming them.
+struct PairedCap<'a, 'db, DB: DatabaseLike> {
+    /// The helper whose arm the cap keeps.
+    function: &'a str,
+    /// The helper returning the pairs.
+    cap: &'a str,
+    /// The table the capped arm reads.
+    arm: &'db DB::Table,
+    /// The cap's arms.
+    pairs: &'a [&'a GrantArm<'db, DB>],
+}
+
+impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
+    /// The rows naming the pair a row of the level reaches through `operands`, `object`
+    /// being the column of the arm's table naming that row.
+    ///
+    /// Operands of columns only name their pair on the arm's own row, which names one row
+    /// of the level where `object` keys the table, or where every operand is `object`
+    /// itself. Literals beside `object` alone name the pairs whose column at its position
+    /// holds the level's row, read from the cap's own rows.
+    fn link(
+        &self,
+        object: &DB::Column,
+        operands: &[CapOperand<'_, DB>],
+        db: &DB,
+    ) -> Result<CapLink, HelperRefusal> {
+        let object_name = object.stored_column_name();
+        let mut columns = Vec::with_capacity(operands.len());
+        let mut literals = Vec::new();
+        let mut beside = None;
+        for (position, operand) in operands.iter().enumerate() {
+            match operand {
+                CapOperand::Column(column) => {
+                    let name = column.stored_column_name();
+                    if name != object_name {
+                        beside.get_or_insert_with(|| name.to_string());
+                    }
+                    self.pairs_alike(column, position, db)?;
+                    columns.push((position, ColumnName::from_stored(name)));
+                }
+                CapOperand::Value(value) => {
+                    let value = literal(value).ok_or_else(|| HelperRefusal::CapOperand {
+                        function: self.function.to_string(),
+                        cap: self.cap.to_string(),
+                        operand: value.to_string(),
+                    })?;
+                    literals.push((position, value));
+                }
+            }
+        }
+        if literals.is_empty() {
+            let table = table_identity(self.arm);
+            let object_name = ColumnName::from_stored(object_name);
+            if let Some(column) = beside.filter(|_| !row_uniquely_keys(&table, &[&object_name], db))
+            {
+                return Err(HelperRefusal::CapOnSeveralRows {
+                    function: self.function.to_string(),
+                    table: table.to_string(),
+                    column,
+                    cap: self.cap.to_string(),
+                });
+            }
+            return Ok(CapLink::Row {
+                columns: columns.into_iter().map(|(_, column)| column).collect(),
+            });
+        }
+        match (columns.as_slice(), beside) {
+            ([(object, _)], None) => Ok(CapLink::Pair {
+                object: *object,
+                literals,
+            }),
+            _ => Err(HelperRefusal::CapLiteralsBeside {
+                function: self.function.to_string(),
+                table: table_identity(self.arm).to_string(),
+                cap: self.cap.to_string(),
+            }),
+        }
+    }
+
+    /// Refuses `column` of the capped arm's table paired with the column at `position` of
+    /// a cap arm, unless both are of one type whose text spelling decides equality, since
+    /// a pair object is named by that spelling on either side.
+    fn pairs_alike(
+        &self,
+        column: &DB::Column,
+        position: usize,
+        db: &DB,
+    ) -> Result<(), HelperRefusal> {
+        let declared = column.data_type(db);
+        for pairs in self.pairs {
+            let Some(paired) = pairs.columns().get(position) else {
+                continue;
+            };
+            let spelled = paired.data_type(db);
+            let decides = matches!(
+                column_kind(&table_identity(self.arm), &column.stored_column_name(), db),
+                ColumnKind::Text
+                    | ColumnKind::Bpchar
+                    | ColumnKind::Uuid
+                    | ColumnKind::Bool
+                    | ColumnKind::Integer
+                    | ColumnKind::Date
+            );
+            if !decides || declared.normalized_name(db) != spelled.normalized_name(db) {
+                return Err(HelperRefusal::CapUnlikeTypes {
+                    function: self.function.to_string(),
+                    table: table_identity(self.arm).to_string(),
+                    column: column.stored_column_name().into_owned(),
+                    cap: self.cap.to_string(),
+                    paired: paired.stored_column_name().into_owned(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
