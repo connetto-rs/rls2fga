@@ -14,7 +14,9 @@ use crate::generator::db_lookup::{
     row_uniquely_keys, single_identity_column,
 };
 use crate::generator::identity::MAX_OBJECT_NAME_CHARS;
-use crate::generator::ir::{GateContextColumn, MembershipGate, PrincipalInfo, TupleSource};
+use crate::generator::ir::{
+    GateContextColumn, GranteeSubject, MembershipGate, PrincipalInfo, TupleSource,
+};
 use crate::generator::model_bounds::MAX_PARAMETER_NAME_CHARS;
 use crate::generator::notes::SkippedTuples;
 use crate::generator::role_relations::{sorted_role_relation_names, RoleRelationName};

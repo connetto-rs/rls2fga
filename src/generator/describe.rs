@@ -549,6 +549,26 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             ))
         }
 
+        // Replayed through its query, which evaluates every conjunct.
+        TupleSource::GranteeGrant {
+            join_table,
+            fk_cols,
+            parent_type,
+            relation,
+            extra_predicates,
+            ..
+        } => Some(residual_description(
+            rendered(query)?,
+            join_table,
+            fk_cols,
+            extra_predicates,
+            ReplayScope::Object {
+                object_type: parent_type.clone(),
+                relations: vec![relation.clone()],
+            },
+            "a grantee grant is replayed through its query".to_string(),
+        )),
+
         TupleSource::ParentBridge {
             table,
             fk_cols,

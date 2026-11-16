@@ -8,7 +8,9 @@ use super::*;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
-use crate::generator::tuple_generator::{quote_sql_identifier, render_attribute_test};
+use crate::generator::tuple_generator::{
+    quote_sql_identifier, quote_sql_string_literal, render_attribute_test,
+};
 use crate::generator::well_known::HOLDER_OBJECT_ID;
 
 pub(super) struct MembershipSourceGate<'a> {
@@ -1587,7 +1589,8 @@ fn helper_call_relation_name(function: &str, arguments: &[String]) -> String {
     clamp_relation_name(name)
 }
 
-/// The rows of the level a grant arm returns, one rule per group of rows it keeps.
+/// The rows of the level a grant arm returns, one rule per group of rows it keeps, and
+/// an audience it keeps for every caller but some as its own rule less them.
 fn helper_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
     level: &TableId,
@@ -1596,9 +1599,18 @@ fn helper_grant_parts<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
-    let groups = grant_row_groups(&grant.rows, &grant.time_bounds);
+    // A grant row naming the caller is the one membership the generic name stands for,
+    // and an audience is named after its table.
+    let unsplit = match grant.grantee {
+        HelperGrantee::Caller { .. } | HelperGrantee::RequestSet { .. } => {
+            member_relation().to_string()
+        }
+        HelperGrantee::Anyone => stored_relation_name(grant.table.name()),
+    };
+    let groups = grant_row_groups(&grant.rows, &grant.time_bounds, &unsplit);
     match &grant.grantee {
-        HelperGrantee::Caller { .. } => {
+        HelperGrantee::Caller { user_column } => {
+            let excluded = caller_exclusion(user_column, &grant.excluded);
             let aggregate = !row_uniquely_keys(&grant.table, &grant.tuple_key(), ctx.db);
             let plan = helper_level_plan(level_type, level, table_plan, all_types);
             groups
@@ -1606,11 +1618,11 @@ fn helper_grant_parts<DB: DatabaseLike>(
                 .filter_map(|(base, extra_predicates)| {
                     caller_grant_relation(
                         grant,
+                        user_column,
                         level_type,
                         plan,
                         ctx,
-                        base,
-                        extra_predicates,
+                        (base, extra_predicates.and(&excluded)),
                         aggregate,
                     )
                 })
@@ -1650,12 +1662,91 @@ fn helper_grant_parts<DB: DatabaseLike>(
                 .map(|gate| share_reach(link.clone(), gate))
                 .collect()
         }
+        HelperGrantee::Anyone => {
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
+            groups
+                .into_iter()
+                .map(|(base, rows)| audience_relation(grant, &base, &rows, level_type, plan))
+                .collect()
+        }
+    }
+}
+
+/// `<column> <> '<caller>'` for each of `excluded`.
+fn caller_exclusion(column: &ColumnName, excluded: &[String]) -> Vec<ResidualPredicate> {
+    let column_sql = quote_sql_identifier(column.as_str());
+    excluded
+        .iter()
+        .map(|caller| ResidualPredicate {
+            sql: format!("{column_sql} <> {}", quote_sql_string_literal(caller)),
+            guard: Some(ResidualGuard::Compare(AttributePredicate {
+                column: column.clone(),
+                test: AttributeTest::Compare {
+                    operator: AttributeOperator::NotEq,
+                    value: AttributeLiteral::Text(caller.clone()),
+                },
+            })),
+            request: None,
+            relations: Vec::new(),
+        })
+        .collect()
+}
+
+/// The relation holding every caller on the level rows `rows` names, or every caller
+/// but the ones the arm excludes, with the sources loading it.
+fn audience_relation(
+    grant: &HelperGrant,
+    base: &str,
+    rows: &ResidualPredicates,
+    level_type: &TypeName,
+    plan: &mut TypePlan,
+) -> UsersetExpr {
+    let fk_cols = vec![grant.object_column.clone()];
+    let mut key = membership_source_key(&grant.table, &fk_cols, &grant.object_column, rows, None);
+    source_key_part(&mut key, "anyone");
+    for caller in &grant.excluded {
+        source_key_part(&mut key, caller);
+    }
+    let grantee_grant = |relation: &RelationName, subject| TupleSource::GranteeGrant {
+        join_table: grant.table.clone(),
+        fk_cols: fk_cols.clone(),
+        parent_type: level_type.clone(),
+        relation: relation.clone(),
+        subject,
+        extra_predicates: rows.clone(),
+    };
+    let everyone = DirectSubject::Wildcard(plan.well_known.user.clone());
+    if grant.excluded.is_empty() {
+        let relation = plan.membership_source_relation(&key, base, everyone);
+        plan.add_source(grantee_grant(&relation, GranteeSubject::Everyone));
+        return UsersetExpr::Computed(relation);
+    }
+    let kept = plan.membership_source_relation(
+        &format!("{key}kept"),
+        format!("{base}_everyone"),
+        everyone,
+    );
+    let excluded = plan.membership_source_relation(
+        &format!("{key}excluded"),
+        format!("{base}_excluded"),
+        DirectSubject::Type(plan.well_known.user.clone()),
+    );
+    plan.add_source(grantee_grant(&kept, GranteeSubject::Everyone));
+    for caller in &grant.excluded {
+        plan.add_source(grantee_grant(
+            &excluded,
+            GranteeSubject::Caller(caller.clone()),
+        ));
+    }
+    UsersetExpr::Exclusion {
+        base: Box::new(UsersetExpr::Computed(kept)),
+        subtract: Box::new(UsersetExpr::Computed(excluded)),
     }
 }
 
 /// The grant rows one rule reads, one group per role the arm keeps, or one for every
 /// row it keeps where the grant table has no role column, each with the relation name
-/// it earns.
+/// it earns, `unsplit` where no role names it.
 ///
 /// A time bound rides the tuple as a condition comparing the row's column with the
 /// request clock. A bound keeping `NULL` splits the rows by whether the column holds
@@ -1666,6 +1757,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
 fn grant_row_groups(
     rows: &GrantRows,
     time_bounds: &[HelperTimeBound],
+    unsplit: &str,
 ) -> Vec<(String, ResidualPredicates)> {
     let roles: Vec<(String, Vec<AttributePredicate>)> = match rows {
         GrantRows::Roles {
@@ -1679,7 +1771,7 @@ fn grant_row_groups(
                 // generic name the source key disambiguates.
                 let base = match value {
                     AttributeLiteral::Text(text) => text.clone(),
-                    _ => member_relation().to_string(),
+                    _ => unsplit.to_string(),
                 };
                 let role = AttributePredicate {
                     column: column.clone(),
@@ -1692,9 +1784,7 @@ fn grant_row_groups(
                 (base, kept.collect())
             })
             .collect(),
-        GrantRows::Matching { predicates } => {
-            vec![(member_relation().to_string(), predicates.clone())]
-        }
+        GrantRows::Matching { predicates } => vec![(unsplit.to_string(), predicates.clone())],
     };
     let null_kept = time_bounds.iter().filter(|bound| bound.keeps_null).count();
     let mut groups = Vec::with_capacity(roles.len() << null_kept);
@@ -1762,16 +1852,17 @@ fn grant_row_conjuncts(
     Some(ResidualPredicates::new(conjuncts))
 }
 
-/// The relation holding the caller each grant row `extra_predicates` keeps names, with
-/// the source loading it, conditioned on the request clock where a conjunct compares
-/// with it, and `None` where that condition cannot be declared.
+/// The relation holding the caller `user_column` names in each grant row the group keeps,
+/// named `base` and kept by `extra_predicates`, with the source loading it, conditioned on
+/// the request clock where a conjunct compares with it, and `None` where that condition
+/// cannot be declared.
 fn caller_grant_relation<DB: DatabaseLike>(
     grant: &HelperGrant,
+    user_column: &ColumnName,
     level_type: &TypeName,
     plan: &mut TypePlan,
     ctx: &PatternCtx<'_, DB>,
-    base: String,
-    extra_predicates: ResidualPredicates,
+    (base, extra_predicates): (String, ResidualPredicates),
     aggregate: bool,
 ) -> Option<RelationName> {
     let gate = if extra_predicates.has_requests() {
@@ -1790,7 +1881,6 @@ fn caller_grant_relation<DB: DatabaseLike>(
     } else {
         None
     };
-    let user_column = grant.grantee.compared_column();
     let fk_cols = vec![grant.object_column.clone()];
     let key = membership_source_key(
         &grant.table,
@@ -1947,6 +2037,7 @@ pub(crate) fn emit_request_value_in_helper_set<DB: DatabaseLike>(
                 predicates: arm.predicates.clone(),
             },
             &[],
+            member_relation().as_str(),
         );
         let Some((identity_cols, share_type, gates)) =
             share.gates(groups, ctx, table_plan, all_types)
