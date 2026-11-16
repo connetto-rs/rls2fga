@@ -22,7 +22,9 @@ use crate::classifier::recognizers::subquery::{
 };
 use crate::classifier::recognizers::{projected_select, unparenthesize};
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
-use crate::generator::db_lookup::{column_kind, row_uniquely_keys, single_identity_column};
+use crate::generator::db_lookup::{
+    column_kind, resolve_row_identity, row_uniquely_keys, single_identity_column,
+};
 use crate::generator::model_bounds::MAX_CONDITIONS;
 use crate::parser::expr::CastChain;
 use crate::parser::names::{
@@ -352,11 +354,12 @@ pub(crate) enum HelperRefusal {
         /// The column of the cap's rows it pairs with.
         paired: String,
     },
-    /// A grant arm keeps only the rows naming a joined row that meets the join's
-    /// conditions.
+    /// A grant arm read where no row link reaches it keeps only the rows naming a joined
+    /// row that meets the join's conditions.
     #[error(
         "declared helper '{function}' keeps the rows of '{table}' only where they name a \
-         row of '{joined}' meeting the join, which no grant relation carries"
+         row of '{joined}' meeting the join, which neither a request-value gate nor a cap's \
+         pairs carry"
     )]
     Joined {
         /// The helper.
@@ -366,10 +369,11 @@ pub(crate) enum HelperRefusal {
         /// The table the arm joins.
         joined: String,
     },
-    /// A grant arm keeps only the rows no row of another table blocks.
+    /// A grant arm read where no row link reaches it keeps only the rows no row of another
+    /// table blocks.
     #[error(
         "declared helper '{function}' keeps the rows of '{table}' only where no row of \
-         '{blocking}' blocks them, which no grant relation carries"
+         '{blocking}' blocks them, which neither a request-value gate nor a cap's pairs carry"
     )]
     AntiJoined {
         /// The helper.
@@ -378,6 +382,54 @@ pub(crate) enum HelperRefusal {
         table: String,
         /// The table whose rows block the arm's.
         blocking: String,
+    },
+    /// A grant arm joins or anti-joins the rows of a table through columns other than
+    /// that table's key, so no one row is named by the arm's row.
+    #[error(
+        "declared helper '{function}' names the rows of '{other}' from the rows of '{table}' \
+         through columns other than the key of '{other}', so no link names one row"
+    )]
+    JoinOffKey {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The joined or blocking table.
+        other: String,
+    },
+    /// The rows a grant arm joins or anti-joins are bounded against the clock.
+    #[error(
+        "declared helper '{function}' bounds the rows of '{other}' it joins against the \
+         clock, which no row link carries"
+    )]
+    JoinTimeBounds {
+        /// The helper.
+        function: String,
+        /// The joined or blocking table.
+        other: String,
+    },
+    /// A grant arm joining or anti-joining rows reads a table no key names one row of.
+    #[error(
+        "declared helper '{function}' joins the rows of '{table}', which no key names one \
+         row of"
+    )]
+    JoinedTableUnkeyed {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+    },
+    /// A row blocking a grant arm's rows is told by a value no tuple spells, so a blocking
+    /// row would go unwritten and the arm would keep the row it blocks.
+    #[error(
+        "declared helper '{function}' tells the rows of '{other}' that block its rows by a \
+         value no tuple spells"
+    )]
+    UnspelledBlockingValue {
+        /// The helper.
+        function: String,
+        /// The blocking table.
+        other: String,
     },
 }
 
@@ -980,7 +1032,7 @@ fn helper_grant<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
-    unjoined(function, grant)?;
+    let (joined, blocked) = arm_joins(function, grant, db)?;
     let table = grant.table();
     let grantee = match grant.granted_to() {
         GrantedTo::Request(compared) => {
@@ -1079,6 +1131,8 @@ fn helper_grant<DB: DatabaseLike>(
         rows: grant_rows(table, grant.restrictions(), db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
         caps,
+        joined,
+        blocked,
     };
     if grant.time_bounds.len() > 1 && !row_uniquely_keys(&grant.table, &grant.tuple_key(), db) {
         return Err(HelperRefusal::MixedTimeBounds {
@@ -1444,7 +1498,8 @@ fn uncapped<DB: DatabaseLike>(
 }
 
 /// Refuses an arm keeping only the rows that name a joined row meeting the join, or that
-/// no row of another table blocks, which no relation loaded from the arm's table carries.
+/// no row of another table blocks, read where no link from the arm's own row reaches the
+/// other table's row.
 fn unjoined<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
@@ -1465,6 +1520,117 @@ fn unjoined<DB: DatabaseLike>(
             blocking: table_identity(anti_join.table()).to_string(),
         }),
     }
+}
+
+/// The rows `grant` joins and the rows that block it, each named by columns of the arm's
+/// own row, refused unless a key names one row of the arm's table and of each other table.
+fn arm_joins<DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'_, DB>,
+    db: &DB,
+) -> Result<(Vec<HelperJoin>, Vec<HelperJoin>), HelperRefusal> {
+    if grant.joined_rows().is_empty() && grant.anti_joins().is_empty() {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let table = table_identity(grant.table());
+    if resolve_row_identity(&table, db).is_none() {
+        return Err(HelperRefusal::JoinedTableUnkeyed {
+            function: function.to_string(),
+            table: table.to_string(),
+        });
+    }
+    let joined = grant
+        .joined_rows()
+        .iter()
+        .map(|joined| {
+            helper_join(
+                function,
+                &table,
+                joined.table(),
+                joined.columns(),
+                (joined.restrictions(), joined.time_bounds()),
+                db,
+            )
+        })
+        .collect::<Result<_, _>>()?;
+    let blocked = grant
+        .anti_joins()
+        .iter()
+        .map(|anti_join| {
+            let columns: Vec<_> = anti_join
+                .correlations()
+                .iter()
+                .map(|correlation| (correlation.arm_column(), correlation.blocking_column()))
+                .collect();
+            let blocked = helper_join(
+                function,
+                &table,
+                anti_join.table(),
+                &columns,
+                (anti_join.restrictions(), anti_join.time_bounds()),
+                db,
+            )?;
+            // A value the model cannot spell would leave a blocking row unwritten, and a
+            // row nothing blocks is kept, so the arm would grant more than the body.
+            if anti_join.restrictions().iter().any(|kept| match kept {
+                Restriction::In(set) => set
+                    .values()
+                    .iter()
+                    .any(|value| !matches!(value, Value::Null) && literal(value).is_none()),
+                Restriction::Null(_) | Restriction::NotNull(_) => false,
+            }) {
+                return Err(HelperRefusal::UnspelledBlockingValue {
+                    function: function.to_string(),
+                    other: blocked.table.to_string(),
+                });
+            }
+            Ok(blocked)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok((joined, blocked))
+}
+
+/// The row of `other` the arm's row names through `columns`, each an arm column beside the
+/// column of `other` it equals, and what that row has to hold.
+fn helper_join<DB: DatabaseLike>(
+    function: &str,
+    table: &TableId,
+    other: &DB::Table,
+    columns: &[(&DB::Column, &DB::Column)],
+    (restrictions, time_bounds): (&[Restriction<'_, DB>], &[TimeBound<'_, DB>]),
+    db: &DB,
+) -> Result<HelperJoin, HelperRefusal> {
+    let other = table_identity(other);
+    if !time_bounds.is_empty() {
+        return Err(HelperRefusal::JoinTimeBounds {
+            function: function.to_string(),
+            other: other.to_string(),
+        });
+    }
+    let off_key = || HelperRefusal::JoinOffKey {
+        function: function.to_string(),
+        table: table.to_string(),
+        other: other.to_string(),
+    };
+    let identity = resolve_row_identity(&other, db).ok_or_else(off_key)?;
+    if identity.len() != columns.len() {
+        return Err(off_key());
+    }
+    let columns = identity
+        .iter()
+        .map(|key| {
+            columns
+                .iter()
+                .find(|(_, named)| named.stored_column_name() == key.as_str())
+                .map(|(arm, _)| ColumnName::from_stored(arm.stored_column_name()))
+                .ok_or_else(off_key)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(HelperJoin {
+        table: other,
+        columns,
+        predicates: restrictions.iter().map(restriction).collect(),
+    })
 }
 
 /// The cap `cap` puts on the rows `grant` returns of `object`, its pairs read from the
@@ -1494,6 +1660,7 @@ fn helper_cap<DB: DatabaseLike>(
                 cap: name,
             });
         };
+        unjoined(&name, rows)?;
         if let Some(nested) = rows.caps().first() {
             return Err(HelperRefusal::CappedCap {
                 function: function.to_string(),

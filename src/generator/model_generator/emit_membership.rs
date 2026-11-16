@@ -1940,7 +1940,11 @@ fn capped_grant_parts<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
-    let parts = helper_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types);
+    let parts = if grant.joined.is_empty() && grant.blocked.is_empty() {
+        helper_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types)
+    } else {
+        joined_grant_parts(grant, level, level_type, ctx, table_plan, all_types)
+    };
     if grant.caps.is_empty() {
         return parts;
     }
@@ -1962,6 +1966,181 @@ fn capped_grant_parts<DB: DatabaseLike>(
     vec![UsersetExpr::Computed(
         plan.ensure_computed(name, UsersetExpr::Intersection(kept)),
     )]
+}
+
+/// The rows of the level a grant arm returns where each row it joins meets the join and no
+/// row blocking it does.
+///
+/// Each row of the arm's table is an object of its type, holding the grant the row makes
+/// while every row it joins holds a gate and no row blocking it does. The level's row
+/// reaches the arm's rows naming it, and every link and gate is read from one row of one
+/// table, so a change to a joined or blocking row moves only that row's own gate.
+fn joined_grant_parts<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
+    let Some(identity) = resolve_row_identity(&grant.table, ctx.db) else {
+        skip_source_without_row_identity(table_plan, &grant.table, "joined grant rows", ctx.db);
+        return Vec::new();
+    };
+    let row_type = ctx.table_types.resolve(&grant.table);
+    let row_grant = HelperGrant {
+        object_columns: identity.clone(),
+        caps: Vec::new(),
+        joined: Vec::new(),
+        blocked: Vec::new(),
+        ..grant.clone()
+    };
+    let parts = helper_grant_parts(
+        &row_grant,
+        Some(&grant.table),
+        &row_type,
+        ctx,
+        table_plan,
+        all_types,
+    );
+    let Some(granted) = combine_union(parts) else {
+        return Vec::new();
+    };
+    let mut name = stored_relation_name(grant.table.name());
+    let mut kept = vec![granted];
+    for joined in &grant.joined {
+        let Some(held) = joined_row_expr(
+            grant, &identity, &row_type, joined, ctx, table_plan, all_types,
+        ) else {
+            return Vec::new();
+        };
+        name.push_str("_with_");
+        name.push_str(&stored_relation_name(joined.table.name()));
+        kept.push(held);
+    }
+    let mut blocking = Vec::with_capacity(grant.blocked.len());
+    for blocked in &grant.blocked {
+        let Some(held) = joined_row_expr(
+            grant, &identity, &row_type, blocked, ctx, table_plan, all_types,
+        ) else {
+            return Vec::new();
+        };
+        name.push_str("_without_");
+        name.push_str(&stored_relation_name(blocked.table.name()));
+        blocking.push(held);
+    }
+    let Some(mut rule) = combine_intersection(kept) else {
+        return Vec::new();
+    };
+    if let Some(subtract) = combine_union(blocking) {
+        rule = UsersetExpr::Exclusion {
+            base: Box::new(rule),
+            subtract: Box::new(subtract),
+        };
+    }
+    let row_plan = helper_level_plan(&row_type, Some(&grant.table), table_plan, all_types);
+    let held = row_plan.ensure_computed(name, rule);
+
+    let mut key = table_source_key("joined-grant-rows", &grant.table);
+    source_key_columns(&mut key, &grant.object_columns);
+    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    let link = plan.membership_source_relation(
+        &key,
+        stored_relation_name(grant.table.name()),
+        vec![DirectSubject::Type(row_type.clone())],
+    );
+    plan.add_source(TupleSource::ClosureBridge {
+        link_table: grant.table.clone(),
+        object_cols: grant.object_columns.clone(),
+        subject_cols: identity,
+        guarded_type: level_type.clone(),
+        owner_type: row_type,
+        relation: link.clone(),
+        extra_predicates: ResidualPredicates::default(),
+    });
+    vec![UsersetExpr::TupleToUserset {
+        tupleset: link,
+        computed: held,
+    }]
+}
+
+/// Everyone a row of the arm's table holds through the row of `joined.table` it names,
+/// `None` where a predicate has no gate.
+///
+/// The named row holds every user while it meets every predicate, or while it exists for
+/// a join with none, and each row of the arm's table links to the row its columns name.
+fn joined_row_expr<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    identity: &[ColumnName],
+    row_type: &TypeName,
+    joined: &HelperJoin,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<UsersetExpr> {
+    let Some(joined_identity) = resolve_row_identity(&joined.table, ctx.db) else {
+        skip_source_without_row_identity(table_plan, &joined.table, "joined row gates", ctx.db);
+        return None;
+    };
+    let existing;
+    let predicates = if joined.predicates.is_empty() {
+        existing = [AttributePredicate {
+            column: joined_identity.first()?.clone(),
+            test: AttributeTest::IsNotNull,
+        }];
+        &existing[..]
+    } else {
+        &joined.predicates[..]
+    };
+    let joined_type = ctx.table_types.resolve(&joined.table);
+    let joined_plan = helper_level_plan(&joined_type, Some(&joined.table), table_plan, all_types);
+    let mut gates = Vec::with_capacity(predicates.len());
+    let mut gate_name = String::new();
+    for predicate in predicates {
+        let gate_key = attribute_gate_key(predicate)?;
+        let relation = joined_plan.gate_relation(
+            &gate_key,
+            attribute_gate_relation_name(predicate.column.as_str(), &gate_key),
+            vec![DirectSubject::Wildcard(joined_plan.well_known.user.clone())],
+        );
+        joined_plan.add_source(TupleSource::AttributeGate {
+            table: joined.table.clone(),
+            identity_cols: joined_identity.clone(),
+            predicate: predicate.clone(),
+            relation: relation.clone(),
+        });
+        let _ = write!(gate_name, ":{}:{gate_key}", gate_key.len());
+        gates.push(UsersetExpr::Computed(relation));
+    }
+    let gate = match combine_intersection(gates)? {
+        UsersetExpr::Computed(relation) => relation,
+        rule => joined_plan.ensure_computed(
+            flag_relation_name(predicates.first()?.column.as_str(), &gate_name),
+            rule,
+        ),
+    };
+    let mut key = table_source_key("joined-row", &grant.table);
+    source_key_columns(&mut key, &joined.columns);
+    source_key_part(&mut key, &joined.table.to_string());
+    let row_plan = helper_level_plan(row_type, Some(&grant.table), table_plan, all_types);
+    let link = row_plan.membership_source_relation(
+        &key,
+        stored_relation_name(joined.table.name()),
+        vec![DirectSubject::Type(joined_type.clone())],
+    );
+    row_plan.add_source(TupleSource::ClosureBridge {
+        link_table: grant.table.clone(),
+        object_cols: identity.to_vec(),
+        subject_cols: joined.columns.clone(),
+        guarded_type: row_type.clone(),
+        owner_type: joined_type,
+        relation: link.clone(),
+        extra_predicates: ResidualPredicates::default(),
+    });
+    Some(UsersetExpr::TupleToUserset {
+        tupleset: link,
+        computed: gate,
+    })
 }
 
 /// The rows of the level `cap` keeps among those `grant` returns, `None` where it keeps
