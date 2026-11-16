@@ -616,13 +616,32 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
         })
         .or_else(|| {
             grant.caps.iter().find_map(|cap| {
-                let linked = match &cap.link {
-                    CapLink::Row { columns } => columns.as_slice(),
-                    CapLink::Pair { .. } => &[],
-                };
-                linked
-                    .iter()
-                    .find_map(|column| key_collation_refusal(&grant.table, column, db))
+                let (table, own, held): (&TableId, &[ColumnName], &[(usize, ColumnName)]) =
+                    match &cap.link {
+                        CapLink::Row { columns } => (&grant.table, columns, &[]),
+                        CapLink::Pair { .. } => (&grant.table, &[], &[]),
+                        CapLink::Held {
+                            reader: CapReader::Arm,
+                            columns,
+                            ..
+                        } => (&grant.table, &[], columns),
+                        CapLink::Held {
+                            reader: CapReader::Joined(row),
+                            columns,
+                            ..
+                        } => (
+                            grant
+                                .held
+                                .as_ref()
+                                .and_then(|held| held.joined.get(*row))
+                                .map_or(&grant.table, |joined| &joined.table),
+                            &[],
+                            columns,
+                        ),
+                    };
+                own.iter()
+                    .chain(held.iter().map(|(_, column)| column))
+                    .find_map(|column| key_collation_refusal(table, column, db))
                     .or_else(|| {
                         cap.arms
                             .iter()

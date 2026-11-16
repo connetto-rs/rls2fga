@@ -1370,6 +1370,197 @@ async fn row_caps_agree_with_postgres_17_and_18() {
     }
 }
 
+/// Teams `…e1` in the first organization and `…e2` in the second.
+const CAPPED_TEAMS: [&str; 2] = [
+    "0e000000-0000-4000-8000-0000000000e1",
+    "0e000000-0000-4000-8000-0000000000e2",
+];
+
+/// Each request of [`joined_caps_case`], its own user acting as one of four profiles,
+/// through the installation acting for it, `None` leaving the installation unset and `""`
+/// standing for a pooled connection that once carried one.
+fn joined_cap_requests() -> [(String, usize, Option<&'static str>); 8] {
+    let [f1, f2, f3] = INSTALLATIONS_ACTING;
+    let mut index = 0;
+    [
+        (0, None),
+        (0, Some("")),
+        (0, Some(f1)),
+        (0, Some(f2)),
+        (1, Some(f1)),
+        (1, Some(f3)),
+        (2, None),
+        (3, Some(f1)),
+    ]
+    .map(|(profile, installation)| {
+        index += 1;
+        (
+            format!("0b000000-0000-4000-8000-0000000001{index:02}"),
+            profile,
+            installation,
+        )
+    })
+}
+
+/// The user of each request of [`joined_cap_requests`] holds the rows of its profile. The
+/// first administers `…e1` and is a member of `…e2`, the second administers `…e2`, the
+/// third administers `…e1` through a deactivated membership, and the fourth is a member of
+/// `…e1`. Memberships scope `organization` for the first and third in the first
+/// organization and `project` otherwise. `…f1` holds `organization` as admin and `project`
+/// as reader and `…f2` holds `organization` as writer, both in the first organization, and
+/// `…f3` holds `organization` as admin in the second. Teams are read through `helper`.
+fn joined_caps_case(major: &str, helper: &str, loading_from_rows: bool) -> ParityCase {
+    let [a1, a2] = ORGANIZATIONS;
+    let [f1, f2, f3] = INSTALLATIONS_ACTING;
+    let [e1, e2] = CAPPED_TEAMS;
+    let mut seed = format!(
+        "INSERT INTO organizations VALUES ('{a1}'), ('{a2}');
+         INSERT INTO app_installations VALUES ('{f1}', '{a1}'), ('{f2}', '{a1}'), ('{f3}', '{a2}');
+         INSERT INTO installation_permissions (installation_id, organization_id, kind, max_role)
+         VALUES
+           ('{f1}', '{a1}', 'organization', 'admin'), ('{f1}', '{a1}', 'project', 'reader'),
+           ('{f2}', '{a1}', 'organization', 'writer'),
+           ('{f3}', '{a2}', 'organization', 'admin');
+         INSERT INTO teams VALUES ('{e1}', '{a1}'), ('{e2}', '{a2}');"
+    );
+    for (user, profile, _) in joined_cap_requests() {
+        let (memberships, members) = match profile {
+            0 => (
+                format!("('{a1}', '{user}', 'active', 'organization'), ('{a2}', '{user}', 'active', 'project')"),
+                format!("('{e1}', '{a1}', '{user}', 'admin'), ('{e2}', '{a2}', '{user}', 'member')"),
+            ),
+            1 => (
+                format!("('{a2}', '{user}', 'active', 'project')"),
+                format!("('{e2}', '{a2}', '{user}', 'admin')"),
+            ),
+            2 => (
+                format!("('{a1}', '{user}', 'deactivated', 'organization')"),
+                format!("('{e1}', '{a1}', '{user}', 'admin')"),
+            ),
+            _ => (
+                format!("('{a1}', '{user}', 'active', 'project')"),
+                format!("('{e1}', '{a1}', '{user}', 'member')"),
+            ),
+        };
+        let _ = write!(
+            seed,
+            "INSERT INTO memberships VALUES {memberships};
+             INSERT INTO team_members VALUES {members};"
+        );
+    }
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-{}-pg{major}{}",
+            helper.replace('_', "-"),
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &crate::row_cap_tests::joined_caps_reading(helper),
+        &[
+            &seed,
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON teams, team_members TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        joined_cap_requests()
+            .into_iter()
+            .map(|(user, _, installation)| acting(&user, Some(&user), installation))
+            .collect(),
+    )
+    .with_settings([
+        support::deployment::typed_caller("app.user_id", DataType::Uuid).may_be_unset(),
+        support::deployment::principal("app.installation_id", "installation", DataType::Uuid)
+            .may_be_unset(),
+    ])
+    .with_registry(
+        r#"{
+            "authz.capped_kinds": { "kind": "declared_helper" },
+            "authz.administered_teams": { "kind": "declared_helper" },
+            "authz.capped_teams": { "kind": "declared_helper" },
+            "authz.scoped_teams": { "kind": "declared_helper" }
+        }"#,
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A request leaving the installation unset or empty reads the teams of every member row
+/// its helper keeps. One acting through an installation reads a team where the
+/// installation holds the kind the cap names in the organization it names:
+/// `administered_teams` the membership's organization as `organization` at admin,
+/// `capped_teams` the member row's organization as `organization` at writer, and
+/// `scoped_teams` the membership's organization as the membership's scope at reader.
+/// Member rows are read through `administered_teams` in every case.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn caps_over_joined_rows_agree_with_postgres_17_and_18() {
+    let [e1, e2] = CAPPED_TEAMS;
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for (helper, teams) in [
+            (
+                "administered_teams",
+                [
+                    [true, false],
+                    [true, false],
+                    [true, false],
+                    [false, false],
+                    [false, false],
+                    [false, true],
+                    [false, false],
+                    [false, false],
+                ],
+            ),
+            (
+                "capped_teams",
+                [
+                    [true, true],
+                    [true, true],
+                    [true, false],
+                    [true, false],
+                    [false, false],
+                    [false, true],
+                    [true, false],
+                    [true, false],
+                ],
+            ),
+            (
+                "scoped_teams",
+                [
+                    [true, true],
+                    [true, true],
+                    [true, false],
+                    [true, false],
+                    [false, false],
+                    [false, false],
+                    [true, false],
+                    [true, false],
+                ],
+            ),
+        ] {
+            for loading_from_rows in [false, true] {
+                let case = joined_caps_case(major, helper, loading_from_rows);
+                let run =
+                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+                for ((subject, _, _), allowed) in joined_cap_requests().into_iter().zip(teams) {
+                    for (team, allowed) in [e1, e2].into_iter().zip(allowed) {
+                        assert_postgres(
+                            &case,
+                            &run,
+                            &subject,
+                            &format!("teams:{team}"),
+                            ActionStatement::Select,
+                            allowed,
+                        );
+                    }
+                }
+                assert_agrees(&case, &run);
+            }
+        }
+    }
+}
+
 /// `t1` holds `bob`, `carol`, whose deactivated membership has expired, and `dave`, whose
 /// active membership expires, `t2` holds `alice` and `bob`, and `bob`'s membership is
 /// deactivated where `deactivated`. Teams are read through `helper`.

@@ -1947,10 +1947,11 @@ fn helper_grant_parts<DB: DatabaseLike>(
 }
 
 /// The rows of the level a grant arm returns, as [`helper_grant_parts`] reads them, kept
-/// by each cap on the arm as one relation.
+/// by each cap on the arm as one relation, or as [`held_grant_expr`] reads them where the
+/// arm's rows are held.
 ///
-/// A cap's operands are the level's row or the arm's own row where the level's row keys it,
-/// so the rows keeping the pair are the ones granting the level's row.
+/// A cap read on the level's row has operands the level's row or the arm's own row where the
+/// level's row keys it, so the rows keeping the pair are the ones granting the level's row.
 fn capped_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
     level: &TableId,
@@ -1959,14 +1960,12 @@ fn capped_grant_parts<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
-    let parts = match &grant.joins {
-        None => helper_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types),
-        Some(joins) => {
-            joined_grant_expr(grant, joins, level, level_type, ctx, table_plan, all_types)
-                .into_iter()
-                .collect()
-        }
-    };
+    if let Some(held) = &grant.held {
+        return held_grant_expr(grant, held, level, level_type, ctx, table_plan, all_types)
+            .into_iter()
+            .collect();
+    }
+    let parts = helper_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types);
     if grant.caps.is_empty() {
         return parts;
     }
@@ -1976,7 +1975,22 @@ fn capped_grant_parts<DB: DatabaseLike>(
     let mut kept = vec![granted];
     let mut name = stored_relation_name(grant.table.name());
     for cap in &grant.caps {
-        let Some(capped) = cap_expr(cap, grant, level, level_type, ctx, table_plan, all_types)
+        let reach = match &cap.link {
+            CapLink::Row { columns } => CapReach::Rows {
+                table: &grant.table,
+                keys: &grant.object_columns,
+                positions: (0..columns.len()).collect(),
+                columns: columns.clone(),
+                literals: &[],
+            },
+            CapLink::Pair { object, literals } => CapReach::Pairs {
+                object: *object,
+                literals,
+            },
+            // A cap needing more of a row than the level's row names holds its rows.
+            CapLink::Held { .. } => return Vec::new(),
+        };
+        let Some(capped) = cap_expr(cap, reach, level, level_type, ctx, table_plan, all_types)
         else {
             return Vec::new();
         };
@@ -1990,16 +2004,17 @@ fn capped_grant_parts<DB: DatabaseLike>(
     )]
 }
 
-/// The rows of the level a grant arm returns where each row it joins meets the join and no
-/// row blocking it does.
+/// The rows of the level a grant arm returns where each row it joins meets the join, no
+/// row blocking it does, and every cap on it keeps it.
 ///
 /// Each row of the arm's table is an object of its type, holding the grant the row makes
-/// while every row it joins holds a gate and no row blocking it does. The level's row
-/// reaches the arm's rows naming it, and every link and gate is read from one row of one
-/// table, so a change to a joined or blocking row moves only that row's own gate.
-fn joined_grant_expr<DB: DatabaseLike>(
+/// while every row it joins holds a gate, no row blocking it does, and the pairs its caps
+/// name hold the caller. The level's row reaches the arm's rows naming it, and every link
+/// and gate is read from one row of one table, so a change to a joined or blocking row
+/// moves only that row's own gate.
+fn held_grant_expr<DB: DatabaseLike>(
     grant: &HelperGrant,
-    joins: &HelperJoins,
+    held: &HeldRows,
     level: &TableId,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
@@ -2008,9 +2023,9 @@ fn joined_grant_expr<DB: DatabaseLike>(
 ) -> Option<UsersetExpr> {
     let row_type = ctx.table_types.resolve(&grant.table);
     let row_grant = HelperGrant {
-        object_columns: joins.identity.clone(),
+        object_columns: held.identity.clone(),
         caps: Vec::new(),
-        joins: None,
+        held: None,
         ..grant.clone()
     };
     let parts = helper_grant_parts(
@@ -2023,20 +2038,27 @@ fn joined_grant_expr<DB: DatabaseLike>(
     );
     let mut name = stored_relation_name(grant.table.name());
     let mut kept = vec![combine_union(parts)?];
-    for joined in &joins.joined {
+    for joined in &held.joined {
         kept.push(joined_row_expr(
-            grant, joins, &row_type, joined, ctx, table_plan, all_types,
+            grant, held, &row_type, joined, ctx, table_plan, all_types,
         )?);
         name.push_str("_with_");
         name.push_str(&stored_relation_name(joined.table.name()));
     }
-    let mut blocking = Vec::with_capacity(joins.blocked.len());
-    for blocked in &joins.blocked {
+    let mut blocking = Vec::with_capacity(held.blocked.len());
+    for blocked in &held.blocked {
         blocking.push(joined_row_expr(
-            grant, joins, &row_type, blocked, ctx, table_plan, all_types,
+            grant, held, &row_type, blocked, ctx, table_plan, all_types,
         )?);
         name.push_str("_without_");
         name.push_str(&stored_relation_name(blocked.table.name()));
+    }
+    for cap in &grant.caps {
+        kept.push(held_cap_expr(
+            cap, grant, held, &row_type, ctx, table_plan, all_types,
+        )?);
+        name.push_str("_within_");
+        name.push_str(&helper_call_relation_name(&cap.function, &cap.arguments));
     }
     let mut rule = combine_intersection(kept)?;
     if let Some(subtract) = combine_union(blocking) {
@@ -2046,7 +2068,7 @@ fn joined_grant_expr<DB: DatabaseLike>(
         };
     }
     let row_plan = helper_level_plan(&row_type, Some(&grant.table), table_plan, all_types);
-    let held = row_plan.ensure_computed(name, rule);
+    let rows_held = row_plan.ensure_computed(name, rule);
 
     let mut key = table_source_key("joined-grant-rows", &grant.table);
     source_key_columns(&mut key, &grant.object_columns);
@@ -2059,7 +2081,7 @@ fn joined_grant_expr<DB: DatabaseLike>(
     plan.add_source(TupleSource::ClosureBridge {
         link_table: grant.table.clone(),
         object_cols: grant.object_columns.clone(),
-        subject_cols: joins.identity.clone(),
+        subject_cols: held.identity.clone(),
         guarded_type: level_type.clone(),
         owner_type: row_type,
         relation: link.clone(),
@@ -2067,18 +2089,18 @@ fn joined_grant_expr<DB: DatabaseLike>(
     });
     Some(UsersetExpr::TupleToUserset {
         tupleset: link,
-        computed: held,
+        computed: rows_held,
     })
 }
 
-/// Everyone a row of the arm's table holds through the row of `joined.table` it names,
-/// `None` where a predicate has no gate.
+/// Everyone a held row of the arm's table holds through the row of `joined.table` it
+/// names, `None` where a predicate has no gate.
 ///
 /// The named row holds every user while it meets every predicate, or while it exists for
-/// a join with none, and each row of the arm's table links to the row its columns name.
+/// a join with none, and each held row links to the row its columns name.
 fn joined_row_expr<DB: DatabaseLike>(
     grant: &HelperGrant,
-    joins: &HelperJoins,
+    held: &HeldRows,
     row_type: &TypeName,
     joined: &HelperJoin,
     ctx: &PatternCtx<'_, DB>,
@@ -2112,10 +2134,25 @@ fn joined_row_expr<DB: DatabaseLike>(
             rule,
         ),
     };
+    let row_plan = helper_level_plan(row_type, Some(&grant.table), table_plan, all_types);
+    Some(UsersetExpr::TupleToUserset {
+        tupleset: joined_row_link(grant, held, joined, &joined_type, row_plan),
+        computed: gate,
+    })
+}
+
+/// The tupleset naming, on each held row of `row_plan`'s type, the row of `joined.table`
+/// its columns name, with the source loading it.
+fn joined_row_link(
+    grant: &HelperGrant,
+    held: &HeldRows,
+    joined: &HelperJoin,
+    joined_type: &TypeName,
+    row_plan: &mut TypePlan,
+) -> RelationName {
     let mut key = table_source_key("joined-row", &grant.table);
     source_key_columns(&mut key, &joined.columns);
     source_key_part(&mut key, &joined.table.to_string());
-    let row_plan = helper_level_plan(row_type, Some(&grant.table), table_plan, all_types);
     let link = row_plan.membership_source_relation(
         &key,
         stored_relation_name(joined.table.name()),
@@ -2123,35 +2160,117 @@ fn joined_row_expr<DB: DatabaseLike>(
     );
     row_plan.add_source(TupleSource::ClosureBridge {
         link_table: grant.table.clone(),
-        object_cols: joins.identity.clone(),
+        object_cols: held.identity.clone(),
         subject_cols: joined.columns.clone(),
-        guarded_type: row_type.clone(),
-        owner_type: joined_type,
+        guarded_type: row_plan.type_name.clone(),
+        owner_type: joined_type.clone(),
         relation: link.clone(),
         extra_predicates: ResidualPredicates::default(),
     });
+    link
+}
+
+/// The held rows of the arm's table `cap` keeps, `None` where it keeps none.
+///
+/// A cap reading the held row's own columns is read on the held row. One reading a joined
+/// row's columns is read on that joined row, which each held row reaches through the link
+/// its join writes.
+fn held_cap_expr<DB: DatabaseLike>(
+    cap: &HelperCap,
+    grant: &HelperGrant,
+    held: &HeldRows,
+    row_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<UsersetExpr> {
+    // A cap read on the level's row never reaches a held row.
+    let CapLink::Held {
+        reader,
+        columns,
+        literals,
+    } = &cap.link
+    else {
+        return None;
+    };
+    let reach = |table, keys| CapReach::Rows {
+        table,
+        keys,
+        positions: columns.iter().map(|(position, _)| *position).collect(),
+        columns: columns.iter().map(|(_, column)| column.clone()).collect(),
+        literals,
+    };
+    let CapReader::Joined(row) = reader else {
+        return cap_expr(
+            cap,
+            reach(&grant.table, &held.identity),
+            &grant.table,
+            row_type,
+            ctx,
+            table_plan,
+            all_types,
+        );
+    };
+    let joined = held.joined.get(*row)?;
+    let joined_type = ctx.table_types.resolve(&joined.table);
+    let capped = cap_expr(
+        cap,
+        reach(&joined.table, &joined.identity),
+        &joined.table,
+        &joined_type,
+        ctx,
+        table_plan,
+        all_types,
+    )?;
+    let joined_plan = helper_level_plan(&joined_type, Some(&joined.table), table_plan, all_types);
+    let within = joined_plan.ensure_computed(
+        helper_call_relation_name(&cap.function, &cap.arguments),
+        capped,
+    );
+    let row_plan = helper_level_plan(row_type, Some(&grant.table), table_plan, all_types);
     Some(UsersetExpr::TupleToUserset {
-        tupleset: link,
-        computed: gate,
+        tupleset: joined_row_link(grant, held, joined, &joined_type, row_plan),
+        computed: within,
     })
 }
 
-/// The rows of the level `cap` keeps among those `grant` returns, `None` where it keeps
-/// none.
+/// How each object of the type a cap is read on reaches the pairs its operands name.
+enum CapReach<'a> {
+    /// The rows of `table` naming each object by `keys`, whose `columns` hold the pair at
+    /// `positions`, beside `literals` at theirs.
+    Rows {
+        table: &'a TableId,
+        keys: &'a [ColumnName],
+        positions: Vec<usize>,
+        columns: Vec<ColumnName>,
+        literals: &'a [(usize, AttributeLiteral)],
+    },
+    /// The pairs whose column at `object` holds the object itself, beside `literals` at
+    /// theirs.
+    Pairs {
+        object: usize,
+        literals: &'a [(usize, AttributeLiteral)],
+    },
+}
+
+/// The objects of `level_type` `cap` keeps, `None` where it keeps none.
 ///
 /// Each pair the cap returns is an object of its own, holding whoever the cap's arms
-/// return it to, and each row of the level links to the pairs its operands name. While the
-/// request leaves the lifting value absent, every row of the level is kept.
+/// return it to, and each object of `level_type` links to the pairs its operands name as
+/// `reach` reads them. Column operands beside literals name an object of their own, keyed
+/// by the columns' values, which links to every pair holding those values beside those
+/// literals. While the request leaves the lifting value absent, every object is kept.
 fn cap_expr<DB: DatabaseLike>(
     cap: &HelperCap,
-    grant: &HelperGrant,
+    reach: CapReach<'_>,
     level: &TableId,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<UsersetExpr> {
-    let pair_type = cap_pair_type_name(cap, ctx.table_types);
+    let call = helper_call_relation_name(&cap.function, &cap.arguments);
+    let pair_type = cap_type_name(cap, "pair", ctx.table_types);
     let mut held = Vec::new();
     for arm in &cap.arms {
         held.extend(helper_grant_parts(
@@ -2159,10 +2278,8 @@ fn cap_expr<DB: DatabaseLike>(
         ));
     }
     let holder = combine_union(held).map(|held| {
-        helper_level_plan(&pair_type, None, table_plan, all_types).ensure_computed(
-            helper_call_relation_name(&cap.function, &cap.arguments),
-            held,
-        )
+        helper_level_plan(&pair_type, None, table_plan, all_types)
+            .ensure_computed(call.clone(), held)
     });
     let mut kept = Vec::with_capacity(2);
     if let Some(lift) = &cap.lift {
@@ -2191,20 +2308,72 @@ fn cap_expr<DB: DatabaseLike>(
         }
     }
     if let Some(holder) = holder {
-        let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
-        let link = cap_link(cap, grant, &pair_type, plan);
-        kept.push(UsersetExpr::TupleToUserset {
-            tupleset: link,
-            computed: holder,
-        });
+        let reached = match reach {
+            CapReach::Pairs { object, literals } => {
+                let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+                UsersetExpr::TupleToUserset {
+                    tupleset: cap_link(&pair_type, literal_links(cap, &[object], literals), plan),
+                    computed: holder,
+                }
+            }
+            CapReach::Rows {
+                table,
+                keys,
+                columns,
+                literals: [],
+                ..
+            } => {
+                let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+                let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
+                UsersetExpr::TupleToUserset {
+                    tupleset: cap_link(&pair_type, rows, plan),
+                    computed: holder,
+                }
+            }
+            CapReach::Rows {
+                table,
+                keys,
+                positions,
+                columns,
+                literals,
+            } => {
+                let mut suffix = String::from("key");
+                for position in &positions {
+                    suffix.push('_');
+                    suffix.push_str(&position.to_string());
+                }
+                let key_type = cap_type_name(cap, &suffix, ctx.table_types);
+                let key_plan = helper_level_plan(&key_type, None, table_plan, all_types);
+                let pairs = cap_link(
+                    &pair_type,
+                    literal_links(cap, &positions, literals),
+                    key_plan,
+                );
+                let at_key = key_plan.ensure_computed(
+                    call,
+                    UsersetExpr::TupleToUserset {
+                        tupleset: pairs,
+                        computed: holder,
+                    },
+                );
+                let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+                let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
+                UsersetExpr::TupleToUserset {
+                    tupleset: cap_link(&key_type, rows, plan),
+                    computed: at_key,
+                }
+            }
+        };
+        kept.push(reached);
     }
     combine_union(kept)
 }
 
-/// The type whose objects are the pairs `cap` returns, named after the call.
-fn cap_pair_type_name(cap: &HelperCap, table_types: &TableTypes) -> TypeName {
+/// The type named after the call `cap` makes and `suffix`, `capped_kinds_reader_pair` for
+/// the pairs `authz.capped_kinds('reader')` returns.
+fn cap_type_name(cap: &HelperCap, suffix: &str, table_types: &TableTypes) -> TypeName {
     let call = helper_call_relation_name(&cap.function, &cap.arguments);
-    let base = canonical_fga_type_name(&format!("{call}_pair"));
+    let base = canonical_fga_type_name(&format!("{call}_{suffix}"));
     if table_types.claims(&base) {
         let mut key = cap.function.clone();
         for argument in &cap.arguments {
@@ -2215,56 +2384,56 @@ fn cap_pair_type_name(cap: &HelperCap, table_types: &TableTypes) -> TypeName {
     base
 }
 
-/// The tupleset naming, on each row of the level, the pairs of `pair_type` its operands
-/// name, with the sources loading it.
-///
-/// Operands of the arm's own row name the pair its columns hold. Literals beside the level's
-/// row name every pair the cap's rows hold with that row and those literals.
-fn cap_link(
-    cap: &HelperCap,
-    grant: &HelperGrant,
-    pair_type: &TypeName,
-    plan: &mut TypePlan,
-) -> RelationName {
-    let level_type = plan.type_name.clone();
-    let links: Vec<(
-        &TableId,
-        Vec<ColumnName>,
-        Vec<ColumnName>,
-        ResidualPredicates,
-    )> = match &cap.link {
-        CapLink::Row { columns } => vec![(
-            &grant.table,
-            grant.object_columns.clone(),
-            columns.clone(),
-            ResidualPredicates::default(),
-        )],
-        CapLink::Pair { object, literals } => cap
-            .arms
-            .iter()
-            .filter_map(|arm| {
-                let held = literals
-                    .iter()
-                    .map(|(position, value)| {
-                        Some(AttributePredicate {
-                            column: arm.object_columns.get(*position)?.clone(),
-                            test: AttributeTest::Compare {
-                                operator: AttributeOperator::Eq,
-                                value: value.clone(),
-                            },
-                        })
+/// One table whose rows link an object to another, each by its columns, and the filter
+/// on those rows.
+type CapLinkRows<'a> = (
+    &'a TableId,
+    Vec<ColumnName>,
+    Vec<ColumnName>,
+    ResidualPredicates,
+);
+
+/// The rows of `cap`'s arms linking the object their columns at `positions` name to the
+/// pair they return, kept where their columns hold `literals` at those literals' positions.
+fn literal_links<'a>(
+    cap: &'a HelperCap,
+    positions: &[usize],
+    literals: &[(usize, AttributeLiteral)],
+) -> Vec<CapLinkRows<'a>> {
+    cap.arms
+        .iter()
+        .filter_map(|arm| {
+            let held = literals
+                .iter()
+                .map(|(position, value)| {
+                    Some(AttributePredicate {
+                        column: arm.object_columns.get(*position)?.clone(),
+                        test: AttributeTest::Compare {
+                            operator: AttributeOperator::Eq,
+                            value: value.clone(),
+                        },
                     })
-                    .collect::<Option<Vec<_>>>()?;
-                Some((
-                    &arm.table,
-                    vec![arm.object_columns.get(*object)?.clone()],
-                    arm.object_columns.clone(),
-                    grant_row_conjuncts(&held, &[], 0)?,
-                ))
-            })
-            .collect(),
-    };
-    let mut key = format!("cap:{pair_type}");
+                })
+                .collect::<Option<Vec<_>>>()?;
+            let keys = positions
+                .iter()
+                .map(|position| arm.object_columns.get(*position).cloned())
+                .collect::<Option<Vec<_>>>()?;
+            Some((
+                &arm.table,
+                keys,
+                arm.object_columns.clone(),
+                grant_row_conjuncts(&held, &[], 0)?,
+            ))
+        })
+        .collect()
+}
+
+/// The tupleset naming, on each object of `plan`'s type, the objects of `owner` the rows of
+/// `links` link it to, with the sources loading it.
+fn cap_link(owner: &TypeName, links: Vec<CapLinkRows<'_>>, plan: &mut TypePlan) -> RelationName {
+    let level_type = plan.type_name.clone();
+    let mut key = format!("cap:{owner}");
     for (table, object_cols, subject_cols, predicates) in &links {
         let mut part = table_source_key("cap_link", table);
         for column in object_cols.iter().chain(subject_cols) {
@@ -2277,8 +2446,8 @@ fn cap_link(
     }
     let link = plan.membership_source_relation(
         &key,
-        pair_type.as_str(),
-        vec![DirectSubject::Type(pair_type.clone())],
+        owner.as_str(),
+        vec![DirectSubject::Type(owner.clone())],
     );
     for (table, object_cols, subject_cols, extra_predicates) in links {
         plan.add_source(TupleSource::ClosureBridge {
@@ -2286,7 +2455,7 @@ fn cap_link(
             object_cols,
             subject_cols,
             guarded_type: level_type.clone(),
-            owner_type: pair_type.clone(),
+            owner_type: owner.clone(),
             relation: link.clone(),
             extra_predicates,
         });

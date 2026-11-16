@@ -693,14 +693,16 @@ pub struct HelperGrant {
     pub time_bounds: Vec<HelperTimeBound>,
     /// The caps a kept row meets, all of them.
     pub caps: Vec<HelperCap>,
-    /// The rows of other tables a kept row names, `None` where it names none.
-    pub joins: Option<HelperJoins>,
+    /// Each row of the arm's table held as its own object, with the rows of other tables
+    /// it names, `None` where the level's row holds the grant.
+    pub held: Option<HeldRows>,
 }
 
-/// The rows of other tables the rows of a grant arm's table name, each row of the arm's
-/// table named by its own key.
+/// The rows of a grant arm's table, each an object keyed by the table's own key, holding
+/// the grant it makes while it meets its joins and caps, as a row it joins, a row that
+/// blocks it, or a cap reading more of it than the level's row names requires.
 #[derive(Debug, Clone, PartialEq)]
-pub struct HelperJoins {
+pub struct HeldRows {
     /// The key of the arm's table.
     pub identity: Vec<ColumnName>,
     /// The rows named through a `JOIN`, each of which has to meet its own predicates.
@@ -754,14 +756,14 @@ pub struct HelperCap {
     /// The rows returning the pairs, each keyed by its columns in the order the helper
     /// returns them, none where the helper returns nothing.
     pub arms: Vec<HelperGrant>,
-    /// The rows naming the pair each row of the level reaches.
+    /// The rows naming the pair each row of the level, or each held row, reaches.
     pub link: CapLink,
     /// The declared single value whose absence lifts the cap, `None` where it holds for
     /// every request.
     pub lift: Option<DeclaredSource>,
 }
 
-/// Which rows name the pair a row of the level reaches.
+/// Which rows name the pair a row of the level or a held row reaches.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapLink {
     /// The capped arm's own row, whose `columns` hold the pair in the order the helper
@@ -778,6 +780,25 @@ pub enum CapLink {
         /// Each literal operand beside its position.
         literals: Vec<(usize, AttributeLiteral)>,
     },
+    /// The row `reader` names for each held row, whose `columns` hold the pair at their
+    /// positions beside `literals` at theirs, read only where the arm's rows are held.
+    Held {
+        /// The row the operand columns are read from.
+        reader: CapReader,
+        /// Each column operand beside its position, a column of the reader's table.
+        columns: Vec<(usize, ColumnName)>,
+        /// Each literal operand beside its position.
+        literals: Vec<(usize, AttributeLiteral)>,
+    },
+}
+
+/// The row a held row's cap reads its operand columns from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapReader {
+    /// The held row itself.
+    Arm,
+    /// The row it joins at this index of [`HeldRows::joined`].
+    Joined(usize),
 }
 
 /// `<column> <operator> now() [OR <column> IS NULL]` in a grant arm's condition, on a

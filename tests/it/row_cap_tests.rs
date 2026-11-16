@@ -152,6 +152,143 @@ fn caps_by_a_literal_kind_or_by_the_row_kind_translate() {
         .expect("the schema translates");
 }
 
+/// Team members an installation acting for their user may administer, through the
+/// membership each member row joins. `administered_teams` caps a member row by its
+/// membership's organization beside the literal kind `organization`, `capped_teams` by the
+/// member row's own organization beside that literal, and `scoped_teams` by the
+/// membership's organization and the kind its scope names.
+pub(crate) const JOINED_CAPS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TYPE authz.role AS ENUM ('reader', 'writer', 'admin');
+CREATE TYPE authz.resource_kind AS ENUM ('organization', 'project');
+CREATE TABLE organizations (id UUID PRIMARY KEY);
+CREATE TABLE memberships (
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  user_id UUID NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'deactivated')),
+  scope authz.resource_kind NOT NULL,
+  PRIMARY KEY (organization_id, user_id)
+);
+CREATE TABLE app_installations (
+  id UUID PRIMARY KEY,
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  UNIQUE (organization_id, id)
+);
+CREATE TABLE installation_permissions (
+  installation_id UUID NOT NULL,
+  organization_id UUID NOT NULL,
+  kind authz.resource_kind NOT NULL,
+  max_role authz.role NOT NULL,
+  PRIMARY KEY (installation_id, kind),
+  FOREIGN KEY (organization_id, installation_id) REFERENCES app_installations (organization_id, id)
+);
+CREATE TABLE teams (
+  id UUID PRIMARY KEY,
+  organization_id UUID NOT NULL REFERENCES organizations (id)
+);
+CREATE TABLE team_members (
+  team_id UUID NOT NULL REFERENCES teams (id),
+  organization_id UUID NOT NULL,
+  user_id UUID NOT NULL,
+  team_role TEXT NOT NULL CHECK (team_role IN ('member', 'admin')),
+  PRIMARY KEY (team_id, user_id),
+  FOREIGN KEY (organization_id, user_id) REFERENCES memberships (organization_id, user_id)
+);
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE team_members ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON memberships, installation_permissions, team_members TO authz_owner;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.acting_installation_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.installation_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.capped_kinds(min_role authz.role)
+RETURNS TABLE (organization_id UUID, kind authz.resource_kind)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT permission.organization_id, permission.kind FROM public.installation_permissions permission
+  WHERE permission.installation_id = authz.acting_installation_id()
+    AND permission.max_role >= min_role
+$$;
+CREATE FUNCTION authz.administered_teams() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership ON membership.organization_id = member.organization_id AND membership.user_id = member.user_id
+  WHERE member.user_id = authz.caller_id()
+    AND member.team_role = 'admin' AND membership.state = 'active'
+    AND (authz.acting_installation_id() IS NULL
+      OR (membership.organization_id, 'organization'::authz.resource_kind)
+        IN (SELECT * FROM authz.capped_kinds('admin')))
+$$;
+CREATE FUNCTION authz.capped_teams() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  WHERE member.user_id = authz.caller_id()
+    AND (authz.acting_installation_id() IS NULL
+      OR (member.organization_id, 'organization'::authz.resource_kind)
+        IN (SELECT * FROM authz.capped_kinds('writer')))
+$$;
+CREATE FUNCTION authz.scoped_teams() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership ON membership.organization_id = member.organization_id AND membership.user_id = member.user_id
+  WHERE member.user_id = authz.caller_id()
+    AND (authz.acting_installation_id() IS NULL
+      OR (membership.organization_id, membership.scope) IN (SELECT * FROM authz.capped_kinds('reader')))
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.acting_installation_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.capped_kinds(authz.role) OWNER TO authz_owner;
+ALTER FUNCTION authz.administered_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.capped_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.scoped_teams() OWNER TO authz_owner;
+CREATE POLICY team_members_select ON team_members FOR SELECT
+  USING (team_id = ANY (ARRAY(SELECT authz.administered_teams())));
+";
+
+/// The helpers [`JOINED_CAPS`] declares.
+pub(crate) const JOINED_CAP_HELPERS: &[&str] = &[
+    "authz.capped_kinds",
+    "authz.administered_teams",
+    "authz.capped_teams",
+    "authz.scoped_teams",
+];
+
+/// [`JOINED_CAPS`] with the teams read through `helper`.
+pub(crate) fn joined_caps_reading(helper: &str) -> String {
+    format!(
+        "{JOINED_CAPS}CREATE POLICY teams_read ON teams FOR SELECT \
+         USING (id IN (SELECT authz.{helper}()));"
+    )
+}
+
+/// A cap by a joined row's columns, by a column other than the returned one beside a
+/// literal, and by the joined row's own columns grades A, each member row its own object.
+#[test]
+fn caps_by_joined_rows_and_by_columns_beside_literals_translate() {
+    for helper in ["administered_teams", "capped_teams", "scoped_teams"] {
+        let schema = joined_caps_reading(helper);
+        for policy in ["teams_read", "team_members_select"] {
+            let using = using_of(&schema, JOINED_CAP_HELPERS, policy);
+            assert_eq!(
+                using.confidence,
+                ConfidenceLevel::A,
+                "{helper} {policy}: {:?}",
+                using.pattern
+            );
+        }
+        installation_translator(JOINED_CAP_HELPERS)
+            .translate(&db_of(&schema))
+            .expect("the schema plans")
+            .outputs()
+            .expect("the schema translates");
+    }
+}
+
 /// A table already named like a cap's pair type keeps its type, and the pairs move to a
 /// type of their own, holding whoever the cap returns them to.
 #[test]
@@ -257,7 +394,27 @@ CREATE POLICY organizations_noted ON organizations FOR SELECT
             "organizations_noted",
             "declared helper 'authz.noted_organizations' pairs column 'kind' of \
              'public.kind_notes' with the rows 'authz.capped_kinds' returns, while several rows \
-             of 'public.kind_notes' can return one row",
+             of 'public.kind_notes' can return one row and no key names each of its rows",
+        ),
+        (
+            joined_caps_reading("scoped_teams").replace(
+                "(membership.organization_id, membership.scope)",
+                "(member.team_id, membership.scope)",
+            ),
+            "teams_read",
+            "declared helper 'authz.scoped_teams' pairs columns of 'public.team_members' and of \
+             'public.memberships' with the rows 'authz.capped_kinds' returns, which no one row \
+             holds",
+        ),
+        (
+            joined_caps_reading("scoped_teams").replace(
+                "scope authz.resource_kind NOT NULL",
+                "scope TEXT NOT NULL",
+            ),
+            "teams_read",
+            "declared helper 'authz.scoped_teams' pairs column 'scope' of 'public.memberships' \
+             with column 'kind' of the rows 'authz.capped_kinds' returns, and the two are not \
+             of one type",
         ),
         (
             reader_kinds("permission.installation_id = authz.acting_installation_id()")
@@ -334,6 +491,7 @@ ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
     ] {
         let helpers = [
             CAP_HELPERS,
+            JOINED_CAP_HELPERS,
             &[
                 "authz.noted_organizations",
                 "authz.reader_kinds",
