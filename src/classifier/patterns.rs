@@ -693,6 +693,37 @@ pub struct HelperGrant {
     pub time_bounds: Vec<HelperTimeBound>,
     /// The caps a kept row meets, all of them.
     pub caps: Vec<HelperCap>,
+    /// The rows of other tables a kept row names, `None` where it names none.
+    pub joins: Option<HelperJoins>,
+}
+
+/// The rows of other tables the rows of a grant arm's table name, each row of the arm's
+/// table named by its own key.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperJoins {
+    /// The key of the arm's table.
+    pub identity: Vec<ColumnName>,
+    /// The rows named through a `JOIN`, each of which has to meet its own predicates.
+    pub joined: Vec<HelperJoin>,
+    /// The rows named through a correlated `NOT EXISTS`, any of which meeting its own
+    /// predicates takes the row away.
+    pub blocked: Vec<HelperJoin>,
+}
+
+/// The one row of `table` a grant arm's row names by its own columns, through a foreign
+/// key for a `JOIN` and through equalities covering the key for a correlated `NOT EXISTS`.
+///
+/// A `NULL` among the columns names no row, which a `JOIN` drops and `NOT EXISTS` keeps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperJoin {
+    /// The joined or blocking table.
+    pub table: TableId,
+    /// The key of `table`.
+    pub identity: Vec<ColumnName>,
+    /// The columns of the arm's table naming the row, in the order of `identity`.
+    pub columns: Vec<ColumnName>,
+    /// What the named row has to hold, all of it.
+    pub predicates: Vec<AttributePredicate>,
 }
 
 impl HelperGrant {

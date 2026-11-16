@@ -13,7 +13,8 @@ use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UN
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, GRANTEES,
-    GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES,
+    GROUPS, INSTALLATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES,
+    RESOURCES,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::row_cap_tests::INSTALLATION_CAPS;
@@ -1365,6 +1366,103 @@ async fn row_caps_agree_with_postgres_17_and_18() {
                 }
             }
             assert_agrees(&case, &run);
+        }
+    }
+}
+
+/// `t1` holds `bob`, `carol`, whose deactivated membership has expired, and `dave`, whose
+/// active membership expires, `t2` holds `alice` and `bob`, and `bob`'s membership is
+/// deactivated where `deactivated`. Teams are read through `helper`.
+fn membership_states_case(
+    major: &str,
+    helper: &str,
+    deactivated: bool,
+    loading_from_rows: bool,
+) -> ParityCase {
+    let bob = if deactivated { "deactivated" } else { "active" };
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-{}-pg{major}{}{}",
+            helper.replace('_', "-"),
+            if deactivated { "-deactivated" } else { "" },
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!(
+            "{MEMBERSHIP_STATES}CREATE POLICY teams_read ON teams FOR SELECT \
+             USING (id IN (SELECT authz.{helper}()));"
+        ),
+        &[
+            &format!(
+                "INSERT INTO memberships VALUES ('org1', 'alice', 'active', NULL),
+                   ('org1', 'bob', '{bob}', NULL),
+                   ('org1', 'carol', 'deactivated', '2000-01-01'),
+                   ('org1', 'dave', 'active', '2099-01-01');
+                 INSERT INTO teams VALUES ('t1', 'org1'), ('t2', 'org1');
+                 INSERT INTO team_members VALUES ('t1', 'org1', 'bob'), ('t1', 'org1', 'carol'),
+                   ('t1', 'org1', 'dave'), ('t2', 'org1', 'alice'), ('t2', 'org1', 'bob')"
+            ),
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON teams TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        ["alice", "bob", "carol", "dave", "anonymous"]
+            .into_iter()
+            .map(caller)
+            .collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(&format!(
+        r#"{{ "authz.{helper}": {{ "kind": "declared_helper" }} }}"#
+    ));
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A member reads the teams whose membership row the helper keeps. A bare join keeps every
+/// member, a join on the state or an anti-join on deactivation keeps active ones, a join on
+/// both keeps active ones never expiring, and an anti-join on the expiry keeps those never
+/// expiring. Deactivating `bob` moves only the helpers reading the state.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn grant_arms_kept_by_membership_state_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for (helper, by_state, carol, dave) in [
+            ("joined_teams", true, false, true),
+            ("unblocked_teams", true, false, true),
+            ("member_teams", false, true, true),
+            ("current_teams", true, false, false),
+            ("unexpiring_teams", false, false, false),
+        ] {
+            for deactivated in [false, true] {
+                for loading_from_rows in [false, true] {
+                    let case =
+                        membership_states_case(major, helper, deactivated, loading_from_rows);
+                    let run =
+                        support::parity::run_before(&cluster, &case, Duration::from_secs(180))
+                            .await;
+                    let expect = |subject: &str, team: &str, allowed| {
+                        assert_postgres(
+                            &case,
+                            &run,
+                            subject,
+                            &format!("teams:{team}"),
+                            ActionStatement::Select,
+                            allowed,
+                        );
+                    };
+                    expect("alice", "t1", false);
+                    expect("alice", "t2", true);
+                    expect("bob", "t1", !(by_state && deactivated));
+                    expect("bob", "t2", !(by_state && deactivated));
+                    expect("carol", "t1", carol);
+                    expect("dave", "t1", dave);
+                    expect("anonymous", "t2", false);
+                    assert_agrees(&case, &run);
+                }
+            }
         }
     }
 }

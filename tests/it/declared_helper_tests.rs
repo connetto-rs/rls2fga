@@ -2233,15 +2233,16 @@ fn a_capped_arm_against_a_request_value_or_returning_several_columns_is_refused(
     }
 }
 
-/// Teams read through the memberships of their members, kept to active members by a
-/// `JOIN` in one helper and by a `NOT EXISTS` in the other.
-const MEMBERSHIP_STATES: &str = "
+/// Teams read through the memberships of their members, kept by a `JOIN` to every member,
+/// to active members, or to active members whose membership never expires, and by a
+/// `NOT EXISTS` to members not deactivated, or whose membership never expires.
+pub(crate) const MEMBERSHIP_STATES: &str = "
 CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
 CREATE SCHEMA authz;
 GRANT USAGE ON SCHEMA authz TO authz_owner;
 CREATE TABLE memberships (
   organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
-  state TEXT NOT NULL CHECK (state IN ('active', 'deactivated')),
+  state TEXT NOT NULL CHECK (state IN ('active', 'deactivated')), expires_at TIMESTAMPTZ,
   PRIMARY KEY (organization_id, user_id));
 CREATE TABLE teams (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL);
 CREATE TABLE team_members (
@@ -2268,6 +2269,33 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
         AND membership.user_id = member.user_id
         AND membership.state = 'deactivated')
 $$;
+CREATE FUNCTION authz.member_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE member.user_id = current_setting('app.user_id', true)
+$$;
+CREATE FUNCTION authz.current_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND membership.state = 'active' AND membership.expires_at IS NULL
+$$;
+CREATE FUNCTION authz.unexpiring_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.memberships membership
+      WHERE membership.organization_id = member.organization_id
+        AND membership.user_id = member.user_id
+        AND membership.expires_at IS NOT NULL)
+$$;
 CREATE FUNCTION authz.active_teams() RETURNS SETOF TEXT
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
   SELECT member.team_id FROM public.team_members member
@@ -2292,40 +2320,154 @@ $$;
 GRANT SELECT ON teams TO authz_owner;
 ALTER FUNCTION authz.joined_teams() OWNER TO authz_owner;
 ALTER FUNCTION authz.unblocked_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.member_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.current_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.unexpiring_teams() OWNER TO authz_owner;
 ALTER FUNCTION authz.active_teams() OWNER TO authz_owner;
 ALTER FUNCTION authz.active_team_pairs() OWNER TO authz_owner;
 ALTER FUNCTION authz.staffed_teams() OWNER TO authz_owner;
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 ";
 
-/// A grant arm keeping only the rows that name a joined row, or that no row of another
-/// table blocks, is refused, whether a column or a request value is compared with the
-/// helper and whether the arm returns the pairs of a cap, since a relation loaded from
-/// the arm's table alone would grant the teams of a deactivated member.
-#[test]
-fn a_grant_arm_kept_by_a_join_or_an_anti_join_is_refused() {
-    let translator =
-        TranslatorBuilder::new(deployment([caller("app.user_id"), scalar("app.team_id")]))
-            .with_min_confidence(ConfidenceLevel::B)
-            .with_declared_helpers([
+/// The translator [`MEMBERSHIP_STATES`] is read with, declaring `extra` helpers beside its own.
+fn membership_states_translator(extra: &[&str]) -> Translator {
+    TranslatorBuilder::new(deployment([caller("app.user_id"), scalar("app.team_id")]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers(
+            [
                 "authz.joined_teams",
                 "authz.unblocked_teams",
+                "authz.member_teams",
+                "authz.current_teams",
+                "authz.unexpiring_teams",
                 "authz.active_teams",
                 "authz.active_team_pairs",
                 "authz.staffed_teams",
-            ])
-            .build();
+            ]
+            .into_iter()
+            .chain(extra.iter().copied()),
+        )
+        .build()
+}
+
+/// A grant arm keeping only the rows that name a joined row, or that no row of another
+/// table blocks, translates where a column is compared with the helper. Each row of the
+/// arm's table holds its grant through the row it names, and every tuple is read from one
+/// row of one table, so a membership changing state moves only its own tuple.
+#[test]
+fn a_grant_arm_kept_by_a_join_or_an_anti_join_holds_through_the_named_row() {
+    let translator = membership_states_translator(&[]);
+    for (helper, row_relation, rule) in [
+        ("joined_teams", "team_members_with_memberships", "and"),
+        ("member_teams", "team_members_with_memberships", "and"),
+        ("current_teams", "team_members_with_memberships", "and"),
+        (
+            "unblocked_teams",
+            "team_members_without_memberships",
+            "but not",
+        ),
+        (
+            "unexpiring_teams",
+            "team_members_without_memberships",
+            "but not",
+        ),
+    ] {
+        let sql = format!(
+            "{MEMBERSHIP_STATES}CREATE POLICY teams_read ON teams FOR SELECT \
+             USING (id IN (SELECT authz.{helper}()));"
+        );
+        let outputs = translator
+            .translate(&db_of(&sql))
+            .expect("the schema plans")
+            .outputs()
+            .expect("the schema translates");
+        let dsl = outputs.model();
+        assert_eq!(
+            relation_definition(&dsl, "teams", helper).as_deref(),
+            Some(format!("{row_relation} from team_members").as_str()),
+            "{dsl}"
+        );
+        let held = relation_definition(&dsl, "team_members", row_relation)
+            .unwrap_or_else(|| panic!("{row_relation} should be defined\n{dsl}"));
+        assert!(
+            held.contains(&format!(" {rule} ")) && held.ends_with(" from memberships"),
+            "{helper}: {held}"
+        );
+        for query in outputs.tuple_queries() {
+            let description = query
+                .description
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} should be described", query.sql));
+            assert!(
+                description.tables.len() <= 1
+                    && (description.tables.is_empty() || description.is_pure()),
+                "{helper}: {} reads more than one row\n{description:?}",
+                query.sql
+            );
+        }
+    }
+}
+
+/// Helpers whose joined or blocking rows no link from the arm's own row names one of.
+const UNLINKED_JOINS: &str = "
+CREATE TABLE loose_members (
+  team_id TEXT NOT NULL REFERENCES teams (id), organization_id TEXT NOT NULL, user_id TEXT NOT NULL,
+  FOREIGN KEY (organization_id, user_id) REFERENCES memberships (organization_id, user_id));
+GRANT SELECT ON loose_members TO authz_owner;
+CREATE FUNCTION authz.loosely_unblocked_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.memberships membership
+      WHERE membership.user_id = member.user_id AND membership.state = 'deactivated')
+$$;
+CREATE FUNCTION authz.unexpired_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND membership.expires_at > now()
+$$;
+CREATE FUNCTION authz.loose_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.loose_members member
+  JOIN public.memberships membership
+    ON membership.organization_id = member.organization_id
+   AND membership.user_id = member.user_id
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND membership.state = 'active'
+$$;
+CREATE FUNCTION authz.crossed_unblocked_teams() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  WHERE member.user_id = current_setting('app.user_id', true)
+    AND NOT EXISTS (
+      SELECT 1 FROM public.memberships membership
+      WHERE membership.state = member.organization_id
+        AND membership.user_id = member.user_id)
+$$;
+ALTER FUNCTION authz.loosely_unblocked_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.unexpired_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.loose_teams() OWNER TO authz_owner;
+ALTER FUNCTION authz.crossed_unblocked_teams() OWNER TO authz_owner;
+";
+
+/// A joined or blocking row is refused where no link from the arm's own row reaches it,
+/// which holds for a request value compared with the helper, an arm returning a cap's
+/// pairs, columns other than the other table's key, a clock bound on the joined row, and
+/// an arm table no key names one row of.
+#[test]
+fn a_join_no_row_link_reaches_is_refused() {
+    let translator = membership_states_translator(&[
+        "authz.loosely_unblocked_teams",
+        "authz.unexpired_teams",
+        "authz.loose_teams",
+        "authz.crossed_unblocked_teams",
+    ]);
     for (using, reason) in [
-        (
-            "id IN (SELECT authz.joined_teams())",
-            "declared helper 'authz.joined_teams' keeps the rows of 'public.team_members' only \
-             where they name a row of 'public.memberships' meeting the join",
-        ),
-        (
-            "id IN (SELECT authz.unblocked_teams())",
-            "declared helper 'authz.unblocked_teams' keeps the rows of 'public.team_members' \
-             only where no row of 'public.memberships' blocks them",
-        ),
         (
             "current_setting('app.team_id', true) IN (SELECT authz.active_teams())",
             "declared helper 'authz.active_teams' keeps the rows of 'public.team_members' only \
@@ -2336,9 +2478,32 @@ fn a_grant_arm_kept_by_a_join_or_an_anti_join_is_refused() {
             "declared helper 'authz.active_team_pairs' keeps the rows of 'public.team_members' \
              only where they name a row of 'public.memberships' meeting the join",
         ),
+        (
+            "id IN (SELECT authz.loosely_unblocked_teams())",
+            "declared helper 'authz.loosely_unblocked_teams' names the rows of \
+             'public.memberships' from the rows of 'public.team_members' through columns other \
+             than the key of 'public.memberships'",
+        ),
+        (
+            "id IN (SELECT authz.unexpired_teams())",
+            "declared helper 'authz.unexpired_teams' bounds the rows of 'public.memberships' it \
+             joins against the clock",
+        ),
+        (
+            "id IN (SELECT authz.loose_teams())",
+            "declared helper 'authz.loose_teams' joins the rows of 'public.loose_members', which \
+             no key names one row of",
+        ),
+        (
+            "id IN (SELECT authz.crossed_unblocked_teams())",
+            "declared helper 'authz.crossed_unblocked_teams' names the rows of \
+             'public.memberships' from the rows of 'public.team_members' through columns other \
+             than the key of 'public.memberships'",
+        ),
     ] {
         let sql = format!(
-            "{MEMBERSHIP_STATES}CREATE POLICY teams_read ON teams FOR SELECT USING ({using});"
+            "{MEMBERSHIP_STATES}{UNLINKED_JOINS}CREATE POLICY teams_read ON teams FOR SELECT \
+             USING ({using});"
         );
         let classified = translator
             .classify(&db_of(&sql))
