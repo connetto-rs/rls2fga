@@ -1268,10 +1268,11 @@ CREATE TABLE s6(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT N
     );
 }
 
-/// The row-value `IN` spelling of a composite-key membership is refused, and the
-/// reason names the `EXISTS` respelling that translates, not a projection problem.
+/// A row-value `IN` pairs each tested value with the projected column in its position,
+/// so it classifies exactly as the `EXISTS` with one equality per pair, the caller
+/// carried inside the row included.
 #[test]
-fn a_row_value_in_subquery_is_diagnosed_with_its_respelling() {
+fn a_row_value_in_subquery_classifies_as_its_exists_spelling() {
     let db = parse_schema(
         r"
 CREATE TABLE p7(tenant_id INT NOT NULL, id INT NOT NULL, PRIMARY KEY(tenant_id, id));
@@ -1280,34 +1281,93 @@ CREATE TABLE s7(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT N
 ",
     )
     .expect("schema should parse");
-    let registry = FunctionRegistry::new();
+    let registry = caller_registry();
 
-    let in_expr = parse_expr(
+    let exists_expr = parse_expr(
+        "EXISTS (
+               SELECT 1
+               FROM s7 s
+               WHERE s.tenant_id = p7.tenant_id
+                 AND s.paper_id = p7.id
+                 AND s.viewer = current_setting('app.user_id')
+             )",
+    );
+    let expected = recognize_p4(&exists_expr, &db, &registry, "p7", &ExpansionState::new())
+        .expect("the EXISTS spelling pairs onto the composite key");
+
+    for spelling in [
         "(tenant_id, id) IN (
                SELECT s.tenant_id, s.paper_id
                FROM s7 s
-               WHERE s.viewer = current_user
+               WHERE s.viewer = current_setting('app.user_id')
              )",
-    );
-
-    assert!(
-        recognize_p4_in_subquery(
-            &in_expr,
+        "(id, current_setting('app.user_id'), tenant_id) = ANY (
+               SELECT s.paper_id, s.viewer, s.tenant_id
+               FROM s7 s
+             )",
+    ] {
+        let classified = recognize_p4_in_subquery(
+            &parse_expr(spelling),
             &db,
             &registry,
             "p7",
             PolicyCommand::Select,
+            &ExpansionState::new(),
+        );
+        assert_eq!(
+            classified.as_ref(),
+            Some(&expected),
+            "`{spelling}` reads as its EXISTS spelling"
+        );
+    }
+}
+
+/// A row-value `IN` whose `EXISTS` spelling is refused carries that spelling's reason,
+/// and a row whose arity differs from the projection pairs nothing.
+#[test]
+fn a_refused_row_value_in_subquery_is_diagnosed_as_its_exists_spelling() {
+    let db = parse_schema(
+        r"
+CREATE TABLE p6(region_id INT NOT NULL, tenant_id INT NOT NULL, id INT NOT NULL,
+                PRIMARY KEY(region_id, tenant_id, id));
+CREATE TABLE s6(tenant_id INT NOT NULL, paper_id INT NOT NULL, viewer TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, paper_id, viewer));
+",
+    )
+    .expect("schema should parse");
+    let registry = caller_registry();
+
+    let unkeyed = parse_expr(
+        "(tenant_id, id, current_setting('app.user_id')) IN (
+               SELECT s.tenant_id, s.paper_id, s.viewer
+               FROM s6 s
+             )",
+    );
+    let reason =
+        diagnose_p4_membership_ambiguity(&unkeyed, &db, &registry, "p6", &ExpansionState::new())
+            .expect("an unkeyed pairing carries a reason");
+    assert!(
+        reason.contains("neither a declared foreign key") && reason.contains("s6"),
+        "the reason is the EXISTS spelling's, got: {reason}"
+    );
+
+    let short_row = parse_expr(
+        "(tenant_id, id) IN (
+               SELECT s.tenant_id, s.paper_id, s.viewer
+               FROM s6 s
+             )",
+    );
+    assert!(
+        recognize_p4_in_subquery(
+            &short_row,
+            &db,
+            &registry,
+            "p6",
+            PolicyCommand::Select,
             &ExpansionState::new()
         )
         .is_none(),
-        "the row-value spelling stays refused"
-    );
-    let reason =
-        diagnose_p4_membership_ambiguity(&in_expr, &db, &registry, "p7", &ExpansionState::new())
-            .expect("the refusal carries a reason");
-    assert!(
-        reason.contains("EXISTS") && reason.contains("row-value"),
-        "the reason names the respelling, got: {reason}"
+        "a row shorter than the projection pairs no column with the third"
     );
 }
 /// A relation the loader and the caller can read differently refuses.

@@ -8,14 +8,18 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use sqlparser::ast::{
-    BinaryOperator, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, InTarget,
-    Query, SelectItem, UnaryOperator, Value,
+    BinaryOperator, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    InTarget, ObjectName, Query, Select, SelectItem, TableAlias, TableFactor, TableFunctionArgs,
+    TableWithJoins, UnaryOperator, Value,
 };
 
 use crate::classifier::expansion::call_matches_declared;
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
 use crate::classifier::recognizers::session::{declared_scalar, grade};
+use crate::classifier::recognizers::subquery::{
+    query_select, select_result_shaping_clause, set_limiting_clause,
+};
 use crate::classifier::recognizers::{projected_select, unparenthesize};
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::generator::db_lookup::{row_uniquely_keys, single_identity_column};
@@ -305,10 +309,10 @@ fn declared_call<'query, 'db, DB: DatabaseLike>(
     db: &'db DB,
     registry: &FunctionRegistry,
 ) -> Option<(&'db DB::Function, &'query [FunctionArg], bool)> {
-    let (call, arguments) = called_helper(query)?;
+    let (name, arguments) = called_helper(query)?;
     let mut reached = db
         .functions()
-        .filter(|declared| call_matches_declared(&call.name, *declared, db))
+        .filter(|declared| call_matches_declared(name, *declared, db))
         .filter(|declared| declared.stored_argument_names(db).count() == arguments.len());
     let function = reached.next()?;
     if !registry.declares_helper(function) {
@@ -375,10 +379,17 @@ fn set_query(set: &Expr) -> Option<&Query> {
     }
 }
 
-/// The one call `SELECT h(...)` makes and its arguments, reading no table and keeping
-/// its one row.
-fn called_helper(query: &Query) -> Option<(&sqlparser::ast::Function, &[FunctionArg])> {
-    let select = projected_select(query)?;
+/// The one call a set query reads and its arguments, `None` where the query reads
+/// anything else or keeps fewer rows than the call returns.
+fn called_helper(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
+    match projected_select(query) {
+        Some(select) => projected_call(select),
+        None => call_read_in_from(query),
+    }
+}
+
+/// The call `SELECT h(...)` makes, reading no table and keeping its one row.
+fn projected_call(select: &Select) -> Option<(&ObjectName, &[FunctionArg])> {
     let [SelectItem::UnnamedExpr(Expr::Function(call))
     | SelectItem::ExprWithAlias {
         expr: Expr::Function(call),
@@ -397,7 +408,91 @@ fn called_helper(query: &Query) -> Option<(&sqlparser::ast::Function, &[Function
         && matches!(call.parameters, FunctionArguments::None)
         && list.duplicate_treatment.is_none()
         && list.clauses.is_empty();
-    plain_call.then_some((call, list.args.as_slice()))
+    plain_call.then_some((&call.name, list.args.as_slice()))
+}
+
+/// The call `SELECT c FROM h(...) a(c)` reads as its only relation, projecting the one
+/// column a set-returning function of a base type returns and keeping every row.
+///
+/// The factor is spelled exhaustively so a field the parser adds to a `FROM` item is a
+/// compile error here rather than a set admitted without a proof.
+fn call_read_in_from(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
+    if set_limiting_clause(query).is_some() {
+        return None;
+    }
+    let select = query_select(query)?;
+    let [TableWithJoins { relation, joins }] = select.from.as_slice() else {
+        return None;
+    };
+    if !joins.is_empty()
+        || select.selection.is_some()
+        || select_result_shaping_clause(select).is_some()
+    {
+        return None;
+    }
+    let TableFactor::Table {
+        name,
+        alias,
+        args: Some(TableFunctionArgs {
+            args,
+            settings: None,
+        }),
+        version: None,
+        sample: None,
+        json_path: None,
+        with_hints,
+        with_ordinality: false,
+        partitions,
+        index_directives,
+        inheritance: None,
+    } = relation
+    else {
+        return None;
+    };
+    // Hints, partitions and index directives are other dialects' syntax, which a
+    // PostgreSQL dump never carries, so any of them leaves the set unproven.
+    let plain = with_hints.is_empty() && partitions.is_empty() && index_directives.is_empty();
+    let [SelectItem::UnnamedExpr(projected)
+    | SelectItem::ExprWithAlias {
+        expr: projected, ..
+    }] = select.projection.as_slice()
+    else {
+        return None;
+    };
+    let function = name.0.last()?.as_ident()?;
+    let (relation, column) = returned_column(function, alias.as_ref())?;
+    (plain && projects_column(unparenthesize(projected), relation, column))
+        .then_some((name, args.as_slice()))
+}
+
+/// The relation name and the column name `PostgreSQL` gives the one column a function of
+/// a base type returns, which is the alias's column where it lists one, else the alias,
+/// else the function's own name.
+fn returned_column<'a>(
+    function: &'a Ident,
+    alias: Option<&'a TableAlias>,
+) -> Option<(&'a Ident, &'a Ident)> {
+    let Some(alias) = alias else {
+        return Some((function, function));
+    };
+    match alias.columns.as_slice() {
+        [] => Some((&alias.name, &alias.name)),
+        [column] if column.data_type.is_none() => Some((&alias.name, &column.name)),
+        _ => None,
+    }
+}
+
+/// Whether `projected` reads `column` of `relation`, bare or qualified by the relation.
+fn projects_column(projected: &Expr, relation: &Ident, column: &Ident) -> bool {
+    let same = |left: &Ident, right: &Ident| stored_ident_name(left) == stored_ident_name(right);
+    match projected {
+        Expr::Identifier(read) => same(read, column),
+        Expr::CompoundIdentifier(parts) => matches!(
+            parts.as_slice(),
+            [qualifier, read] if same(qualifier, relation) && same(read, column)
+        ),
+        _ => false,
+    }
 }
 
 /// The guarded table's column the set is compared with, uncast.
