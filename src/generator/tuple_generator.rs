@@ -9,7 +9,9 @@ use crate::generator::identity::{
     typed_name_literal, typed_name_sql, wildcard_subject_literal, MAX_OBJECT_NAME_CHARS,
     MAX_SUBJECT_NAME_BYTES,
 };
-use crate::generator::ir::{MembershipGate, TupleSource, TupleSourceKey, SINGLETON_OBJECT_KEY};
+use crate::generator::ir::{
+    GranteeSubject, MembershipGate, TupleSource, TupleSourceKey, SINGLETON_OBJECT_KEY,
+};
 use crate::generator::model_generator::{DirectSubject, SchemaPlan};
 pub use crate::generator::notes::SkippedTuples;
 use crate::generator::well_known::{
@@ -1114,6 +1116,60 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             })
         }
 
+        // Several grant rows may name one audience on one object, so the query keeps
+        // each tuple once.
+        TupleSource::GranteeGrant {
+            join_table,
+            fk_cols,
+            parent_type,
+            relation,
+            subject,
+            extra_predicates,
+        } => {
+            let join_table_sql = join_table.sql_name();
+            let fk_parts = quoted_key_parts(fk_cols);
+            let object_sql = typed_name_sql(parent_type, fk_parts.iter().map(String::as_str));
+            let guards: Vec<String> = fk_parts
+                .iter()
+                .map(|part| format!("{part} IS NOT NULL"))
+                .collect();
+            let (subject_sql, described) = match subject {
+                GranteeSubject::Everyone => (
+                    wildcard_subject_literal(&well_known.user),
+                    "every caller".to_string(),
+                ),
+                GranteeSubject::Caller(identity) => (
+                    typed_name_literal(&well_known.user, identity),
+                    format!("caller {identity}"),
+                ),
+            };
+            let guards = join_row_is_nameable(
+                &guards.join(" AND "),
+                &object_sql,
+                Some(&subject_sql),
+                join_table,
+                fk_cols,
+                &[],
+                names,
+            );
+            let where_clause = extra_predicates.sql().map_or_else(
+                || format!("\nWHERE {guards}"),
+                |e| format!("\nWHERE {guards}\nAND ({e})"),
+            );
+            Some(TupleQuery {
+                comment: format!("-- {parent_type} grants to {described} from {join_table}"),
+                sql: format!(
+                    "SELECT DISTINCT {object_sql} AS object, '{relation}' AS relation, \
+                     {subject_sql} AS subject\n\
+                     FROM {join_table_sql}{where_clause};"
+                ),
+                description: None,
+                condition: None,
+                skipped: None,
+                monetary_locale: None,
+            })
+        }
+
         // Each share row is its own object, keyed on the join table's own primary key, so
         // two viewers of one guarded row become two objects rather than colliding on one.
         TupleSource::RequestShareGate {
@@ -1912,7 +1968,7 @@ pub(crate) fn quote_sql_identifier(identifier: &str) -> String {
 ///
 /// With `standard_conforming_strings` on, which `PostgreSQL` has defaulted to since 9.1,
 /// a backslash is an ordinary character and doubling the quote is the whole escape.
-fn quote_sql_string_literal(value: &str) -> String {
+pub(crate) fn quote_sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 

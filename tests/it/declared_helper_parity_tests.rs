@@ -9,7 +9,7 @@ use rls2fga::types::ActionStatement;
 
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_tests::{
-    EXPIRING, GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
+    AUDIENCES, EXPIRING, GROUPS, INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
 };
 use crate::support;
 use crate::support::parity::{
@@ -410,6 +410,73 @@ async fn request_values_behind_helpers_agree_with_postgres_17_and_18() {
             // No link, and an installation never set, read nothing.
             expect("no_links", "docs:d1", false);
             expect("unset_installation", "docs:d1", false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const AUDIENCE_HELPERS: &str = r#"{
+    "authz.projects_visible": { "kind": "declared_helper" }
+}"#;
+
+/// `p_public` is everyone's, `p_signed` every caller's but `anonymous`, and `p_private`
+/// its members', `alice` and `anonymous`, whom the arm's gate excludes.
+fn audiences_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-audiences-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        AUDIENCES,
+        &[
+            "INSERT INTO projects VALUES ('p_public', 'public'), ('p_signed', 'signed_in'),
+               ('p_private', 'private');
+             INSERT INTO project_members VALUES ('p_private', 'alice'), ('p_private', 'anonymous');
+             INSERT INTO docs VALUES ('d_public', 'p_public', NULL), ('d_signed', 'p_signed', NULL),
+               ('d_private', 'p_private', NULL)",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        ["alice", "bob", "anonymous"]
+            .into_iter()
+            .map(caller)
+            .collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(AUDIENCE_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn audiences_and_caller_gates_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = audiences_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            // Everyone includes the caller the other arms' gates exclude.
+            expect("anonymous", "docs:d_public", true);
+            expect("bob", "docs:d_signed", true);
+            expect("anonymous", "docs:d_signed", false);
+            // A member is admitted unless the gate excludes it.
+            expect("alice", "docs:d_private", true);
+            expect("bob", "docs:d_private", false);
+            expect("anonymous", "docs:d_private", false);
             assert_agrees(&case, &run);
         }
     }

@@ -54,6 +54,15 @@ pub(crate) struct MembershipGate {
     pub aggregate: bool,
 }
 
+/// Who a [`TupleSource::GranteeGrant`] row grants.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GranteeSubject {
+    /// `user:*`, every caller.
+    Everyone,
+    /// `user:<identity>`, one caller named by a constant.
+    Caller(String),
+}
+
 /// One kind of access-control fact, expressible as a static SQL query.
 ///
 /// Data only: rendering lives in [`crate::generator::tuple_generator`].
@@ -163,6 +172,19 @@ pub(crate) enum TupleSource {
         extra_predicates: ResidualPredicates,
         /// The clock condition its member tuple names, absent for a plain membership.
         gate: Option<MembershipGate>,
+    },
+
+    /// A grant row naming every caller, or one caller a gate excludes. Produces
+    /// `(parent_type:fk_cols, relation, <subject>)` once per distinct tuple.
+    GranteeGrant {
+        join_table: TableId,
+        /// Columns of `join_table` naming the parent resource, in the parent key's order.
+        fk_cols: Vec<ColumnName>,
+        parent_type: TypeName,
+        relation: RelationName,
+        subject: GranteeSubject,
+        /// Residual predicate.
+        extra_predicates: ResidualPredicates,
     },
 
     /// P4/P5 child-to-parent link. Produces `(type:pk, relation, parent_type:fk_cols)`.
@@ -555,6 +577,14 @@ pub(crate) enum TupleSourceKey<'a> {
         extra_predicates: ResidualSqlKey<'a>,
         gate: Option<&'a MembershipGate>,
     },
+    GranteeGrant {
+        join_table: &'a TableId,
+        fk_cols: &'a [ColumnName],
+        parent_type: &'a TypeName,
+        relation: &'a RelationName,
+        subject: &'a GranteeSubject,
+        extra_predicates: ResidualSqlKey<'a>,
+    },
     ParentBridge {
         table: &'a TableId,
         fk_cols: &'a [ColumnName],
@@ -727,6 +757,7 @@ impl TupleSource {
             | Self::TeamMembership { .. }
             | Self::ExistsMembership { .. }
             | Self::RequestShareGate { .. }
+            | Self::GranteeGrant { .. }
             | Self::MembershipShareMembers { .. }
             | Self::ScopeShares { .. }
             | Self::HolderMembers { .. }
@@ -793,6 +824,11 @@ impl TupleSource {
                 vec![(team_type.clone(), member_relation())]
             }
             Self::ExistsMembership {
+                parent_type,
+                relation,
+                ..
+            }
+            | Self::GranteeGrant {
                 parent_type,
                 relation,
                 ..
@@ -932,6 +968,21 @@ impl TupleSource {
                 relation,
                 extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::when(gate.is_some())),
                 gate: gate.as_ref(),
+            },
+            Self::GranteeGrant {
+                join_table,
+                fk_cols,
+                parent_type,
+                relation,
+                subject,
+                extra_predicates,
+            } => TupleSourceKey::GranteeGrant {
+                join_table,
+                fk_cols,
+                parent_type,
+                relation,
+                subject,
+                extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::No),
             },
             Self::ParentBridge {
                 table,

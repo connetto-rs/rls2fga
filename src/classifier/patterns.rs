@@ -121,6 +121,12 @@ impl ResidualPredicates {
         Self(conjuncts)
     }
 
+    /// These conjuncts followed by `more`, all holding at once.
+    #[must_use]
+    pub(crate) fn and(&self, more: &[ResidualPredicate]) -> Self {
+        Self(self.0.iter().chain(more).cloned().collect())
+    }
+
     /// True when the shape carries no residual at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -644,7 +650,7 @@ pub struct HelperCall {
 /// One `SELECT` of a helper's body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HelperSetArm {
-    /// The caller's rows of a grant table.
+    /// The rows of a grant table the arm keeps.
     Grant(Box<HelperGrant>),
     /// The rows of the level whose parent another call returns.
     Parent(HelperParent),
@@ -659,8 +665,11 @@ pub struct HelperGrant {
     pub table: TableId,
     /// Column naming the level's row each grant is on.
     pub object_column: ColumnName,
-    /// Whom each grant row admits.
+    /// Whose rows the arm keeps.
     pub grantee: HelperGrantee,
+    /// The callers the arm keeps no row for, each as the caller identity a check sends,
+    /// from `current_setting(<caller>) <> <value>`.
+    pub excluded: Vec<String>,
     /// Which grant rows count.
     pub rows: GrantRows,
     /// The bounds a kept row meets against the statement time, all of them, which the
@@ -669,10 +678,11 @@ pub struct HelperGrant {
 }
 
 impl HelperGrant {
-    /// The columns keying one tuple of the arm's relations, its object, its caller and,
-    /// for a relation per role, its role.
+    /// The columns keying one tuple of the arm's relations, its object, the column naming
+    /// its grantee where one does and, for a relation per role, its role.
     pub(crate) fn tuple_key(&self) -> Vec<&ColumnName> {
-        let mut key = vec![&self.object_column, self.grantee.compared_column()];
+        let mut key = vec![&self.object_column];
+        key.extend(self.grantee.compared_column());
         if let GrantRows::Roles { column, .. } = &self.rows {
             key.push(column);
         }
@@ -706,15 +716,19 @@ pub enum HelperGrantee {
         /// The declared set, carrying the parameter the caller supplies.
         source: DeclaredSource,
     },
+    /// Every row, whoever the caller is.
+    Anyone,
 }
 
 impl HelperGrantee {
-    /// The grant table's column compared with a value of the request.
+    /// The grant table's column compared with the caller or with a set the request
+    /// carries, `None` for an arm naming nobody.
     #[must_use]
-    pub fn compared_column(&self) -> &ColumnName {
+    pub fn compared_column(&self) -> Option<&ColumnName> {
         match self {
-            Self::Caller { user_column } => user_column,
-            Self::RequestSet { value_column, .. } => value_column,
+            Self::Caller { user_column } => Some(user_column),
+            Self::RequestSet { value_column, .. } => Some(value_column),
+            Self::Anyone => None,
         }
     }
 }
