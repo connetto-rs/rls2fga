@@ -8,8 +8,8 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, InTarget,
-    ObjectName, Query, Select, SelectItem, TableAlias, TableFactor, TableFunctionArgs,
+    BinaryOperator, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
+    InTarget, ObjectName, Query, Select, SelectItem, TableAlias, TableFactor, TableFunctionArgs,
     TableWithJoins, UnaryOperator, Value,
 };
 
@@ -25,11 +25,13 @@ use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::generator::db_lookup::{row_uniquely_keys, single_identity_column};
 use crate::generator::model_bounds::MAX_CONDITIONS;
 use crate::parser::expr::CastChain;
-use crate::parser::names::{lookup_table, stored_ident_name, stored_relation_name, table_identity};
+use crate::parser::names::{
+    lookup_table, lookup_table_id, stored_ident_name, stored_relation_name, table_identity,
+};
 use crate::parser::sql_parser::{
-    CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike, GrantArm,
-    GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent, SettingValue,
-    TableLike, TimeBound, TimeComparison,
+    CallerGate, CheckConstraintLike, ColumnLike, DatabaseLike, ForeignKeyLike, FunctionLike,
+    GrantArm, GrantedTo, HelperArm, HelperSet, LiteralSet, ParentArm, SettingContent,
+    SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
 };
 use crate::types::ColumnName;
 use sql_traits::errors::{HelperSetError, LookupError};
@@ -47,10 +49,7 @@ pub(crate) enum HelperRefusal {
         source: HelperSetError,
     },
     /// A helper the body calls was never declared.
-    #[error(
-        "declared helper '{function}' reads '{called}' through a parent arm, and '{called}' \
-         is not declared"
-    )]
+    #[error("declared helper '{function}' calls '{called}', which is not declared")]
     UndeclaredCallee {
         /// The helper whose body calls it.
         function: String,
@@ -112,17 +111,38 @@ pub(crate) enum HelperRefusal {
         /// The table the helper returns keys of.
         level: String,
     },
-    /// An arm returns the same rows whoever calls, which no grantee of the compared
-    /// column stands for.
+    /// A gate on a caller the deployment lets go unset keeps rows for a request no
+    /// subject names apart from a caller's.
     #[error(
-        "declared helper '{function}' returns the rows of '{table}' it keeps to every \
-         request alike, and no grantee stands for every caller"
+        "declared helper '{function}' tests whether setting '{setting}' holds a caller, \
+         which the deployment lets a request leave unset, so no subject names such a request"
     )]
-    SameForEveryRequest {
+    GateOnUnsetCaller {
         /// The helper.
         function: String,
-        /// The table the arm reads.
-        table: String,
+        /// The caller setting.
+        setting: String,
+    },
+    /// A gate excludes a caller spelled otherwise than the identity a check sends.
+    #[error(
+        "declared helper '{function}' excludes the caller {value}, which is not spelled as \
+         the identity a check sends"
+    )]
+    UnnamedCaller {
+        /// The helper.
+        function: String,
+        /// The excluded value as written.
+        value: String,
+    },
+    /// A gate excludes callers from rows admitting whoever presents a value of a set
+    /// the request carries.
+    #[error(
+        "declared helper '{function}' excludes callers from rows a set the request \
+         carries admits"
+    )]
+    ExcludedFromRequestSet {
+        /// The helper.
+        function: String,
     },
     /// A request value is compared with arms whose rows depend on the request.
     #[error(
@@ -148,30 +168,16 @@ pub(crate) enum HelperRefusal {
         /// The table the arm reads.
         table: String,
     },
-    /// An arm keeps its rows only while a caller setting reads a value, a condition
-    /// no grant relation carries.
+    /// An arm naming a set of grantees or everyone keeps its rows by the statement time.
     #[error(
-        "declared helper '{function}' keeps the rows of '{table}' only while a caller \
-         setting is set, which no grant relation carries"
+        "declared helper '{function}' keeps the rows of '{table}' naming a set of grantees \
+         or everyone by the statement time, which those grants do not carry"
     )]
-    CallerGated {
+    TimeBoundedGrantees {
         /// The helper.
         function: String,
         /// The table the arm reads.
         table: String,
-    },
-    /// An arm keeps the rows naming a grantee another helper returns.
-    #[error(
-        "declared helper '{function}' keeps the rows of '{table}' naming a grantee \
-         '{grantees}' returns, which no grant relation reads yet"
-    )]
-    GranteeSet {
-        /// The helper.
-        function: String,
-        /// The table the arm reads.
-        table: String,
-        /// The helper returning the grantees.
-        grantees: String,
     },
     /// A grant arm bounds its rows against the clock more than once, while several of
     /// its rows can grant one caller one row, so no one tuple carries the bounds of the
@@ -195,6 +201,33 @@ pub(crate) enum HelperRefusal {
         table: String,
         /// The bounds keeping `NULL`.
         bounds: usize,
+    },
+    /// A grant arm returns several columns, which no one relation names.
+    #[error(
+        "declared helper '{function}' returns {columns} columns of '{table}' from one arm, \
+         while a relation names one"
+    )]
+    SeveralColumns {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// How many columns the arm returns.
+        columns: usize,
+    },
+    /// A grant arm keeps only the rows whose columns pair with the rows another helper
+    /// returns.
+    #[error(
+        "declared helper '{function}' keeps the rows of '{table}' only where they pair with \
+         the rows '{cap}' returns, which no grant relation carries"
+    )]
+    Capped {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The helper returning the pairs.
+        cap: String,
     },
 }
 
@@ -569,9 +602,10 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
             }
         };
         bounded_by_no_time(&name, grant)?;
+        let column = granted_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
-            value_column: ColumnName::from_stored(grant.column().stored_column_name()),
+            value_column: ColumnName::from_stored(column.stored_column_name()),
             predicates: grant.restrictions().iter().map(restriction).collect(),
         });
     }
@@ -629,7 +663,7 @@ fn answered_call<'db, DB: DatabaseLike>(
 }
 
 /// One call and what it returns, refused unless every arm returns keys of `level`, the
-/// table whose rows `compared` names.
+/// table whose rows `compared` names, or of a table whose key references `level`'s.
 fn helper_call<DB: DatabaseLike>(
     function: &DB::Function,
     arguments: &[Value],
@@ -640,14 +674,18 @@ fn helper_call<DB: DatabaseLike>(
     registry: &FunctionRegistry,
 ) -> Result<HelperCall, HelperRefusal> {
     let name = registry.resolved_target_name(&function.target_name());
+    let arguments: Vec<String> = arguments.iter().map(ToString::to_string).collect();
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
-            HelperArm::Grant(grant) => (
-                rows_named_by(grant.table(), grant.column(), db)?
-                    .ok_or_else(|| names_no_rows(grant.table(), grant.column()))?,
-                HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db)?)),
-            ),
+            HelperArm::Grant(grant) => {
+                let column = granted_column(&name, grant)?;
+                (
+                    rows_named_by(grant.table(), column, db)?
+                        .ok_or_else(|| names_no_rows(grant.table(), column))?,
+                    HelperSetArm::Grant(Box::new(helper_grant(&name, grant, db, registry)?)),
+                )
+            }
             HelperArm::Parent(parent) => (
                 table_identity(parent.table()),
                 HelperSetArm::Parent(helper_parent(&name, parent, db, registry)?),
@@ -655,11 +693,13 @@ fn helper_call<DB: DatabaseLike>(
             HelperArm::Walk(walk) => (
                 table_identity(walk.table()),
                 HelperSetArm::Walk(HelperWalk {
+                    table: table_identity(walk.table()),
                     fk_column: ColumnName::from_stored(walk.column().stored_column_name()),
+                    direction: walk.direction(),
                 }),
             ),
         };
-        if returned != *level {
+        if !keys_name_rows_of(&returned, level, db)? {
             return Err(HelperRefusal::OtherLevel {
                 column: compared.to_string(),
                 named: level.to_string(),
@@ -671,10 +711,43 @@ fn helper_call<DB: DatabaseLike>(
     }
     Ok(HelperCall {
         function: name,
-        arguments: arguments.iter().map(ToString::to_string).collect(),
+        arguments,
         level: level.clone(),
         arms,
     })
+}
+
+/// Whether every key of `table` is a key of `level`, its one-column key referencing
+/// `level`'s through a chain of such keys, as an organization's key is a grantee's.
+fn keys_name_rows_of<DB: DatabaseLike>(
+    table: &TableId,
+    level: &TableId,
+    db: &DB,
+) -> Result<bool, HelperRefusal> {
+    let mut reached = table.clone();
+    let mut visited = Vec::new();
+    while reached != *level {
+        if visited.contains(&reached) {
+            return Ok(false);
+        }
+        let (Some(held), Some(key)) = (
+            lookup_table_id(db, &reached),
+            single_identity_column(&reached, db),
+        ) else {
+            return Ok(false);
+        };
+        let Some(key) = held
+            .columns(db)?
+            .find(|column| column.stored_column_name() == key.as_str())
+        else {
+            return Ok(false);
+        };
+        let Some(named) = rows_named_by(held, key, db)? else {
+            return Ok(false);
+        };
+        visited.push(core::mem::replace(&mut reached, named));
+    }
+    Ok(true)
 }
 
 fn helper_parent<DB: DatabaseLike>(
@@ -703,57 +776,90 @@ fn helper_parent<DB: DatabaseLike>(
         db,
         registry,
     )?;
-    Ok(HelperParent { fk_column, call })
+    Ok(HelperParent {
+        table: table_identity(parent.table()),
+        fk_column,
+        call,
+    })
 }
 
 fn helper_grant<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
     db: &DB,
+    registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
     let table = grant.table();
-    let refused_table = || table_identity(table).to_string();
-    if grant.gate().is_some() {
-        return Err(HelperRefusal::CallerGated {
-            function: function.to_string(),
-            table: refused_table(),
-        });
-    }
-    let compared = match grant.granted_to() {
-        GrantedTo::Request(compared) => compared,
-        GrantedTo::Anyone => {
-            return Err(HelperRefusal::SameForEveryRequest {
-                function: function.to_string(),
-                table: refused_table(),
-            })
-        }
-        GrantedTo::Set(set) => {
-            return Err(HelperRefusal::GranteeSet {
-                function: function.to_string(),
-                table: refused_table(),
-                grantees: set.function().target_name().to_string(),
-            })
-        }
-    };
-    let column = ColumnName::from_stored(compared.column().stored_column_name());
-    // `sql-traits` compares a column with the caller or with the elements of a whole
-    // setting declared as a set.
-    let grantee = match compared.setting().content() {
-        SettingContent::Value(value @ SettingValue::Set { .. }) => {
-            bounded_by_no_time(function, grant)?;
-            HelperGrantee::RequestSet {
-                value_column: column,
-                source: DeclaredSource::whole(compared.setting(), value.clone()),
+    let grantee = match grant.granted_to() {
+        GrantedTo::Request(compared) => {
+            let column = ColumnName::from_stored(compared.column().stored_column_name());
+            // `sql-traits` compares a column with the caller or with the elements of a
+            // whole setting declared as a set.
+            match compared.setting().content() {
+                SettingContent::Value(value @ SettingValue::Set { .. }) => {
+                    bounded_by_no_time(function, grant)?;
+                    HelperGrantee::RequestSet {
+                        value_column: column,
+                        source: DeclaredSource::whole(compared.setting(), value.clone()),
+                    }
+                }
+                _ => HelperGrantee::Caller {
+                    user_column: column,
+                },
             }
         }
-        _ => HelperGrantee::Caller {
-            user_column: column,
-        },
+        GrantedTo::Set(set) => {
+            let called = set.function();
+            if !registry.declares_helper(called) {
+                return Err(HelperRefusal::UndeclaredCallee {
+                    function: function.to_string(),
+                    called: called.target_name().to_string(),
+                });
+            }
+            let grantee_column = ColumnName::from_stored(set.column().stored_column_name());
+            // Without a foreign key the grantees are rows of the table the set covers.
+            let named = match rows_named_by(table, set.column(), db)? {
+                Some(named) => named,
+                None => set
+                    .set()
+                    .covered_table()
+                    .map(table_identity)
+                    .ok_or_else(|| names_no_rows(table, set.column()))?,
+            };
+            let call = helper_call(
+                called,
+                set.arguments(),
+                set.set(),
+                &grantee_column,
+                &named,
+                db,
+                registry,
+            )?;
+            HelperGrantee::Set {
+                grantee_column,
+                call,
+            }
+        }
+        GrantedTo::Anyone => HelperGrantee::Anyone,
     };
+    if !grant.time_bounds().is_empty()
+        && matches!(grantee, HelperGrantee::Set { .. } | HelperGrantee::Anyone)
+    {
+        return Err(HelperRefusal::TimeBoundedGrantees {
+            function: function.to_string(),
+            table: table_identity(table).to_string(),
+        });
+    }
+    let excluded = match grant.gate() {
+        None => Vec::new(),
+        Some(gate) => excluded_callers(function, gate, &grantee)?,
+    };
+    let object_column = granted_column(function, grant)?;
     let grant = HelperGrant {
         table: table_identity(table),
-        object_column: ColumnName::from_stored(grant.column().stored_column_name()),
+        object_column: ColumnName::from_stored(object_column.stored_column_name()),
         grantee,
+        excluded,
         rows: grant_rows(table, grant.restrictions(), db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
     };
@@ -831,6 +937,84 @@ fn grant_rows<DB: DatabaseLike>(
         },
         _ => GrantRows::Matching { predicates },
     })
+}
+
+/// The callers a gate on the caller setting keeps no row for, as the identities their
+/// checks send.
+///
+/// A check always names a caller, so `IS NOT NULL` and `<> ''` exclude nobody it can
+/// send. That holds only where the deployment promises a caller on every request: a
+/// request it lets leave the setting unset reads `NULL` or `''`, and no subject names
+/// such a check apart from a caller's, unless the arm compares a column with the caller
+/// and so keeps nothing for it anyway.
+fn excluded_callers(
+    function: &str,
+    gate: &CallerGate<'_>,
+    grantee: &HelperGrantee,
+) -> Result<Vec<String>, HelperRefusal> {
+    let setting = gate.setting();
+    if setting.presence() == SettingPresence::MayBeUnset
+        && !matches!(grantee, HelperGrantee::Caller { .. })
+    {
+        return Err(HelperRefusal::GateOnUnsetCaller {
+            function: function.to_string(),
+            setting: setting.name().to_string(),
+        });
+    }
+    let data_type = match setting.content() {
+        SettingContent::Value(SettingValue::Caller(data_type)) => Some(data_type),
+        _ => None,
+    };
+    // `sql-traits` names each excluded value once.
+    let mut excluded = Vec::with_capacity(gate.excluded().len());
+    for value in gate.excluded() {
+        let text = match value {
+            Value::SingleQuotedString(text) => Some(text.as_str()),
+            Value::DollarQuotedString(text) => Some(text.value.as_str()),
+            _ => None,
+        };
+        // No check sends an empty caller, so `<> ''` excludes nobody.
+        if text == Some("") {
+            continue;
+        }
+        let identity = text
+            .zip(data_type)
+            .and_then(|(text, data_type)| caller_identity(text, data_type))
+            .ok_or_else(|| HelperRefusal::UnnamedCaller {
+                function: function.to_string(),
+                value: value.to_string(),
+            })?;
+        excluded.push(identity);
+    }
+    if !excluded.is_empty() && matches!(grantee, HelperGrantee::RequestSet { .. }) {
+        return Err(HelperRefusal::ExcludedFromRequestSet {
+            function: function.to_string(),
+        });
+    }
+    Ok(excluded)
+}
+
+/// The identity a check sends for a caller spelled `text`, which the deployment
+/// promises to send in the canonical text of `data_type`.
+///
+/// `None` where `text` is not that canonical text, since the cast `PostgreSQL` applies
+/// is not read here, and for a type with no such reading.
+fn caller_identity(text: &str, data_type: &DataType) -> Option<String> {
+    let canonical = match data_type {
+        DataType::Text | DataType::Varchar(None) | DataType::CharacterVarying(None) => true,
+        DataType::Uuid => {
+            text.len() == 36
+                && text.char_indices().all(|(index, character)| {
+                    if matches!(index, 8 | 13 | 18 | 23) {
+                        character == '-'
+                    } else {
+                        character.is_ascii_digit() || matches!(character, 'a'..='f')
+                    }
+                })
+        }
+        _ => false,
+    };
+    canonical.then(|| text.to_string())
 }
 
 /// `<column> IN (<values>)`, the values one restriction keeps.
@@ -988,6 +1172,30 @@ fn same_literal(left: &AttributeLiteral, right: &AttributeLiteral) -> bool {
                 )
         }
         _ => left == right,
+    }
+}
+
+/// The one column `grant` returns, refused where it returns several or where a cap
+/// keeps only some of its rows, which no relation loaded from the arm carries.
+fn granted_column<'db, DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'db, DB>,
+) -> Result<&'db DB::Column, HelperRefusal> {
+    let table = || table_identity(grant.table()).to_string();
+    if let Some(cap) = grant.caps().first() {
+        return Err(HelperRefusal::Capped {
+            function: function.to_string(),
+            table: table(),
+            cap: cap.function().target_name().to_string(),
+        });
+    }
+    match grant.columns() {
+        [column] => Ok(column),
+        columns => Err(HelperRefusal::SeveralColumns {
+            function: function.to_string(),
+            table: table(),
+            columns: columns.len(),
+        }),
     }
 }
 

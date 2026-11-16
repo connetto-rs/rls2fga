@@ -588,7 +588,7 @@ pub(crate) fn fallback_source_shape(arg: &Expr) -> Option<FallbackSourceShape> {
 
 /// Whether `function` is `NULLIF(_, '')`, whose sentinel is the reading a bare
 /// `current_setting` gives a setting the request left unset.
-fn empty_sentinel_nullif(function: &Function) -> bool {
+pub(crate) fn empty_sentinel_nullif(function: &Function) -> bool {
     builtin_function_name(function).as_deref() == Some("nullif")
         && positional_function_arg(function, 1)
             .is_some_and(|sentinel| string_literal(sentinel).is_some_and(|value| value.is_empty()))

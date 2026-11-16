@@ -10,8 +10,8 @@ use crate::classifier::patterns::{
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    RequestValueInHelperSet, RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet,
-    UnclassifiedExpr, UncorrelatedMembership,
+    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowValueEqualsCallerScalar,
+    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::render_attribute_test;
 use crate::types::TranslationNote;
@@ -220,6 +220,10 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 source.request_parameter(),
                 arguments.join(", ")
             )
+        }
+        PatternClass::P28RequestValueAbsent(RequestValueAbsent { source, negated }) => {
+            let state = if *negated { "carried" } else { "absent" };
+            format!("P28 (caller value {} {state})", source.request_parameter())
         }
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {
             member_table, ..

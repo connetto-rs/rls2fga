@@ -121,6 +121,12 @@ impl ResidualPredicates {
         Self(conjuncts)
     }
 
+    /// These conjuncts followed by `more`, all holding at once.
+    #[must_use]
+    pub(crate) fn and(&self, more: &[ResidualPredicate]) -> Self {
+        Self(self.0.iter().chain(more).cloned().collect())
+    }
+
     /// True when the shape carries no residual at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -502,6 +508,17 @@ pub struct CallerScalarInConstantList {
     pub source: DeclaredSource,
 }
 
+/// The request leaves a declared single value it may leave unset absent, so no row takes
+/// part: `NULLIF(current_setting('app.installation_id', true), '') IS NULL`, or carries
+/// it where negated, as `IS NOT NULL` does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RequestValueAbsent {
+    /// The declared source, carrying the parameter the caller supplies.
+    pub source: DeclaredSource,
+    /// Whether the policy tests for the value instead, as `IS NOT NULL` does.
+    pub negated: bool,
+}
+
 /// The value a fallback read hands over equals a constant the policy names: Supabase's
 /// `auth.role() = 'authenticated'`, whose body reads
 /// `COALESCE(NULLIF(current_setting('request.jwt.claim.role', true), ''), NULLIF
@@ -637,18 +654,20 @@ pub struct HelperCall {
     pub arguments: Vec<String>,
     /// The table whose keys the call returns.
     pub level: TableId,
-    /// The sets the call returns the union of, none where it returns nothing.
+    /// The sets whose union the call returns, none where it returns nothing. An arm may
+    /// return keys of another table whose key references `level`'s, an organization or a
+    /// team among the grantees, each of them a key of `level` too.
     pub arms: Vec<HelperSetArm>,
 }
 
 /// One `SELECT` of a helper's body.
 #[derive(Debug, Clone, PartialEq)]
 pub enum HelperSetArm {
-    /// The caller's rows of a grant table.
+    /// The rows of a grant table naming a grantee.
     Grant(Box<HelperGrant>),
     /// The rows of the level whose parent another call returns.
     Parent(HelperParent),
-    /// The rows of the level whose parent this same call returns.
+    /// The rows of the level next to the ones this same call returns, along its tree.
     Walk(HelperWalk),
 }
 
@@ -659,8 +678,11 @@ pub struct HelperGrant {
     pub table: TableId,
     /// Column naming the level's row each grant is on.
     pub object_column: ColumnName,
-    /// Whom each grant row admits.
+    /// Whose rows the arm keeps.
     pub grantee: HelperGrantee,
+    /// The callers the arm keeps no row for, each as the caller identity a check sends,
+    /// from `current_setting(<caller>) <> <value>`.
+    pub excluded: Vec<String>,
     /// Which grant rows count.
     pub rows: GrantRows,
     /// The bounds a kept row meets against the statement time, all of them, which the
@@ -669,10 +691,11 @@ pub struct HelperGrant {
 }
 
 impl HelperGrant {
-    /// The columns keying one tuple of the arm's relations, its object, its caller and,
-    /// for a relation per role, its role.
+    /// The columns keying one tuple of the arm's relations, its object, the column naming
+    /// its grantee where one does and, for a relation per role, its role.
     pub(crate) fn tuple_key(&self) -> Vec<&ColumnName> {
-        let mut key = vec![&self.object_column, self.grantee.compared_column()];
+        let mut key = vec![&self.object_column];
+        key.extend(self.grantee.compared_column());
         if let GrantRows::Roles { column, .. } = &self.rows {
             key.push(column);
         }
@@ -688,6 +711,14 @@ pub struct HelperTimeBound {
     pub comparison: AttributeRequestPredicate,
     /// Whether a row holding `NULL` in the column meets the bound.
     pub keeps_null: bool,
+}
+
+impl HelperGrant {
+    /// Whether the arm returns the caller itself, `SELECT g.id FROM grantees g WHERE g.id =
+    /// <caller>`, so a grant naming one of its rows names that user.
+    pub(crate) fn returns_the_caller(&self) -> bool {
+        matches!(&self.grantee, HelperGrantee::Caller { user_column } if *user_column == self.object_column)
+    }
 }
 
 /// Whom a grant arm's rows admit.
@@ -706,15 +737,28 @@ pub enum HelperGrantee {
         /// The declared set, carrying the parameter the caller supplies.
         source: DeclaredSource,
     },
+    /// `<grantee column> IN (SELECT <call>)`, the rows naming one of the grantees the
+    /// call returns.
+    Set {
+        /// Column holding the grantee.
+        grantee_column: ColumnName,
+        /// The call returning the grantees, keys of the table the column names.
+        call: HelperCall,
+    },
+    /// Every row, whoever the caller is.
+    Anyone,
 }
 
 impl HelperGrantee {
-    /// The grant table's column compared with a value of the request.
+    /// The grant table's column compared with the caller, with a set the request carries
+    /// or with the grantees a set holds, `None` for an arm naming nobody.
     #[must_use]
-    pub fn compared_column(&self) -> &ColumnName {
+    pub fn compared_column(&self) -> Option<&ColumnName> {
         match self {
-            Self::Caller { user_column } => user_column,
-            Self::RequestSet { value_column, .. } => value_column,
+            Self::Caller { user_column } => Some(user_column),
+            Self::RequestSet { value_column, .. } => Some(value_column),
+            Self::Set { grantee_column, .. } => Some(grantee_column),
+            Self::Anyone => None,
         }
     }
 }
@@ -742,22 +786,26 @@ pub enum GrantRows {
     },
 }
 
-/// `SELECT <level key> FROM <level> WHERE <fk column> IN (SELECT <call>)`.
+/// `SELECT <key> FROM <table> WHERE <fk column> IN (SELECT <call>)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperParent {
-    /// Column of the level referencing the rows `call` returns.
+    /// The table whose rows the arm returns, the level or one whose key references it.
+    pub table: TableId,
+    /// Column of `table` referencing the rows `call` returns.
     pub fk_column: ColumnName,
     /// The call returning the parents.
     pub call: HelperCall,
 }
 
-/// `SELECT <level key> FROM <level> JOIN <walk> ON <fk column> = <walk>.<column>` in
-/// the recursive term of a `WITH RECURSIVE` body, which returns every row below one the
-/// call returns.
+/// The recursive term of a `WITH RECURSIVE` body walking a tree of the level's keys.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperWalk {
-    /// Column of the level referencing its own key, the row's parent.
+    /// The table holding the tree, the level or one whose key references it.
+    pub table: TableId,
+    /// Column of `table` referencing its own key, the row's parent.
     pub fk_column: ColumnName,
+    /// Which way the walk follows the tree.
+    pub direction: sql_traits::structs::WalkDirection,
 }
 
 /// Caller-identity sets subtracted from a positive grant.
@@ -881,6 +929,10 @@ pub enum PatternClass {
     /// `current_setting('app.installation_id', true) IN (SELECT
     /// authz.installations_allowing('docs', 'select'))`.
     P27RequestValueInHelperSet(RequestValueInHelperSet),
+    /// P28: The request leaves a declared single value it may leave unset absent, or
+    /// carries it where negated, so no row takes part:
+    /// `NULLIF(current_setting('app.installation_id', true), '') IS NULL`.
+    P28RequestValueAbsent(RequestValueAbsent),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

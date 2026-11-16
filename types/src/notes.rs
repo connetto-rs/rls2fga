@@ -408,9 +408,9 @@ pub enum TranslationNote {
         /// Characters the key may render, once encoded, before the row is left out.
         budget: usize,
     },
-    /// A declared helper walks down its table's own parent column, which `PostgreSQL`
-    /// follows to any depth and `OpenFGA` resolves only as deep as its
-    /// `resolveNodeLimit` allows.
+    /// A declared helper walks its table's own parent column, down to every row below
+    /// or up to every row above, which `PostgreSQL` follows to any depth and `OpenFGA`
+    /// resolves only as deep as its `resolveNodeLimit` allows.
     ///
     /// Stated as a contract rather than a list, since the translator never sees how deep
     /// the tree goes.
@@ -422,7 +422,7 @@ pub enum TranslationNote {
         table: TableId,
         /// The column naming each row's parent.
         column: ColumnName,
-        /// The relation resolved once per parent.
+        /// The relation resolved once per parent or child.
         relation: RelationName,
     },
     /// A condition parameter the caller has to put in every check context.
@@ -699,9 +699,9 @@ impl fmt::Display for TranslationNote {
                         "Every check context must carry the `settings` map. {refuse}, so \
                          put the value of {key} in it under the key '{parameter}', exactly \
                          as PostgreSQL renders it, and no key where {key} is unset. An \
-                         absent key reads as NULL, which admits least, so never send an \
-                         empty string in its place, which is a value that admits what \
-                         NULL does not"
+                         absent key reads as PostgreSQL reads an unset setting, so never \
+                         send an empty string in its place, which the model reads as a \
+                         value where PostgreSQL may read it as unset"
                     ),
                     _ => write!(f, "Every check context must carry '{parameter}'. {refuse}"),
                 }

@@ -5,7 +5,7 @@
 //! cannot drift apart.
 
 use crate::classifier::patterns::{AttributePredicate, ResidualPredicates};
-use crate::generator::model_generator::GateAtom;
+use crate::generator::model_generator::{GateAtom, PresenceAtom};
 use crate::generator::notes::SkippedTuples;
 use crate::generator::well_known::member_relation;
 #[cfg(not(feature = "std"))]
@@ -52,6 +52,21 @@ pub(crate) struct MembershipGate {
     /// groups by it and carries `MAX(deadline)`, and the shape joins rather than settling
     /// from one row. False when the row uniquely keys the tuple, which stays `FromRow`.
     pub aggregate: bool,
+}
+
+/// Who a [`TupleSource::GranteeGrant`] row grants.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum GranteeSubject {
+    /// `type_name:<column>#relation`, whoever holds `relation` on the grantee.
+    Userset {
+        type_name: TypeName,
+        relation: RelationName,
+        column: ColumnName,
+    },
+    /// `user:*`, every caller.
+    Everyone,
+    /// `user:<identity>`, one caller named by a constant.
+    Caller(String),
 }
 
 /// One kind of access-control fact, expressible as a static SQL query.
@@ -165,6 +180,21 @@ pub(crate) enum TupleSource {
         gate: Option<MembershipGate>,
     },
 
+    /// A grant row naming whoever a grantee set holds on its grantee, every caller, or
+    /// one caller a gate excludes, an inline grantee's type checked by the rows its
+    /// predicates join. Produces `(parent_type:fk_cols, relation, <subject>)` once per
+    /// distinct tuple.
+    GranteeGrant {
+        join_table: TableId,
+        /// Columns of `join_table` naming the parent resource, in the parent key's order.
+        fk_cols: Vec<ColumnName>,
+        parent_type: TypeName,
+        relation: RelationName,
+        subject: GranteeSubject,
+        /// Residual predicate, with the joins typing an inline grantee among them.
+        extra_predicates: ResidualPredicates,
+    },
+
     /// P4/P5 child-to-parent link. Produces `(type:pk, relation, parent_type:fk_cols)`.
     ///
     /// The object column is resolved at render time, keeping the IR free of schema
@@ -270,6 +300,20 @@ pub(crate) enum TupleSource {
         atom: GateAtom,
     },
 
+    /// One test of whether the request carries a value it may leave unset, held by the
+    /// object standing for one guarded type. Produces `(gate_type:gate_object, relation,
+    /// user:*, condition, {})`, the condition reading only the request.
+    ///
+    /// Names no table, as [`Self::RequestGateEntry`] does not.
+    RequestPresenceEntry {
+        gate_type: TypeName,
+        gate_object: String,
+        relation: RelationName,
+        condition: ConditionName,
+        /// The test, with the caller contract it states.
+        presence: PresenceAtom,
+    },
+
     /// A share row keyed on its own primary key, gated by a conditional wildcard comparing
     /// its member value with a request value as `comparison` specifies.
     RequestShareGate {
@@ -318,7 +362,10 @@ pub(crate) enum TupleSource {
         share_type: TypeName,
         relation: RelationName,
     },
-    /// P19 links each guarded object to the owner its closure row names.
+    /// Links each object a row names to the subject the same row names, such as the owner
+    /// a P19 closure row names, or a tree's parent and child keys read from a table whose
+    /// key is another type's key. Produces
+    /// `(guarded_type:object_cols, relation, owner_type:subject_cols)`.
     ClosureBridge {
         /// Table whose rows record the closure.
         link_table: TableId,
@@ -555,6 +602,14 @@ pub(crate) enum TupleSourceKey<'a> {
         extra_predicates: ResidualSqlKey<'a>,
         gate: Option<&'a MembershipGate>,
     },
+    GranteeGrant {
+        join_table: &'a TableId,
+        fk_cols: &'a [ColumnName],
+        parent_type: &'a TypeName,
+        relation: &'a RelationName,
+        subject: &'a GranteeSubject,
+        extra_predicates: ResidualSqlKey<'a>,
+    },
     ParentBridge {
         table: &'a TableId,
         fk_cols: &'a [ColumnName],
@@ -610,6 +665,13 @@ pub(crate) enum TupleSourceKey<'a> {
         condition: &'a ConditionName,
         row_parameter: &'a str,
         atom: &'a GateAtom,
+    },
+    RequestPresenceEntry {
+        gate_type: &'a TypeName,
+        gate_object: &'a str,
+        relation: &'a RelationName,
+        condition: &'a ConditionName,
+        presence: &'a PresenceAtom,
     },
     RequestShareGate {
         share_type: &'a TypeName,
@@ -722,11 +784,13 @@ impl TupleSource {
             | Self::ClosureBridge { .. }
             | Self::ActingKind { .. }
             | Self::RequestGateEntry { .. }
+            | Self::RequestPresenceEntry { .. }
             | Self::OwnerIdentity { .. }
             | Self::ExplicitGrants { .. }
             | Self::TeamMembership { .. }
             | Self::ExistsMembership { .. }
             | Self::RequestShareGate { .. }
+            | Self::GranteeGrant { .. }
             | Self::MembershipShareMembers { .. }
             | Self::ScopeShares { .. }
             | Self::HolderMembers { .. }
@@ -796,6 +860,11 @@ impl TupleSource {
                 parent_type,
                 relation,
                 ..
+            }
+            | Self::GranteeGrant {
+                parent_type,
+                relation,
+                ..
             } => {
                 vec![(parent_type.clone(), relation.clone())]
             }
@@ -809,6 +878,11 @@ impl TupleSource {
             Self::PolicyScope { scope_relation, .. }
             | Self::SingletonScope { scope_relation, .. } => own(scope_relation),
             Self::RequestGateEntry {
+                gate_type,
+                relation,
+                ..
+            }
+            | Self::RequestPresenceEntry {
                 gate_type,
                 relation,
                 ..
@@ -933,6 +1007,21 @@ impl TupleSource {
                 extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::when(gate.is_some())),
                 gate: gate.as_ref(),
             },
+            Self::GranteeGrant {
+                join_table,
+                fk_cols,
+                parent_type,
+                relation,
+                subject,
+                extra_predicates,
+            } => TupleSourceKey::GranteeGrant {
+                join_table,
+                fk_cols,
+                parent_type,
+                relation,
+                subject,
+                extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::No),
+            },
             Self::ParentBridge {
                 table,
                 fk_cols,
@@ -1040,6 +1129,19 @@ impl TupleSource {
                 condition,
                 row_parameter,
                 atom,
+            },
+            Self::RequestPresenceEntry {
+                gate_type,
+                gate_object,
+                relation,
+                condition,
+                presence,
+            } => TupleSourceKey::RequestPresenceEntry {
+                gate_type,
+                gate_object,
+                relation,
+                condition,
+                presence,
             },
             Self::RequestShareGate {
                 join_table,

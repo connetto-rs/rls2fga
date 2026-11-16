@@ -14,7 +14,9 @@ use crate::generator::db_lookup::{
     row_uniquely_keys, single_identity_column,
 };
 use crate::generator::identity::MAX_OBJECT_NAME_CHARS;
-use crate::generator::ir::{GateContextColumn, MembershipGate, PrincipalInfo, TupleSource};
+use crate::generator::ir::{
+    GateContextColumn, GranteeSubject, MembershipGate, PrincipalInfo, TupleSource,
+};
 use crate::generator::model_bounds::MAX_PARAMETER_NAME_CHARS;
 use crate::generator::notes::SkippedTuples;
 use crate::generator::role_relations::{sorted_role_relation_names, RoleRelationName};
@@ -96,8 +98,8 @@ use emit_requests::{
     emit_request_formula, emit_request_gate, RequestSide,
 };
 use emit_roles::{emit_numeric_threshold, emit_role_name_in_list, OwnerScope};
-pub(crate) use request_formula::GateAtom;
 use request_formula::RequestFormula;
+pub(crate) use request_formula::{GateAtom, PresenceAtom};
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
 use simplify::{
     drop_implied_insert_readback, grants_nothing, inline_synthetic_rule_aliases,
@@ -492,12 +494,13 @@ impl TypePlan {
         relation
     }
 
-    /// Each source's tuples satisfy only its own membership relation.
+    /// Each source's tuples satisfy only its own membership relation, which accepts
+    /// `subjects`.
     fn membership_source_relation(
         &mut self,
         key: &str,
         base: impl Into<String>,
-        subject: DirectSubject,
+        subjects: Vec<DirectSubject>,
     ) -> RelationName {
         if let Some(relation) = self.membership_source_relations.get(key) {
             return relation.clone();
@@ -522,8 +525,7 @@ impl TypePlan {
             relation = RelationName::canonicalized(format!("{head}{suffix}"));
             counter += 1;
         }
-        self.direct_relations
-            .insert(relation.clone(), vec![subject]);
+        self.direct_relations.insert(relation.clone(), subjects);
         self.membership_source_relations
             .insert(key.to_string(), relation.clone());
         relation
@@ -1907,6 +1909,14 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     matches!(atom.comparison, RequestComparison::CallerSetHolds),
                 ));
             }
+            TupleSource::RequestPresenceEntry { presence, .. } => {
+                contracts.insert((
+                    presence.request_parameter.to_string(),
+                    Some(presence.setting_key.clone()),
+                    None,
+                    false,
+                ));
+            }
             _ => {}
         }
     }
@@ -2015,6 +2025,7 @@ fn source_carries_condition(source: &TupleSource) -> bool {
         TupleSource::ConditionalAttributeGate { .. }
             | TupleSource::SessionAttributeGate { .. }
             | TupleSource::RequestGateEntry { .. }
+            | TupleSource::RequestPresenceEntry { .. }
             | TupleSource::RequestShareGate { .. }
             | TupleSource::ExistsMembership { gate: Some(_), .. }
             | TupleSource::HolderMembers { gate: Some(_), .. }
@@ -2807,6 +2818,12 @@ fn translate_pattern<DB: DatabaseLike>(
         ),
         PatternClass::P25FallbackScalarInConstantList(test) => emit_request_formula(
             &RequestFormula::fallback_in_constant_list(test),
+            ctx,
+            table_plan,
+            all_types,
+        ),
+        PatternClass::P28RequestValueAbsent(test) => emit_request_formula(
+            &RequestFormula::Presence(PresenceAtom::of(test)),
             ctx,
             table_plan,
             all_types,

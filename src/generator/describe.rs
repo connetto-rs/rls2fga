@@ -549,6 +549,27 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             ))
         }
 
+        // Replayed through its query, which evaluates every conjunct, the joins typing an
+        // inline grantee among them.
+        TupleSource::GranteeGrant {
+            join_table,
+            fk_cols,
+            parent_type,
+            relation,
+            extra_predicates,
+            ..
+        } => Some(residual_description(
+            rendered(query)?,
+            join_table,
+            fk_cols,
+            extra_predicates,
+            ReplayScope::Object {
+                object_type: parent_type.clone(),
+                relations: vec![relation.clone()],
+            },
+            "a grantee grant is replayed through its query".to_string(),
+        )),
+
         TupleSource::ParentBridge {
             table,
             fk_cols,
@@ -699,6 +720,28 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                         values: [(row_parameter.clone(), atom.value.clone())]
                             .into_iter()
                             .collect(),
+                    }),
+                },
+            },
+        }),
+
+        // The condition reads only the request, so the fact carries no value of its own.
+        TupleSource::RequestPresenceEntry {
+            gate_type,
+            gate_object,
+            relation,
+            condition,
+            ..
+        } => Some(RecordDescription {
+            tables: Vec::new(),
+            derivation: RecordDerivation::Constant {
+                record: Record {
+                    object: format!("{gate_type}:{}", encode_part(gate_object)),
+                    relation: relation.clone(),
+                    subject: format!("{}:*", well_known.user),
+                    context: Some(RecordContextValue {
+                        condition: condition.clone(),
+                        values: alloc::collections::BTreeMap::new(),
                     }),
                 },
             },

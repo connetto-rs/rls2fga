@@ -281,7 +281,7 @@ pub(crate) fn reach_column_relations(
     for relations in &plan.column_relations {
         for relation in relations.columns.values().chain([&relations.on_table]) {
             if reached.insert((gate.type_name.clone(), relation.clone())) {
-                reach_direct_usersets(gate, relation, reached);
+                reach_direct_usersets(gate, relation, by_name, reached);
             }
         }
     }
@@ -356,6 +356,11 @@ fn drop_unlinked_gate_entries(all_types: &mut BTreeMap<TypeName, TypePlan>) {
                 ..
             }
             | TupleSource::RequestGateEntry {
+                gate_type,
+                gate_object,
+                ..
+            }
+            | TupleSource::RequestPresenceEntry {
                 gate_type,
                 gate_object,
                 ..
@@ -590,6 +595,12 @@ fn constant_leaf(
                 gate_object,
                 relation: held,
                 ..
+            }
+            | TupleSource::RequestPresenceEntry {
+                gate_type,
+                gate_object,
+                relation: held,
+                ..
             } if *gate_type == plan.type_name
                 && gate_object.as_str() == context.owner.type_name.as_str()
                 && held == relation =>
@@ -606,6 +617,7 @@ fn constant_leaf(
 fn reach_direct_usersets(
     plan: &TypePlan,
     relation: &RelationName,
+    by_name: &BTreeMap<&TypeName, &TypePlan>,
     reached: &mut BTreeSet<(TypeName, RelationName)>,
 ) {
     for subject in plan.direct_relations.get(relation).into_iter().flatten() {
@@ -614,7 +626,19 @@ fn reach_direct_usersets(
             relation,
         } = subject
         {
-            reached.insert((type_name.clone(), relation.clone()));
+            // A subject `type#relation` is evaluated on that type, so whatever its
+            // definition reads is reached too.
+            match by_name.get(type_name) {
+                Some(target) => reach_userset(
+                    &UsersetExpr::Computed(relation.clone()),
+                    target,
+                    by_name,
+                    reached,
+                ),
+                None => {
+                    reached.insert((type_name.clone(), relation.clone()));
+                }
+            }
         }
     }
 }
@@ -630,7 +654,7 @@ pub(crate) fn reach_userset(
             if !reached.insert((plan.type_name.clone(), name.clone())) {
                 return;
             }
-            reach_direct_usersets(plan, name, reached);
+            reach_direct_usersets(plan, name, by_name, reached);
             if let Some(inner) = plan.computed_relations.get(name) {
                 reach_userset(inner, plan, by_name, reached);
             }
@@ -649,7 +673,7 @@ pub(crate) fn reach_userset(
                 if !reached.insert((target.type_name.clone(), computed.clone())) {
                     continue;
                 }
-                reach_direct_usersets(target, computed, reached);
+                reach_direct_usersets(target, computed, by_name, reached);
                 if let Some(inner) = target.computed_relations.get(computed) {
                     reach_userset(inner, target, by_name, reached);
                 }

@@ -264,14 +264,19 @@ fn request_predicate(
                     .all(|other| other == Some(role))
                     .then(|| RequestPredicate::ActsAs { role: role.clone() });
             }
-            let mut atoms = feeding.iter().map(|indexed| match indexed.source {
-                TupleSource::RequestGateEntry { atom, .. } => Some(atom),
+            let mut tests = feeding.iter().map(|indexed| match indexed.source {
+                TupleSource::RequestGateEntry { atom, .. } => {
+                    Some(RequestPredicate::Holds(atom.request_atom()))
+                }
+                TupleSource::RequestPresenceEntry { presence, .. } => {
+                    Some(presence.request_predicate())
+                }
                 _ => None,
             });
-            let first = atoms.next()??;
-            atoms
-                .all(|atom| atom == Some(first))
-                .then(|| RequestPredicate::Holds(first.request_atom()))
+            let first = tests.next()??;
+            tests
+                .all(|test| test.as_ref() == Some(&first))
+                .then_some(first)
         }
     }
 }
