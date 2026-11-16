@@ -221,6 +221,18 @@ pub fn public_flag_relation_name(column: &str) -> RelationName {
     )))
 }
 
+/// Derive the relation holding the rows a flag names, after the column it tests.
+///
+/// `key` is the flag's structural identity, hashed for a stable readable name.
+#[must_use]
+pub fn flag_relation_name(column: &str, key: &str) -> RelationName {
+    RelationName::canonicalized(clamp_relation_name(format!(
+        "flag_{}_{}",
+        canonical_fga_type_name(column),
+        stable_hex_suffix(key)
+    )))
+}
+
 /// Derive the relation a literal attribute gate grants through, one per predicate.
 ///
 /// `key` is the predicate's structural identity, hashed for a stable readable name.

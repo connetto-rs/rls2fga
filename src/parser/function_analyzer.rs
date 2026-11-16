@@ -2,7 +2,9 @@
 use crate::no_std_prelude::*;
 use alloc::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{BinaryOperator, Expr, Function, FunctionArguments, SelectItem, Statement};
+use sqlparser::ast::{
+    BinaryOperator, Expr, Function, FunctionArguments, SelectItem, SetExpr, Statement,
+};
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
@@ -401,18 +403,39 @@ pub(crate) fn body_role_keyword(
 /// one a scalar subquery in the policy goes through, because a body that yields no row
 /// returns NULL and a comparison against NULL hides the row while the model would grant
 /// it. Sharing it is what stops the two spellings of one hazard being guarded apart.
+///
+/// A body's `WITH` binds names the projection reads, so it moves into the `EXISTS` the
+/// projection is, which scopes it over exactly what it scoped before. Any other projection
+/// has nowhere to keep it and is `None`.
 pub(crate) fn body_single_projection(body: &str) -> Option<Expr> {
     let statements = Parser::parse_sql(&PostgreSqlDialect {}, body).ok()?;
-    let [Statement::Query(query)] = statements.as_slice() else {
+    let [Statement::Query(mut query)] = <[Statement; 1]>::try_from(statements).ok()? else {
         return None;
     };
-    let select = projected_select(query)?;
+    projected_select(&query)?;
+    let with = query.with.take();
+    let SetExpr::Select(select) = *query.body else {
+        return None;
+    };
     let [SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. }] =
-        select.projection.as_slice()
+        <[SelectItem; 1]>::try_from(select.projection).ok()?
     else {
         return None;
     };
-    Some(expr.clone())
+    match (with, expr) {
+        (None, expr) => Some(expr),
+        (
+            Some(with),
+            Expr::Exists {
+                mut subquery,
+                negated,
+            },
+        ) if subquery.with.is_none() => {
+            subquery.with = Some(with);
+            Some(Expr::Exists { subquery, negated })
+        }
+        (Some(_), _) => None,
+    }
 }
 
 /// The caller read a whole body makes, when the body has the shape of an accessor.
@@ -640,8 +663,8 @@ pub(crate) fn body_reads_effective_user(body: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        body_setting_fallback, FunctionSemantic, RoleKeyword, SettingFallbackSource,
-        TeamMembershipConfig,
+        body_setting_fallback, body_single_projection, FunctionSemantic, RoleKeyword,
+        SettingFallbackSource, TeamMembershipConfig,
     };
     use crate::classifier::function_registry::DeclaredSources;
     use crate::parser::sql_parser::SettingValue;
@@ -660,6 +683,33 @@ mod tests {
             language,
             &DeclaredSources::of(&caller_deployment()),
         )
+    }
+
+    /// A body's `WITH` binds names its projection reads, so it rides into the `EXISTS` the
+    /// projection is, and a projection that cannot hold it is no expression at all.
+    #[test]
+    fn a_body_with_bindings_projects_them_inside_its_exists() {
+        let walk = "WITH RECURSIVE up (id) AS (SELECT resource UNION SELECT e.parent_id FROM up JOIN public.edges e ON e.id = up.id) SELECT EXISTS (SELECT 1 FROM up)";
+        assert_eq!(
+            body_single_projection(walk).map(|expr| expr.to_string()),
+            Some(
+                "EXISTS (WITH RECURSIVE up (id) AS (SELECT resource UNION SELECT e.parent_id \
+                 FROM up JOIN public.edges e ON e.id = up.id) SELECT 1 FROM up)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            body_single_projection("WITH t AS (SELECT 1 AS v) SELECT (SELECT v FROM t)"),
+            None
+        );
+        assert_eq!(
+            body_single_projection(
+                "WITH t AS (SELECT 1 AS v) SELECT EXISTS (WITH u AS (SELECT 2) SELECT 1 FROM t)"
+            ),
+            None
+        );
+        assert_eq!(body_single_projection("SELECT 1; SELECT 2"), None);
+        assert_eq!(body_single_projection("DELETE FROM t"), None);
     }
 
     /// A body falling back across two declared sources reads as that fallback, the

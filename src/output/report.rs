@@ -8,7 +8,7 @@ use crate::classifier::patterns::{
     ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
     ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExcludedSet, ExistsMembership,
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
-    FallbackScalarUnequalsConstant, JsonbFieldOwnership, MembershipExclusion,
+    FallbackScalarUnequalsConstant, FlaggedRow, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
     RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowValueEqualsCallerScalar,
     RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
@@ -398,8 +398,30 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                         call.function,
                         call.arguments.join(", ")
                     ),
+                    ExcludedSet::Flag(flag) => {
+                        write!(rendered, "{}", format_pattern(&flag.pattern))
+                    }
                 };
             }
+            rendered
+        }
+        PatternClass::P29FlaggedRow(FlaggedRow {
+            column,
+            table,
+            edges,
+            ..
+        }) => {
+            let mut rendered = format!("P29 ({table} flagged at {column}");
+            if !edges.is_empty() {
+                rendered.push_str(" or above it through ");
+                for (at, edge) in edges.iter().enumerate() {
+                    if at != 0 {
+                        rendered.push_str(", ");
+                    }
+                    let _ = write!(rendered, "{}.{}", edge.table, edge.parent_column);
+                }
+            }
+            rendered.push(')');
             rendered
         }
         PatternClass::Unknown(UnclassifiedExpr { reason, .. }) => format!("Unknown: {reason}"),

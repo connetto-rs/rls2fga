@@ -28,6 +28,8 @@ mod attribute;
 mod casts;
 /// Keys of the row contained in a set built from a subquery.
 mod containment;
+/// P29 a row its own columns flag, read by key or up a recursive walk.
+mod flag;
 /// P20 calls to a declared `SECURITY DEFINER` helper.
 mod helper;
 /// Whether a residual answers every caller alike.
@@ -53,6 +55,7 @@ pub(crate) use attribute::{
 };
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use containment::contained_keys_as_memberships;
+pub(crate) use flag::{recognize_flagged_row, FlagRefusal};
 pub(crate) use helper::{recognize_declared_helper, recognize_excluded_helper, HelperRefusal};
 pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use owner_expression::recognize_owner_expression;

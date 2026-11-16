@@ -586,3 +586,36 @@ fn oracle_indirect_memberships_cannot_bypass_key_and_scope_validation() {
         );
     }
 }
+
+/// An answered refusal in the base of an exclusion regrades the exclusion, which is then
+/// as sure as the flag it subtracts.
+#[test]
+fn an_answered_refusal_beside_a_flag_exclusion_regrades_the_exclusion() {
+    let schema = BIT_FLAG_SCHEMA
+        .replace("bits INT)", "bits INT, locked BOOLEAN NOT NULL)")
+        .replace(
+            "= 2)));",
+            "= 2)) AND NOT EXISTS (SELECT 1 FROM folders g WHERE g.id = docs.folder_id AND g.locked));",
+        );
+    let db = parse_schema(&schema).expect("schema parses");
+    let mut classified = translator().classify(&db);
+    assert_eq!(
+        classified[0]
+            .using_classification()
+            .expect("the policy has a USING clause")
+            .confidence,
+        ConfidenceLevel::D
+    );
+
+    consult_oracle(&mut classified, &BitFlagIsPublic);
+
+    let outer = classified[0]
+        .using_classification()
+        .expect("the clause survives");
+    assert!(
+        matches!(outer.pattern, PatternClass::MembershipExclusion(_)),
+        "{:?}",
+        outer.pattern
+    );
+    assert_eq!(outer.confidence, ConfidenceLevel::B);
+}

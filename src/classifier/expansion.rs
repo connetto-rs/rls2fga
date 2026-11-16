@@ -13,8 +13,8 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{
     Expr, FunctionArg, FunctionArgExpr, FunctionArguments, FunctionCalledOnNull, FunctionSecurity,
-    FunctionSetValue, Ident, ObjectName, ObjectNamePart, TableFactor, Value, Visit, VisitMut,
-    Visitor, VisitorMut,
+    FunctionSetValue, Ident, ObjectName, ObjectNamePart, Query, TableFactor, Value, Visit,
+    VisitMut, Visitor, VisitorMut,
 };
 
 use crate::classifier::function_registry::FunctionRegistry;
@@ -278,11 +278,22 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
             )))
         }
     };
+    let bound = bound_names(&body);
+    if let Some(name) = bound.iter().find(|name| {
+        db.tables()
+            .any(|table| table.stored_table_name() == name.as_str())
+    }) {
+        return Some(refused(format!(
+            "The body of '{function_name}' binds '{name}' in a WITH, which also names a \
+             table, so which of the two a reference reads cannot be told"
+        )));
+    }
     if string_body {
         let search_path = function_search_path(function);
         let mut qualify = QualifyStringBodyTables {
             db,
             search_path: &search_path,
+            bound: &bound,
             failed: None,
         };
         let _ = VisitMut::visit(&mut body, &mut qualify);
@@ -307,7 +318,10 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
         )));
     }
 
-    let mut scan = BodyScan::default();
+    let mut scan = BodyScan {
+        bound,
+        ..BodyScan::default()
+    };
     let _ = body.visit(&mut scan);
     if let Some(shape) = scan.unmodeled_relation {
         return Some(refused(format!(
@@ -640,6 +654,7 @@ fn qualified_table_name<T: TableLike>(table: &T) -> ObjectName {
 struct QualifyStringBodyTables<'db, 'path, DB: DatabaseLike> {
     db: &'db DB,
     search_path: &'path FunctionSearchPath,
+    bound: &'path [String],
     failed: Option<String>,
 }
 
@@ -650,7 +665,7 @@ impl<DB: DatabaseLike> VisitorMut for QualifyStringBodyTables<'_, '_, DB> {
         let TableFactor::Table { name, .. } = table_factor else {
             return ControlFlow::Continue(());
         };
-        if name.0.len() != 1 {
+        if name.0.len() != 1 || reads_binding(self.bound, name) {
             return ControlFlow::Continue(());
         }
         let spelling = name.to_string();
@@ -688,6 +703,39 @@ impl<DB: DatabaseLike> VisitorMut for QualifyStringBodyTables<'_, '_, DB> {
         *name = qualified_table_name(table);
         ControlFlow::Continue(())
     }
+}
+
+/// The names the `WITH` clauses anywhere in `body` bind, as `PostgreSQL` stores them.
+///
+/// The caller refuses a body binding a name that also names a table, so a one-part
+/// reference to a bound name reads the binding wherever the body is valid.
+fn bound_names(body: &Expr) -> Vec<String> {
+    struct Collect(Vec<String>);
+    impl Visitor for Collect {
+        type Break = ();
+        fn pre_visit_query(&mut self, query: &Query) -> ControlFlow<()> {
+            if let Some(with) = &query.with {
+                self.0.extend(
+                    with.cte_tables
+                        .iter()
+                        .map(|cte| stored_ident_name(&cte.alias.name).into_owned()),
+                );
+            }
+            ControlFlow::Continue(())
+        }
+    }
+    let mut collect = Collect(Vec::new());
+    let _ = body.visit(&mut collect);
+    collect.0
+}
+
+/// Whether `name` is one part naming a binding of `bound`.
+fn reads_binding(bound: &[String], name: &ObjectName) -> bool {
+    let [part] = name.0.as_slice() else {
+        return false;
+    };
+    let stored = stored_ident_name(object_name_part_ident(part));
+    bound.iter().any(|binding| *binding == stored)
 }
 
 /// The policy table's spelling as identifier parts, quoting preserved.
@@ -749,7 +797,7 @@ fn contains_query(expr: &Expr) -> bool {
     struct FindsQuery(bool);
     impl Visitor for FindsQuery {
         type Break = ();
-        fn pre_visit_query(&mut self, _query: &sqlparser::ast::Query) -> ControlFlow<Self::Break> {
+        fn pre_visit_query(&mut self, _query: &Query) -> ControlFlow<Self::Break> {
             self.0 = true;
             ControlFlow::Break(())
         }
@@ -794,7 +842,8 @@ fn qualify_argument_columns(expr: &Expr, outer_parts: &[Ident]) -> Option<Expr> 
     Some(rewritten)
 }
 
-fn call_argument_column(arg: &Expr, table: &str) -> Option<ColumnName> {
+/// The guarded table's column `arg` reads, bare or qualified by the policy table's name.
+pub(crate) fn call_argument_column(arg: &Expr, table: &str) -> Option<ColumnName> {
     let column = match arg {
         Expr::Identifier(column) => column,
         Expr::CompoundIdentifier(parts) => {
@@ -892,6 +941,8 @@ fn owner_bypasses_rls<DB: DatabaseLike>(db: &DB, owner: Option<&str>) -> bool {
 /// resolve against, and every bare identifier.
 #[derive(Default)]
 struct BodyScan {
+    /// Names the body's `WITH` clauses bind, which a reference reads instead of a table.
+    bound: Vec<String>,
     /// Relation spellings the body reads, for the ownership gate.
     tables: Vec<String>,
     /// Normalized table and alias names in scope, which claim a qualifier.
@@ -917,7 +968,9 @@ impl Visitor for BodyScan {
                         .push(stored_ident_name(&alias.name).into_owned()),
                     None => self.scope_names.push(stored_relation_name(&spelling)),
                 }
-                self.tables.push(spelling);
+                if !reads_binding(&self.bound, name) {
+                    self.tables.push(spelling);
+                }
             }
             TableFactor::Derived { alias, .. } => {
                 if let Some(alias) = alias {

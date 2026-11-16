@@ -1172,3 +1172,19 @@ fn a_membership_table_narrowing_the_role_is_refused() {
         team_term(schema, role).expect_err("membership read rules must refuse the term");
     }
 }
+
+/// A flag reads rows and never the caller, so subtracting one names nobody.
+#[test]
+fn a_term_subtracting_only_a_flag_names_no_caller() {
+    let schema = SHOP.replace(
+        "customers (id TEXT PRIMARY KEY)",
+        "customers (id TEXT PRIMARY KEY, banned BOOLEAN NOT NULL)",
+    );
+    let reason = refuse_on(
+        &schema,
+        "orders",
+        "NOT EXISTS (SELECT 1 FROM customers c WHERE c.id = orders.customer_id AND c.banned)",
+        ConfidenceLevel::B,
+    );
+    assert!(reason.contains("names the caller"), "{reason}");
+}

@@ -425,6 +425,15 @@ pub enum TranslationNote {
         /// The relation resolved once per parent or child.
         relation: RelationName,
     },
+    /// A row flag inherited up a walk of edge tables, which `PostgreSQL` follows to any
+    /// depth and `OpenFGA` resolves only as deep as its `resolveNodeLimit` allows.
+    FlagWalkDepth {
+        /// The flagged table.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// The relation resolved once per ancestor.
+        relation: RelationName,
+    },
     /// A condition parameter the caller has to put in every check context.
     ///
     /// A list parameter and a clock parameter are carried by name, and a single value
@@ -579,6 +588,7 @@ impl TranslationNote {
             | Self::CallerSuppliesConditionParameter { .. }
             | Self::RowIdentifierBudget { .. }
             | Self::HelperWalkDepth { .. }
+            | Self::FlagWalkDepth { .. }
             | Self::TypeNameCollision { .. }
             | Self::PolicyClauseIllegal { .. } => NoteSeverity::ActionRequired,
             Self::PolicyReadRecursion { .. }
@@ -630,6 +640,9 @@ impl TranslationNote {
                 table: spelling, ..
             }
             | Self::HelperWalkDepth {
+                table: spelling, ..
+            }
+            | Self::FlagWalkDepth {
                 table: spelling, ..
             }
             | Self::ReadsDeniedSoWritesCannotName {
@@ -857,6 +870,14 @@ impl fmt::Display for TranslationNote {
                  resolves as '{relation}' once per parent and only as deep as its \
                  resolveNodeLimit allows, 25 by default. A row further below the one granted \
                  fails the check where PostgreSQL grants it, so keep the tree shallower or \
+                 raise the limit."
+            ),
+            Self::FlagWalkDepth { table, relation } => write!(
+                f,
+                "A flag on '{table}' is inherited down its edges as '{relation}', which \
+                 OpenFGA resolves once per ancestor and only as deep as its resolveNodeLimit \
+                 allows, 25 by default. A check on a row further below fails with a \
+                 resolution error where PostgreSQL answers it, so keep the tree shallower or \
                  raise the limit."
             ),
             Self::FunctionExpanded { function, .. } => write!(

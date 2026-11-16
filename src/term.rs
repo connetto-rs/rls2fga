@@ -30,7 +30,7 @@ use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     filter_policies_for_output, AbacAnd, ClassifiedExpr, ClassifiedPolicy, Composite,
-    ConfidenceLevel, ExpandedFunction, MembershipExclusion, MembershipInCallerSet,
+    ConfidenceLevel, ExcludedSet, ExpandedFunction, MembershipExclusion, MembershipInCallerSet,
     ParentInheritance, PatternClass, PolicyCommand, PolicyMode, RowValueInCallerSet, StoredClause,
     UnclassifiedExpr,
 };
@@ -375,7 +375,10 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
                 continue;
             }
             PatternClass::MembershipExclusion(MembershipExclusion { base, subtract }) => {
-                if !subtract.is_empty() && !found.contains(&TermCaller::Identity) {
+                let names_caller = subtract
+                    .iter()
+                    .any(|excluded| !matches!(excluded, ExcludedSet::Flag(_)));
+                if names_caller && !found.contains(&TermCaller::Identity) {
                     found.push(TermCaller::Identity);
                 }
                 if let Some(base) = base {
@@ -391,6 +394,7 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P17CallerScalarEqualsConstant(_)
             | PatternClass::P27RequestValueInHelperSet(_)
             | PatternClass::P28RequestValueAbsent(_)
+            | PatternClass::P29FlaggedRow(_)
             | PatternClass::P21CallerScalarUnequalsConstant(_)
             | PatternClass::P22CallerScalarInConstantList(_)
             | PatternClass::P23FallbackScalarEqualsConstant(_)
