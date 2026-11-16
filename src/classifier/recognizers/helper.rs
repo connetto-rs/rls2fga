@@ -545,7 +545,7 @@ fn projects_column(projected: &Expr, relation: &Ident, column: &Ident) -> bool {
 }
 
 /// The guarded table's column the set is compared with, uncast.
-fn compared_column(expr: &Expr, table: &str) -> Option<ColumnName> {
+pub(super) fn compared_column(expr: &Expr, table: &str) -> Option<ColumnName> {
     let column = match expr {
         Expr::Nested(inner) => return compared_column(inner, table),
         Expr::Identifier(column) => column,

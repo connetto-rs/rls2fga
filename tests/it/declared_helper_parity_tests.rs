@@ -9,6 +9,7 @@ use rls2fga::types::ActionStatement;
 use sqlparser::ast::DataType;
 
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
+use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EXPIRING, GRANTEES, GROUPS,
     INSTALLATIONS, LEVELS, ORDERS, OWNER_READS, REQUEST_VALUES,
@@ -965,5 +966,69 @@ async fn repeated_expiring_grants_agree_with_postgres_now_and_a_year_on() {
             );
         }
         assert_agrees(&case, &run);
+    }
+}
+
+const CONTAINMENT_HELPERS: &str = r#"{
+    "authz.owned_folders": { "kind": "declared_helper" }
+}"#;
+
+/// A folder is read by the owner of both it and its parent.
+const CONTAINED_KEYS: &str = "
+CREATE POLICY folders_read ON folders FOR SELECT USING (
+  ARRAY[id, parent_id] <@ ARRAY(SELECT authz.owned_folders()));
+";
+
+/// `alice` owns the root `f1`, `f2` under it and `f4` under `bob`'s `f3`.
+fn containment_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-containment-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!("{FOLDERS}{CONTAINED_KEYS}"),
+        &[
+            "INSERT INTO folders VALUES ('f1', NULL, 'alice', NULL), ('f2', 'f1', 'alice', NULL),
+               ('f3', 'f1', 'bob', NULL), ('f4', 'f3', 'alice', NULL)",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON folders TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(CONTAINMENT_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn contained_row_keys_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = containment_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, statement, allowed| {
+                assert_postgres(&case, &run, subject, object, statement, allowed);
+            };
+            expect("alice", "folders:f2", ActionStatement::Select, true);
+            // A root's `NULL` parent makes the containment false.
+            expect("alice", "folders:f1", ActionStatement::Select, false);
+            // Each key must be in the set, a parent owned by someone else failing it.
+            expect("alice", "folders:f4", ActionStatement::Select, false);
+            expect("bob", "folders:f3", ActionStatement::Select, false);
+            expect("erin", "folders:f2", ActionStatement::Select, false);
+            expect("anonymous", "folders:f2", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
     }
 }
