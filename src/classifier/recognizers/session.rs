@@ -1973,16 +1973,7 @@ mod tests {
                 "declared set by every request",
             ),
         ] {
-            let expr = parse_expr(clause);
-            assert!(
-                recognize_session_attribute(&expr, registry).is_none(),
-                "`{clause}` stays refused"
-            );
-            let reasons = refused_absence_tests(&expr, registry);
-            assert!(
-                reasons.len() == 1 && reasons[0].contains(reason),
-                "`{clause}` names why: {reasons:?}"
-            );
+            assert_refused_naming(clause, registry, refused_absence_tests, reason);
         }
         assert_eq!(
             refused_absence_tests(
@@ -2129,16 +2120,7 @@ mod tests {
                 "declared set by every request",
             ),
         ] {
-            let expr = parse_expr(clause);
-            assert!(
-                recognize_session_attribute(&expr, registry).is_none(),
-                "`{clause}` stays refused"
-            );
-            let reasons = refused_absence_tests(&expr, registry);
-            assert!(
-                reasons.len() == 1 && reasons[0].contains(reason),
-                "`{clause}` names why: {reasons:?}"
-            );
+            assert_refused_naming(clause, registry, refused_absence_tests, reason);
         }
         assert!(
             recognize_session_attribute(&parse_expr("app.wrapped_mode() = 'main'"), &always)
@@ -2184,11 +2166,7 @@ mod tests {
                 "NULLIF hides a field of setting 'request.jwt.claims'",
             ),
         ] {
-            let reasons = refused_emptied_reads(&parse_expr(clause), registry);
-            assert!(
-                reasons.len() == 1 && reasons[0].contains(reason),
-                "`{clause}` names why: {reasons:?}"
-            );
+            assert_refused_naming(clause, registry, refused_emptied_reads, reason);
         }
         let unset = accessor_registry(scalar("app.mode").may_be_unset());
         for (clause, registry) in [
@@ -2204,5 +2182,25 @@ mod tests {
                 "`{clause}` names nothing"
             );
         }
+    }
+
+    /// Asserts that `clause` stays unrecognized and that `diagnose` names exactly one
+    /// reason, which contains `reason`.
+    fn assert_refused_naming(
+        clause: &str,
+        registry: &FunctionRegistry,
+        diagnose: fn(&Expr, &FunctionRegistry) -> Vec<String>,
+        reason: &str,
+    ) {
+        let expr = parse_expr(clause);
+        assert!(
+            recognize_session_attribute(&expr, registry).is_none(),
+            "`{clause}` stays refused"
+        );
+        let reasons = diagnose(&expr, registry);
+        assert!(
+            reasons.len() == 1 && reasons[0].contains(reason),
+            "`{clause}` names why: {reasons:?}"
+        );
     }
 }

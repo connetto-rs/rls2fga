@@ -184,10 +184,11 @@ CREATE POLICY p ON notes FOR SELECT USING (owner = current_setting('app.user_id'
     );
 }
 
-/// A wrapper resolves to the setting it reads, so its body has to be that read and
-/// nothing else. With a `FROM` and a `WHERE` the function yields no row once the guard is
-/// gone, so it returns NULL and `PostgreSQL` hides every row, while resolving it to the
-/// setting would grant every row the request's value matches.
+/// A wrapper resolves to the setting it reads, so its body has to be that read, bare or
+/// through `NULLIF(_, '')`, and nothing else. With a `FROM` and a `WHERE` the function
+/// yields no row once the guard is gone, so it returns NULL and `PostgreSQL` hides every
+/// row, while resolving it to the setting would grant every row the request's value
+/// matches.
 ///
 /// The caller identity half of this door is guarded by `is_direct_accessor_body`. This
 /// covers the declared value half, which reaches the setting through `SettingReader`
