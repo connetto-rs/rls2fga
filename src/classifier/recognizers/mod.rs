@@ -26,6 +26,8 @@ use crate::types::ColumnName;
 mod attribute;
 /// Casts that can rename a value compared with a request value.
 mod casts;
+/// Keys of the row contained in a set built from a subquery.
+mod containment;
 /// P20 calls to a declared `SECURITY DEFINER` helper.
 mod helper;
 /// Whether a residual answers every caller alike.
@@ -50,6 +52,7 @@ pub(crate) use attribute::{
     temporal_literal_comparisons, TemporalColumns,
 };
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
+pub(crate) use containment::contained_keys_as_memberships;
 pub(crate) use helper::{recognize_declared_helper, recognize_excluded_helper, HelperRefusal};
 pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use owner_expression::recognize_owner_expression;

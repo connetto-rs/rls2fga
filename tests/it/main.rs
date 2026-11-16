@@ -20,6 +20,7 @@ mod confidence_filtering_tests;
 mod container_startup_tests;
 mod cross_type_temporal_tests;
 mod declared_helper_blocklist_tests;
+mod declared_helper_containment_tests;
 mod declared_helper_parity_tests;
 mod declared_helper_tests;
 mod diagnostic_reach_tests;

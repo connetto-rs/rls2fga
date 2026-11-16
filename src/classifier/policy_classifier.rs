@@ -750,6 +750,11 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classify_expr_depth(inner, db, registry, table, command, depth + 1, state);
     }
 
+    // Keys of the row contained in a set read as each key's membership in it.
+    if let Some(memberships) = recognizers::contained_keys_as_memberships(expr, db, table) {
+        return classify_expr_depth(&memberships, db, registry, table, command, depth + 1, state);
+    }
+
     // Gap 4: CASE WHEN cond1 THEN TRUE WHEN cond2 THEN TRUE ... ELSE FALSE END
     // conditions, then recurse.
     if let Expr::Case {
