@@ -8,7 +8,9 @@ use super::*;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::recognizers::{owner_key_of, resolve_membership_pairing, MembershipPairing};
-use crate::generator::tuple_generator::{quote_sql_identifier, render_attribute_test};
+use crate::generator::tuple_generator::{
+    quote_sql_identifier, quote_sql_string_literal, render_attribute_test,
+};
 use crate::generator::well_known::HOLDER_OBJECT_ID;
 
 pub(super) struct MembershipSourceGate<'a> {
@@ -1608,9 +1610,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
     let groups = grant_row_groups(&grant.rows, &grant.time_bounds, &unsplit);
     match &grant.grantee {
         HelperGrantee::Caller { user_column } => {
-            let Some(excluded) = caller_exclusion(user_column, &grant.excluded) else {
-                return Vec::new();
-            };
+            let excluded = caller_exclusion(user_column, &grant.excluded);
             let aggregate = !row_uniquely_keys(&grant.table, &grant.tuple_key(), ctx.db);
             let plan = helper_level_plan(level_type, level, table_plan, all_types);
             groups
@@ -1672,37 +1672,22 @@ fn helper_grant_parts<DB: DatabaseLike>(
     }
 }
 
-/// `<column> <> '<caller>'` for each of `excluded`. `None` where one has no SQL spelling.
-fn caller_exclusion(column: &ColumnName, excluded: &[String]) -> Option<Vec<ResidualPredicate>> {
-    let kept: Vec<AttributePredicate> = excluded
+/// `<column> <> '<caller>'` for each of `excluded`.
+fn caller_exclusion(column: &ColumnName, excluded: &[String]) -> Vec<ResidualPredicate> {
+    let column_sql = quote_sql_identifier(column.as_str());
+    excluded
         .iter()
-        .map(|caller| AttributePredicate {
-            column: column.clone(),
-            test: AttributeTest::Compare {
-                operator: AttributeOperator::NotEq,
-                value: AttributeLiteral::Text(caller.clone()),
-            },
-        })
-        .collect();
-    attribute_conjuncts(&kept)
-}
-
-/// `predicates` as residual conjuncts on the columns of the query's one table. `None`
-/// where one has no SQL spelling.
-fn attribute_conjuncts(predicates: &[AttributePredicate]) -> Option<Vec<ResidualPredicate>> {
-    predicates
-        .iter()
-        .map(|predicate| {
-            Some(ResidualPredicate {
-                sql: format!(
-                    "{} {}",
-                    quote_sql_identifier(predicate.column.as_str()),
-                    render_attribute_test(&predicate.test)?
-                ),
-                guard: Some(ResidualGuard::Compare(predicate.clone())),
-                request: None,
-                relations: Vec::new(),
-            })
+        .map(|caller| ResidualPredicate {
+            sql: format!("{column_sql} <> {}", quote_sql_string_literal(caller)),
+            guard: Some(ResidualGuard::Compare(AttributePredicate {
+                column: column.clone(),
+                test: AttributeTest::Compare {
+                    operator: AttributeOperator::NotEq,
+                    value: AttributeLiteral::Text(caller.clone()),
+                },
+            })),
+            request: None,
+            relations: Vec::new(),
         })
         .collect()
 }

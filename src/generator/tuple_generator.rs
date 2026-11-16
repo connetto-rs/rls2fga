@@ -1968,7 +1968,7 @@ pub(crate) fn quote_sql_identifier(identifier: &str) -> String {
 ///
 /// With `standard_conforming_strings` on, which `PostgreSQL` has defaulted to since 9.1,
 /// a backslash is an ordinary character and doubling the quote is the whole escape.
-fn quote_sql_string_literal(value: &str) -> String {
+pub(crate) fn quote_sql_string_literal(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
