@@ -140,6 +140,70 @@ fn every_spelling_of_set_membership_reads_alike() {
         spelled("(project_id) = ANY (ARRAY(SELECT authz.projects_with('read')))"),
         array
     );
+    assert_eq!(
+        spelled("project_id IN (SELECT p.id FROM authz.projects_with('read') p(id))"),
+        array
+    );
+    assert_eq!(
+        spelled("project_id IN (SELECT id FROM authz.projects_with('read') AS p (id))"),
+        array
+    );
+    assert_eq!(
+        spelled("project_id = ANY (ARRAY(SELECT p FROM authz.projects_with('read') p))"),
+        array
+    );
+    assert_eq!(
+        spelled("project_id IN (SELECT projects_with FROM authz.projects_with('read'))"),
+        array
+    );
+}
+
+/// A call in `FROM` is the set it returns, so the helper's own table is no rescan of the
+/// guarded one, and the call is refused by name only until it is declared.
+#[test]
+fn a_call_in_from_on_the_level_itself_is_the_declared_set() {
+    let sql = format!(
+        "{LEVELS}{OWNER_READS}
+         ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY projects_read ON projects FOR SELECT USING (
+           id IN (SELECT p.id FROM authz.projects_with('read') p(id)));"
+    );
+    assert_eq!(
+        relation_definition(&model(&sql, BOTH), "projects", "can_select").as_deref(),
+        Some("projects_with_read and acting_app_user from request_gate")
+    );
+    let reason = refusal_of(&sql, &[], "projects_read");
+    assert!(reason.contains("'authz.projects_with'"), "{reason}");
+    assert!(!reason.contains("recursion"), "{reason}");
+}
+
+/// A subquery over the call that projects or keeps anything but the rows it returns, or
+/// that `PostgreSQL` refuses outright, is not read as the helper's set.
+#[test]
+fn a_call_in_from_projecting_or_filtering_its_rows_is_not_the_declared_set() {
+    for subquery in [
+        "SELECT lower(p) FROM authz.projects_with('read') p",
+        "SELECT 'read' FROM authz.projects_with('read') p",
+        "SELECT p FROM authz.projects_with('read') p WHERE p <> 'archived'",
+        "SELECT p FROM authz.projects_with('read') p LIMIT 1",
+        "SELECT p FROM authz.projects_with('read') p, projects",
+        "SELECT p.id FROM authz.projects_with('read') WITH ORDINALITY p(id, n) WHERE p.n = 1",
+        "SELECT p, p FROM authz.projects_with('read') p",
+        "SELECT p.id FROM authz.projects_with('read') p(id, n)",
+        "SELECT public.p.id FROM authz.projects_with('read') p(id)",
+    ] {
+        let sql = format!(
+            "{LEVELS}{OWNER_READS}
+             ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY orders_read ON orders FOR SELECT USING (
+               project_id IN ({subquery}));"
+        );
+        let classified = using_of(&sql, BOTH, "orders_read");
+        assert!(
+            matches!(classified.pattern, PatternClass::Unknown(_)),
+            "{subquery}: {classified:?}"
+        );
+    }
 }
 
 #[test]
