@@ -2163,6 +2163,35 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
         }
     }
 
+    /// A role keyword in an expanded body is refused for the deployment that names it, and
+    /// the refusal names the function whose body reads it.
+    #[test]
+    fn a_role_keyword_in_an_expanded_body_names_the_function() {
+        let db = parse_schema(
+            r"
+CREATE TABLE docs (id UUID PRIMARY KEY, status TEXT);
+CREATE FUNCTION held_by_caller(holder TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE AS $$ SELECT holder = current_user $$;
+",
+        )
+        .expect("schema should parse");
+        let registry = FunctionRegistry::new();
+        let classified = classify_expr(
+            &parse_expr("held_by_caller(status)"),
+            &db,
+            &registry,
+            "docs",
+            PolicyCommand::Select,
+        );
+        let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &classified.pattern else {
+            panic!("expected Unknown, got: {:?}", classified.pattern);
+        };
+        assert!(
+            reason.contains("held_by_caller") && reason.contains("no deployment names one"),
+            "{reason}"
+        );
+    }
+
     /// Lead 3 named the unrecognized call. An operator carries no function to name, so
     /// these shapes kept the generic reason and sent the operator reading the whole
     /// clause to find which piece defeated recognition.
