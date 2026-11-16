@@ -11,7 +11,8 @@ use crate::generator::well_known::member_relation;
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::types::{
-    ColumnName, ConditionName, ContextWitness, RelationName, RequestComparison, TableId, TypeName,
+    ColumnName, ConditionName, ContextWitness, RelationName, RequestComparison,
+    RequestNormalization, TableId, TypeName,
 };
 
 /// The shared object identifier of a keyless table.
@@ -264,6 +265,9 @@ pub(crate) enum TupleSource {
         request_parameter: String,
         /// Session setting the caller's value mirrors, so the contract can name it.
         setting_key: String,
+        /// The function the policy applies to that setting, whose result the caller
+        /// supplies in its place.
+        normalization: Option<RequestNormalization>,
         /// Separator the policy splits that setting on, for a list parameter.
         separator: Option<String>,
         /// How the two sides are compared.
@@ -336,6 +340,9 @@ pub(crate) enum TupleSource {
         request_parameter: String,
         /// Session setting the caller's value mirrors, so the contract can name it.
         setting_key: String,
+        /// The function the policy applies to that setting, whose result the caller
+        /// supplies in its place.
+        normalization: Option<RequestNormalization>,
         /// Separator the policy splits that setting on, absent for a list source.
         separator: Option<String>,
         /// How the member value is compared with the request value.
@@ -1098,6 +1105,7 @@ impl TupleSource {
                 // The caller's contract, which the notes carry off the plan's own sources.
                 // Named rather than elided, so a field added here has to be decided about.
                 setting_key: _,
+                normalization: _,
                 separator: _,
             } => TupleSourceKey::SessionAttributeGate {
                 table,
@@ -1161,6 +1169,7 @@ impl TupleSource {
                 extra_predicates,
                 temporal_context,
                 setting_key: _,
+                normalization: _,
                 separator: _,
             } => TupleSourceKey::RequestShareGate {
                 share_type,
@@ -1591,6 +1600,7 @@ mod tests {
             member_col: ColumnName::from_stored("viewer"),
             request_parameter: "subjects".to_string(),
             setting_key: "app.subjects".to_string(),
+            normalization: None,
             separator: Some(",".to_string()),
             comparison: RequestComparison::CallerSetHolds,
             extra_predicates: ResidualPredicates::new({
@@ -1624,14 +1634,16 @@ mod tests {
         );
     }
 
-    /// The two fields the key leaves out, stated rather than elided.
+    /// The three fields the key leaves out, stated rather than elided.
     ///
-    /// Neither reaches the query or the relation shapes: they name the caller's contract,
+    /// None reaches the query or the relation shapes: they name the caller's contract,
     /// which the notes carry from the plan's own sources. Two gates differing only there
     /// render one query and are one key.
     #[test]
     fn dedup_key_ignores_the_caller_contract_fields() {
-        let gate = |setting_key: &str, separator: Option<&str>| TupleSource::SessionAttributeGate {
+        let gate = |setting_key: &str,
+                    normalization: Option<RequestNormalization>,
+                    separator: Option<&str>| TupleSource::SessionAttributeGate {
             table: table("docs"),
             identity_cols: vec![ColumnName::from_stored("id")],
             relation: owner_user_relation(),
@@ -1640,14 +1652,16 @@ mod tests {
             column: ColumnName::from_stored("owner"),
             request_parameter: "subjects".to_string(),
             setting_key: setting_key.to_string(),
+            normalization,
             separator: separator.map(str::to_string),
             comparison: RequestComparison::CallerSetHolds,
         };
 
         assert_eq!(
-            gate("app.subjects", Some(",")).dedup_key(),
-            gate("app.teams", Some(";")).dedup_key(),
-            "the setting key and its separator name the contract, not the query"
+            gate("app.subjects", None, Some(",")).dedup_key(),
+            gate("app.teams", Some(RequestNormalization::Lower), Some(";")).dedup_key(),
+            "the setting key, its normalization and its separator name the contract, not \
+             the query"
         );
     }
 }

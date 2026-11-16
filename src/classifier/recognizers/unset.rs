@@ -12,7 +12,7 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
 
-use super::session::{bare_declared_read, fallback_read, set_read, sole_projection};
+use super::session::{bare_declared_read, fallback_read, lowered_value, set_read, sole_projection};
 use super::{accessor_read, caller_source, string_literal, unparenthesize};
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::parser::expr::unwrap_cast_or_nested;
@@ -274,11 +274,18 @@ fn compare<'r>(
 
 /// The declaration of the single value `expr` reads, the caller or a scalar, when a
 /// request may leave it unset. A read wrapped in `NULLIF` reads `''` as `NULL` and is
-/// not one.
+/// not one, while `lower('')` is `''`, so a lowered bare read is.
 fn unset_value<'r>(expr: &Expr, registry: &'r FunctionRegistry) -> Option<&'r DeclaredSource> {
     let caller = accessor_read(expr).and_then(|read| caller_source(&read, registry));
     caller
-        .or_else(|| bare_declared_read(expr, registry).map(|(source, _)| source))
+        .or_else(|| {
+            bare_declared_read(expr, registry)
+                .or_else(|| {
+                    lowered_value(expr)
+                        .and_then(|(_, argument)| bare_declared_read(argument, registry))
+                })
+                .map(|(source, _)| source)
+        })
         .filter(|source| source.may_be_unset())
 }
 
@@ -338,6 +345,24 @@ mod tests {
         assert!(
             settings_read(owner, vec![caller("app.user_id")]).is_empty(),
             "a setting every request sets has no empty reading"
+        );
+    }
+
+    /// `lower('')` is `''`, so a lowered value compared with a row value matches the rows
+    /// holding `''` as the value itself does, and a read through `NULLIF` never does.
+    #[test]
+    fn a_lowered_value_matches_the_empty_text_as_the_value_does() {
+        let unset = || vec![scalar("app.email").may_be_unset()];
+        assert_eq!(
+            settings_read("email = lower(current_setting('app.email', true))", unset()),
+            ["app.email"]
+        );
+        assert_eq!(
+            settings_read(
+                "email = lower(NULLIF(current_setting('app.email', true), ''))",
+                unset()
+            ),
+            Vec::<String>::new()
         );
     }
 

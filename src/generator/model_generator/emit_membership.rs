@@ -3,7 +3,10 @@
 //! Membership through a join table, a membership naming no column of the guarded table, a
 //! parent rule through a foreign key, and the two shapes that combine other patterns.
 
-use super::emit_requests::{declare_condition, request_comparison_spec, request_gate_on};
+use super::emit_requests::{
+    declare_condition, request_comparison_spec, request_gate_on, reserve_temporal_clocks,
+    temporal_gates,
+};
 use super::*;
 
 use crate::classifier::expansion::ExpansionState;
@@ -1821,7 +1824,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
     let unsplit = match grant.grantee {
         HelperGrantee::Caller { .. }
         | HelperGrantee::Principal { .. }
-        | HelperGrantee::RequestSet { .. } => member_relation().to_string(),
+        | HelperGrantee::RequestValue { .. } => member_relation().to_string(),
         HelperGrantee::Set { .. } | HelperGrantee::Anyone => {
             stored_relation_name(grant.table.name())
         }
@@ -1876,7 +1879,7 @@ fn helper_grant_parts<DB: DatabaseLike>(
                 })
                 .collect();
         }
-        HelperGrantee::RequestSet {
+        HelperGrantee::RequestValue {
             value_column,
             source,
         } => {
@@ -1884,7 +1887,6 @@ fn helper_grant_parts<DB: DatabaseLike>(
                 table: &grant.table,
                 value_column,
                 source,
-                comparison: RequestComparison::CallerSetHolds,
             };
             let Some((identity_cols, share_type, gates)) =
                 share.gates(groups, ctx, table_plan, all_types)
@@ -2811,12 +2813,11 @@ fn caller_grant_relation<DB: DatabaseLike>(
 }
 
 /// The rows of a table admitting whoever presents a value the request compares with
-/// each row's.
+/// each row's, the one value the source carries or one of the set's.
 struct RequestShares<'a> {
     table: &'a TableId,
     value_column: &'a ColumnName,
     source: &'a DeclaredSource,
-    comparison: RequestComparison,
 }
 
 impl RequestShares<'_> {
@@ -2824,7 +2825,9 @@ impl RequestShares<'_> {
     /// one per group of rows, with the table's row identity and its share type. `None`
     /// where the table has no row identity.
     ///
-    /// Each row is an object of its own, so one condition parameter carries its value.
+    /// Each row is an object of its own, so one condition parameter carries its value. A
+    /// group kept by the statement time compares its row's bound with the request clock
+    /// in the same condition, and a group whose bound has no condition admits nobody.
     fn gates<DB: DatabaseLike>(
         &self,
         groups: Vec<(String, ResidualPredicates)>,
@@ -2839,18 +2842,55 @@ impl RequestShares<'_> {
         };
         let share_type = share_type_name(table, ctx.table_types);
         let request_parameter = self.source.condition_parameter();
-        let mut namespace = ctx.condition_parameters.namespace([request_parameter]);
-        let row_parameter = namespace.allocate_row(self.value_column.as_str());
+        let comparison = if self.source.packing().is_some() {
+            RequestComparison::CallerSetHolds
+        } else {
+            RequestComparison::CallerValueEquals
+        };
         let separator = self.source.separator().map(str::to_string);
         let share_plan = all_types.entry(share_type.clone()).or_insert_with(|| {
             TypePlan::new_with_well_known(share_type.clone(), &ctx.settings.well_known)
         });
-        let condition = declare_condition(
-            share_plan,
-            request_comparison_spec(&row_parameter, request_parameter, self.comparison),
-        );
         let mut gates = Vec::with_capacity(groups.len());
         for (base, extra_predicates) in groups {
+            let mut namespace = ctx.condition_parameters.namespace([request_parameter]);
+            reserve_temporal_clocks(&extra_predicates, ctx.condition_parameters, &mut namespace);
+            let row_parameter = namespace.allocate_row(self.value_column.as_str());
+            let temporal = if extra_predicates.has_requests() {
+                let Some(temporal) = temporal_gates(
+                    &extra_predicates,
+                    table,
+                    ctx.condition_parameters,
+                    &mut namespace,
+                    ctx.db,
+                ) else {
+                    continue;
+                };
+                temporal
+            } else {
+                Vec::new()
+            };
+            let mut spec = request_comparison_spec(&row_parameter, request_parameter, comparison);
+            for gate in &temporal {
+                spec.expression = format!("{} && {}", spec.expression, gate.fragment);
+                spec.parameters.extend([
+                    (
+                        gate.parameter.to_string(),
+                        ConditionParameter::Scalar(TIMESTAMP_PARAMETER_TYPE),
+                    ),
+                    gate.clock.declaration(),
+                ]);
+            }
+            let condition = declare_condition(share_plan, spec);
+            let temporal_context: Vec<GateContextColumn> = temporal
+                .into_iter()
+                .map(|gate| GateContextColumn {
+                    parameter: gate.parameter.to_string(),
+                    column: gate.column,
+                    witness: gate.witness,
+                    monotone: gate.monotone,
+                })
+                .collect();
             let key = membership_source_key(
                 table,
                 &identity_cols,
@@ -2858,9 +2898,9 @@ impl RequestShares<'_> {
                 &extra_predicates,
                 Some(MembershipSourceGate {
                     condition: &condition,
-                    context: &[],
+                    context: &temporal_context,
                     aggregate: false,
-                    clocked: false,
+                    clocked: !temporal_context.is_empty(),
                     inputs: &[
                         row_parameter.as_str(),
                         request_parameter.as_str(),
@@ -2880,15 +2920,16 @@ impl RequestShares<'_> {
                 identity_cols: identity_cols.clone(),
                 share_type: share_type.clone(),
                 relation: gate.clone(),
-                condition: condition.clone(),
+                condition,
                 row_parameter: row_parameter.to_string(),
                 member_col: self.value_column.clone(),
                 request_parameter: request_parameter.to_string(),
                 setting_key: self.source.setting_key().to_string(),
+                normalization: self.source.normalization(),
                 separator: separator.clone(),
-                comparison: self.comparison,
+                comparison,
                 extra_predicates,
-                temporal_context: Vec::new(),
+                temporal_context,
             };
             share_plan.add_source(gate_source.clone());
             // The guarded table's own sources state what its checks ask of the caller.
@@ -2930,7 +2971,6 @@ pub(crate) fn emit_request_value_in_helper_set<DB: DatabaseLike>(
             table: &arm.table,
             value_column: &arm.value_column,
             source: &test.source,
-            comparison: RequestComparison::CallerValueEquals,
         };
         let groups = grant_row_groups(
             &GrantRows::Matching {

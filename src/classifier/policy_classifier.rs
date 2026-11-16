@@ -611,7 +611,7 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
             HelperGrantee::Set { call, .. } => helper_call_refusal(call, db),
             HelperGrantee::Caller { .. }
             | HelperGrantee::Principal { .. }
-            | HelperGrantee::RequestSet { .. }
+            | HelperGrantee::RequestValue { .. }
             | HelperGrantee::Anyone => None,
         })
         .or_else(|| {

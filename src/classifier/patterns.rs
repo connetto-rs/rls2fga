@@ -828,12 +828,13 @@ pub enum HelperGrantee {
         /// Column holding the caller.
         user_column: ColumnName,
     },
-    /// `<value column> = ANY (<set>)`, each row admitting whoever presents its value in
-    /// a set the request carries.
-    RequestSet {
-        /// Column whose value the set has to hold.
+    /// `<value column> = <value>` or `<value column> = ANY (<set>)`, each row admitting
+    /// whoever presents its value as the value the request carries or in the set it
+    /// carries.
+    RequestValue {
+        /// Column whose value the request has to present.
         value_column: ColumnName,
-        /// The declared set, carrying the parameter the caller supplies.
+        /// The declared value or set, carrying the parameter the caller supplies.
         source: DeclaredSource,
     },
     /// `<principal column> = current_setting(<principal>)`, each row admitting whoever
@@ -859,8 +860,8 @@ pub enum HelperGrantee {
 
 impl HelperGrantee {
     /// The grant table's column compared with the caller, with another principal the
-    /// request acts for, with a set the request carries or with the grantees a set holds,
-    /// `None` for an arm naming nobody.
+    /// request acts for, with a value or set the request carries or with the grantees a
+    /// set holds, `None` for an arm naming nobody.
     #[must_use]
     pub fn compared_column(&self) -> Option<&ColumnName> {
         match self {
@@ -868,7 +869,7 @@ impl HelperGrantee {
             Self::Principal {
                 principal_column, ..
             } => Some(principal_column),
-            Self::RequestSet { value_column, .. } => Some(value_column),
+            Self::RequestValue { value_column, .. } => Some(value_column),
             Self::Set { grantee_column, .. } => Some(grantee_column),
             Self::Anyone => None,
         }

@@ -10,7 +10,9 @@ use rls2fga::generator::tuple_generator::SkippedTuples;
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::{AttributeLiteral, AttributePredicate, AttributeTest, ConfidenceLevel};
-use rls2fga::types::{ColumnName, RequestPredicate, RowDecision, TranslationNote};
+use rls2fga::types::{
+    ColumnName, RequestNormalization, RequestPredicate, RowDecision, TranslationNote,
+};
 use sqlparser::ast::DataType;
 
 use crate::support::deployment::{
@@ -470,10 +472,6 @@ fn every_unproven_call_is_refused() {
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT p.id FROM public.projects p WHERE p.team_id IN (SELECT authz.projects_with(min_role))
              $$;
-             CREATE FUNCTION authz.tenant_teams() RETURNS SETOF TEXT
-             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-               SELECT g.team_id FROM public.team_grants g WHERE g.principal_id = current_setting('app.tenant', true)
-             $$;
              CREATE FUNCTION authz.mixed() RETURNS SETOF TEXT
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT g.team_id FROM public.team_grants g WHERE g.principal_id = current_setting('app.user_id', true)
@@ -481,7 +479,6 @@ fn every_unproven_call_is_refused() {
                SELECT g.project_id FROM public.project_grants g WHERE g.principal_id = current_setting('app.user_id', true)
              $$;
              ALTER FUNCTION authz.misparented(TEXT) OWNER TO authz_owner;
-             ALTER FUNCTION authz.tenant_teams() OWNER TO authz_owner;
              ALTER FUNCTION authz.mixed() OWNER TO authz_owner;
              ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
              ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
@@ -493,7 +490,6 @@ fn every_unproven_call_is_refused() {
         "authz.projects_with",
         "authz.teams_with",
         "authz.misparented",
-        "authz.tenant_teams",
         "authz.mixed",
     ];
     let named = [
@@ -511,11 +507,6 @@ fn every_unproven_call_is_refused() {
             "projects_read",
             "team_id = ANY (ARRAY(SELECT authz.misparented('read')))",
             "column 'team_id' names rows of 'public.teams'",
-        ),
-        (
-            "projects_read",
-            "team_id = ANY (ARRAY(SELECT authz.tenant_teams()))",
-            "compares a column with setting `app.tenant` as the identity of a principal, which it is not",
         ),
         (
             "orders_read",
@@ -781,6 +772,131 @@ CREATE POLICY docs_installation ON docs AS RESTRICTIVE FOR SELECT
   USING (current_setting('app.installation_id', true) = ''
          OR current_setting('app.installation_id', true) IN (SELECT authz.installations_allowing('docs', 'select')));
 ";
+
+/// Invitations a helper returns to whoever presents the address they name, as
+/// `lower(...)` makes of the request's verified email, read through an accessor and
+/// inline, and an exact address, and share links a helper returns while they last to
+/// whoever presents them.
+pub(crate) const INVITATIONS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE invitations (id TEXT PRIMARY KEY, email TEXT NOT NULL CHECK (email = lower(email)),
+  accepted_by TEXT, expires_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE share_links (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL);
+CREATE TABLE memberships (id TEXT PRIMARY KEY, invitation_id TEXT REFERENCES invitations (id));
+CREATE TABLE claims (id TEXT PRIMARY KEY, invitation_id TEXT NOT NULL REFERENCES invitations (id));
+CREATE TABLE notices (id TEXT PRIMARY KEY, invitation_id TEXT NOT NULL REFERENCES invitations (id));
+CREATE TABLE docs (id TEXT PRIMARY KEY, link_id TEXT NOT NULL REFERENCES share_links (id));
+GRANT SELECT ON invitations, share_links TO authz_owner;
+CREATE FUNCTION authz.verified_email() RETURNS TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT lower(NULLIF(current_setting('app.verified_email', true), ''))
+$$;
+CREATE FUNCTION authz.pending_invitations() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT invitation.id FROM public.invitations invitation
+  WHERE invitation.email = authz.verified_email() AND invitation.accepted_by IS NULL
+    AND invitation.expires_at > now()
+$$;
+CREATE FUNCTION authz.claimable() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT invitation.id FROM public.invitations invitation
+  WHERE invitation.email = lower(NULLIF(current_setting('app.verified_email', true), ''))
+$$;
+CREATE FUNCTION authz.addressed() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT invitation.id FROM public.invitations invitation
+  WHERE invitation.email = NULLIF(current_setting('app.verified_email', true), '')
+$$;
+CREATE FUNCTION authz.live_links() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT link.id FROM public.share_links link
+  WHERE link.id = ANY (string_to_array(current_setting('app.link_ids', true), ','))
+    AND link.expires_at > now()
+$$;
+ALTER FUNCTION authz.verified_email() OWNER TO authz_owner;
+ALTER FUNCTION authz.pending_invitations() OWNER TO authz_owner;
+ALTER FUNCTION authz.claimable() OWNER TO authz_owner;
+ALTER FUNCTION authz.addressed() OWNER TO authz_owner;
+ALTER FUNCTION authz.live_links() OWNER TO authz_owner;
+ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+CREATE POLICY memberships_read ON memberships FOR SELECT USING (
+  invitation_id = ANY (ARRAY(SELECT authz.pending_invitations())));
+ALTER TABLE claims ENABLE ROW LEVEL SECURITY;
+CREATE POLICY claims_read ON claims FOR SELECT USING (
+  invitation_id IN (SELECT authz.claimable()));
+ALTER TABLE notices ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notices_read ON notices FOR SELECT USING (
+  invitation_id IN (SELECT authz.addressed()));
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  link_id = ANY (ARRAY(SELECT authz.live_links())));
+";
+
+/// The helpers [`INVITATIONS`] reads.
+pub(crate) const INVITATION_HELPERS: &[&str] = &[
+    "authz.pending_invitations",
+    "authz.claimable",
+    "authz.addressed",
+    "authz.live_links",
+];
+
+/// A grant arm comparing its column with a declared scalar admits whoever presents the
+/// row's value, the lowered value under a key of its own and the address as sent under
+/// the setting's, never the caller, and a set kept by the statement time carries its
+/// bound beside the set.
+#[test]
+fn a_grant_arm_compared_with_a_scalar_admits_whoever_presents_its_value() {
+    let outputs = TranslatorBuilder::new(deployment([
+        scalar("app.verified_email").may_be_unset(),
+        delimited_set("app.link_ids", ","),
+    ]))
+    .with_min_confidence(ConfidenceLevel::A)
+    .with_declared_helpers(INVITATION_HELPERS)
+    .build()
+    .translate(&db_of(INVITATIONS))
+    .expect("the schema should plan")
+    .outputs()
+    .expect("every clause should translate");
+    let model = outputs.model();
+    for read in [
+        "\"app_verified_email_lower\" in settings && \
+         settings[\"app_verified_email_lower\"] == email && expires_at > request_time\n",
+        "\"app_verified_email_lower\" in settings && \
+         settings[\"app_verified_email_lower\"] == email\n",
+        "\"app_verified_email\" in settings && settings[\"app_verified_email\"] == email\n",
+        "id in app_link_ids && expires_at > request_time\n",
+    ] {
+        assert!(model.contains(read), "`{read}` in\n{model}");
+    }
+    let mut contracts: Vec<_> = outputs
+        .notes()
+        .iter()
+        .filter_map(|note| match note {
+            TranslationNote::CallerSuppliesConditionParameter {
+                parameter,
+                normalization,
+                ..
+            } => Some((parameter.as_str(), *normalization)),
+            _ => None,
+        })
+        .collect();
+    contracts.sort();
+    contracts.dedup();
+    assert_eq!(
+        contracts,
+        [
+            ("app_link_ids", None),
+            ("app_verified_email", None),
+            (
+                "app_verified_email_lower",
+                Some(RequestNormalization::Lower)
+            ),
+            ("request_time", None),
+        ]
+    );
+}
 
 /// The helpers [`REQUEST_VALUES`] reads.
 pub(crate) const REQUEST_HELPERS: &[&str] =
@@ -1054,20 +1170,17 @@ fn a_negated_absence_test_is_the_opposite_test() {
 
 /// A request value behind a helper falls closed where the rows it reads depend on the
 /// request or on the statement time, and so does a grant to everyone kept by the
-/// statement time and a caller gate on rows a request's set admits.
+/// statement time, a caller gate on rows a request's set admits, a value a request may
+/// leave unset read without `NULLIF`, and a lowered value whose key a declared setting
+/// takes.
 #[test]
 fn request_values_the_gates_cannot_carry_are_refused() {
     let policy = |using: &str| {
         format!(
             "{LEVELS}{OWNER_READS}{REQUEST_VALUES}
              CREATE TABLE expiring_links (id TEXT PRIMARY KEY, expires_at TIMESTAMPTZ NOT NULL);
-             GRANT SELECT ON expiring_links TO authz_owner;
-             CREATE FUNCTION authz.live_links() RETURNS SETOF TEXT
-             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
-               SELECT e.id FROM public.expiring_links e
-               WHERE e.id = ANY (string_to_array(current_setting('app.link_ids', true), ','))
-                 AND e.expires_at > now()
-             $$;
+             CREATE TABLE addressed_links (id TEXT PRIMARY KEY, address TEXT NOT NULL);
+             GRANT SELECT ON expiring_links, addressed_links TO authz_owner;
              CREATE FUNCTION authz.live_ids() RETURNS SETOF TEXT
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT e.id FROM public.expiring_links e WHERE e.expires_at > now()
@@ -1078,9 +1191,20 @@ fn request_values_the_gates_cannot_carry_are_refused() {
                WHERE l.id = ANY (string_to_array(current_setting('app.link_ids', true), ','))
                  AND current_setting('app.user_id', true) <> 'anonymous'
              $$;
-             ALTER FUNCTION authz.live_links() OWNER TO authz_owner;
+             CREATE FUNCTION authz.addressed_bare() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT a.id FROM public.addressed_links a
+               WHERE a.address = current_setting('app.email', true)
+             $$;
+             CREATE FUNCTION authz.addressed_lowered() RETURNS SETOF TEXT
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT a.id FROM public.addressed_links a
+               WHERE a.address = lower(NULLIF(current_setting('app.email', true), ''))
+             $$;
              ALTER FUNCTION authz.live_ids() OWNER TO authz_owner;
              ALTER FUNCTION authz.gated_links() OWNER TO authz_owner;
+             ALTER FUNCTION authz.addressed_bare() OWNER TO authz_owner;
+             ALTER FUNCTION authz.addressed_lowered() OWNER TO authz_owner;
              CREATE FUNCTION authz.allowing_twice(target TEXT) RETURNS SETOF TEXT
              LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
                SELECT ip.installation_id FROM public.installation_permissions ip
@@ -1095,6 +1219,7 @@ fn request_values_the_gates_cannot_carry_are_refused() {
              CREATE TABLE notes (id TEXT PRIMARY KEY,
                link_id TEXT NOT NULL REFERENCES share_links (id),
                live_id TEXT NOT NULL REFERENCES expiring_links (id),
+               addressed_id TEXT NOT NULL REFERENCES addressed_links (id),
                project_id TEXT REFERENCES projects (id));
              ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
              CREATE POLICY notes_read ON notes FOR SELECT USING ({using});"
@@ -1103,15 +1228,18 @@ fn request_values_the_gates_cannot_carry_are_refused() {
     let helpers = [
         "authz.presented_links",
         "authz.installations_allowing",
-        "authz.live_links",
         "authz.live_ids",
         "authz.gated_links",
+        "authz.addressed_bare",
+        "authz.addressed_lowered",
         "authz.allowing_twice",
     ];
     let translator = TranslatorBuilder::new(deployment([
         caller("app.user_id"),
         scalar("app.installation_id"),
         delimited_set("app.link_ids", ","),
+        scalar("app.email").may_be_unset(),
+        scalar("app.email_lower"),
     ]))
     .with_min_confidence(ConfidenceLevel::B)
     .with_declared_helpers(helpers)
@@ -1127,18 +1255,22 @@ fn request_values_the_gates_cannot_carry_are_refused() {
              statement time",
         ),
         (
-            "live_id = ANY (ARRAY(SELECT authz.live_links()))",
-            "keeps the rows of 'public.expiring_links' it compares with a request value by the \
-             statement time",
-        ),
-        (
             "live_id = ANY (ARRAY(SELECT authz.live_ids()))",
             "keeps the rows of 'public.expiring_links' naming a set of grantees or everyone by \
              the statement time",
         ),
         (
             "link_id = ANY (ARRAY(SELECT authz.gated_links()))",
-            "excludes callers from rows a set the request carries admits",
+            "excludes callers from rows a value the request carries admits",
+        ),
+        (
+            "addressed_id = ANY (ARRAY(SELECT authz.addressed_bare()))",
+            "compares a column with setting 'app.email' read without NULLIF",
+        ),
+        (
+            "addressed_id = ANY (ARRAY(SELECT authz.addressed_lowered()))",
+            "compares a column with lower(app.email), whose key in the settings map a \
+             declared setting already takes",
         ),
         (
             "current_setting('app.installation_id', true) IN (SELECT authz.gated_links())",

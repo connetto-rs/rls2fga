@@ -398,6 +398,82 @@ async fn scalar_setting_parity() {
     }
 }
 
+/// A caller holding `email` in its session, or nothing where the request leaves it unset.
+fn email_caller(subject: &str, email: Option<&str>) -> Principal {
+    let mut principal = Principal::as_role(subject, "app_reader");
+    if let Some(email) = email {
+        principal.session.push(("app.email".into(), email.into()));
+    }
+    principal
+}
+
+/// A row value and a constant are each compared with `lower` of a declared value the
+/// request may leave unset, through `NULLIF` and bare. The check carries what the
+/// database's `lower` returns under `app_email_lower`, so a mixed-case value and one
+/// outside ASCII lower as `PostgreSQL` 18 lowers them, and `OpenFGA` agrees with it.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn lowered_setting_parity() {
+    let cluster = Cluster::start().await;
+    for from_rows in [false, true] {
+        let mut case = ParityCase::reading(
+            if from_rows {
+                "lowered-setting-rows"
+            } else {
+                "lowered-setting"
+            },
+            "CREATE TABLE inboxes(
+                 id TEXT PRIMARY KEY,
+                 email TEXT NOT NULL CHECK (email = lower(email)));
+             ALTER TABLE inboxes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY inbox_read ON inboxes FOR SELECT USING (
+                 email = lower(NULLIF(current_setting('app.email', true), '')));
+             CREATE TABLE notices(id TEXT PRIMARY KEY);
+             ALTER TABLE notices ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notice_read ON notices FOR SELECT USING (
+                 lower(current_setting('app.email', true)) = 'ann@example.com');",
+            &[
+                "INSERT INTO inboxes VALUES ('ann', 'ann@example.com'), \
+                 ('emile', 'émile@example.com');",
+                "INSERT INTO notices VALUES ('n1');",
+                "CREATE ROLE app_reader LOGIN;
+                 GRANT SELECT ON inboxes, notices TO app_reader",
+            ],
+            vec![
+                email_caller("ann", Some("Ann@Example.COM")),
+                email_caller("emile", Some("ÉMILE@EXAMPLE.COM")),
+                email_caller("other", Some("bob@example.com")),
+                email_caller("unset", None),
+            ],
+        )
+        .with_settings([deployment::scalar("app.email").may_be_unset()]);
+        case.loading_from_rows = from_rows;
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(120)).await;
+        for (subject, object, allowed) in [
+            ("ann", "inboxes:ann", true),
+            ("ann", "inboxes:emile", false),
+            ("ann", "notices:n1", true),
+            ("emile", "inboxes:emile", true),
+            ("emile", "inboxes:ann", false),
+            ("emile", "notices:n1", false),
+            ("other", "inboxes:ann", false),
+            ("other", "notices:n1", false),
+            ("unset", "inboxes:ann", false),
+            ("unset", "notices:n1", false),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
 /// A caller holding `value` in both the bare setting and the JSON field, or neither where
 /// the request leaves the setting unset.
 fn mode_caller(subject: &str, value: Option<&str>) -> Principal {

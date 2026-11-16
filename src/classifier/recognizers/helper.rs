@@ -33,10 +33,10 @@ use crate::parser::names::{
 use crate::parser::sql_parser::{
     CallerGate, CapLift, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike,
     ForeignKeyLike, FunctionLike, GrantArm, GrantedTo, HelperArm, HelperSet, JoinedRow, ParentArm,
-    Restriction, RowCap, SettingContent, SettingPresence, SettingValue, TableLike, TimeBound,
-    TimeComparison,
+    Restriction, RowCap, SettingComparison, SettingContent, SettingPresence, SettingValue,
+    TableLike, TimeBound, TimeComparison,
 };
-use crate::types::{ColumnKind, ColumnName, TypeName};
+use crate::types::{ColumnKind, ColumnName, RequestNormalization, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
 
 /// Why a call to a declared helper does not translate.
@@ -137,15 +137,42 @@ pub(crate) enum HelperRefusal {
         /// The excluded value as written.
         value: String,
     },
-    /// A gate excludes callers from rows admitting whoever presents a value of a set
-    /// the request carries.
+    /// A gate excludes callers from rows admitting whoever presents a value the request
+    /// carries.
     #[error(
-        "declared helper '{function}' excludes callers from rows a set the request \
+        "declared helper '{function}' excludes callers from rows a value the request \
          carries admits"
     )]
-    ExcludedFromRequestSet {
+    ExcludedFromRequestValue {
         /// The helper.
         function: String,
+    },
+    /// An arm compares a column with a value a request may leave unset, read without
+    /// `NULLIF`, so the `''` an ended transaction-local value reads as keeps rows.
+    #[error(
+        "declared helper '{function}' compares a column with setting '{setting}' read \
+         without NULLIF, which a request leaving it unset may read as '' and match rows \
+         holding ''"
+    )]
+    UnsetReadAsEmpty {
+        /// The helper.
+        function: String,
+        /// The setting compared with.
+        setting: String,
+    },
+    /// An arm compares a column with a normalized value whose key a declared setting
+    /// already takes, so the caller could not send both.
+    #[error(
+        "declared helper '{function}' compares a column with {normalization}({setting}), \
+         whose key in the settings map a declared setting already takes"
+    )]
+    NormalizedKeyTaken {
+        /// The helper.
+        function: String,
+        /// The setting normalized.
+        setting: String,
+        /// The function normalizing it.
+        normalization: &'static str,
     },
     /// A gate excludes callers from rows admitting whoever acts for a principal they name.
     #[error(
@@ -182,10 +209,12 @@ pub(crate) enum HelperRefusal {
         /// The setting compared with the set.
         setting: String,
     },
-    /// An arm compared with a request value keeps its rows by the statement time.
+    /// An arm of a set compared with a request value keeps its rows by the statement
+    /// time.
     #[error(
         "declared helper '{function}' keeps the rows of '{table}' it compares with a \
-         request value by the statement time, which no request-value gate carries"
+         request value by the statement time, which a set compared with a request value \
+         does not carry"
     )]
     TimeBoundedRequestValues {
         /// The helper.
@@ -496,11 +525,11 @@ pub(crate) fn recognize_declared_helper<DB: DatabaseLike>(
                     function: function.target_name().to_string(),
                 })
             } else {
-                request_value_in_helper_set(function, arguments, source, db, registry)
+                request_value_in_helper_set(function, arguments, &source, db, registry)
             };
             (
                 pattern.map(PatternClass::P27RequestValueInHelperSet),
-                grade(source),
+                grade(&source),
             )
         };
     Some(match pattern {
@@ -857,8 +886,8 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
     })
 }
 
-/// Refuses an arm keeping rows by the statement time, which no gate comparing a row's
-/// value with the request carries.
+/// Refuses an arm keeping rows by the statement time, which the gate stating a set
+/// compared with a request value does not carry.
 fn bounded_by_no_time<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
@@ -1053,16 +1082,19 @@ fn helper_grant<DB: DatabaseLike>(
         GrantedTo::Request(compared) => {
             let column = ColumnName::from_stored(compared.column().stored_column_name());
             // `sql-traits` compares a column with the caller, with another principal the
-            // deployment declares, or with the elements of a whole setting declared as a
-            // set.
+            // deployment declares, with a declared scalar, normalized or not, or with the
+            // elements of a whole setting declared as a set.
             match compared.setting().content() {
                 SettingContent::Value(value @ SettingValue::Set { .. }) => {
-                    bounded_by_no_time(function, grant)?;
-                    HelperGrantee::RequestSet {
+                    HelperGrantee::RequestValue {
                         value_column: column,
                         source: DeclaredSource::whole(compared.setting(), value.clone()),
                     }
                 }
+                SettingContent::Value(SettingValue::Scalar(_)) => HelperGrantee::RequestValue {
+                    value_column: column,
+                    source: compared_scalar(function, compared, registry)?,
+                },
                 SettingContent::Value(SettingValue::Principal { kind, .. }) => {
                     HelperGrantee::Principal {
                         principal_column: column,
@@ -1177,6 +1209,46 @@ fn helper_grant<DB: DatabaseLike>(
     Ok(grant)
 }
 
+/// The declared scalar a grant arm compares a column with, or the value of its own its
+/// normalization makes of it, which the caller sends in the scalar's place.
+///
+/// A read without `NULLIF` of a scalar a request may leave unset reads `''` once a
+/// transaction-local value has ended, and keeps the rows holding `''`, which a request
+/// omitting the value never matches in the model, so it is refused.
+fn compared_scalar<DB: DatabaseLike>(
+    function: &str,
+    compared: &SettingComparison<'_, DB>,
+    registry: &FunctionRegistry,
+) -> Result<DeclaredSource, HelperRefusal> {
+    let setting = compared.setting().name();
+    let source = registry
+        .declared_source(setting, &[])
+        .filter(|source| source.is_scalar())
+        .ok_or_else(|| HelperRefusal::NoDeployment {
+            function: function.to_string(),
+        })?;
+    if source.may_be_unset() && !compared.excludes_unset() {
+        return Err(HelperRefusal::UnsetReadAsEmpty {
+            function: function.to_string(),
+            setting: setting.to_string(),
+        });
+    }
+    let Some(normalization) = compared.normalization() else {
+        return Ok(source.clone());
+    };
+    let normalization = match normalization {
+        sql_traits::structs::RequestNormalization::Lower => RequestNormalization::Lower,
+    };
+    registry
+        .sources()
+        .normalized(source, normalization)
+        .ok_or_else(|| HelperRefusal::NormalizedKeyTaken {
+            function: function.to_string(),
+            setting: setting.to_string(),
+            normalization: normalization.function_name(),
+        })
+}
+
 /// The bound as the comparison the request clock completes, `now()` read unshifted.
 fn time_bound<DB: DatabaseLike>(bound: &TimeBound<'_, DB>) -> HelperTimeBound {
     let operator = match bound.comparison() {
@@ -1276,8 +1348,8 @@ fn excluded_callers(
     }
     if !excluded.is_empty() {
         match grantee {
-            HelperGrantee::RequestSet { .. } => {
-                return Err(HelperRefusal::ExcludedFromRequestSet {
+            HelperGrantee::RequestValue { .. } => {
+                return Err(HelperRefusal::ExcludedFromRequestValue {
                     function: function.to_string(),
                 })
             }

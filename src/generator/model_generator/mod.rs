@@ -45,7 +45,7 @@ use crate::parser::sql_parser::{
 use crate::types::{
     stable_hex_suffix, ColumnCommand, ColumnKind, ColumnName, ColumnRelations, ConditionName,
     ConditionParameterName, ContextWitness, FallbackStep, RelationName, RequestComparison,
-    RequestPrincipal, TableId, TranslationNote, TypeName,
+    RequestNormalization, RequestPrincipal, TableId, TranslationNote, TypeName,
 };
 
 /// The kind a request acts as, joined to every row.
@@ -852,6 +852,16 @@ impl ConditionParameterAllocator {
             } else {
                 format!("{}.{}", source.setting_key(), source.path().join("."))
             };
+            // Lives in the `settings` map, so a name the request clock holds is no clash.
+            if let Some(lowered) = registry
+                .sources()
+                .normalized(source, RequestNormalization::Lower)
+            {
+                allocator
+                    .request_sources
+                    .entry(lowered.condition_parameter().clone())
+                    .or_insert_with(|| format!("lower({name})"));
+            }
             allocator.reserve_request(source.condition_parameter().clone(), name)?;
         }
         Ok(allocator)
@@ -1539,6 +1549,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 setting_key: None,
                 separator: None,
                 is_list: false,
+                normalization: None,
             }),
     );
 
@@ -1916,7 +1927,14 @@ fn scar_unfillable_grants<DB: DatabaseLike>(
 /// Read back off the sources the arms recorded, so the note and the emitted conditions cannot name
 /// different parameters. The clock's parameters are noted off the surviving conditions instead.
 fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
-    let mut contracts: BTreeSet<(String, Option<String>, Option<String>, bool)> = BTreeSet::new();
+    type Contract = (
+        String,
+        Option<String>,
+        Option<String>,
+        bool,
+        Option<RequestNormalization>,
+    );
+    let mut contracts: BTreeSet<Contract> = BTreeSet::new();
     for source in &plan.table_tuple_sources {
         match source {
             // A row column gate, or a share row's, states either a set or a value, by its
@@ -1924,6 +1942,7 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
             TupleSource::SessionAttributeGate {
                 request_parameter,
                 setting_key,
+                normalization,
                 separator,
                 comparison,
                 ..
@@ -1931,6 +1950,7 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
             | TupleSource::RequestShareGate {
                 request_parameter,
                 setting_key,
+                normalization,
                 separator,
                 comparison,
                 ..
@@ -1940,6 +1960,7 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     Some(setting_key.clone()),
                     separator.clone(),
                     matches!(comparison, RequestComparison::CallerSetHolds),
+                    *normalization,
                 ));
             }
             TupleSource::RequestGateEntry { atom, .. } => {
@@ -1948,6 +1969,7 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     Some(atom.setting_key.clone()),
                     atom.separator.clone(),
                     matches!(atom.comparison, RequestComparison::CallerSetHolds),
+                    atom.normalization,
                 ));
             }
             TupleSource::RequestPresenceEntry { presence, .. } => {
@@ -1956,17 +1978,19 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     Some(presence.setting_key.clone()),
                     None,
                     false,
+                    None,
                 ));
             }
             _ => {}
         }
     }
-    for (parameter, setting_key, separator, is_list) in contracts {
+    for (parameter, setting_key, separator, is_list, normalization) in contracts {
         notes.push(TranslationNote::CallerSuppliesConditionParameter {
             parameter,
             setting_key,
             separator,
             is_list,
+            normalization,
         });
     }
 }

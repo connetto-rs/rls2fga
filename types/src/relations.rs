@@ -1,3 +1,5 @@
+use serde::{Deserialize, Serialize};
+
 use crate::prelude::*;
 use crate::{RecordDescription, RelationName, TypeName};
 
@@ -103,6 +105,29 @@ pub enum RequestComparison {
     /// The caller's single value has to differ from the row's, which `PostgreSQL`'s
     /// `NULL` reading also fails, so an unset setting denies.
     CallerValueUnequals,
+}
+
+/// A function `PostgreSQL` applies to a request value before comparing it, whose result
+/// the caller sends under a key of its own.
+///
+/// The result follows the database's collation, which CEL cannot read, so the caller
+/// asks the database the policies run in for it rather than computing it itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestNormalization {
+    /// `lower(value)`.
+    Lower,
+}
+
+impl RequestNormalization {
+    /// The `pg_catalog` function the policy applies, which the caller applies the same
+    /// way.
+    #[must_use]
+    pub fn function_name(self) -> &'static str {
+        match self {
+            Self::Lower => "lower",
+        }
+    }
 }
 
 /// A predicate over the values the caller supplies in every check context.

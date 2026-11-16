@@ -8,8 +8,8 @@ use core::fmt::Write as _;
 use rls2fga::generator::well_known::WellKnownTypes;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{
-    ConfidenceLevel, RecordDerivation, RecordDescription, RequestComparison, RequestPredicate,
-    RowDecision,
+    ConfidenceLevel, RecordDerivation, RecordDescription, RequestComparison, RequestNormalization,
+    RequestPredicate, RowDecision, TranslationNote,
 };
 
 use crate::support::deployment;
@@ -405,5 +405,63 @@ CREATE POLICY paper_cap ON papers AS RESTRICTIVE FOR SELECT USING (
         relation_definition(&dsl, "papers", "can_select").as_deref(),
         Some("no_access"),
         "{dsl}"
+    );
+}
+
+/// `lower` of a declared value reaches the model as a value of its own, so the clause
+/// translates, the condition reads the lowered key, and the caller is told to send what
+/// the database's `lower` returns under it.
+#[test]
+fn a_lowered_request_value_is_a_contract_of_its_own() {
+    let sql = "
+CREATE TABLE objects (id UUID PRIMARY KEY, email TEXT NOT NULL CHECK (email = lower(email)));
+ALTER TABLE objects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY email_inline ON objects FOR SELECT
+    USING (email = lower(NULLIF(current_setting('app.verified_email', true), '')));
+";
+    let outputs = TranslatorBuilder::new(deployment::caller_deployment_with([deployment::scalar(
+        "app.verified_email",
+    )
+    .may_be_unset()]))
+    .build()
+    .translate(&db_of(sql))
+    .expect("translation should plan")
+    .outputs()
+    .expect("every clause translates");
+
+    assert!(
+        outputs
+            .model()
+            .contains("settings[\"app_verified_email_lower\"]"),
+        "{}",
+        outputs.model()
+    );
+    let contract = outputs
+        .notes()
+        .iter()
+        .find(|note| {
+            matches!(
+                note,
+                TranslationNote::CallerSuppliesConditionParameter { parameter, .. }
+                    if parameter == "app_verified_email_lower"
+            )
+        })
+        .expect("the lowered value is a contract with the caller");
+    assert_eq!(
+        contract,
+        &TranslationNote::CallerSuppliesConditionParameter {
+            parameter: "app_verified_email_lower".to_string(),
+            setting_key: Some("app.verified_email".to_string()),
+            separator: None,
+            is_list: false,
+            normalization: Some(RequestNormalization::Lower),
+        }
+    );
+    assert!(
+        contract
+            .message()
+            .contains("what lower(app.verified_email) returns, computed by the database"),
+        "{}",
+        contract.message()
     );
 }
