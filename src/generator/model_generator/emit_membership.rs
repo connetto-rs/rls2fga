@@ -1687,6 +1687,9 @@ fn flag_edge_link(
 /// arm returning keys of a table whose key references the level's, an organization or a
 /// team among the grantees, holds on the level's row sharing that key, so the walk
 /// starts from every key the call returns, as the recursive term joins all of them.
+///
+/// A call with a selection holds the rows its walk reached, `<call>_reached`, and the
+/// selection's grant parts both.
 fn helper_call_relation<DB: DatabaseLike>(
     call: &HelperCall,
     ctx: &PatternCtx<'_, DB>,
@@ -1732,36 +1735,71 @@ fn helper_call_relation<DB: DatabaseLike>(
     if parts.is_empty() {
         return None;
     }
+    let kept = match &call.selection {
+        None => None,
+        Some(selection) => {
+            let kept = selection
+                .iter()
+                .flat_map(|grant| {
+                    caller_gated_grant_parts(
+                        grant,
+                        &call.level,
+                        &level_type,
+                        ctx,
+                        table_plan,
+                        all_types,
+                    )
+                })
+                .collect();
+            Some(combine_union(kept)?)
+        }
+    };
     let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
     let name = helper_call_relation_name(&call.function, call.arguments.iter().chain(&call.labels));
-    if walked.is_empty() {
-        return combine_union(parts).map(|returned| plan.ensure_computed(name, returned));
-    }
-    let walks = walked
-        .iter()
-        .map(|walk| match walk.direction {
-            WalkDirection::Down => {
-                helper_parent_link(plan, &walk.edges, &call.level, level_type.clone(), ctx.db)
-            }
-            WalkDirection::Up => helper_child_link(plan, &walk.edges, &level_type),
-        })
-        .collect();
-    let relation = plan.ensure_walk_computed(name, parts, walks);
-    for walk in walked {
-        plan.walk_notes
-            .entry((
-                relation.clone(),
-                walk.edges.table.clone(),
-                walk.edges.parent_column.clone(),
-            ))
-            .or_insert_with(|| TranslationNote::HelperWalkDepth {
-                function: call.function.clone(),
-                table: walk.edges.table.clone(),
-                column: walk.edges.parent_column.clone(),
-                relation: relation.clone(),
-            });
-    }
-    Some(relation)
+    // The walk names the rows it reached, which the selection keeps some of under `name`.
+    let (reached_name, kept) = match kept {
+        None => (name, None),
+        Some(kept) => (
+            clamp_relation_name(format!("{name}_reached")),
+            Some((name, kept)),
+        ),
+    };
+    let reached = if walked.is_empty() {
+        plan.ensure_computed(reached_name, combine_union(parts)?)
+    } else {
+        let walks = walked
+            .iter()
+            .map(|walk| match walk.direction {
+                WalkDirection::Down => {
+                    helper_parent_link(plan, &walk.edges, &call.level, level_type.clone(), ctx.db)
+                }
+                WalkDirection::Up => helper_child_link(plan, &walk.edges, &level_type),
+            })
+            .collect();
+        let relation = plan.ensure_walk_computed(reached_name, parts, walks);
+        for walk in walked {
+            plan.walk_notes
+                .entry((
+                    relation.clone(),
+                    walk.edges.table.clone(),
+                    walk.edges.parent_column.clone(),
+                ))
+                .or_insert_with(|| TranslationNote::HelperWalkDepth {
+                    function: call.function.clone(),
+                    table: walk.edges.table.clone(),
+                    column: walk.edges.parent_column.clone(),
+                    relation: relation.clone(),
+                });
+        }
+        relation
+    };
+    Some(match kept {
+        None => reached,
+        Some((name, kept)) => plan.ensure_computed(
+            name,
+            UsersetExpr::Intersection(vec![UsersetExpr::Computed(reached), kept]),
+        ),
+    })
 }
 
 /// The tupleset naming, on the level's row each edge's child names, the row of

@@ -598,17 +598,24 @@ fn membership_refusal<DB: DatabaseLike>(
     })
 }
 
-/// Why a grant row or a parent link a declared helper's call reads cannot be compared in
-/// `OpenFGA`.
+/// Why a grant row or a parent link a declared helper's call reads, or a grant arm of its
+/// selection, cannot be compared in `OpenFGA`.
 fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<String> {
-    call.arms.iter().find_map(|arm| match arm {
-        HelperSetArm::Grant(grant) => helper_grant_refusal(grant, db),
-        HelperSetArm::Parent(parent) => {
-            tree_edges_refusal(&parent.edges, db).or_else(|| helper_call_refusal(&parent.call, db))
-        }
-        HelperSetArm::Walk(walk) => tree_edges_refusal(&walk.edges, db),
-        HelperSetArm::Called(called) => helper_call_refusal(called, db),
-    })
+    call.arms
+        .iter()
+        .find_map(|arm| match arm {
+            HelperSetArm::Grant(grant) => helper_grant_refusal(grant, db),
+            HelperSetArm::Parent(parent) => tree_edges_refusal(&parent.edges, db)
+                .or_else(|| helper_call_refusal(&parent.call, db)),
+            HelperSetArm::Walk(walk) => tree_edges_refusal(&walk.edges, db),
+            HelperSetArm::Called(called) => helper_call_refusal(called, db),
+        })
+        .or_else(|| {
+            call.selection
+                .iter()
+                .flatten()
+                .find_map(|grant| helper_grant_refusal(grant, db))
+        })
 }
 
 /// Why a column a grant arm names its object or its grantee by, or one its caps pair,

@@ -1646,8 +1646,9 @@ fn helper_call<DB: DatabaseLike>(
     }
 }
 
-/// One call and what it returns at `selection`, refused unless every arm returns keys of
-/// `level` or of a table whose key references `level`'s.
+/// One call and what it returns at `selection`, refused unless every arm, and every grant
+/// arm a walk's final query keeps the rows to, returns keys of `level` or of a table whose
+/// key references `level`'s.
 ///
 /// The call's rows are read as keys only in a column holding no labels, every other
 /// column holding labels, so the keys it returns at a label are the ones its rows pair
@@ -1672,34 +1673,51 @@ fn helper_call_at<DB: DatabaseLike>(
             keys,
         });
     }
+    let on_level = |returned: TableId| {
+        if keys_name_rows_of(&returned, level, db)? {
+            return Ok(());
+        }
+        Err(HelperRefusal::OtherLevel {
+            column: compared.to_string(),
+            named: Box::new(level.clone()),
+            function: name.clone(),
+            returned: Box::new(returned),
+        })
+    };
+    // A grant arm and the rows it returns at the selection, `None` where it returns none.
+    let grant_at = |grant: &GrantArm<'_, DB>| {
+        let Some(selected) = selection.of(&name, grant.returned())? else {
+            return Ok(None);
+        };
+        let column = selected.key;
+        let read_labels = selected
+            .labels
+            .iter()
+            .map(|(read, label)| AttributePredicate {
+                column: ColumnName::from_stored(read.stored_column_name()),
+                test: AttributeTest::In(literal(label).into_iter().collect()),
+            })
+            .collect();
+        let returned = rows_returned_by(grant.table(), column, db)?
+            .ok_or_else(|| names_no_rows(grant.table(), column))?;
+        let lowered = helper_grant(
+            &name,
+            grant,
+            (core::slice::from_ref(&column), read_labels),
+            Some(level),
+            db,
+            registry,
+        )?;
+        Ok::<_, HelperRefusal>(Some((returned, lowered)))
+    };
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
             HelperArm::Grant(grant) => {
-                let Some(selected) = selection.of(&name, grant.returned())? else {
+                let Some((returned, lowered)) = grant_at(grant)? else {
                     continue;
                 };
-                let column = selected.key;
-                let read_labels = selected
-                    .labels
-                    .iter()
-                    .map(|(read, label)| AttributePredicate {
-                        column: ColumnName::from_stored(read.stored_column_name()),
-                        test: AttributeTest::In(literal(label).into_iter().collect()),
-                    })
-                    .collect();
-                (
-                    rows_returned_by(grant.table(), column, db)?
-                        .ok_or_else(|| names_no_rows(grant.table(), column))?,
-                    HelperSetArm::Grant(Box::new(helper_grant(
-                        &name,
-                        grant,
-                        (core::slice::from_ref(&column), read_labels),
-                        Some(level),
-                        db,
-                        registry,
-                    )?)),
-                )
+                (returned, HelperSetArm::Grant(Box::new(lowered)))
             }
             HelperArm::Parent(parent) => (
                 table_identity(parent.child_table()),
@@ -1724,16 +1742,22 @@ fn helper_call_at<DB: DatabaseLike>(
                 continue;
             }
         };
-        if !keys_name_rows_of(&returned, level, db)? {
-            return Err(HelperRefusal::OtherLevel {
-                column: compared.to_string(),
-                named: Box::new(level.clone()),
-                function: name,
-                returned: Box::new(returned),
-            });
-        }
+        on_level(returned)?;
         arms.push(arm);
     }
+    let reselected = set
+        .selection()
+        .map(|kept| {
+            kept.iter()
+                .filter_map(|grant| grant_at(grant).transpose())
+                .map(|at| {
+                    let (returned, lowered) = at?;
+                    on_level(returned)?;
+                    Ok(lowered)
+                })
+                .collect::<Result<Vec<_>, HelperRefusal>>()
+        })
+        .transpose()?;
     Ok(HelperCall {
         function: name,
         arguments: arguments.iter().map(ToString::to_string).collect(),
@@ -1744,6 +1768,7 @@ fn helper_call_at<DB: DatabaseLike>(
             .collect(),
         level: level.clone(),
         arms,
+        selection: reselected,
     })
 }
 
