@@ -2503,6 +2503,65 @@ mod tests {
     }
 
     #[test]
+    fn a_column_comparison_refuses_what_the_row_cannot_decide() {
+        let compared = |kind: ColumnKind, operator, other_kind: ColumnKind| Guard::CompareColumns {
+            column: read("low", kind),
+            operator,
+            other: read("high", other_kind),
+        };
+        let text = |value: &'static str| RowCell::Text(Cow::Borrowed(value));
+        let texts = FullRow::default()
+            .with_cell("low", text("a"))
+            .with_cell("high", text("b"));
+        let only_low = FullRow::default().with_cell("low", text("a"));
+        let only_high = FullRow::default().with_cell("high", text("b"));
+        let mixed = FullRow::default()
+            .with_cell("low", RowCell::Integer(Cow::Borrowed("1")))
+            .with_cell("high", text("1"));
+        let text_eq = compared(ColumnKind::Text, AttributeOperator::Eq, ColumnKind::Text);
+        for (guard, row) in [(&text_eq, &only_high), (&text_eq, &only_low)] {
+            assert!(
+                matches!(
+                    guard_holds(guard, row),
+                    Eval::Refuse(RecordError::ColumnAbsent(_))
+                ),
+                "{guard:?}"
+            );
+        }
+        for (guard, row) in [
+            (
+                compared(ColumnKind::Text, AttributeOperator::Lt, ColumnKind::Text),
+                &texts,
+            ),
+            (
+                compared(ColumnKind::Integer, AttributeOperator::Eq, ColumnKind::Text),
+                &mixed,
+            ),
+            (
+                Guard::Compare {
+                    column: read("low", ColumnKind::Text),
+                    predicate: AttributePredicate {
+                        column: ColumnName::from_stored("low"),
+                        test: AttributeTest::CompareColumn {
+                            operator: AttributeOperator::Eq,
+                            other: ColumnName::from_stored("high"),
+                        },
+                    },
+                },
+                &texts,
+            ),
+        ] {
+            assert!(
+                matches!(
+                    guard_holds(&guard, row),
+                    Eval::Refuse(RecordError::ComparisonNeedsQuery(_))
+                ),
+                "{guard:?}"
+            );
+        }
+    }
+
+    #[test]
     fn record_evaluation_keeps_empty_records_ahead_of_refusals() {
         let description = single_row_description(
             ObjectKey::new(vec![ValueSource::typed_column(

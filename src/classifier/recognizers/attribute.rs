@@ -1056,20 +1056,20 @@ pub(crate) enum ColumnComparisonRefusal {
     },
     /// Text columns under two collations, between which `PostgreSQL` cannot choose.
     #[error(
-        "{comparison}: {column} compares under {column_collation} and {other} under \
-         {other_collation}, and PostgreSQL raises at every check comparing text whose \
-         collations conflict"
+        "{comparison}: {column} compares under the collation {column_collation} and {other} \
+         under the collation {other_collation}, and PostgreSQL raises at every check comparing \
+         text whose collations conflict"
     )]
     Collations {
         /// The comparison as written.
         comparison: String,
         /// The left column.
         column: ColumnName,
-        /// Its collation, described.
+        /// Its collation's name.
         column_collation: String,
         /// The right column.
         other: ColumnName,
-        /// Its collation, described.
+        /// Its collation's name.
         other_collation: String,
     },
 }
@@ -1145,41 +1145,25 @@ pub(crate) fn column_comparison<DB: DatabaseLike>(
             other_type: other_type.into_owned(),
         }));
     }
-    let column_collation = column_declared.collation(db).ok();
-    let other_collation = other_declared.collation(db).ok();
-    let collations_agree = match (&column_collation, &other_collation) {
-        (Some(ColumnCollation::Unknown) | None, _) | (_, Some(ColumnCollation::Unknown) | None) => {
-            false
+    // The database default yields to any named collation, so only two named ones conflict.
+    if let (Ok(ColumnCollation::Named(named)), Ok(ColumnCollation::Named(other_named))) =
+        (column_declared.collation(db), other_declared.collation(db))
+    {
+        if named != other_named {
+            return Some(Err(ColumnComparisonRefusal::Collations {
+                comparison: expr.to_string(),
+                column,
+                column_collation: named.name().to_string(),
+                other,
+                other_collation: other_named.name().to_string(),
+            }));
         }
-        (Some(ColumnCollation::DatabaseDefault), _)
-        | (_, Some(ColumnCollation::DatabaseDefault)) => true,
-        (named, other_named) => named == other_named,
-    };
-    if !collations_agree {
-        return Some(Err(ColumnComparisonRefusal::Collations {
-            comparison: expr.to_string(),
-            column,
-            column_collation: described_collation(column_collation.as_ref()),
-            other,
-            other_collation: described_collation(other_collation.as_ref()),
-        }));
     }
     Some(Ok(ColumnComparison {
         column,
         operator,
         other,
     }))
-}
-
-/// A column's collation as a refusal names it.
-fn described_collation(collation: Option<&ColumnCollation<'_>>) -> String {
-    match collation {
-        Some(ColumnCollation::DatabaseDefault) => "the database default collation".to_string(),
-        Some(ColumnCollation::Named(named)) => format!("the collation {}", named.name()),
-        Some(ColumnCollation::Unknown) | None => {
-            "a collation the schema does not resolve".to_string()
-        }
-    }
 }
 
 /// The type and printed value of a quoted literal cast once to `date`, `timestamp` or
