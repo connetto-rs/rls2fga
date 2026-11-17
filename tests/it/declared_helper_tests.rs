@@ -859,6 +859,8 @@ CREATE TABLE procedure_templates (id TEXT PRIMARY KEY REFERENCES ownables (id),
 CREATE TABLE weighing_templates (id TEXT PRIMARY KEY REFERENCES procedure_templates (id));
 CREATE TABLE paired_templates (id TEXT PRIMARY KEY REFERENCES templates (id),
   FOREIGN KEY (id) REFERENCES procedure_templates (id));
+CREATE TABLE ordered_templates (id TEXT PRIMARY KEY REFERENCES resources (id),
+  FOREIGN KEY (id) REFERENCES ownables (id));
 ALTER TABLE templates ENABLE ROW LEVEL SECURITY;
 CREATE POLICY templates_select ON templates FOR SELECT USING (
   id = ANY (ARRAY(SELECT authz.resources_granted())));
@@ -871,13 +873,17 @@ CREATE POLICY weighing_templates_select ON weighing_templates FOR SELECT USING (
 ALTER TABLE paired_templates ENABLE ROW LEVEL SECURITY;
 CREATE POLICY paired_templates_select ON paired_templates FOR SELECT USING (
   id = ANY (ARRAY(SELECT authz.resources_granted())));
+ALTER TABLE ordered_templates ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ordered_templates_select ON ordered_templates FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_granted())));
 ";
 
 const EXTENSION_HELPERS: &[&str] = &["authz.ownables_granted", "authz.resources_granted"];
 
 /// A key reaching a resource's through the keys of the tables it extends names that
 /// resource, so each extension holds the grants on its resource, as a key referencing the
-/// resource's directly does, and so does a key extending two tables that both extend it.
+/// resource's directly does, whichever of its keys comes first, and so does a key extending
+/// two tables that both extend it.
 #[test]
 fn a_key_extending_a_resource_through_other_keys_holds_the_resource_grants() {
     let dsl = model(EXTENSIONS, EXTENSION_HELPERS);
@@ -886,6 +892,7 @@ fn a_key_extending_a_resource_through_other_keys_holds_the_resource_grants() {
         "procedure_templates",
         "weighing_templates",
         "paired_templates",
+        "ordered_templates",
     ] {
         assert_eq!(
             relation_definition(&dsl, table, "can_select").as_deref(),

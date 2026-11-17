@@ -1736,10 +1736,11 @@ fn extensions_case(major: &str, loading_from_rows: bool) -> ParityCase {
              INSERT INTO procedure_templates VALUES ('r1', 'o1', 'p1'), ('r2', 'o1', 'p1');
              INSERT INTO weighing_templates VALUES ('r1'), ('r2');
              INSERT INTO paired_templates VALUES ('r1'), ('r2');
+             INSERT INTO ordered_templates VALUES ('r1'), ('r2');
              INSERT INTO resource_grants VALUES ('r1', 'alice'), ('r2', 'bob')",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON templates, procedure_templates, weighing_templates,
-               paired_templates TO app_reader;
+               paired_templates, ordered_templates TO app_reader;
              GRANT USAGE ON SCHEMA authz TO app_reader;
              REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
@@ -1767,6 +1768,7 @@ async fn keys_extending_a_resource_agree_with_postgres_17_and_18() {
                 "procedure_templates",
                 "weighing_templates",
                 "paired_templates",
+                "ordered_templates",
             ] {
                 let expect = |subject: &str, row: &str, allowed| {
                     assert_postgres(
