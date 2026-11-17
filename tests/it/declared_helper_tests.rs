@@ -815,6 +815,153 @@ fn a_grant_arm_returning_its_own_key_returns_its_own_rows_through_any_reference(
     }
 }
 
+/// Resources, the ownables among them, and tables extending the ownables, whose keys reach
+/// the resource's through one, two and three keys, `paired_templates` extending two of them,
+/// each read with the resources granted to the caller. `assets` are resources that are not
+/// ownables, and `asset_versions` extend them.
+pub(crate) const EXTENSIONS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE resources (id TEXT PRIMARY KEY, kind TEXT NOT NULL, organization_id TEXT NOT NULL,
+  UNIQUE (id, kind), UNIQUE (organization_id, id));
+CREATE TABLE ownables (id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'ownable' CHECK (kind = 'ownable'), project_id TEXT NOT NULL,
+  UNIQUE (id, project_id), FOREIGN KEY (id, kind) REFERENCES resources (id, kind));
+CREATE TABLE assets (id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL DEFAULT 'asset' CHECK (kind = 'asset'),
+  FOREIGN KEY (id, kind) REFERENCES resources (id, kind));
+CREATE TABLE asset_versions (id TEXT PRIMARY KEY REFERENCES assets (id));
+CREATE TABLE archives (id TEXT PRIMARY KEY);
+CREATE TABLE resource_grants (resource_id TEXT NOT NULL REFERENCES resources (id),
+  user_id TEXT NOT NULL, PRIMARY KEY (resource_id, user_id));
+CREATE TABLE ownable_grants (ownable_id TEXT NOT NULL REFERENCES ownables (id),
+  user_id TEXT NOT NULL, PRIMARY KEY (ownable_id, user_id));
+GRANT SELECT ON resource_grants, ownable_grants TO authz_owner;
+CREATE FUNCTION authz.resources_granted() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT g.resource_id FROM public.resource_grants g
+  WHERE g.user_id = current_setting('app.user_id', true)
+$$;
+CREATE FUNCTION authz.ownables_granted() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT g.ownable_id FROM public.ownable_grants g
+  WHERE g.user_id = current_setting('app.user_id', true)
+$$;
+ALTER FUNCTION authz.resources_granted() OWNER TO authz_owner;
+ALTER FUNCTION authz.ownables_granted() OWNER TO authz_owner;
+CREATE TABLE templates (id TEXT PRIMARY KEY, project_id TEXT NOT NULL,
+  FOREIGN KEY (id, project_id) REFERENCES ownables (id, project_id));
+CREATE TABLE procedure_templates (id TEXT PRIMARY KEY REFERENCES ownables (id),
+  organization_id TEXT NOT NULL, project_id TEXT NOT NULL,
+  FOREIGN KEY (id, project_id) REFERENCES ownables (id, project_id),
+  FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));
+CREATE TABLE weighing_templates (id TEXT PRIMARY KEY REFERENCES procedure_templates (id));
+CREATE TABLE paired_templates (id TEXT PRIMARY KEY REFERENCES templates (id),
+  FOREIGN KEY (id) REFERENCES procedure_templates (id));
+ALTER TABLE templates ENABLE ROW LEVEL SECURITY;
+CREATE POLICY templates_select ON templates FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_granted())));
+ALTER TABLE procedure_templates ENABLE ROW LEVEL SECURITY;
+CREATE POLICY procedure_templates_select ON procedure_templates FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_granted())));
+ALTER TABLE weighing_templates ENABLE ROW LEVEL SECURITY;
+CREATE POLICY weighing_templates_select ON weighing_templates FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_granted())));
+ALTER TABLE paired_templates ENABLE ROW LEVEL SECURITY;
+CREATE POLICY paired_templates_select ON paired_templates FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_granted())));
+";
+
+const EXTENSION_HELPERS: &[&str] = &["authz.ownables_granted", "authz.resources_granted"];
+
+/// A key reaching a resource's through the keys of the tables it extends names that
+/// resource, so each extension holds the grants on its resource, as a key referencing the
+/// resource's directly does, and so does a key extending two tables that both extend it.
+#[test]
+fn a_key_extending_a_resource_through_other_keys_holds_the_resource_grants() {
+    let dsl = model(EXTENSIONS, EXTENSION_HELPERS);
+    for table in [
+        "templates",
+        "procedure_templates",
+        "weighing_templates",
+        "paired_templates",
+    ] {
+        assert_eq!(
+            relation_definition(&dsl, table, "can_select").as_deref(),
+            Some("resources_granted from resources and acting_app_user from request_gate"),
+            "{table}: {dsl}"
+        );
+    }
+}
+
+/// A key whose chain stops short of the helper's rows, leads to another table beside
+/// them, reaches them only through a table the helper's rows are not, or runs into a cycle
+/// of keys is refused, naming the table where the chain stops.
+#[test]
+fn a_key_chain_missing_the_helper_rows_is_refused() {
+    let returns_resources = "while declared helper 'authz.resources_granted' returns keys of \
+                             'public.resources'";
+    let cases = [
+        (
+            EXTENSIONS.replace(
+                "project_id TEXT NOT NULL,
+  FOREIGN KEY (id, project_id) REFERENCES ownables (id, project_id));
+CREATE TABLE procedure_templates",
+                "project_id TEXT NOT NULL);
+CREATE TABLE procedure_templates",
+            ),
+            "templates_select",
+            format!("column 'id' names rows of 'public.templates', {returns_resources}"),
+        ),
+        (
+            EXTENSIONS.replace(
+                "UNIQUE (id, project_id), FOREIGN KEY (id, kind) REFERENCES resources (id, kind));",
+                "UNIQUE (id, project_id));",
+            ),
+            "templates_select",
+            format!("column 'id' names rows of 'public.ownables', {returns_resources}"),
+        ),
+        (
+            EXTENSIONS.replace(
+                "FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id)",
+                "FOREIGN KEY (id) REFERENCES archives (id)",
+            ),
+            "procedure_templates_select",
+            "column 'id' of 'public.procedure_templates' names no row of one table".to_owned(),
+        ),
+        (
+            format!(
+                "{EXTENSIONS}
+ALTER TABLE asset_versions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY asset_versions_select ON asset_versions FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.ownables_granted())));"
+            ),
+            "asset_versions_select",
+            "column 'id' names rows of 'public.assets', while declared helper \
+             'authz.ownables_granted' returns keys of 'public.ownables'"
+                .to_owned(),
+        ),
+        (
+            format!(
+                "{EXTENSIONS}
+CREATE TABLE ring_a (id TEXT PRIMARY KEY REFERENCES resources (id));
+CREATE TABLE ring_b (id TEXT PRIMARY KEY REFERENCES ring_a (id));
+ALTER TABLE ring_a ADD FOREIGN KEY (id) REFERENCES ring_b (id);
+ALTER TABLE ring_a ENABLE ROW LEVEL SECURITY;
+CREATE POLICY ring_a_select ON ring_a FOR SELECT USING (
+  id = ANY (ARRAY(SELECT authz.resources_granted())));"
+            ),
+            "ring_a_select",
+            "column 'id' of 'public.ring_a' names no row of one table".to_owned(),
+        ),
+    ];
+    for (schema, policy, expected) in cases {
+        let reason = refusal_of(&schema, EXTENSION_HELPERS, policy);
+        assert!(reason.contains(&expected), "{policy}: {reason}");
+    }
+}
+
 /// R100's installations, whose `owner` may be a team or a project and references
 /// neither, administered through a helper reading it once per level.
 pub(crate) const INSTALLATIONS: &str = "

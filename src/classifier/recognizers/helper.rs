@@ -105,17 +105,17 @@ pub(crate) enum HelperRefusal {
     /// The compared column names other rows than the helper returns.
     #[error(
         "column '{column}' names rows of '{named}', while declared helper '{function}' \
-         returns keys of '{level}'"
+         returns keys of '{returned}'"
     )]
     OtherLevel {
         /// The compared column.
         column: String,
         /// The table its values name.
-        named: String,
+        named: Box<TableId>,
         /// The helper.
         function: String,
         /// The table the helper returns keys of.
-        level: String,
+        returned: Box<TableId>,
     },
     /// A gate on a caller the deployment lets go unset decides the arm in a way the request
     /// gate on whether the request carries a caller does not state.
@@ -1614,14 +1614,45 @@ fn label_columns<DB: DatabaseLike>(set: &HelperSet<'_, DB>, width: usize, db: &D
     labelled
 }
 
+/// One call and what it returns at `selection`, read at `named`, the table whose rows
+/// `compared` names, else at the first table along `named`'s keys whose rows the call
+/// returns.
+///
+/// A key referencing another table's key names that table's rows too, so a call returning
+/// the keys of a table `named` extends, as an ownable's key is a resource's, is read at
+/// that table.
+fn helper_call<DB: DatabaseLike>(
+    call: (&DB::Function, &[Value], &HelperSet<'_, DB>),
+    selection: &Selection,
+    compared: &ColumnName,
+    named: &TableId,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<HelperCall, HelperRefusal> {
+    let mut level = named.clone();
+    let mut tried = Vec::new();
+    loop {
+        match helper_call_at(call, selection, compared, &level, db, registry) {
+            Err(HelperRefusal::OtherLevel {
+                named, returned, ..
+            }) if *named == level
+                && !tried.contains(&*returned)
+                && keys_name_rows_of(&level, &returned, db)? =>
+            {
+                tried.push(core::mem::replace(&mut level, *returned));
+            }
+            answer => return answer,
+        }
+    }
+}
+
 /// One call and what it returns at `selection`, refused unless every arm returns keys of
-/// `level`, the table whose rows `compared` names, or of a table whose key references
-/// `level`'s.
+/// `level` or of a table whose key references `level`'s.
 ///
 /// The call's rows are read as keys only in a column holding no labels, every other
 /// column holding labels, so the keys it returns at a label are the ones its rows pair
 /// with that label.
-fn helper_call<DB: DatabaseLike>(
+fn helper_call_at<DB: DatabaseLike>(
     (function, arguments, set): (&DB::Function, &[Value], &HelperSet<'_, DB>),
     selection: &Selection,
     compared: &ColumnName,
@@ -1696,9 +1727,9 @@ fn helper_call<DB: DatabaseLike>(
         if !keys_name_rows_of(&returned, level, db)? {
             return Err(HelperRefusal::OtherLevel {
                 column: compared.to_string(),
-                named: level.to_string(),
+                named: Box::new(level.clone()),
                 function: name,
-                level: returned.to_string(),
+                returned: Box::new(returned),
             });
         }
         arms.push(arm);
@@ -1765,7 +1796,7 @@ fn called_call<DB: DatabaseLike>(
         key: selected.key,
         labels,
     };
-    helper_call(
+    helper_call_at(
         (helper, called.arguments(), called.set()),
         &selection,
         compared,
@@ -1783,30 +1814,81 @@ fn keys_name_rows_of<DB: DatabaseLike>(
     level: &TableId,
     db: &DB,
 ) -> Result<bool, HelperRefusal> {
+    reaches(table, level, db, &mut KeyWalk::default())
+}
+
+/// A reading of keys referencing other tables' keys, holding the tables whose keys it is
+/// passing through, so a cycle of keys ends it, and the table whose rows each key it read
+/// names, so no key is read twice.
+#[derive(Default)]
+struct KeyWalk {
+    passing: Vec<TableId>,
+    read: Vec<(TableId, TableId)>,
+}
+
+/// [`keys_name_rows_of`] within `walk`.
+fn reaches<DB: DatabaseLike>(
+    table: &TableId,
+    level: &TableId,
+    db: &DB,
+    walk: &mut KeyWalk,
+) -> Result<bool, HelperRefusal> {
+    Ok(first_along(table, db, walk, |reached, _| Ok(reached == level))?.is_some())
+}
+
+/// The first table along `table`'s chain of keys, `table` included, that `found` holds of.
+fn first_along<DB: DatabaseLike>(
+    table: &TableId,
+    db: &DB,
+    walk: &mut KeyWalk,
+    mut found: impl FnMut(&TableId, &mut KeyWalk) -> Result<bool, HelperRefusal>,
+) -> Result<Option<TableId>, HelperRefusal> {
+    let entered = walk.passing.len();
     let mut reached = table.clone();
-    let mut visited = Vec::new();
-    while reached != *level {
-        if visited.contains(&reached) {
-            return Ok(false);
+    let first = loop {
+        if found(&reached, walk)? {
+            break Some(reached);
         }
-        let (Some(held), Some(key)) = (
-            lookup_table_id(db, &reached),
-            single_identity_column(&reached, db),
-        ) else {
-            return Ok(false);
-        };
-        let Some(key) = held
-            .columns(db)?
-            .find(|column| column.stored_column_name() == key.as_str())
-        else {
-            return Ok(false);
-        };
-        let Some(named) = rows_named_by(held, key, db)? else {
-            return Ok(false);
-        };
-        visited.push(core::mem::replace(&mut reached, named));
+        if walk.passing.contains(&reached) {
+            break None;
+        }
+        walk.passing.push(reached.clone());
+        match key_rows(&reached, db, walk)? {
+            Some(named) => reached = named,
+            None => break None,
+        }
+    };
+    walk.passing.truncate(entered);
+    Ok(first)
+}
+
+/// The table whose rows the one key column of `table` names, which `walk` is passing
+/// through, `None` where `table` has no one key column.
+fn key_rows<DB: DatabaseLike>(
+    table: &TableId,
+    db: &DB,
+    walk: &mut KeyWalk,
+) -> Result<Option<TableId>, HelperRefusal> {
+    if let Some((_, named)) = walk.read.iter().find(|(read, _)| read == table) {
+        return Ok(Some(named.clone()));
     }
-    Ok(true)
+    let (Some(held), Some(key)) = (
+        lookup_table_id(db, table),
+        single_identity_column(table, db),
+    ) else {
+        return Ok(None);
+    };
+    let Some(key) = held
+        .columns(db)?
+        .find(|column| column.stored_column_name() == key.as_str())
+    else {
+        return Ok(None);
+    };
+    let named = named_rows(held, key, db, walk)?;
+    if let Some(named) = &named {
+        walk.read.push((table.clone(), named.clone()));
+    }
+    Ok(named)
 }
 
 fn helper_parent<DB: DatabaseLike>(
@@ -2229,18 +2311,32 @@ fn restriction<DB: DatabaseLike>(kept: &Restriction<'_, DB>) -> AttributePredica
     }
 }
 
-/// The table whose rows the values of `column` name, which are the rows of the one table
-/// whose key column its foreign keys pair it with, else its own table's where it is that
-/// table's key, and `None` where it is neither.
+/// The table whose rows the values of `column` name, which are the rows of the table whose
+/// key column its foreign keys pair it with, else its own table's where it is that table's
+/// key, and `None` where it is neither.
 ///
 /// A key of any width pairing `column` with the referenced table's key column makes every
 /// value one row of that table. A single-column key referencing another column names rows
 /// by something other than their key and refuses, while a wider one pairs `column` with
-/// part of a key, which says nothing of `column` alone.
+/// part of a key, which says nothing of `column` alone. Keys pairing `column` with several
+/// tables' key columns name the rows of the one whose key reaches every other's through
+/// keys, as keys to an ownable and to a resource name the ownable, which is a resource, and
+/// else those of the nearest table every one of their keys reaches, as keys to a camera and
+/// to a geopositioning device name a device.
 fn rows_named_by<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
     db: &DB,
+) -> Result<Option<TableId>, HelperRefusal> {
+    named_rows(table, column, db, &mut KeyWalk::default())
+}
+
+/// [`rows_named_by`] within `walk`.
+fn named_rows<DB: DatabaseLike>(
+    table: &DB::Table,
+    column: &DB::Column,
+    db: &DB,
+    walk: &mut KeyWalk,
 ) -> Result<Option<TableId>, HelperRefusal> {
     let mut referenced: Option<TableId> = None;
     for foreign_key in table.foreign_keys(db)? {
@@ -2260,11 +2356,22 @@ fn rows_named_by<DB: DatabaseLike>(
             }
             return Err(names_no_rows(table, column));
         }
-        // Two keys referencing different tables leave the rows the value names open.
-        if referenced.as_ref().is_some_and(|held| *held != parent) {
-            return Err(names_no_rows(table, column));
-        }
-        referenced = Some(parent);
+        referenced = match referenced {
+            Some(held) if held != parent => {
+                if reaches(&held, &parent, db, walk)? {
+                    Some(held)
+                } else if reaches(&parent, &held, db, walk)? {
+                    Some(parent)
+                } else {
+                    // Each value is a row of both, so of the nearest table both extend.
+                    let shared = first_along(&held, db, walk, |reached, walk| {
+                        reaches(&parent, reached, db, walk)
+                    })?;
+                    Some(shared.ok_or_else(|| names_no_rows(table, column))?)
+                }
+            }
+            _ => Some(parent),
+        };
     }
     if referenced.is_some() {
         return Ok(referenced);
@@ -2596,7 +2703,7 @@ fn within_call<DB: DatabaseLike>(
             called: called.target_name().to_string(),
         });
     }
-    helper_call(
+    helper_call_at(
         (called, cap.arguments(), cap.set()),
         &Selection::default(),
         &ColumnName::from_stored(object.stored_column_name()),
