@@ -10,7 +10,7 @@ use sqlparser::parser::Parser;
 use sqlparser::tokenizer::{Token, Tokenizer};
 
 use crate::classifier::function_registry::DeclaredSources;
-use crate::classifier::recognizers::{projected_select, renaming_reason};
+use crate::classifier::recognizers::{lowered_value, projected_select, renaming_reason};
 use crate::parser::expr::{
     function_arg_expr, function_call, positional_function_arg, string_literal, CastChain,
 };
@@ -18,7 +18,7 @@ use crate::parser::names::{
     builtin_function_name, folded_function_name, is_current_user_keyword_name, role_keyword,
     RoleKeyword,
 };
-use crate::types::ColumnName;
+use crate::types::{ColumnName, RequestNormalization};
 
 /// Complete metadata for a role-threshold team membership join.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,6 +101,10 @@ pub enum FunctionSemantic {
         /// that wrapped read.
         #[serde(default)]
         skips_empty: bool,
+        /// The function the body applies to the read, so calling it is that function of
+        /// the read, or `None` where the body returns the read itself.
+        #[serde(default)]
+        normalization: Option<RequestNormalization>,
     },
 
     /// A function whose whole body is a `COALESCE` of declared sources, so calling it
@@ -483,21 +487,30 @@ fn body_caller_read_of(
 pub(crate) struct BodySettingRead {
     /// The key the body reads.
     pub(crate) key: String,
-    /// Every cast around and inside the read, outermost first.
+    /// Every cast around and inside the read, outermost first, inside the call of the
+    /// normalization where there is one.
     pub(crate) casts: CastChain,
     /// True where the body wraps the read in `NULLIF(_, '')`.
     pub(crate) skips_empty: bool,
+    /// The function the body applies to the read and every cast around its call,
+    /// outermost first.
+    pub(crate) normalization: Option<(RequestNormalization, CastChain)>,
 }
 
 /// The `current_setting` read a whole body returns, bare or wrapped in `NULLIF(_, '')`,
-/// so a call to the function is that read.
+/// either way optionally lowered by `lower`, so a call to the function is that read.
 pub(crate) fn body_setting_read(body: &str) -> Option<BodySettingRead> {
     let expr = body_single_projection(body)?;
-    let (casts, read, skips_empty) = emptied_read(&expr)?;
+    let (normalization, value) = match lowered_value(&expr) {
+        Some((casts, argument)) => (Some((RequestNormalization::Lower, casts)), argument),
+        None => (None, &expr),
+    };
+    let (casts, read, skips_empty) = emptied_read(value)?;
     Some(BodySettingRead {
         key: current_setting_literal_key(read)?,
         casts,
         skips_empty,
+        normalization,
     })
 }
 

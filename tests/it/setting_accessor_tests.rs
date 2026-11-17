@@ -1,12 +1,15 @@
 //! A zero-argument `LANGUAGE sql` accessor whose body returns a declared setting read
-//! through `NULLIF(<read>, '')` reads as that expression written inline.
+//! through `NULLIF(<read>, '')`, or `lower` of that read, reads as that expression
+//! written inline.
+
+use core::fmt::Write as _;
 
 use rls2fga::classifier::patterns::{
     ClassifiedExpr, ClassifiedPolicy, PatternClass, UnclassifiedExpr,
 };
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::translator::{Translator, TranslatorBuilder};
-use rls2fga::types::{ConfidenceLevel, TranslationNote};
+use rls2fga::types::{ConfidenceLevel, RequestNormalization, TranslationNote};
 use sqlparser::ast::DataType;
 
 use crate::support::deployment::{deployment, typed_caller, typed_scalar};
@@ -168,4 +171,150 @@ fn an_accessor_against_another_sentinel_stays_unread() {
         panic!("the accessor should stay unread");
     };
     assert!(reason.contains("The body of 'authz.caller_id'"), "{reason}");
+}
+
+/// An accessor returning the verified email as `lower` makes of it, and one returning
+/// `upper` of it, which no reader reads.
+const LOWERED: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE invitations (id UUID PRIMARY KEY, email TEXT NOT NULL CHECK (email = lower(email)));
+CREATE FUNCTION authz.verified_email() RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER
+  SET search_path = '' AS $$ SELECT lower(NULLIF(current_setting('app.verified_email', true), '')) $$;
+CREATE FUNCTION authz.shouted_email() RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER
+  SET search_path = '' AS $$ SELECT upper(NULLIF(current_setting('app.verified_email', true), '')) $$;
+ALTER FUNCTION authz.verified_email() OWNER TO authz_owner;
+ALTER FUNCTION authz.shouted_email() OWNER TO authz_owner;
+ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+";
+
+/// [`LOWERED`] with one policy on `invitations` per `(name, USING)` pair.
+fn lowered_schema(policies: &[(&str, &str)]) -> String {
+    policies
+        .iter()
+        .fold(LOWERED.to_string(), |mut schema, (name, using)| {
+            writeln!(
+                schema,
+                "CREATE POLICY {name} ON invitations USING ({using});"
+            )
+            .expect("writing to a String cannot fail");
+            schema
+        })
+}
+
+/// The verified email, as text a request may leave unset or one every request sets.
+fn email_translator(may_be_unset: bool) -> Translator {
+    let email = typed_scalar("app.verified_email", DataType::Text);
+    TranslatorBuilder::new(deployment([if may_be_unset {
+        email.may_be_unset()
+    } else {
+        email
+    }]))
+    .with_min_confidence(ConfidenceLevel::A)
+    .build()
+}
+
+/// The lowered read [`LOWERED`]'s accessor returns, written inline.
+const INLINE_LOWERED: &str =
+    "email = lower(NULLIF(current_setting('app.verified_email', true), ''))";
+
+/// A call to an accessor returning `lower` of the wrapped read is that lowered read, bare
+/// and inside a scalar subquery, so it grades A on the lowered value's own key as the
+/// inline spelling does and translates to the same model and caller contract.
+#[test]
+fn an_accessor_returning_a_lowered_read_reads_as_the_lowered_read() {
+    let translator = email_translator(true);
+    let policies = classified(
+        &translator,
+        &lowered_schema(&[
+            ("email_inline", INLINE_LOWERED),
+            ("email_subquery", "email = (SELECT authz.verified_email())"),
+            ("email_call", "authz.verified_email() = email"),
+        ]),
+    );
+    let inline = using_of(&policies, "email_inline");
+    assert_eq!(inline.confidence, ConfidenceLevel::A, "{inline:?}");
+    let PatternClass::P15RowValueEqualsCallerScalar(compared) = &inline.pattern else {
+        panic!("the inline read compares the row's email: {inline:?}");
+    };
+    assert_eq!(
+        compared.source.normalization(),
+        Some(RequestNormalization::Lower)
+    );
+    for wrapped in ["email_subquery", "email_call"] {
+        assert_eq!(using_of(&policies, wrapped), inline, "{wrapped}");
+    }
+
+    let translated = |using: &str| {
+        let translation = translator
+            .translate(&db_of(&lowered_schema(&[("email_read", using)])))
+            .expect("the schema should plan");
+        let outputs = translation.outputs().expect("the clause should translate");
+        (outputs.model().clone(), outputs.notes().to_vec())
+    };
+    let (model, notes) = translated(INLINE_LOWERED);
+    assert!(
+        notes.iter().any(|note| matches!(
+            note,
+            TranslationNote::CallerSuppliesConditionParameter {
+                parameter,
+                normalization: Some(RequestNormalization::Lower),
+                ..
+            } if parameter.as_str() == "app_verified_email_lower"
+        )),
+        "{notes:?}"
+    );
+    assert_eq!(
+        translated("email = (SELECT authz.verified_email())"),
+        (model, notes)
+    );
+}
+
+/// A value every request sets may be `''`, which the accessor's `NULLIF` hides before
+/// `lower` runs, so the call is refused naming why, and `lower` of the call lowers a
+/// value the caller already sends lowered, which no reader reads, as inline.
+#[test]
+fn a_lowered_accessor_the_caller_cannot_send_is_refused() {
+    let policies = classified(
+        &email_translator(false),
+        &lowered_schema(&[("email_call", "email = (SELECT authz.verified_email())")]),
+    );
+    let using = using_of(&policies, "email_call");
+    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &using.pattern else {
+        panic!("the call should be refused: {using:?}");
+    };
+    assert!(
+        reason.contains("Setting 'app.verified_email' is declared set by every request"),
+        "{reason}"
+    );
+
+    let policies = classified(
+        &email_translator(true),
+        &lowered_schema(&[("email_relowered", "email = lower(authz.verified_email())")]),
+    );
+    let using = using_of(&policies, "email_relowered");
+    assert!(
+        matches!(using.pattern, PatternClass::Unknown(_)),
+        "{using:?}"
+    );
+}
+
+/// A body applying a function no reader reads changes the value the request carries, so
+/// it stays a body no reader reads.
+#[test]
+fn an_accessor_applying_another_function_stays_unread() {
+    let policies = classified(
+        &email_translator(true),
+        &lowered_schema(&[("email_shouted", "email = (SELECT authz.shouted_email())")]),
+    );
+    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) =
+        &using_of(&policies, "email_shouted").pattern
+    else {
+        panic!("the accessor should stay unread");
+    };
+    assert!(
+        reason.contains("The body of 'authz.shouted_email'"),
+        "{reason}"
+    );
 }
