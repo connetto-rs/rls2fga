@@ -14,6 +14,8 @@ mod classifier_tests;
 mod clock_threshold_tests;
 mod co_membership_tests;
 mod collation_replay_tests;
+mod column_comparison_parity_tests;
+mod column_comparison_tests;
 mod common_patterns_tests;
 mod composite_key_membership_tests;
 mod confidence_filtering_tests;

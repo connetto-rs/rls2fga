@@ -654,7 +654,8 @@ fn boolean_true(ident: &Ident) -> AttributePredicate {
     }
 }
 
-/// Whether `test` compares with a literal no session setting reads differently.
+/// Whether `test` compares with a literal no session setting reads differently, never true of
+/// a column comparison, which only its table types.
 fn decided_by_the_row(test: &AttributeTest) -> bool {
     let plain = |literal: &AttributeLiteral| {
         matches!(
@@ -669,6 +670,7 @@ fn decided_by_the_row(test: &AttributeTest) -> bool {
         AttributeTest::Compare { value, .. } => plain(value),
         AttributeTest::In(values) => values.iter().all(plain),
         AttributeTest::IsNull | AttributeTest::IsNotNull => true,
+        AttributeTest::CompareColumn { .. } => false,
     }
 }
 

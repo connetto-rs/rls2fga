@@ -1253,6 +1253,17 @@ fn compare_guard<DB: DatabaseLike>(
     // database decides.
     let text_decides = || column_compares_bytewise(table, predicate.column.as_str(), db);
     let row_decides = match &predicate.test {
+        AttributeTest::CompareColumn { operator, other } => {
+            let other = column_read(table, other, db);
+            let decides = columns_row_decide(kind, other.kind(), *operator, || {
+                text_decides() && column_compares_bytewise(table, other.as_str(), db)
+            });
+            return decides.then_some(Guard::CompareColumns {
+                column,
+                operator: *operator,
+                other,
+            });
+        }
         AttributeTest::Compare { operator, value } => {
             literal_row_decides(kind, value)
                 && (!compares_text(value)
@@ -1273,6 +1284,25 @@ fn compare_guard<DB: DatabaseLike>(
         column,
         predicate: predicate.clone(),
     })
+}
+
+/// Whether the evaluator compares two cells of `kind` and `other` as `PostgreSQL` does, where
+/// `bytewise` tells whether both columns' text compares byte for byte.
+fn columns_row_decide(
+    kind: ColumnKind,
+    other: ColumnKind,
+    operator: AttributeOperator,
+    bytewise: impl FnOnce() -> bool,
+) -> bool {
+    kind == other
+        && match kind {
+            ColumnKind::Bool | ColumnKind::Integer | ColumnKind::Decimal | ColumnKind::Uuid => true,
+            // Text orders by collation, which only the database knows.
+            ColumnKind::Text | ColumnKind::Bpchar => {
+                matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq) && bytewise()
+            }
+            _ => false,
+        }
 }
 
 /// Whether the evaluator compares a cell of `kind` against `value` as `PostgreSQL` does.

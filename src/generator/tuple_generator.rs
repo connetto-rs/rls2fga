@@ -2071,6 +2071,11 @@ pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
             operator.sql(),
             render_attribute_literal(value)?
         )),
+        AttributeTest::CompareColumn { operator, other } => Some(format!(
+            "{} {}",
+            operator.sql(),
+            quote_sql_identifier(other.as_str())
+        )),
         AttributeTest::In(values) if !values.is_empty() => {
             let rendered = values
                 .iter()

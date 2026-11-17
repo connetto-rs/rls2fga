@@ -49,7 +49,7 @@ pub use attribute::{
     residual_predicate,
 };
 pub(crate) use attribute::{
-    clock_refusals, comparison_renaming_cast, conjunct_reads_only_the_row,
+    clock_refusals, column_comparison, comparison_renaming_cast, conjunct_reads_only_the_row,
     local_literal_comparison, residual_predicate_reading, temporal_literal_comparison,
     temporal_literal_comparisons, TemporalColumns,
 };
