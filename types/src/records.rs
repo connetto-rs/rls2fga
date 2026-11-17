@@ -266,6 +266,15 @@ pub enum Guard {
         /// The predicate to apply.
         predicate: AttributePredicate,
     },
+    /// Two columns of the row compare as stated, a row where either is NULL failing.
+    CompareColumns {
+        /// The column on the comparison's left.
+        column: ColumnRead,
+        /// The comparison applied.
+        operator: AttributeOperator,
+        /// The column on the comparison's right.
+        other: ColumnRead,
+    },
 }
 
 impl Guard {
@@ -1103,6 +1112,11 @@ fn guard_holds<R: RowValues + ?Sized>(guard: &Guard, row: &R) -> Eval<()> {
             Eval::Refuse(error) => Eval::Refuse(error),
         },
         Guard::Compare { column, predicate } => compare_holds(column, predicate, row),
+        Guard::CompareColumns {
+            column,
+            operator,
+            other,
+        } => columns_hold(column, *operator, other, row),
     }
 }
 
@@ -1126,6 +1140,8 @@ fn compare_holds<R: RowValues + ?Sized>(
     };
     match &predicate.test {
         AttributeTest::IsNull => holds(matches!(cell, RowCell::Null)),
+        // The other column's type is carried by [`Guard::CompareColumns`] alone.
+        AttributeTest::CompareColumn { .. } => undecided(),
         AttributeTest::IsNotNull => holds(!matches!(cell, RowCell::Null)),
         // SQL compares NULL against nothing, so only a null test admits it.
         _ if matches!(cell, RowCell::Null) => Eval::Empty,
@@ -1163,6 +1179,72 @@ fn compare_holds<R: RowValues + ?Sized>(
             }
         }
     }
+}
+
+/// Whether two columns of the row compare as `operator` states, failing where either is NULL
+/// as SQL does.
+fn columns_hold<R: RowValues + ?Sized>(
+    column: &ColumnRead,
+    operator: AttributeOperator,
+    other: &ColumnRead,
+    row: &R,
+) -> Eval<()> {
+    let present = |read: &ColumnRead| match checked_cell(row, read) {
+        Eval::Value(RowCell::Null) | Eval::Empty => Eval::Empty,
+        decided => decided,
+    };
+    let cell = match present(column) {
+        Eval::Value(cell) => cell,
+        Eval::Empty => return Eval::Empty,
+        Eval::Refuse(error) => return Eval::Refuse(error),
+    };
+    let other_cell = match present(other) {
+        Eval::Value(cell) => cell,
+        Eval::Empty => return Eval::Empty,
+        Eval::Refuse(error) => return Eval::Refuse(error),
+    };
+    // Text orders by collation, which only the database knows.
+    let ordered_text = matches!(cell, RowCell::Text(_))
+        && !matches!(operator, AttributeOperator::Eq | AttributeOperator::NotEq);
+    match cells_ordering(&cell, &other_cell) {
+        Some(ordering) if !ordered_text => {
+            if ordering_matches(operator, ordering) {
+                Eval::Value(())
+            } else {
+                Eval::Empty
+            }
+        }
+        _ => Eval::Refuse(RecordError::ComparisonNeedsQuery(column.to_string())),
+    }
+}
+
+/// How two cells of one type order, absent where only SQL can tell. Text orders byte for
+/// byte, which only equality under a deterministic collation shares with `PostgreSQL`.
+fn cells_ordering(left: &RowCell<'_>, right: &RowCell<'_>) -> Option<core::cmp::Ordering> {
+    match (left, right) {
+        (RowCell::Bool(left), RowCell::Bool(right)) => Some(left.cmp(right)),
+        (
+            RowCell::Integer(left) | RowCell::Decimal(left),
+            RowCell::Integer(right) | RowCell::Decimal(right),
+        ) => compare_decimals(left.as_ref(), right.as_ref()),
+        (RowCell::Text(left), RowCell::Text(right)) => Some(left.as_ref().cmp(right.as_ref())),
+        (RowCell::Uuid(left), RowCell::Uuid(right)) => {
+            Some(uuid_value(left)?.cmp(&uuid_value(right)?))
+        }
+        _ => None,
+    }
+}
+
+/// The 128 bits a `uuid` spelling holds, its hyphens and letter case aside, which is how
+/// `PostgreSQL` orders two of them. `None` for a spelling without exactly 32 hex digits.
+fn uuid_value(spelled: &str) -> Option<u128> {
+    let mut value = 0_u128;
+    let mut digits = 0_usize;
+    for character in spelled.chars().filter(|character| *character != '-') {
+        value = value << 4 | u128::from(character.to_digit(16)?);
+        digits += 1;
+    }
+    (digits == 32).then_some(value)
 }
 
 /// How the row's value orders against one literal, absent where only SQL can tell.

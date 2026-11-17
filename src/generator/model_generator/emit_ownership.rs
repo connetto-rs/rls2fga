@@ -70,6 +70,10 @@ pub(super) fn attribute_gate_key(predicate: &AttributePredicate) -> Option<Strin
         AttributeTest::Compare { operator, value } => {
             format!("{}:{}", operator.gate_token(), literal_gate_key(value)?)
         }
+        AttributeTest::CompareColumn { operator, other } => {
+            let other = other.as_str();
+            format!("{}:col{}:{other}", operator.gate_token(), other.len())
+        }
         AttributeTest::In(values) => {
             let mut key = format!("in:{}:", values.len());
             for value in values {

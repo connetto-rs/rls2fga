@@ -1,7 +1,7 @@
 use super::*;
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::parser::expr::{cast_type_name, element_type, peel_noting_casts};
-use crate::parser::sql_parser::DataTypeLike;
+use crate::parser::sql_parser::{ColumnCollation, DataTypeLike};
 use crate::types::TemporalKind;
 use sql_traits::utils::scalar_family::ScalarFamily;
 use sql_values::postgres::{parse_interval_typmod, IntervalError, IntervalFields, IntervalTypmod};
@@ -1023,6 +1023,163 @@ pub(crate) fn temporal_literal_comparison(
             },
         }))
     })
+}
+
+/// Why two columns of the checked row compared with each other become no guard.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum ColumnComparisonRefusal {
+    /// A compared name the guarded table does not declare.
+    #[error("{comparison}: the table declares no column {column}")]
+    MissingColumn {
+        /// The comparison as written.
+        comparison: String,
+        /// The name no column carries.
+        column: ColumnName,
+    },
+    /// Columns `PostgreSQL` compares by converting one to the other's type.
+    #[error(
+        "{comparison}: PostgreSQL compares {column} of type {column_type} with {other} of type \
+         {other_type} by converting one of them, so only columns of one type, or of two integer \
+         types, translate"
+    )]
+    Types {
+        /// The comparison as written.
+        comparison: String,
+        /// The left column.
+        column: ColumnName,
+        /// Its type, normalized.
+        column_type: String,
+        /// The right column.
+        other: ColumnName,
+        /// Its type, normalized.
+        other_type: String,
+    },
+    /// Text columns under two collations, between which `PostgreSQL` cannot choose.
+    #[error(
+        "{comparison}: {column} compares under {column_collation} and {other} under \
+         {other_collation}, and PostgreSQL raises at every check comparing text whose \
+         collations conflict"
+    )]
+    Collations {
+        /// The comparison as written.
+        comparison: String,
+        /// The left column.
+        column: ColumnName,
+        /// Its collation, described.
+        column_collation: String,
+        /// The right column.
+        other: ColumnName,
+        /// Its collation, described.
+        other_collation: String,
+    },
+}
+
+/// Two columns of the checked row compared with each other, the left one first by name.
+#[derive(Debug)]
+pub(crate) struct ColumnComparison {
+    /// The column first by name.
+    pub(crate) column: ColumnName,
+    /// The comparison, oriented with [`Self::column`] on the left.
+    pub(crate) operator: AttributeOperator,
+    /// The other column.
+    pub(crate) other: ColumnName,
+}
+
+impl ColumnComparison {
+    /// The guard this comparison is.
+    pub(crate) fn into_predicate(self) -> AttributePredicate {
+        AttributePredicate {
+            column: self.column,
+            test: AttributeTest::CompareColumn {
+                operator: self.operator,
+                other: self.other,
+            },
+        }
+    }
+}
+
+/// `column op other` over two bare columns of `table`, ordered by name so every spelling mints
+/// one gate, refused where `PostgreSQL` converts one side, which every pair of types but two
+/// integer types needs.
+pub(crate) fn column_comparison<DB: DatabaseLike>(
+    expr: &Expr,
+    table: &DB::Table,
+    db: &DB,
+) -> Option<Result<ColumnComparison, ColumnComparisonRefusal>> {
+    let expr = unparenthesize(expr);
+    let Expr::BinaryOp { left, op, right } = expr else {
+        return None;
+    };
+    let operator = attribute_operator(op)?;
+    let left = bare_column(left)?;
+    let right = bare_column(right)?;
+    let (column, other, operator) = if left <= right {
+        (left, right, operator)
+    } else {
+        (right, left, mirrored(operator))
+    };
+    let declared = |name: &ColumnName| {
+        table
+            .columns(db)
+            .into_iter()
+            .flatten()
+            .find(|candidate| candidate.stored_column_name() == name.as_str())
+            .ok_or_else(|| ColumnComparisonRefusal::MissingColumn {
+                comparison: expr.to_string(),
+                column: name.clone(),
+            })
+    };
+    let (column_declared, other_declared) = match (declared(&column), declared(&other)) {
+        (Ok(column_declared), Ok(other_declared)) => (column_declared, other_declared),
+        (Err(refusal), _) | (_, Err(refusal)) => return Some(Err(refusal)),
+    };
+    let column_type = column_declared.data_type(db).normalized_name(db);
+    let other_type = other_declared.data_type(db).normalized_name(db);
+    let integer = |name: &str| matches!(name, "SMALLINT" | "INT" | "BIGINT");
+    if column_type != other_type && !(integer(&column_type) && integer(&other_type)) {
+        return Some(Err(ColumnComparisonRefusal::Types {
+            comparison: expr.to_string(),
+            column,
+            column_type: column_type.into_owned(),
+            other,
+            other_type: other_type.into_owned(),
+        }));
+    }
+    let column_collation = column_declared.collation(db).ok();
+    let other_collation = other_declared.collation(db).ok();
+    let collations_agree = match (&column_collation, &other_collation) {
+        (Some(ColumnCollation::Unknown) | None, _) | (_, Some(ColumnCollation::Unknown) | None) => {
+            false
+        }
+        (Some(ColumnCollation::DatabaseDefault), _)
+        | (_, Some(ColumnCollation::DatabaseDefault)) => true,
+        (named, other_named) => named == other_named,
+    };
+    if !collations_agree {
+        return Some(Err(ColumnComparisonRefusal::Collations {
+            comparison: expr.to_string(),
+            column,
+            column_collation: described_collation(column_collation.as_ref()),
+            other,
+            other_collation: described_collation(other_collation.as_ref()),
+        }));
+    }
+    Some(Ok(ColumnComparison {
+        column,
+        operator,
+        other,
+    }))
+}
+
+/// A column's collation as a refusal names it.
+fn described_collation(collation: Option<&ColumnCollation<'_>>) -> String {
+    match collation {
+        Some(ColumnCollation::DatabaseDefault) => "the database default collation".to_string(),
+        Some(ColumnCollation::Named(named)) => format!("the collation {}", named.name()),
+        Some(ColumnCollation::Unknown) | None => {
+            "a collation the schema does not resolve".to_string()
+        }
+    }
 }
 
 /// The type and printed value of a quoted literal cast once to `date`, `timestamp` or

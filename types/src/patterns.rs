@@ -210,7 +210,8 @@ impl TemporalKind {
     }
 }
 
-/// What an attribute guard asks of its column, against literal constants or NULL only.
+/// What an attribute guard asks of its column, against literal constants, NULL or another
+/// column of the same row.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum AttributeTest {
     /// The column compares as stated against one literal.
@@ -220,6 +221,14 @@ pub enum AttributeTest {
         /// The literal the column is compared against.
         value: AttributeLiteral,
     },
+    /// The column compares as stated against another column of the row of its type, or both
+    /// integers, failing where either is NULL.
+    CompareColumn {
+        /// Comparison applied, oriented with the guard's column on the left.
+        operator: AttributeOperator,
+        /// The other column, folded to its stored name.
+        other: ColumnName,
+    },
     /// The column equals one of the literals, as SQL `IN` decides it.
     In(Vec<AttributeLiteral>),
     /// The column is SQL NULL.
@@ -228,7 +237,8 @@ pub enum AttributeTest {
     IsNotNull,
 }
 
-/// A column tested against literal constants or NULL, which the row alone decides.
+/// A column tested against literal constants, NULL or another column of the same row, which
+/// the row alone decides.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct AttributePredicate {
     /// Column the guard reads, folded to its stored name.

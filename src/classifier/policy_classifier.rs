@@ -959,6 +959,23 @@ fn classify_expr_inner<DB: DatabaseLike>(
             Err(refusal) => unknown_d(expr, refusal.to_string()),
         };
     }
+    if let Some(compared) = lookup_table(db, table)
+        .and_then(|guarded| recognizers::column_comparison(expr, guarded, db))
+    {
+        let grade = |column| literal_attribute_confidence(db, registry, table, column);
+        return match compared {
+            Ok(compared) => ClassifiedExpr {
+                confidence: grade(&compared.column).min(grade(&compared.other)),
+                pattern: PatternClass::P9AttributeCondition(AttributeCondition {
+                    column: compared.column.clone(),
+                    value_description: compared.other.to_string(),
+                    predicate: Some(compared.into_predicate()),
+                    request_predicate: None,
+                }),
+            },
+            Err(refusal) => unknown_d(expr, refusal.to_string()),
+        };
+    }
 
     let renamings = recognizers::renaming_casts(expr, registry);
     if !renamings.is_empty() {
@@ -2079,7 +2096,7 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
     fn classify_generic_unknown_expression_has_fallback_reason() {
         let db = docs_db();
         let registry = FunctionRegistry::new();
-        let expr = parse_expr("owner_id = owner_id");
+        let expr = parse_expr("owner_id IS DISTINCT FROM owner_id");
 
         let classified = classify_expr(&expr, &db, &registry, "docs", PolicyCommand::Select);
 
