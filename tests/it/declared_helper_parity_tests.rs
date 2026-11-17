@@ -16,6 +16,7 @@ use crate::declared_helper_tests::{
     EDGE_FOLDERS, EXPIRING, FOUNDED, GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, LEVELS,
     MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
+use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::row_cap_tests::{INSTALLATION_CAPS, POLICY_CAPS};
 use crate::support;
@@ -2325,6 +2326,76 @@ async fn grant_arms_kept_by_membership_state_agree_with_postgres_17_and_18() {
                     assert_agrees(&case, &run);
                 }
             }
+        }
+    }
+}
+
+/// Resources `r1`, `r3` and `r4` let their writers share. `alice` writes `r1`, administers
+/// `r2` and reads `r3`, and `bob` writes `r3` and `r4` and administers `r1`.
+fn shares_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-labelled-shares-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        SHARES,
+        &[
+            "INSERT INTO resources VALUES ('r1', true), ('r2', false), ('r3', true), ('r4', true);
+             INSERT INTO grants VALUES
+               ('r1', 'alice', 'writer'), ('r2', 'alice', 'admin'), ('r3', 'alice', 'reader'),
+               ('r4', 'bob', 'writer'), ('r1', 'bob', 'admin'), ('r3', 'bob', 'writer')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT, DELETE ON grants TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        ["alice", "bob", "carol"].into_iter().map(caller).collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(SHARE_HELPERS_JSON);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+const SHARE_HELPERS_JSON: &str = r#"{
+    "authz.resources_with": { "kind": "declared_helper" },
+    "authz.sharable_grants": { "kind": "declared_helper" }
+}"#;
+
+/// A caller reads the grants on a resource it may share any role on and deletes those whose
+/// role it may share there, an admin sharing every role and a writer the roles up to writer
+/// where the resource lets writers share.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn grants_shared_by_label_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = shares_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, grant: &str, statement, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("grants:{grant}"),
+                    statement,
+                    allowed,
+                );
+            };
+            // `alice` shares every role on `r2` and reader and writer on `r1`.
+            expect("alice", "r1|bob", ActionStatement::Select, true);
+            expect("alice", "r1|bob", ActionStatement::Delete, false);
+            expect("alice", "r1|alice", ActionStatement::Delete, true);
+            expect("alice", "r2|alice", ActionStatement::Delete, true);
+            expect("alice", "r3|bob", ActionStatement::Select, false);
+            // `bob` shares every role on `r1` and reader and writer on `r3` and `r4`.
+            expect("bob", "r1|bob", ActionStatement::Delete, true);
+            expect("bob", "r3|alice", ActionStatement::Delete, true);
+            expect("bob", "r2|alice", ActionStatement::Select, false);
+            expect("carol", "r1|alice", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
         }
     }
 }

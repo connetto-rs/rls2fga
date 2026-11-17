@@ -167,6 +167,15 @@ fn fallback_parameter(first: &crate::types::FallbackStep) -> String {
     first.parameter.clone()
 }
 
+/// The call `call` spelled as written, followed by each label it is read at.
+fn helper_call_text(call: &crate::classifier::patterns::HelperCall) -> String {
+    let mut text = format!("{}({})", call.function, call.arguments.join(", "));
+    if !call.labels.is_empty() {
+        let _ = write!(text, " at {}", call.labels.join(", "));
+    }
+    text
+}
+
 fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String {
     use crate::classifier::patterns::PatternClass;
     match pattern {
@@ -203,11 +212,7 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
             format!("P19 (membership through {})", membership.link_table)
         }
         PatternClass::P20DeclaredHelper(DeclaredHelper { column, call }) => {
-            format!(
-                "P20 ({column} in {}({}))",
-                call.function,
-                call.arguments.join(", ")
-            )
+            format!("P20 ({column} in {})", helper_call_text(call))
         }
         PatternClass::P30RowInHelperPairs(RowInHelperPairs {
             columns,
@@ -415,12 +420,9 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                     ExcludedSet::Membership(membership) => {
                         write!(rendered, "{}", membership.join_table)
                     }
-                    ExcludedSet::Helper(DeclaredHelper { column, call }) => write!(
-                        rendered,
-                        "{column} in {}({})",
-                        call.function,
-                        call.arguments.join(", ")
-                    ),
+                    ExcludedSet::Helper(DeclaredHelper { column, call }) => {
+                        write!(rendered, "{column} in {}", helper_call_text(call))
+                    }
                     ExcludedSet::Flag(flag) => {
                         write!(rendered, "{}", format_pattern(&flag.pattern))
                     }

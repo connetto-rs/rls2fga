@@ -33,10 +33,10 @@ use crate::parser::names::{
     table_identity,
 };
 use crate::parser::sql_parser::{
-    CallerGate, CapLift, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike,
-    ForeignKeyLike, FunctionLike, GrantArm, GrantedTo, HelperArm, HelperSet, JoinedRow, ParentArm,
-    Restriction, RowCap, SettingComparison, SettingContent, SettingPresence, SettingValue,
-    TableLike, TimeBound, TimeComparison,
+    CalledArm, CallerGate, CapLift, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike,
+    DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike, GrantArm, GrantedTo, HelperArm,
+    HelperSet, JoinedRow, ParentArm, Restriction, Returned, RowCap, SettingComparison,
+    SettingContent, SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
 };
 use crate::types::{ColumnKind, ColumnName, RequestNormalization, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
@@ -205,8 +205,8 @@ pub(crate) enum HelperRefusal {
     #[error(
         "declared helper '{function}' is compared with the request's value \
          '{setting}', so only arms returning the same rows to every request read, and \
-         one of its arms is a parent, a walk or keeps its rows by what the request \
-         carries"
+         one of its arms is a parent, a walk, another helper's rows or keeps its rows by \
+         what the request carries"
     )]
     RequestDependentValues {
         /// The helper.
@@ -263,6 +263,39 @@ pub(crate) enum HelperRefusal {
         /// How many columns the arm returns.
         columns: usize,
     },
+    /// A helper's rows are read as keys where its arms return labels.
+    #[error(
+        "declared helper '{function}' returns labels in the column read as keys, which name \
+         no row"
+    )]
+    LabelledKey {
+        /// The helper.
+        function: String,
+    },
+    /// A helper's rows are read as keys of one column while another column of them holds
+    /// no labels either.
+    #[error(
+        "declared helper '{function}' returns {keys} columns no arm returns labels in, while \
+         only one column of keys beside labels reads as a set of keys"
+    )]
+    SeveralKeys {
+        /// The helper.
+        function: String,
+        /// How many of its columns hold no labels.
+        keys: usize,
+    },
+    /// A column compared with the labels a helper returns is of no enum type, so no label
+    /// list bounds the values it holds.
+    #[error(
+        "column '{column}' is compared with the labels declared helper '{function}' returns, \
+         while it is of no enum type listing the labels it can hold"
+    )]
+    LabelOperand {
+        /// The helper.
+        function: String,
+        /// The compared column.
+        column: String,
+    },
     /// A grant arm compared with a request value keeps only the rows whose columns pair
     /// with the rows another helper returns.
     #[error(
@@ -277,12 +310,24 @@ pub(crate) enum HelperRefusal {
         /// The helper returning the pairs.
         cap: String,
     },
-    /// A cap returns some of its pairs through a parent or a walk, which no row keys.
+    /// A cap returns some of its pairs through a parent, a walk or another helper's rows,
+    /// which no row keys.
     #[error(
-        "{capped} is capped by '{cap}', which returns pairs through a parent or a walk, \
-         while a pair is read from the row returning it"
+        "{capped} is capped by '{cap}', which returns pairs through a parent, a walk or \
+         another helper's rows, while a pair is read from the row returning it"
     )]
     CapByParentOrWalk {
+        /// What the cap keeps rows of.
+        capped: Capped,
+        /// The helper returning the pairs.
+        cap: String,
+    },
+    /// A cap returns labels beside the values its rows hold, which no row holds.
+    #[error(
+        "{capped} is capped by '{cap}', which returns labels beside its rows, while a pair is \
+         read from the row returning it"
+    )]
+    CapByLabels {
         /// What the cap keeps rows of.
         capped: Capped,
         /// The helper returning the pairs.
@@ -609,12 +654,12 @@ pub(crate) fn recognize_row_in_helper_pairs<DB: DatabaseLike>(
         return None;
     }
     let guarded = lookup_table(db, table)?;
-    let pattern = if overloaded {
+    let classified = if overloaded {
         Err(HelperRefusal::Overloaded {
             function: function.target_name().to_string(),
         })
     } else {
-        row_in_helper_pairs(
+        row_in_helper_rows(
             operands,
             function,
             arguments,
@@ -623,18 +668,47 @@ pub(crate) fn recognize_row_in_helper_pairs<DB: DatabaseLike>(
             registry,
         )
     };
-    Some(match pattern {
-        Ok(pattern) => ClassifiedExpr {
-            pattern: PatternClass::P30RowInHelperPairs(pattern),
-            confidence: ConfidenceLevel::A,
-        },
-        Err(refusal) => ClassifiedExpr {
-            pattern: PatternClass::Unknown(UnclassifiedExpr {
-                sql_text: expr.to_string(),
-                reason: refusal.to_string(),
-            }),
-            confidence: ConfidenceLevel::D,
-        },
+    Some(classified.unwrap_or_else(|refusal| ClassifiedExpr {
+        pattern: PatternClass::Unknown(UnclassifiedExpr {
+            sql_text: expr.to_string(),
+            reason: refusal.to_string(),
+        }),
+        confidence: ConfidenceLevel::D,
+    }))
+}
+
+/// `operands` of `table` compared with the rows one call of `function` returns, as the
+/// pairs those rows are where no arm returns labels, and otherwise as each label beside the
+/// keys the rows pair with it.
+fn row_in_helper_rows<DB: DatabaseLike>(
+    operands: &[Expr],
+    function: &DB::Function,
+    arguments: &[FunctionArg],
+    (table, guarded): (&str, &DB::Table),
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<ClassifiedExpr, HelperRefusal> {
+    let (values, set) = answered_call(function, arguments, db, registry)?;
+    let labelled = label_columns(&set, operands.len(), db);
+    if labelled.contains(&true) {
+        return row_in_labelled_rows(
+            operands,
+            (function, &values, &set),
+            &labelled,
+            (table, guarded),
+            db,
+            registry,
+        );
+    }
+    Ok(ClassifiedExpr {
+        pattern: PatternClass::P30RowInHelperPairs(row_in_helper_pairs(
+            operands,
+            (function, &values, &set),
+            (table, guarded),
+            db,
+            registry,
+        )?),
+        confidence: ConfidenceLevel::A,
     })
 }
 
@@ -643,14 +717,12 @@ pub(crate) fn recognize_row_in_helper_pairs<DB: DatabaseLike>(
 /// declares the column it pairs with in.
 fn row_in_helper_pairs<DB: DatabaseLike>(
     operands: &[Expr],
-    function: &DB::Function,
-    arguments: &[FunctionArg],
+    (function, values, set): (&DB::Function, &[Value], &HelperSet<'_, DB>),
     (table, guarded): (&str, &DB::Table),
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<RowInHelperPairs, HelperRefusal> {
-    let (values, set) = answered_call(function, arguments, db, registry)?;
-    let (pairs, rows) = helper_pairs(&Capped::Policy, function, &values, &set, db, registry)?;
+    let (pairs, rows) = helper_pairs(&Capped::Policy, function, values, set, db, registry)?;
     let arms = CapArms {
         capped: &Capped::Policy,
         cap: &pairs.function,
@@ -690,6 +762,190 @@ fn row_in_helper_pairs<DB: DatabaseLike>(
     })
 }
 
+/// One label operand of a row compared with a helper returning labels: the column of the
+/// guarded table it is, `None` for a literal, beside the labels it can hold.
+type LabelChoice = (usize, Option<ColumnName>, Vec<String>);
+
+/// `operands` of `table` compared with the rows one call of `function` returns, one column
+/// of keys beside columns of labels, as the disjunction over every label each label operand
+/// can hold of that operand holding it and the key operand being among the keys the rows
+/// pair with those labels.
+///
+/// A label operand is a column of an enum type, which holds one of its labels, or a literal
+/// naming one, and `PostgreSQL` compares a row holding `NULL` with no row, as the
+/// disjunction keeps none.
+fn row_in_labelled_rows<DB: DatabaseLike>(
+    operands: &[Expr],
+    (function, values, set): (&DB::Function, &[Value], &HelperSet<'_, DB>),
+    labelled: &[bool],
+    (table, guarded): (&str, &DB::Table),
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<ClassifiedExpr, HelperRefusal> {
+    let name = registry.resolved_target_name(&function.target_name());
+    let mut keys = operands
+        .iter()
+        .zip(labelled)
+        .enumerate()
+        .filter(|(_, (_, labels))| !**labels);
+    let (Some((key, (key_operand, _))), None) = (keys.next(), keys.next()) else {
+        return Err(HelperRefusal::SeveralKeys {
+            function: name,
+            keys: labelled.iter().filter(|labels| !**labels).count(),
+        });
+    };
+    let operand_refusal = |operand: &Expr| HelperRefusal::CapOperand {
+        capped: Capped::Policy,
+        cap: name.clone(),
+        operand: operand.to_string(),
+    };
+    let guarded_column = |column: &ColumnName| -> Result<Option<&DB::Column>, HelperRefusal> {
+        Ok(guarded
+            .columns(db)?
+            .find(|candidate| candidate.stored_column_name() == column.as_str()))
+    };
+    let key_column =
+        compared_column(key_operand, table).ok_or_else(|| HelperRefusal::CapLiteralsBeside {
+            capped: Capped::Policy,
+            table: table_identity(guarded).to_string(),
+            cap: name.clone(),
+        })?;
+    let compared = guarded_column(&key_column)?.ok_or_else(|| operand_refusal(key_operand))?;
+    let level =
+        rows_named_by(guarded, compared, db)?.ok_or_else(|| names_no_rows(guarded, compared))?;
+    let mut choices: Vec<LabelChoice> = Vec::new();
+    for (((position, operand), (_, declared)), _) in operands
+        .iter()
+        .enumerate()
+        .zip(function.returned_columns(db))
+        .zip(labelled)
+        .filter(|(_, labels)| **labels)
+    {
+        if let Some(column) = compared_column(operand, table) {
+            let held = guarded_column(&column)?.ok_or_else(|| operand_refusal(operand))?;
+            let labels = enum_labels(held, db).ok_or_else(|| HelperRefusal::LabelOperand {
+                function: name.clone(),
+                column: column.to_string(),
+            })?;
+            choices.push((position, Some(column), labels));
+        } else {
+            let Some(AttributeLiteral::Text(label)) = paired_literal(operand, &declared) else {
+                return Err(operand_refusal(operand));
+            };
+            choices.push((position, None, vec![label]));
+        }
+    }
+    let mut assignments: Vec<Vec<(usize, Option<&ColumnName>, &str)>> = vec![Vec::new()];
+    for (position, column, labels) in &choices {
+        assignments = assignments
+            .into_iter()
+            .flat_map(|held| {
+                labels.iter().map(move |label| {
+                    let mut assigned = held.clone();
+                    assigned.push((*position, column.as_ref(), label.as_str()));
+                    assigned
+                })
+            })
+            .collect();
+    }
+    let mut disjuncts = Vec::with_capacity(assignments.len());
+    for assignment in assignments {
+        let selection = Selection {
+            key,
+            labels: assignment
+                .iter()
+                .map(|(position, _, label)| (*position, Value::SingleQuotedString((*label).into())))
+                .collect(),
+        };
+        let call = helper_call(
+            (function, values, set),
+            &selection,
+            &key_column,
+            &level,
+            db,
+            registry,
+        )?;
+        if call.arms.is_empty() {
+            continue;
+        }
+        let mut parts: Vec<ClassifiedExpr> = assignment
+            .iter()
+            .filter_map(|(_, column, label)| {
+                Some(label_test((*column)?, label, db, registry, table))
+            })
+            .collect();
+        parts.push(ClassifiedExpr {
+            pattern: PatternClass::P20DeclaredHelper(DeclaredHelper {
+                column: key_column.clone(),
+                call,
+            }),
+            confidence: ConfidenceLevel::A,
+        });
+        disjuncts.push(joined(BoolOp::And, parts));
+    }
+    if disjuncts.is_empty() {
+        // No label returns a key, so the comparison keeps no row.
+        return Ok(ClassifiedExpr {
+            pattern: PatternClass::P10ConstantBool(ConstantBool { value: false }),
+            confidence: ConfidenceLevel::A,
+        });
+    }
+    Ok(joined(BoolOp::Or, disjuncts))
+}
+
+/// `parts` joined by `op`, the one part alone where there is one.
+fn joined(op: BoolOp, parts: Vec<ClassifiedExpr>) -> ClassifiedExpr {
+    match <[ClassifiedExpr; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => ClassifiedExpr {
+            confidence: composite_confidence(&parts),
+            pattern: PatternClass::P8Composite(Composite { op, parts }),
+        },
+    }
+}
+
+/// `<column> = '<label>'` on the guarded row, graded as the policy writing it is.
+fn label_test<DB: DatabaseLike>(
+    column: &ColumnName,
+    label: &str,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> ClassifiedExpr {
+    let confidence = if registry.is_confirmed_attribute_column(db, table, column.as_str()) {
+        ConfidenceLevel::A
+    } else {
+        ConfidenceLevel::B
+    };
+    ClassifiedExpr {
+        pattern: PatternClass::P9AttributeCondition(AttributeCondition {
+            column: column.clone(),
+            value_description: format!("'{label}'"),
+            predicate: Some(AttributePredicate {
+                column: column.clone(),
+                test: AttributeTest::Compare {
+                    operator: AttributeOperator::Eq,
+                    value: AttributeLiteral::Text(label.to_string()),
+                },
+            }),
+            request_predicate: None,
+        }),
+        confidence,
+    }
+}
+
+/// The labels of the enum type `column` holds, in the order the type declares them, `None`
+/// where it is of no enum type.
+fn enum_labels<DB: DatabaseLike>(column: &DB::Column, db: &DB) -> Option<Vec<String>> {
+    let enumeration = column.data_type(db).enumeration(db)?;
+    matches!(enumeration.kind(), EnumerationKind::Enum).then(|| {
+        enumeration
+            .into_members()
+            .map(|member| member.label().to_string())
+            .collect()
+    })
+}
+
 /// The literal `operand` writes, plain or a quoted string cast only to `declared`, the type
 /// a helper declares the column it pairs with in, so the tuple query coerces it alike.
 fn paired_literal(operand: &Expr, declared: &str) -> Option<AttributeLiteral> {
@@ -716,6 +972,9 @@ fn paired_literal(operand: &Expr, declared: &str) -> Option<AttributeLiteral> {
 
 /// The helper `query` calls compared with `compared`, `None` where `query` calls no
 /// declared helper or `compared` is no column of `table`.
+///
+/// `query` calls a helper returning one column, or reads one column of the rows a helper
+/// returning `TABLE (...)` returns, which [`helper_call`] reads only as keys beside labels.
 fn helper_compared_with<DB: DatabaseLike>(
     compared: &Expr,
     query: &Query,
@@ -723,7 +982,10 @@ fn helper_compared_with<DB: DatabaseLike>(
     registry: &FunctionRegistry,
     table: &str,
 ) -> Option<Result<DeclaredHelper, HelperRefusal>> {
-    let (function, arguments, overloaded) = declared_call(query, db, registry)?;
+    let (function, arguments, overloaded, key) = match declared_call(query, db, registry) {
+        Some((function, arguments, overloaded)) => (function, arguments, overloaded, 0),
+        None => column_read_in_from(query, db, registry)?,
+    };
     let column = compared_column(compared, table)?;
     let guarded = lookup_table(db, table)?;
     let guarded_column = guarded
@@ -737,8 +999,7 @@ fn helper_compared_with<DB: DatabaseLike>(
         })
     } else {
         declared_helper(
-            function,
-            arguments,
+            (function, arguments, key),
             column,
             guarded,
             guarded_column,
@@ -951,15 +1212,28 @@ fn function_read(query: &Query) -> Option<FunctionRead<'_>> {
     })
 }
 
-/// The declared helper returning `TABLE (...)` whose every column `query` reads from the
-/// one call it reads, through `*` or naming each in the order the helper returns them,
-/// beside the call's arguments and whether another declaration takes as many. `None`
-/// where `query` reads anything else.
-fn pairs_read_in_from<'query, 'db, DB: DatabaseLike>(
+/// One call of a declared helper returning `TABLE (...)` a query reads as its only
+/// relation.
+struct TableRead<'query, 'db, DB: DatabaseLike> {
+    /// The call as the query reads it.
+    read: FunctionRead<'query>,
+    /// The helper the call reaches.
+    function: &'db DB::Function,
+    /// Whether another declaration takes as many arguments.
+    overloaded: bool,
+    /// The name the query reads the call's rows under.
+    relation: &'query Ident,
+    /// The name the query reads each column the helper returns by, in order.
+    names: Vec<String>,
+}
+
+/// The call of a declared helper returning `TABLE (...)` `query` reads as its only relation,
+/// `None` where it reads anything else.
+fn table_read<'query, 'db, DB: DatabaseLike>(
     query: &'query Query,
     db: &'db DB,
     registry: &FunctionRegistry,
-) -> Option<(&'db DB::Function, &'query [FunctionArg], bool)> {
+) -> Option<TableRead<'query, 'db, DB>> {
     let read = function_read(query)?;
     let (function, overloaded) = declared_function(read.name, read.arguments.len(), db, registry)?;
     let relation = match read.alias {
@@ -978,7 +1252,7 @@ fn pairs_read_in_from<'query, 'db, DB: DatabaseLike>(
     {
         return None;
     }
-    let names: Vec<_> = returned
+    let names = returned
         .iter()
         .enumerate()
         .map(|(position, name)| {
@@ -987,7 +1261,33 @@ fn pairs_read_in_from<'query, 'db, DB: DatabaseLike>(
                 |column| stored_ident_name(&column.name),
             )
         })
+        .map(alloc::borrow::Cow::into_owned)
         .collect();
+    Some(TableRead {
+        read,
+        function,
+        overloaded,
+        relation,
+        names,
+    })
+}
+
+/// The declared helper returning `TABLE (...)` whose every column `query` reads from the
+/// one call it reads, through `*` or naming each in the order the helper returns them,
+/// beside the call's arguments and whether another declaration takes as many. `None`
+/// where `query` reads anything else.
+fn pairs_read_in_from<'query, 'db, DB: DatabaseLike>(
+    query: &'query Query,
+    db: &'db DB,
+    registry: &FunctionRegistry,
+) -> Option<(&'db DB::Function, &'query [FunctionArg], bool)> {
+    let TableRead {
+        read,
+        function,
+        overloaded,
+        relation,
+        names,
+    } = table_read(query, db, registry)?;
     let reads_every = match read.select.projection.as_slice() {
         [SelectItem::Wildcard(options)] => adds_nothing(options),
         [SelectItem::QualifiedWildcard(
@@ -1009,6 +1309,34 @@ fn pairs_read_in_from<'query, 'db, DB: DatabaseLike>(
         }
     };
     reads_every.then_some((function, read.arguments, overloaded))
+}
+
+/// The declared helper returning `TABLE (...)` one of whose columns `query` reads alone from
+/// the one call it reads, beside the call's arguments, whether another declaration takes as
+/// many, and the position of the column read. `None` where `query` reads anything else.
+fn column_read_in_from<'query, 'db, DB: DatabaseLike>(
+    query: &'query Query,
+    db: &'db DB,
+    registry: &FunctionRegistry,
+) -> Option<(&'db DB::Function, &'query [FunctionArg], bool, usize)> {
+    let TableRead {
+        read,
+        function,
+        overloaded,
+        relation,
+        names,
+    } = table_read(query, db, registry)?;
+    let [SelectItem::UnnamedExpr(projected)
+    | SelectItem::ExprWithAlias {
+        expr: projected, ..
+    }] = read.select.projection.as_slice()
+    else {
+        return None;
+    };
+    let position = names
+        .iter()
+        .position(|column| projects_column(unparenthesize(projected), relation, column))?;
+    Some((function, read.arguments, overloaded, position))
 }
 
 /// Whether a `*` keeps every column as the relation returns it, which every option other
@@ -1087,10 +1415,10 @@ fn argument_value(argument: &FunctionArg) -> Option<&Value> {
     }
 }
 
-/// The pattern for one call of `function` compared with `column` of `guarded`.
+/// The pattern for one call of `function` whose column at `key` is compared with `column`
+/// of `guarded`.
 fn declared_helper<DB: DatabaseLike>(
-    function: &DB::Function,
-    arguments: &[FunctionArg],
+    (function, arguments, key): (&DB::Function, &[FunctionArg], usize),
     column: ColumnName,
     guarded: &DB::Table,
     guarded_column: &DB::Column,
@@ -1107,7 +1435,18 @@ fn declared_helper<DB: DatabaseLike>(
             .map(table_identity)
             .ok_or_else(|| names_no_rows(guarded, guarded_column))?,
     };
-    let call = helper_call(function, &values, &set, &column, &named, db, registry)?;
+    let selection = Selection {
+        key,
+        labels: Vec::new(),
+    };
+    let call = helper_call(
+        (function, &values, &set),
+        &selection,
+        &column,
+        &named,
+        db,
+        registry,
+    )?;
     Ok(DeclaredHelper { column, call })
 }
 
@@ -1201,31 +1540,131 @@ fn answered_call<'db, DB: DatabaseLike>(
     Ok((values, set))
 }
 
-/// One call and what it returns, refused unless every arm returns keys of `level`, the
-/// table whose rows `compared` names, or of a table whose key references `level`'s.
+/// The columns of a helper's rows a call reads: its keys, and the label each column of
+/// labels has to hold.
+#[derive(Debug, Clone, Default)]
+struct Selection {
+    /// The position of the column of keys, the one column of a helper returning one.
+    key: usize,
+    /// Each column of labels read at one label, beside that label, in the order the helper
+    /// returns those columns. A column of labels not listed holds any of them.
+    labels: Vec<(usize, Value)>,
+}
+
+/// What an arm returning `returned` returns at a selection: its column of keys, and each
+/// column it reads where the selection reads a label, beside that label.
+struct Selected<'s, S> {
+    /// What the arm returns in the column of keys.
+    key: S,
+    /// Each column the arm reads a label off, beside the label it has to hold.
+    labels: Vec<(S, &'s Value)>,
+}
+
+impl Selection {
+    /// What an arm of `function` returning `returned` returns at this selection, `None`
+    /// where it lists labels without the one the selection reads.
+    fn of<'s, S: Copy>(
+        &'s self,
+        function: &str,
+        returned: &[Returned<S>],
+    ) -> Result<Option<Selected<'s, S>>, HelperRefusal> {
+        let Some(Returned::Read(key)) = returned.get(self.key) else {
+            return Err(HelperRefusal::LabelledKey {
+                function: function.to_string(),
+            });
+        };
+        let mut labels = Vec::new();
+        for (position, label) in &self.labels {
+            match returned.get(*position) {
+                Some(Returned::Labels(listed)) if listed.contains(label) => {}
+                Some(Returned::Read(read)) => labels.push((*read, label)),
+                Some(Returned::Labels(_)) | None => return Ok(None),
+            }
+        }
+        Ok(Some(Selected { key: *key, labels }))
+    }
+}
+
+/// Which of the `width` columns `set` returns are columns of labels, some arm returning
+/// labels in it, itself or through the helper it calls.
+fn label_columns<DB: DatabaseLike>(set: &HelperSet<'_, DB>, width: usize, db: &DB) -> Vec<bool> {
+    let mut labelled = vec![false; width];
+    for arm in set.arms() {
+        match arm {
+            HelperArm::Grant(grant) => {
+                for (column, returned) in labelled.iter_mut().zip(grant.returned()) {
+                    *column |= matches!(returned, Returned::Labels(_));
+                }
+            }
+            HelperArm::Called(called) => {
+                let width = called.function().returned_columns(db).count().max(1);
+                let labelled_by_callee = label_columns(called.set(), width, db);
+                for (column, returned) in labelled.iter_mut().zip(called.returned()) {
+                    *column |= match returned {
+                        Returned::Labels(_) => true,
+                        Returned::Read(position) => {
+                            labelled_by_callee.get(*position) == Some(&true)
+                        }
+                    };
+                }
+            }
+            HelperArm::Parent(_) | HelperArm::Walk(_) => {}
+        }
+    }
+    labelled
+}
+
+/// One call and what it returns at `selection`, refused unless every arm returns keys of
+/// `level`, the table whose rows `compared` names, or of a table whose key references
+/// `level`'s.
+///
+/// The call's rows are read as keys only in a column holding no labels, every other
+/// column holding labels, so the keys it returns at a label are the ones its rows pair
+/// with that label.
 fn helper_call<DB: DatabaseLike>(
-    function: &DB::Function,
-    arguments: &[Value],
-    set: &HelperSet<'_, DB>,
+    (function, arguments, set): (&DB::Function, &[Value], &HelperSet<'_, DB>),
+    selection: &Selection,
     compared: &ColumnName,
     level: &TableId,
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperCall, HelperRefusal> {
     let name = registry.resolved_target_name(&function.target_name());
-    let arguments: Vec<String> = arguments.iter().map(ToString::to_string).collect();
+    let labelled = label_columns(set, function.returned_columns(db).count().max(1), db);
+    if labelled.get(selection.key) != Some(&false) {
+        return Err(HelperRefusal::LabelledKey { function: name });
+    }
+    let keys = labelled.iter().filter(|labels| !**labels).count();
+    if keys > 1 {
+        return Err(HelperRefusal::SeveralKeys {
+            function: name,
+            keys,
+        });
+    }
     let mut arms = Vec::with_capacity(set.arms().len());
     for arm in set.arms() {
         let (returned, arm) = match arm {
             HelperArm::Grant(grant) => {
-                let column = granted_column(&name, grant)?;
+                let Some(selected) = selection.of(&name, grant.returned())? else {
+                    continue;
+                };
+                let column = selected.key;
+                let read_labels = selected
+                    .labels
+                    .iter()
+                    .map(|(read, label)| AttributePredicate {
+                        column: ColumnName::from_stored(read.stored_column_name()),
+                        test: AttributeTest::In(literal(label).into_iter().collect()),
+                    })
+                    .collect();
                 (
                     rows_returned_by(grant.table(), column, db)?
                         .ok_or_else(|| names_no_rows(grant.table(), column))?,
                     HelperSetArm::Grant(Box::new(helper_grant(
                         &name,
                         grant,
-                        core::slice::from_ref(&column),
+                        (core::slice::from_ref(&column), read_labels),
+                        Some(level),
                         db,
                         registry,
                     )?)),
@@ -1242,6 +1681,17 @@ fn helper_call<DB: DatabaseLike>(
                     direction: walk.direction(),
                 }),
             ),
+            // Every arm of the called set is checked against `level` in its own call.
+            HelperArm::Called(called) => {
+                if let Some(call) =
+                    called_call(&name, called, selection, compared, level, db, registry)?
+                {
+                    if !call.arms.is_empty() {
+                        arms.push(HelperSetArm::Called(call));
+                    }
+                }
+                continue;
+            }
         };
         if !keys_name_rows_of(&returned, level, db)? {
             return Err(HelperRefusal::OtherLevel {
@@ -1255,7 +1705,12 @@ fn helper_call<DB: DatabaseLike>(
     }
     Ok(HelperCall {
         function: name,
-        arguments,
+        arguments: arguments.iter().map(ToString::to_string).collect(),
+        labels: selection
+            .labels
+            .iter()
+            .map(|(_, label)| label.to_string())
+            .collect(),
         level: level.clone(),
         arms,
     })
@@ -1273,6 +1728,52 @@ fn rows_returned_by<DB: DatabaseLike>(
         Some(own) => Ok(Some(own)),
         None => rows_named_by(table, column, db),
     }
+}
+
+/// The call `called` makes from an arm of `function`, read at the selection the arm's own
+/// `selection` makes of the called helper's columns, `None` where the arm lists labels
+/// without the one `selection` reads, or reads one column of the called rows at two labels.
+fn called_call<DB: DatabaseLike>(
+    function: &str,
+    called: &CalledArm<'_, DB>,
+    selection: &Selection,
+    compared: &ColumnName,
+    level: &TableId,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<Option<HelperCall>, HelperRefusal> {
+    let helper = called.function();
+    if !registry.declares_helper(helper) {
+        return Err(HelperRefusal::UndeclaredCallee {
+            function: function.to_string(),
+            called: helper.target_name().to_string(),
+        });
+    }
+    let Some(selected) = selection.of(function, called.returned())? else {
+        return Ok(None);
+    };
+    let mut labels: Vec<(usize, Value)> = Vec::with_capacity(selected.labels.len());
+    for (position, label) in selected.labels {
+        match labels.iter().find(|(held, _)| *held == position) {
+            Some((_, held)) if held != label => return Ok(None),
+            Some(_) => {}
+            None => labels.push((position, label.clone())),
+        }
+    }
+    labels.sort_unstable_by_key(|(position, _)| *position);
+    let selection = Selection {
+        key: selected.key,
+        labels,
+    };
+    helper_call(
+        (helper, called.arguments(), called.set()),
+        &selection,
+        compared,
+        level,
+        db,
+        registry,
+    )
+    .map(Some)
 }
 
 /// Whether every key of `table` is a key of `level`, its one-column key referencing
@@ -1326,9 +1827,8 @@ fn helper_parent<DB: DatabaseLike>(
     let referenced = rows_named_by(parent.table(), parent.column(), db)?
         .unwrap_or_else(|| table_identity(parent.parent_table()));
     let call = helper_call(
-        called,
-        parent.arguments(),
-        parent.set(),
+        (called, parent.arguments(), parent.set()),
+        &Selection::default(),
         &edges.parent_column,
         &referenced,
         db,
@@ -1352,11 +1852,16 @@ fn helper_edges<DB: DatabaseLike>(
 }
 
 /// The grant `grant` makes on the object `objects` name, the one row of the level for an
-/// arm of a call and the pair for an arm of a cap.
+/// arm of a call and the pair for an arm of a cap, its rows holding each label
+/// `read_labels` reads off them.
+///
+/// A cap comparing the one object, the arm's own key, with the keys a helper returns keeps
+/// the rows the call returns at `level`, which an arm of a call reads within that call.
 fn helper_grant<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
-    objects: &[&DB::Column],
+    (objects, read_labels): (&[&DB::Column], Vec<AttributePredicate>),
+    level: Option<&TableId>,
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
@@ -1414,9 +1919,8 @@ fn helper_grant<DB: DatabaseLike>(
                     .ok_or_else(|| names_no_rows(table, set.column()))?,
             };
             let call = helper_call(
-                called,
-                set.arguments(),
-                set.set(),
+                (called, set.arguments(), set.set()),
+                &Selection::default(),
                 &grantee_column,
                 &named,
                 db,
@@ -1436,18 +1940,24 @@ fn helper_grant<DB: DatabaseLike>(
             excluded_callers(function, gate, &grantee)?,
         ),
     };
-    let (caps, held) = match objects {
+    let (caps, within, held) = match objects {
         [object] => {
-            let caps = grant
-                .caps()
-                .iter()
-                .map(|cap| helper_cap(function, grant, cap, db, registry))
-                .collect::<Result<_, _>>()?;
-            place_caps(function, grant, object, caps, held, db)?
+            let mut caps = Vec::new();
+            let mut within = Vec::new();
+            for cap in grant.caps() {
+                match level.filter(|_| caps_own_key(cap, object)) {
+                    Some(level) => {
+                        within.push(within_call(function, cap, object, level, db, registry)?);
+                    }
+                    None => caps.push(helper_cap(function, grant, cap, db, registry)?),
+                }
+            }
+            let (caps, held) = place_caps(function, grant, object, caps, held, db)?;
+            (caps, within, held)
         }
         // Only an arm of a cap returns several columns, and `helper_cap` refuses one
         // carrying caps of its own.
-        _ => (Vec::new(), held),
+        _ => (Vec::new(), Vec::new(), held),
     };
     let grant = HelperGrant {
         table: table_identity(table),
@@ -1458,9 +1968,10 @@ fn helper_grant<DB: DatabaseLike>(
         grantee,
         excluded,
         carried_caller,
-        rows: grant_rows(table, grant.restrictions(), db)?,
+        rows: grant_rows(table, grant.restrictions(), read_labels, db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
         caps,
+        within,
         held,
     };
     if grant.time_bounds.len() > 1 && !row_uniquely_keys(&grant.table, &grant.tuple_key(), db) {
@@ -1550,16 +2061,17 @@ fn time_bound<DB: DatabaseLike>(bound: &TimeBound<'_, DB>) -> HelperTimeBound {
     }
 }
 
-/// The rows `restrictions` keep of `table`, split by its role column where it has one.
+/// The rows `restrictions` keep of `table` and `read_labels` keep of them, split by its role
+/// column where it has one.
 fn grant_rows<DB: DatabaseLike>(
     table: &DB::Table,
     restrictions: &[Restriction<'_, DB>],
+    read_labels: Vec<AttributePredicate>,
     db: &DB,
 ) -> Result<GrantRows, HelperRefusal> {
     let (role_column, mut roles) = split_column(table, db)?.unzip();
-    let mut predicates = Vec::with_capacity(restrictions.len());
-    for kept in restrictions {
-        let kept = restriction(kept);
+    let mut predicates = Vec::with_capacity(restrictions.len() + read_labels.len());
+    for kept in restrictions.iter().map(restriction).chain(read_labels) {
         match (&mut roles, &kept.test) {
             (Some(roles), AttributeTest::In(values))
                 if role_column.as_ref() == Some(&kept.column) =>
@@ -1885,17 +2397,20 @@ fn same_literal(left: &AttributeLiteral, right: &AttributeLiteral) -> bool {
 }
 
 /// The one column `grant` returns, refused where it returns several, which no one relation
-/// names.
+/// names, or labels, which name no row.
 fn granted_column<'db, DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'db, DB>,
 ) -> Result<&'db DB::Column, HelperRefusal> {
-    match grant.columns() {
-        [column] => Ok(column),
-        columns => Err(HelperRefusal::SeveralColumns {
+    match grant.returned() {
+        [Returned::Read(column)] => Ok(column),
+        [Returned::Labels(_)] => Err(HelperRefusal::LabelledKey {
+            function: function.to_string(),
+        }),
+        returned => Err(HelperRefusal::SeveralColumns {
             function: function.to_string(),
             table: table_identity(grant.table()).to_string(),
-            columns: columns.len(),
+            columns: returned.len(),
         }),
     }
 }
@@ -2058,6 +2573,39 @@ fn helper_join<DB: DatabaseLike>(
     })
 }
 
+/// Whether `cap` keeps the rows whose `object`, the arm's own key, the helper it calls
+/// returns, for every request alike.
+fn caps_own_key<DB: DatabaseLike>(cap: &RowCap<'_, DB>, object: &DB::Column) -> bool {
+    cap.lift().is_none()
+        && matches!(cap.operands(), [CapOperand::Column(column)] if same_column::<DB>(column, object))
+}
+
+/// The call whose keys at `level` a cap on the arm's own key `object` keeps the rows of.
+fn within_call<DB: DatabaseLike>(
+    function: &str,
+    cap: &RowCap<'_, DB>,
+    object: &DB::Column,
+    level: &TableId,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<HelperCall, HelperRefusal> {
+    let called = cap.function();
+    if !registry.declares_helper(called) {
+        return Err(HelperRefusal::UndeclaredCallee {
+            function: function.to_string(),
+            called: called.target_name().to_string(),
+        });
+    }
+    helper_call(
+        (called, cap.arguments(), cap.set()),
+        &Selection::default(),
+        &ColumnName::from_stored(object.stored_column_name()),
+        level,
+        db,
+        registry,
+    )
+}
+
 /// The cap `cap` puts on the rows `grant` returns, its pairs read from the cap's own arms,
 /// linked from each held row until [`place_caps`] moves it to the level's row.
 fn helper_cap<DB: DatabaseLike>(
@@ -2121,7 +2669,21 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 nested: nested.function().target_name().to_string(),
             });
         }
-        let paired_arm = helper_grant(&name, grant, grant.columns(), db, registry)?;
+        let Some(columns) = grant
+            .returned()
+            .iter()
+            .map(|returned| match returned {
+                Returned::Read(column) => Some(*column),
+                Returned::Labels(_) => None,
+            })
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Err(HelperRefusal::CapByLabels {
+                capped: capped.clone(),
+                cap: name,
+            });
+        };
+        let paired_arm = helper_grant(&name, grant, (&columns, Vec::new()), None, db, registry)?;
         if let Some(caller) = &paired_arm.carried_caller {
             return Err(HelperRefusal::GateOnUnsetCaller {
                 function: name,
@@ -2460,7 +3022,7 @@ impl<DB: DatabaseLike> CapArms<'_, '_, DB> {
         let declared = column.data_type(db);
         let table = table_identity(table);
         for pairs in self.pairs {
-            let Some(paired) = pairs.columns().get(position) else {
+            let Some(Returned::Read(paired)) = pairs.returned().get(position) else {
                 continue;
             };
             let spelled = paired.data_type(db);

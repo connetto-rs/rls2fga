@@ -9,7 +9,7 @@ use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
     composite_confidence, exclusion_confidence, flagged_rows, BoolOp, ClassifiedExpr, Composite,
     ConfidenceLevel, ConstantBool, DeclaredHelper, ExcludedSet, ExistsMembership, ExpandedFunction,
-    HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
+    HelperCall, HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
 };
 use crate::classifier::recognizers::{
     diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_excluded_helper,
@@ -702,7 +702,16 @@ fn excluded_helper<DB: DatabaseLike>(
             column: helper.column,
         });
     }
-    for arm in &helper.call.arms {
+    if let Some(refusal) = nullable_projection(&helper.call, db) {
+        return Err(refusal);
+    }
+    Ok(helper)
+}
+
+/// The first column an arm of `call`, or of a call it reads, returns without a proof it
+/// holds no `NULL`.
+fn nullable_projection<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<ExclusionError> {
+    for arm in &call.arms {
         let (returned_from, returned) = match arm {
             HelperSetArm::Grant(grant) => (&grant.table, grant.object_columns.as_slice()),
             HelperSetArm::Parent(parent) => (
@@ -713,17 +722,21 @@ fn excluded_helper<DB: DatabaseLike>(
                 &walk.edges.table,
                 core::slice::from_ref(walk.returned_column()),
             ),
+            HelperSetArm::Called(called) => match nullable_projection(called, db) {
+                Some(refusal) => return Some(refusal),
+                None => continue,
+            },
         };
         for returned in returned {
             if !column_proven_not_null(db, returned_from, returned.as_str()) {
-                return Err(ExclusionError::NullableProjection {
+                return Some(ExclusionError::NullableProjection {
                     table: returned_from.clone(),
                     column: returned.clone(),
                 });
             }
         }
     }
-    Ok(helper)
+    None
 }
 
 /// Accept only `P4`, excluding caller-set and parent-inheritance patterns.
