@@ -12,8 +12,8 @@ use sqlparser::ast::DataType;
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
-    caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, GRANTEES,
-    GROUPS, INSTALLATIONS, INVITATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
+    caller_and_audiences_only, GranteeArms, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING,
+    GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
     REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
@@ -1413,6 +1413,160 @@ async fn repeated_expiring_grants_agree_with_postgres_now_and_a_year_on() {
             );
         }
         assert_agrees(&case, &run);
+    }
+}
+
+/// The callers of [`expiring_grantees_case`].
+const EXPIRING_GRANTEE_CALLERS: [&str; 6] =
+    ["alice", "bob", "carol", "dave", "anonymous", "mallory"];
+
+/// `alice` holds a grant with no end, `bob` one ending tomorrow, `carol` one that ended
+/// yesterday, and `mallory`, disabled yesterday, one with no end. `team_a`, holding `dave`,
+/// holds one grant ending tomorrow and one with no end, and so does everyone, beside one
+/// that ended yesterday. `p_twice` is everyone's through two grantees, one grant ended and
+/// one ending in two years. Every caller but `anonymous` holds one grant ending tomorrow,
+/// and each opening ends tomorrow, ended yesterday or has no end. Grants have no key, and
+/// `alice`, `bob`, `team_a` and everyone each hold an ended grant beside a live one.
+fn expiring_grantees_case(major: &str, arms: GranteeArms, loading_from_rows: bool) -> ParityCase {
+    let callers = EXPIRING_GRANTEE_CALLERS
+        .iter()
+        .map(|subject| format!("('{subject}')"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let enabled = if arms == GranteeArms::DisablingCaller {
+        " AND (g.disabled_at IS NULL OR g.disabled_at > $1::timestamptz)"
+    } else {
+        ""
+    };
+    let teams = if arms == GranteeArms::WithTeams {
+        "\n               UNION SELECT c.subject, tm.team_id FROM callers c\n                 JOIN team_members tm ON tm.user_id = c.subject"
+    } else {
+        ""
+    };
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-expiring-grantees-pg{major}-{arms:?}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &arms
+            .schema()
+            .replace(",\n  PRIMARY KEY (project_id, grantee_id)", ""),
+        &[
+            "INSERT INTO grantees VALUES
+               ('alice', 'user', NULL), ('bob', 'user', NULL), ('carol', 'user', NULL),
+               ('dave', 'user', NULL), ('anonymous', 'user', NULL),
+               ('mallory', 'user', now() - interval '1 day'), ('team_a', 'team', NULL),
+               ('everyone', 'everyone', NULL), ('everyone_too', 'everyone', NULL),
+               ('signed_in', 'signed_in', NULL);
+             INSERT INTO team_members VALUES ('team_a', 'dave');
+             INSERT INTO projects VALUES ('p_alice'), ('p_bob'), ('p_carol'), ('p_mallory'),
+               ('p_team'), ('p_team_open'), ('p_everyone'), ('p_everyone_past'),
+               ('p_everyone_open'), ('p_twice'), ('p_signed'), ('p_opening'),
+               ('p_opening_past'), ('p_opening_open');
+             INSERT INTO project_grants VALUES
+               ('p_alice', 'alice', NULL),
+               ('p_alice', 'alice', now() - interval '1 day'),
+               ('p_bob', 'bob', now() + interval '1 day'),
+               ('p_bob', 'bob', now() - interval '1 day'),
+               ('p_carol', 'carol', now() - interval '1 day'),
+               ('p_mallory', 'mallory', NULL),
+               ('p_team', 'team_a', now() + interval '1 day'),
+               ('p_team', 'team_a', now() - interval '1 day'),
+               ('p_team_open', 'team_a', NULL),
+               ('p_everyone', 'everyone', now() + interval '1 day'),
+               ('p_everyone', 'everyone', now() - interval '2 days'),
+               ('p_everyone_past', 'everyone', now() - interval '1 day'),
+               ('p_everyone_open', 'everyone', NULL),
+               ('p_twice', 'everyone', now() - interval '1 day'),
+               ('p_twice', 'everyone_too', now() + interval '2 years'),
+               ('p_signed', 'signed_in', now() + interval '1 day');
+             INSERT INTO project_openings VALUES ('p_opening', now() + interval '1 day'),
+               ('p_opening_past', now() - interval '1 day'), ('p_opening_open', NULL);
+             INSERT INTO docs SELECT 'd' || substr(id, 2), id, NULL FROM projects",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        EXPIRING_GRANTEE_CALLERS
+            .into_iter()
+            .map(|subject| caller(subject).with_clock())
+            .collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(GRANTEE_HELPERS)
+    .also_at(
+        "1 year",
+        &format!(
+            "WITH callers (subject) AS (VALUES {callers}),
+             reached (subject, id) AS (
+               SELECT c.subject, g.id FROM callers c JOIN grantees g ON g.id = c.subject{enabled}
+               UNION SELECT c.subject, g.id FROM callers c CROSS JOIN grantees g
+                 WHERE g.kind = 'everyone'
+               UNION SELECT c.subject, g.id FROM callers c CROSS JOIN grantees g
+                 WHERE g.kind = 'signed_in' AND c.subject <> 'anonymous'{teams})
+             SELECT r.subject, 'docs:' || d.id AS object
+             FROM reached r JOIN project_grants pg ON pg.grantee_id = r.id
+               JOIN docs d ON d.project_id = pg.project_id
+             WHERE pg.expires_at IS NULL OR pg.expires_at > $1::timestamptz
+             UNION
+             SELECT c.subject, 'docs:' || d.id FROM callers c CROSS JOIN project_openings po
+               JOIN docs d ON d.project_id = po.project_id
+             WHERE po.expires_at IS NULL OR po.expires_at > $1::timestamptz"
+        ),
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// Grants naming the caller, a team, everyone or every caller but `anonymous` through a
+/// set, and projects open to everyone, each kept until its end, agree with `PostgreSQL`
+/// now and a year on, whether the set is read as whoever it holds or as the users it names.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn expiring_grants_naming_grantees_agree_with_postgres_17_and_18_now_and_a_year_on() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for arms in GranteeArms::ALL {
+            for loading_from_rows in [false, true] {
+                let case = expiring_grantees_case(major, arms, loading_from_rows);
+                let run =
+                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+                let teams = arms == GranteeArms::WithTeams;
+                for (subject, object, allowed) in [
+                    ("alice", "docs:d_alice", true),
+                    ("bob", "docs:d_bob", true),
+                    ("carol", "docs:d_carol", false),
+                    (
+                        "mallory",
+                        "docs:d_mallory",
+                        arms != GranteeArms::DisablingCaller,
+                    ),
+                    ("dave", "docs:d_team", teams),
+                    ("dave", "docs:d_team_open", teams),
+                    ("anonymous", "docs:d_everyone", true),
+                    ("anonymous", "docs:d_everyone_past", false),
+                    ("anonymous", "docs:d_everyone_open", true),
+                    ("anonymous", "docs:d_twice", true),
+                    ("anonymous", "docs:d_signed", false),
+                    ("bob", "docs:d_signed", true),
+                    ("anonymous", "docs:d_opening", true),
+                    ("anonymous", "docs:d_opening_past", false),
+                    ("anonymous", "docs:d_opening_open", true),
+                ] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        object,
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                }
+                assert_agrees(&case, &run);
+            }
+        }
     }
 }
 

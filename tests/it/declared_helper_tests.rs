@@ -1332,11 +1332,6 @@ fn request_values_the_gates_cannot_carry_are_refused() {
              statement time",
         ),
         (
-            "live_id = ANY (ARRAY(SELECT authz.live_ids()))",
-            "keeps the rows of 'public.expiring_links' naming a set of grantees or everyone by \
-             the statement time",
-        ),
-        (
             "link_id = ANY (ARRAY(SELECT authz.gated_links()))",
             "excludes callers from rows a value the request carries admits",
         ),
@@ -2329,6 +2324,242 @@ fn each_clock_comparison_keeps_its_direction() {
             .and_then(|(_, body)| body.split_once('\n'))
             .map(|(line, _)| line.trim());
         assert_eq!(condition, Some(compared), "{bound}: {dsl}");
+    }
+}
+
+/// The arm of [`EXPIRING_GRANTEES`]'s `authz.caller_grantees` reading a team's members.
+const TEAM_ARM: &str = "
+  UNION
+  SELECT tm.team_id FROM public.team_members tm WHERE tm.user_id = current_setting('app.user_id', true)";
+
+/// The arm of [`EXPIRING_GRANTEES`]'s `authz.caller_grantees` returning the caller itself.
+const OWN_ARM: &str =
+    "SELECT g.id FROM public.grantees g WHERE g.id = current_setting('app.user_id', true)";
+
+/// Grants to the caller, a team the caller is in, everyone or every caller but
+/// `anonymous`, each ending at `expires_at` unless it holds `NULL`, and projects open to
+/// everyone until their own `expires_at`.
+const EXPIRING_GRANTEES: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE grantees (id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('user', 'team', 'everyone', 'signed_in')),
+  disabled_at TIMESTAMPTZ);
+CREATE TABLE team_members (team_id TEXT NOT NULL REFERENCES grantees (id),
+  user_id TEXT NOT NULL REFERENCES grantees (id), PRIMARY KEY (team_id, user_id));
+CREATE TABLE projects (id TEXT PRIMARY KEY);
+CREATE TABLE project_grants (project_id TEXT NOT NULL REFERENCES projects (id),
+  grantee_id TEXT NOT NULL REFERENCES grantees (id), expires_at TIMESTAMPTZ,
+  PRIMARY KEY (project_id, grantee_id));
+CREATE TABLE project_openings (project_id TEXT PRIMARY KEY REFERENCES projects (id),
+  expires_at TIMESTAMPTZ);
+GRANT SELECT ON grantees, team_members, project_grants, project_openings TO authz_owner;
+CREATE FUNCTION authz.caller_grantees() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT g.id FROM public.grantees g WHERE g.id = current_setting('app.user_id', true)
+  UNION
+  SELECT g.id FROM public.grantees g WHERE g.kind = 'everyone'
+  UNION
+  SELECT g.id FROM public.grantees g
+  WHERE g.kind = 'signed_in' AND current_setting('app.user_id', true) <> 'anonymous'
+  UNION
+  SELECT tm.team_id FROM public.team_members tm WHERE tm.user_id = current_setting('app.user_id', true)
+$$;
+CREATE FUNCTION authz.projects_granted() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT pg.project_id FROM public.project_grants pg
+  WHERE pg.grantee_id IN (SELECT authz.caller_grantees())
+    AND (pg.expires_at IS NULL OR pg.expires_at > now())
+  UNION
+  SELECT po.project_id FROM public.project_openings po
+  WHERE po.expires_at IS NULL OR po.expires_at > now()
+$$;
+ALTER FUNCTION authz.caller_grantees() OWNER TO authz_owner;
+ALTER FUNCTION authz.projects_granted() OWNER TO authz_owner;
+GRANT EXECUTE ON FUNCTION authz.caller_grantees() TO authz_owner;
+CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects (id), title TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (
+  project_id = ANY (ARRAY(SELECT authz.projects_granted())));
+";
+
+/// How [`EXPIRING_GRANTEES`]'s `authz.caller_grantees` reads the caller's grantees.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GranteeArms {
+    /// The caller, its teams and the audiences.
+    WithTeams,
+    /// The caller and the audiences alone.
+    CallerAndAudiences,
+    /// The caller while its grantee row is not disabled, and the audiences.
+    DisablingCaller,
+}
+
+impl GranteeArms {
+    pub(crate) const ALL: [Self; 3] = [
+        Self::WithTeams,
+        Self::CallerAndAudiences,
+        Self::DisablingCaller,
+    ];
+
+    /// [`EXPIRING_GRANTEES`] with these arms.
+    pub(crate) fn schema(self) -> String {
+        let without_teams = EXPIRING_GRANTEES.replace(TEAM_ARM, "");
+        assert_ne!(without_teams, EXPIRING_GRANTEES);
+        match self {
+            Self::WithTeams => EXPIRING_GRANTEES.to_string(),
+            Self::CallerAndAudiences => without_teams,
+            Self::DisablingCaller => without_teams.replace(
+                OWN_ARM,
+                &format!("{OWN_ARM}\n    AND (g.disabled_at IS NULL OR g.disabled_at > now())"),
+            ),
+        }
+    }
+}
+
+/// The type restrictions of `type_name`'s relations, sorted, each condition they name
+/// spelled `C` once its expression is checked to be `compared`.
+fn restrictions_conditioned_on(dsl: &str, type_name: &str, compared: &str) -> Vec<String> {
+    let mut restrictions: Vec<String> = relation_definitions(dsl, type_name)
+        .into_iter()
+        .map(|(_, body)| body)
+        .filter(|body| body.starts_with('['))
+        .map(|body| {
+            let mut spelled = String::with_capacity(body.len());
+            let mut rest = body.as_str();
+            while let Some((head, tail)) = rest.split_once(" with ") {
+                let end = tail.find([',', ']']).unwrap_or(tail.len());
+                let condition = &tail[..end];
+                let expression = dsl
+                    .split_once(&format!("condition {condition}("))
+                    .and_then(|(_, body)| body.split_once("{\n"))
+                    .and_then(|(_, body)| body.split_once('\n'))
+                    .map(|(line, _)| line.trim());
+                assert_eq!(expression, Some(compared), "{condition}: {dsl}");
+                spelled.push_str(head);
+                spelled.push_str(" with C");
+                rest = &tail[end..];
+            }
+            spelled.push_str(rest);
+            spelled
+        })
+        .collect();
+    restrictions.sort();
+    restrictions
+}
+
+/// A grant row naming one of a set's grantees, or everyone, carries its end on its tuple
+/// as a condition on the request clock, on the userset whoever the set holds, on the user
+/// or `user:*` a set of the caller and the audiences names, and on `user:*` for an arm
+/// naming nobody. A row with no end carries none. A set whose caller arm keeps its row by
+/// the clock is read as whoever it holds, since a join on the grantee row cannot carry
+/// the clock.
+#[test]
+fn an_expiring_grant_naming_a_set_or_everyone_is_a_tuple_conditioned_on_the_request_clock() {
+    let helpers = &["authz.caller_grantees", "authz.projects_granted"];
+    let userset = [
+        "[grantees#caller_grantees with C]",
+        "[grantees#caller_grantees]",
+        "[user:* with C]",
+        "[user:*]",
+    ];
+    let inline = [
+        "[user with C]",
+        "[user, user:*]",
+        "[user:* with C]",
+        "[user:* with C]",
+        "[user:* with C]",
+        "[user:*]",
+        "[user:*]",
+        "[user]",
+        "[user]",
+    ];
+    for (arms, expected) in [
+        (GranteeArms::WithTeams, &userset[..]),
+        (GranteeArms::CallerAndAudiences, &inline[..]),
+        (GranteeArms::DisablingCaller, &userset[..]),
+    ] {
+        let schema = arms.schema();
+        let classified = using_of(&schema, helpers, "docs_read");
+        assert_eq!(
+            classified.confidence,
+            ConfidenceLevel::A,
+            "{arms:?}: {classified:?}"
+        );
+        let dsl = model(&schema, helpers);
+        assert_eq!(
+            restrictions_conditioned_on(&dsl, "projects", "expires_at > request_time"),
+            expected,
+            "{arms:?}: {dsl}"
+        );
+    }
+}
+
+/// No tuple of an expiring grant row is kept or dropped by the clock at load time. Each
+/// row whose end is set rides a condition, and a tuple without one reads only rows with
+/// no end, or names the caller the arm's gate excludes, which no clock gives a grant.
+#[test]
+fn no_tuple_of_an_expiring_grant_reads_the_clock_at_load_time() {
+    let helpers = &["authz.caller_grantees", "authz.projects_granted"];
+    for arms in GranteeArms::ALL {
+        let outputs = translator(ConfidenceLevel::B, helpers)
+            .translate(&db_of(&arms.schema()))
+            .expect("the schema should plan")
+            .outputs()
+            .expect("every clause should translate");
+        let expiring: Vec<_> = outputs
+            .tuple_queries()
+            .iter()
+            .filter(|query| {
+                query.sql.contains("FROM \"public\".\"project_grants\"")
+                    || query.sql.contains("FROM \"public\".\"project_openings\"")
+            })
+            .collect();
+        assert!(!expiring.is_empty(), "{arms:?}");
+        for query in expiring {
+            assert!(!query.sql.contains("now()"), "{arms:?}: {}", query.sql);
+            assert!(
+                query.condition.is_some()
+                    || query.sql.contains("\"expires_at\" IS NULL")
+                    || query.sql.contains("'user:anonymous' AS subject"),
+                "{arms:?}: {}",
+                query.sql
+            );
+        }
+    }
+}
+
+/// Two bounds on a grant naming a set, whose rows key one userset tuple each, translate,
+/// and so do they where the set holds only the caller and the audiences, whose rows
+/// naming different audiences share one `user:*` tuple, since the set is then read as
+/// whoever it holds.
+#[test]
+fn two_bounds_on_a_grant_naming_a_set_read_whoever_the_set_holds() {
+    let helpers = &["authz.caller_grantees", "authz.projects_granted"];
+    for arms in [GranteeArms::WithTeams, GranteeArms::CallerAndAudiences] {
+        let schema = arms
+            .schema()
+            .replace(
+                "expires_at TIMESTAMPTZ,\n  PRIMARY KEY",
+                "expires_at TIMESTAMPTZ, starts_at TIMESTAMPTZ NOT NULL,\n  PRIMARY KEY",
+            )
+            .replace(
+                "    AND (pg.expires_at IS NULL OR pg.expires_at > now())",
+                "    AND (pg.expires_at IS NULL OR pg.expires_at > now())\n    AND pg.starts_at <= now()",
+            );
+        let classified = using_of(&schema, helpers, "docs_read");
+        assert_eq!(
+            classified.confidence,
+            ConfidenceLevel::A,
+            "{arms:?}: {classified:?}"
+        );
+        let dsl = model(&schema, helpers);
+        let restrictions = relation_definitions(&dsl, "projects")
+            .into_iter()
+            .map(|(_, body)| body)
+            .filter(|body| body.starts_with("[grantees#caller_grantees"))
+            .count();
+        assert_eq!(restrictions, 2, "{arms:?}: {dsl}");
     }
 }
 

@@ -135,6 +135,13 @@ pub(crate) enum DirectSubject {
         type_name: TypeName,
         relation: RelationName,
     },
+    /// The holders of `relation` on an object of `type_name`, every tuple of which carries
+    /// a condition, `type#relation with condition` in the DSL.
+    ConditionalUserset {
+        type_name: TypeName,
+        relation: RelationName,
+        condition: ConditionName,
+    },
 }
 
 impl DirectSubject {
@@ -155,6 +162,11 @@ impl DirectSubject {
                 type_name,
                 relation,
             } => format!("u:{type_name}#{relation}"),
+            Self::ConditionalUserset {
+                type_name,
+                relation,
+                condition,
+            } => format!("uc:{type_name}#{relation}:{condition}"),
         }
     }
 
@@ -169,6 +181,9 @@ impl DirectSubject {
                 type_name: name, ..
             }
             | Self::Userset {
+                type_name: name, ..
+            }
+            | Self::ConditionalUserset {
                 type_name: name, ..
             } => Some(name),
             Self::Wildcard(_) | Self::ConditionalWildcard { .. } => None,
@@ -192,6 +207,11 @@ impl DirectSubject {
                 type_name,
                 relation,
             } => format!("{type_name}#{relation}"),
+            Self::ConditionalUserset {
+                type_name,
+                relation,
+                condition,
+            } => format!("{type_name}#{relation} with {condition}"),
         }
     }
 }
@@ -2026,7 +2046,8 @@ fn surviving_conditions(
         .flatten()
         .filter_map(|subject| match subject {
             DirectSubject::ConditionalWildcard { condition, .. }
-            | DirectSubject::ConditionalType { condition, .. } => Some(condition),
+            | DirectSubject::ConditionalType { condition, .. }
+            | DirectSubject::ConditionalUserset { condition, .. } => Some(condition),
             DirectSubject::Type(_) | DirectSubject::Wildcard(_) | DirectSubject::Userset { .. } => {
                 None
             }
@@ -2093,6 +2114,7 @@ fn source_carries_condition(source: &TupleSource) -> bool {
             | TupleSource::RequestPresenceEntry { .. }
             | TupleSource::RequestShareGate { .. }
             | TupleSource::ExistsMembership { gate: Some(_), .. }
+            | TupleSource::GranteeGrant { gate: Some(_), .. }
             | TupleSource::HolderMembers { gate: Some(_), .. }
             | TupleSource::MembershipShareMembers { .. }
     )

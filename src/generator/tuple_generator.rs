@@ -301,6 +301,9 @@ fn row_context(
         }
         | DirectSubject::ConditionalType {
             condition: named, ..
+        }
+        | DirectSubject::ConditionalUserset {
+            condition: named, ..
         } => (named == condition.name).then_some(named),
         DirectSubject::Type(_) | DirectSubject::Wildcard(_) | DirectSubject::Userset { .. } => None,
     }) else {
@@ -1126,6 +1129,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             relation,
             subject,
             extra_predicates,
+            gate,
         } => {
             let join_table_sql = join_table.sql_name();
             let fk_parts = quoted_key_parts(fk_cols);
@@ -1171,19 +1175,60 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 subject_columns,
                 names,
             );
-            let where_clause = extra_predicates.sql().map_or_else(
-                || format!("\nWHERE {guards}"),
-                |e| format!("\nWHERE {guards}\nAND ({e})"),
+            let Some(gate) = gate else {
+                let where_clause = extra_predicates.sql().map_or_else(
+                    || format!("\nWHERE {guards}"),
+                    |e| format!("\nWHERE {guards}\nAND ({e})"),
+                );
+                return Some(TupleQuery {
+                    comment: format!("-- {parent_type} grants to {described} from {join_table}"),
+                    sql: format!(
+                        "SELECT DISTINCT {object_sql} AS object, '{relation}' AS relation, \
+                         {subject_sql} AS subject\n\
+                         FROM {join_table_sql}{where_clause};"
+                    ),
+                    description: None,
+                    condition: None,
+                    skipped: None,
+                    monetary_locale: None,
+                });
+            };
+            // The clock rides the tuple as a condition, and rows keying one tuple carry the
+            // bound some row of them meets last, as a membership's rows do.
+            let (context, where_clause) = gate_context_sql(
+                gate,
+                &guards,
+                extra_predicates
+                    .sql_excluding_requests()
+                    .into_iter()
+                    .collect(),
             );
+            let group_by = if gate.aggregate {
+                let mut grouped = fk_parts;
+                grouped.extend(
+                    subject_columns
+                        .iter()
+                        .map(|column| quote_sql_identifier(column.as_str())),
+                );
+                format!("\nGROUP BY {}", grouped.join(", "))
+            } else {
+                String::new()
+            };
             Some(TupleQuery {
-                comment: format!("-- {parent_type} grants to {described} from {join_table}"),
+                comment: format!(
+                    "-- {parent_type} grants to {described} from {join_table}, evaluated by \
+                     condition {}",
+                    gate.condition
+                ),
                 sql: format!(
-                    "SELECT DISTINCT {object_sql} AS object, '{relation}' AS relation, \
-                     {subject_sql} AS subject\n\
-                     FROM {join_table_sql}{where_clause};"
+                    "SELECT {object_sql} AS object, '{relation}' AS relation, \
+                     {subject_sql} AS subject,\n\
+                     \x20 '{}' AS condition, jsonb_build_object({context}) AS context\n\
+                     FROM {join_table_sql}{where_clause}{group_by};",
+                    gate.condition
                 ),
                 description: None,
-                condition: None,
+                condition: Some(gate.condition.clone()),
                 skipped: None,
                 monetary_locale: None,
             })

@@ -493,9 +493,28 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                     guards,
                 ));
             };
-            if gate.aggregate {
+            let replayed = if gate.aggregate {
                 // Several rows can key the same (object, user), so the latest deadline is
                 // read by querying the changed parent's slice. The row alone cannot say it.
+                Some(format!(
+                    "several membership rows can grant one (object, user), so the latest \
+                     deadline is read by querying: condition {}",
+                    gate.condition
+                ))
+            } else if extra_predicates.decidable().is_none() {
+                // A join typing an inline grantee reads another table's row.
+                Some(format!(
+                    "the membership row carries a residual predicate only SQL can evaluate \
+                     beside condition {}: {}",
+                    gate.condition,
+                    extra_predicates
+                        .sql_excluding_requests()
+                        .unwrap_or_default()
+                ))
+            } else {
+                None
+            };
+            if let Some(reason) = replayed {
                 let query = rendered(query)?;
                 return Some(residual_description(
                     query,
@@ -506,11 +525,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
                         object_type: parent_type.clone(),
                         relations: vec![relation.clone()],
                     },
-                    format!(
-                        "several membership rows can grant one (object, user), so the latest \
-                         deadline is read by querying: condition {}",
-                        gate.condition
-                    ),
+                    reason,
                 ));
             }
             // The clock joined the condition, so the member row alone decides the record:
