@@ -894,15 +894,13 @@ fn row_in_labelled_rows<DB: DatabaseLike>(
 }
 
 /// `parts` joined by `op`, the one part alone where there is one.
-fn joined(op: BoolOp, mut parts: Vec<ClassifiedExpr>) -> ClassifiedExpr {
-    if parts.len() == 1 {
-        if let Some(part) = parts.pop() {
-            return part;
-        }
-    }
-    ClassifiedExpr {
-        confidence: composite_confidence(&parts),
-        pattern: PatternClass::P8Composite(Composite { op, parts }),
+fn joined(op: BoolOp, parts: Vec<ClassifiedExpr>) -> ClassifiedExpr {
+    match <[ClassifiedExpr; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => ClassifiedExpr {
+            confidence: composite_confidence(&parts),
+            pattern: PatternClass::P8Composite(Composite { op, parts }),
+        },
     }
 }
 
