@@ -1702,16 +1702,170 @@ fn a_caller_gate_loads_the_constant_it_excludes() {
     );
 }
 
-/// A gate on a caller the deployment lets go unset names a request no subject spells
-/// apart from a caller's, so an arm granting its audience is refused.
+/// A bare read of a caller the deployment lets go unset reads `''` on a pooled connection
+/// whose earlier transaction set it, which `<> 'anonymous'` keeps, so the audience arm is
+/// refused.
 #[test]
-fn a_gate_on_a_caller_that_may_be_unset_is_refused() {
+fn a_bare_gate_on_a_caller_that_may_be_unset_is_refused() {
     let translator = TranslatorBuilder::new(deployment([caller("app.user_id").may_be_unset()]))
         .with_min_confidence(ConfidenceLevel::B)
         .with_declared_helpers(AUDIENCE_HELPERS)
         .build();
     let reason = audience_refusal(&translator, AUDIENCES);
     assert!(reason.contains("app.user_id"), "{reason}");
+    assert!(reason.contains("without NULLIF"), "{reason}");
+}
+
+/// Resources shared with grantees, where `authz.signed_in_grantees` returns the caller's
+/// own grantee and, while the request carries a caller, the `signed_in` audience. The
+/// caller is a `uuid` read through `authz.caller_id()`.
+pub(crate) const SIGNED_IN: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE grantees (id UUID PRIMARY KEY,
+  kind TEXT NOT NULL CHECK (kind IN ('user', 'everyone', 'signed_in')));
+CREATE TABLE resources (id UUID PRIMARY KEY);
+CREATE TABLE grants (resource_id UUID NOT NULL REFERENCES resources (id),
+  grantee_id UUID NOT NULL REFERENCES grantees (id), PRIMARY KEY (resource_id, grantee_id));
+GRANT SELECT ON grantees, resources, grants TO authz_owner;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.signed_in_grantees() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT grantee.id FROM public.grantees grantee
+  WHERE grantee.id = authz.caller_id() AND grantee.kind = 'user'
+  UNION
+  SELECT grantee.id FROM public.grantees grantee WHERE grantee.kind = 'everyone'
+  UNION
+  SELECT grantee.id FROM public.grantees grantee
+  WHERE grantee.kind = 'signed_in' AND authz.caller_id() IS NOT NULL
+$$;
+CREATE FUNCTION authz.signed_in_reach() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT permission.resource_id FROM public.grants permission
+  WHERE permission.grantee_id IN (SELECT authz.signed_in_grantees())
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.signed_in_grantees() OWNER TO authz_owner;
+ALTER FUNCTION authz.signed_in_reach() OWNER TO authz_owner;
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+CREATE POLICY signed_in_reach ON resources FOR SELECT USING (
+  id IN (SELECT authz.signed_in_reach()));
+";
+
+/// The grantee helpers [`SIGNED_IN`] declares.
+const SIGNED_IN_HELPERS: &[&str] = &["authz.signed_in_grantees", "authz.signed_in_reach"];
+
+/// A translator for the caller `app.user_id` as a `uuid` a request may leave unset.
+fn signed_in_translator() -> Translator {
+    TranslatorBuilder::new(deployment([
+        typed_caller("app.user_id", DataType::Uuid).may_be_unset()
+    ]))
+    .with_min_confidence(ConfidenceLevel::A)
+    .with_declared_helpers(SIGNED_IN_HELPERS)
+    .build()
+}
+
+/// An audience arm kept only while the request carries a caller holds every user on the
+/// rows it keeps, while the request gate's `settings` key for the caller is carried, and
+/// the checker is told to send the caller under that key.
+#[test]
+fn an_audience_arm_kept_while_a_caller_is_set_holds_while_the_request_carries_one() {
+    let outputs = signed_in_translator()
+        .translate(&db_of(SIGNED_IN))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    let definition = |type_name: &str, relation: &str| {
+        relation_definition(&dsl, type_name, relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    let returned = definition("grantees", "signed_in_grantees");
+    let gated = returned
+        .split(" or ")
+        .map(|arm| definition("grantees", arm))
+        .find(|rule| rule.contains(" and "))
+        .unwrap_or_else(|| panic!("no arm is gated: {dsl}"));
+    let (granted, gate) = gated.split_once(" and ").unwrap_or_else(|| panic!("{dsl}"));
+    assert_eq!(definition("grantees", granted), "[user:*]");
+    let (carried, from) = gate.split_once(" from ").unwrap_or_else(|| panic!("{dsl}"));
+    assert_eq!(from, "request_gate", "{dsl}");
+    assert!(carried.starts_with("app_user_id_carried"), "{dsl}");
+    let condition = definition("request_gate", carried);
+    assert!(condition.starts_with("[user:* with "), "{dsl}");
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::CallerSuppliesConditionParameter {
+                parameter,
+                setting_key: Some(setting_key),
+                ..
+            } if parameter == "app_user_id" && setting_key == "app.user_id"
+        )),
+        "{:#?}",
+        outputs.notes()
+    );
+}
+
+/// The reason `translator` refuses the `USING` clause of `policy` in `sql`.
+fn using_refusal(translator: &Translator, sql: &str, policy: &str) -> String {
+    let classified = translator
+        .classify(&db_of(sql))
+        .into_iter()
+        .find(|classified| classified.name() == policy)
+        .unwrap_or_else(|| panic!("{policy} should classify"));
+    let using = classified
+        .using_classification()
+        .expect("USING should classify");
+    assert_eq!(using.confidence, ConfidenceLevel::D, "{using:?}");
+    match &using.pattern {
+        PatternClass::Unknown(UnclassifiedExpr { reason, .. }) => reason.clone(),
+        other => panic!("{policy} should be refused, got {other:?}"),
+    }
+}
+
+/// A gate whose read keeps rows for a request carrying no caller, or raises for one, is
+/// refused with the reason, as is one on an arm of a cap, whose pairs no request gate
+/// reaches.
+#[test]
+fn a_gate_on_a_caller_that_may_be_unset_is_refused_where_the_model_cannot_state_it() {
+    for (gate, reason) in [
+        (
+            "current_setting('app.user_id', true) IS NOT NULL",
+            "without NULLIF",
+        ),
+        (
+            "NULLIF(current_setting('app.user_id'), '') IS NOT NULL",
+            "without missing_ok",
+        ),
+    ] {
+        let sql = SIGNED_IN.replace("authz.caller_id() IS NOT NULL", gate);
+        let refused = using_refusal(&signed_in_translator(), &sql, "signed_in_reach");
+        assert!(refused.contains("app.user_id"), "{gate}: {refused}");
+        assert!(refused.contains(reason), "{gate}: {refused}");
+    }
+    let capped = CAPS.replace(
+        "FROM public.approved_kinds approved",
+        "FROM public.approved_kinds approved \
+         WHERE NULLIF(current_setting('app.user_id', true), '') IS NOT NULL",
+    );
+    let translator = TranslatorBuilder::new(deployment([caller("app.user_id").may_be_unset()]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers(["authz.capped_kinds", "authz.capped_resources"])
+        .build();
+    let refused = using_refusal(
+        &translator,
+        &format!(
+            "{capped}CREATE POLICY resources_read ON resources FOR SELECT \
+             USING (id IN (SELECT authz.capped_resources()));"
+        ),
+        "resources_read",
+    );
+    assert!(refused.contains("app.user_id"), "{refused}");
+    assert!(refused.contains("arm of a cap"), "{refused}");
 }
 
 /// The request's grantees, one `grantee_id` per grant naming a user, an organization's

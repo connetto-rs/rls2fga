@@ -686,6 +686,12 @@ pub struct HelperGrant {
     /// The callers the arm keeps no row for, each as the caller identity a check sends,
     /// from `current_setting(<caller>) <> <value>`.
     pub excluded: Vec<String>,
+    /// The caller the deployment lets a request leave unset, whose presence the arm's gate
+    /// requires, so the arm keeps its rows only for a request carrying it. `None` where
+    /// the arm keeps them whether the request carries a caller or not, and where it
+    /// compares a column with the caller, which `PostgreSQL` matches with no row while
+    /// the caller reads `NULL`.
+    pub carried_caller: Option<DeclaredSource>,
     /// Which grant rows count.
     pub rows: GrantRows,
     /// The bounds a kept row meets against the statement time, all of them, which the

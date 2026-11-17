@@ -1507,12 +1507,12 @@ fn asked_context(
     context
 }
 
-/// The `settings` map a check carries, the one value a declared value the caller set
-/// travels under its parameter name, absent where the caller set nothing so it reads as
+/// The `settings` map a check carries, each declared value that travels there and that the
+/// caller set under its parameter name, absent where the caller set nothing so it reads as
 /// `PostgreSQL`'s `NULL`.
 pub(crate) fn settings_map(sources: &DeclaredSources, principal: &Principal) -> serde_json::Value {
     let mut map = serde_json::Map::new();
-    for source in sources.iter().filter(|source| source.is_scalar()) {
+    for source in sources.iter().filter(|source| source.travels_in_settings()) {
         if let Some(text) = session_text(source, principal) {
             map.insert(
                 source.request_parameter().to_string(),
