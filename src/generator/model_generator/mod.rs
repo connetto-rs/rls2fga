@@ -89,7 +89,7 @@ use dsl::render_dsl;
 use emit_membership::{
     emit_abac_and, emit_blocked_set, emit_composite, emit_declared_helper, emit_exists_membership,
     emit_flagged_row, emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
-    emit_request_value_in_helper_set, emit_uncorrelated_membership,
+    emit_request_value_in_helper_set, emit_row_in_helper_pairs, emit_uncorrelated_membership,
 };
 use emit_ownership::{
     attribute_gate_key, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
@@ -2782,6 +2782,9 @@ fn translate_pattern<DB: DatabaseLike>(
         }
         PatternClass::P20DeclaredHelper(helper) => {
             emit_declared_helper(helper, ctx, table_plan, all_types)
+        }
+        PatternClass::P30RowInHelperPairs(pattern) => {
+            emit_row_in_helper_pairs(pattern, ctx, table_plan, all_types)
         }
         PatternClass::P27RequestValueInHelperSet(test) => {
             emit_request_value_in_helper_set(test, ctx, table_plan, all_types)

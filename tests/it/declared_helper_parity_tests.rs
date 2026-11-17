@@ -17,7 +17,7 @@ use crate::declared_helper_tests::{
     REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
-use crate::row_cap_tests::INSTALLATION_CAPS;
+use crate::row_cap_tests::{INSTALLATION_CAPS, POLICY_CAPS};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
@@ -1634,6 +1634,172 @@ async fn row_caps_agree_with_postgres_17_and_18() {
                         format!("resources:{}", owned_resource(index + 1, resource)),
                         allowed,
                     );
+                }
+            }
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const POLICY_CAP_HELPERS: &str = r#"{
+    "authz.capped_kinds": { "kind": "declared_helper" },
+    "authz.member_organizations": { "kind": "declared_helper" }
+}"#;
+
+/// The project, the report and, by position, the organization and kind each of the three
+/// rows of [`policy_caps_case`] carries.
+const CAPPED_ROWS: [(&str, &str, usize, &str); 3] = [
+    (
+        "0c100000-0000-4000-8000-000000000001",
+        "0c200000-0000-4000-8000-000000000001",
+        0,
+        "project",
+    ),
+    (
+        "0c100000-0000-4000-8000-000000000002",
+        "0c200000-0000-4000-8000-000000000002",
+        0,
+        "organization",
+    ),
+    (
+        "0c100000-0000-4000-8000-000000000003",
+        "0c200000-0000-4000-8000-000000000003",
+        1,
+        "project",
+    ),
+];
+
+/// The invitation of member `member` to the organization at `organization`, numbered as
+/// [`policy_caps_case`] seeds them.
+fn invitation(member: usize, organization: usize) -> String {
+    format!("0c300000-0000-4000-8000-0000000000{member}{organization}")
+}
+
+/// An invitation to the first organization of a user who is no member.
+const STRANGER_INVITATION: &str = "0c300000-0000-4000-8000-000000000099";
+
+/// Every member belongs to the first organization and is invited to both, beside a stranger
+/// invited to the first.
+fn policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let [a1, a2] = ORGANIZATIONS;
+    let [f1, f2, f3] = INSTALLATIONS_ACTING;
+    let mut seed = format!(
+        "INSERT INTO organizations VALUES ('{a1}'), ('{a2}');
+         INSERT INTO installation_permissions (installation_id, organization_id, kind, max_role)
+         VALUES
+           ('{f1}', '{a1}', 'organization', 'reader'), ('{f1}', '{a1}', 'project', 'writer'),
+           ('{f2}', '{a1}', 'organization', 'admin'), ('{f2}', '{a1}', 'project', 'reader'),
+           ('{f3}', '{a2}', 'project', 'admin');
+         INSERT INTO invitations VALUES
+           ('{STRANGER_INVITATION}', '{a1}', '0b000000-0000-4000-8000-0000000000ff');"
+    );
+    for (project, report, organization, kind) in CAPPED_ROWS {
+        let organization = ORGANIZATIONS[organization];
+        let _ = write!(
+            seed,
+            "INSERT INTO projects VALUES ('{project}', '{organization}', '{kind}');
+             INSERT INTO reports VALUES ('{report}', '{organization}', '{kind}');"
+        );
+    }
+    for (index, (member, _)) in CAPPED_MEMBERS.iter().enumerate() {
+        let _ = write!(
+            seed,
+            "INSERT INTO memberships VALUES ('{a1}', '{member}');
+             INSERT INTO invitations VALUES
+               ('{}', '{a1}', '{member}'), ('{}', '{a2}', '{member}');",
+            invitation(index + 1, 1),
+            invitation(index + 1, 2),
+        );
+    }
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-policy-caps-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        POLICY_CAPS,
+        &[
+            &seed,
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON projects, reports, invitations TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        CAPPED_MEMBERS
+            .iter()
+            .map(|(member, installation)| acting(member, Some(member), *installation))
+            .collect(),
+    )
+    .with_settings([
+        support::deployment::typed_caller("app.user_id", DataType::Uuid).may_be_unset(),
+        support::deployment::principal("app.installation_id", "installation", DataType::Uuid)
+            .may_be_unset(),
+    ])
+    .with_registry(POLICY_CAP_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// An installation reads the projects, reports and invitations whose pair it holds at the
+/// role each policy caps them by, and a request without one reads what its member reads.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn policy_clauses_capped_by_helper_pairs_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = policy_caps_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (index, (member, projects, reports, invitations)) in [
+                (CAPPED_MEMBERS[0].0, [true; 3], [true; 3], [true; 3]),
+                (CAPPED_MEMBERS[1].0, [true; 3], [true; 3], [true; 3]),
+                (
+                    CAPPED_MEMBERS[2].0,
+                    [true, false, false],
+                    [true, true, false],
+                    [true, false, true],
+                ),
+                (
+                    CAPPED_MEMBERS[3].0,
+                    [false, true, false],
+                    [true, true, false],
+                    [true, false, true],
+                ),
+                (
+                    CAPPED_MEMBERS[4].0,
+                    [false, false, true],
+                    [false, false, true],
+                    [false; 3],
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let expect = |object: String, allowed| {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        member,
+                        &object,
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                };
+                for (((project, report, ..), project_allowed), report_allowed) in
+                    CAPPED_ROWS.into_iter().zip(projects).zip(reports)
+                {
+                    expect(format!("projects:{project}"), project_allowed);
+                    expect(format!("reports:{report}"), report_allowed);
+                }
+                for (invited, allowed) in [
+                    invitation(index + 1, 1),
+                    invitation(index + 1, 2),
+                    STRANGER_INVITATION.to_string(),
+                ]
+                .into_iter()
+                .zip(invitations)
+                {
+                    expect(format!("invitations:{invited}"), allowed);
                 }
             }
             assert_agrees(&case, &run);

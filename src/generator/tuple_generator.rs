@@ -2058,7 +2058,7 @@ pub(crate) fn render_attribute_test(test: &AttributeTest) -> Option<String> {
 ///
 /// A number keeps its source spelling, so `priority >= 3` compares against `3` rather
 /// than a reformatted value, and the column's own type decides the comparison.
-fn render_attribute_literal(value: &AttributeLiteral) -> Option<String> {
+pub(crate) fn render_attribute_literal(value: &AttributeLiteral) -> Option<String> {
     match value {
         AttributeLiteral::Text(text) => Some(quote_sql_string_literal(text)),
         AttributeLiteral::AsText(text) => Some(format!("{}::text", quote_sql_string_literal(text))),

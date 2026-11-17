@@ -336,7 +336,8 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         // `BridgeColumnMissing`, which names the bridge that could not be written, and
         // refusing here instead would replace that with a threshold drop saying less.
         // An expanded call's inner classification passed this check against the same
-        // table when it was produced, so the wrapper reads nothing of its own.
+        // table when it was produced, so the wrapper reads nothing of its own, and each
+        // column a pair names was found on the guarded table when the pair was read.
         PatternClass::ExpandedFunction(ExpandedFunction { .. })
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { .. })
@@ -344,6 +345,7 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P2RoleNameInList(RoleNameInList { .. })
         | PatternClass::P7AbacAnd(AbacAnd { .. })
         | PatternClass::P8Composite(Composite { .. })
+        | PatternClass::P30RowInHelperPairs(RowInHelperPairs { .. })
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
@@ -438,6 +440,15 @@ fn compared_key_refusal<DB: DatabaseLike>(
         PatternClass::P20DeclaredHelper(DeclaredHelper { column, call }) => {
             check(guarded, column).or_else(|| helper_call_refusal(call, db))
         }
+        PatternClass::P30RowInHelperPairs(RowInHelperPairs { columns, pairs, .. }) => columns
+            .iter()
+            .find_map(|(_, column)| check(guarded, column))
+            .or_else(|| {
+                pairs
+                    .arms
+                    .iter()
+                    .find_map(|arm| helper_grant_refusal(arm, db))
+            }),
         PatternClass::P1NumericThreshold(NumericThreshold {
             function_name,
             resource_column,
@@ -639,7 +650,8 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
                     .chain(held.iter().map(|(_, column)| column))
                     .find_map(|column| key_collation_refusal(table, column, db))
                     .or_else(|| {
-                        cap.arms
+                        cap.pairs
+                            .arms
                             .iter()
                             .find_map(|arm| helper_grant_refusal(arm, db))
                     })
@@ -1159,6 +1171,13 @@ fn recognize_leaf<DB: DatabaseLike>(
         return Some(classified);
     }
 
+    // Try P30: the row's columns naming a pair a declared definer helper returns, which
+    // shares the same spellings with a row in place of the column.
+    if let Some(classified) = recognizers::recognize_row_in_helper_pairs(expr, db, registry, table)
+    {
+        return Some(classified);
+    }
+
     // Try P29 on a flag the parent one edge row names carries. Before P5, whose correlated
     // `EXISTS` it shares, and refused only once no membership spelling reads it.
     let parent_refusal = match classify_parent_flag(expr, db, registry, table, state) {
@@ -1430,6 +1449,9 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
             "membership-through-a-second-table check"
         }
         PatternClass::P20DeclaredHelper(DeclaredHelper { .. }) => "declared-helper check",
+        PatternClass::P30RowInHelperPairs(RowInHelperPairs { .. }) => {
+            "row among a declared helper's pairs"
+        }
         PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet { .. }) => {
             "declared caller value among a declared helper's values"
         }
@@ -1458,6 +1480,8 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::P20DeclaredHelper(DeclaredHelper { .. })
+        // The pairs hold whoever the helper's rows return them to.
+        | PatternClass::P30RowInHelperPairs(RowInHelperPairs { .. })
         // Membership of the holder is still a user-resource relationship, even though
         // the holder stands for the whole table.
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })

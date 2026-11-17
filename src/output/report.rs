@@ -10,10 +10,10 @@ use crate::classifier::patterns::{
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, FlaggedRow, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowValueEqualsCallerScalar,
-    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
+    RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
-use crate::generator::tuple_generator::render_attribute_test;
+use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
 use crate::types::TranslationNote;
 
 /// Remove Markdown table control characters and escape pipes.
@@ -208,6 +208,34 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 call.function,
                 call.arguments.join(", ")
             )
+        }
+        PatternClass::P30RowInHelperPairs(RowInHelperPairs {
+            columns,
+            literals,
+            pairs,
+        }) => {
+            let mut rendered = String::from("P30 ((");
+            for position in 0..columns.len() + literals.len() {
+                if position != 0 {
+                    rendered.push_str(", ");
+                }
+                if let Some((_, column)) = columns.iter().find(|(at, _)| *at == position) {
+                    rendered.push_str(column.as_str());
+                } else if let Some(value) = literals
+                    .iter()
+                    .find(|(at, _)| *at == position)
+                    .and_then(|(_, value)| render_attribute_literal(value))
+                {
+                    rendered.push_str(&value);
+                }
+            }
+            let _ = write!(
+                rendered,
+                ") in {}({}))",
+                pairs.function,
+                pairs.arguments.join(", ")
+            );
+            rendered
         }
         PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet {
             source,

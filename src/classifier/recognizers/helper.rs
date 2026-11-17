@@ -9,8 +9,9 @@
 use crate::no_std_prelude::*;
 use sqlparser::ast::{
     BinaryOperator, DataType, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident,
-    InTarget, ObjectName, Query, Select, SelectItem, TableAlias, TableFactor, TableFunctionArgs,
-    TableWithJoins, UnaryOperator, Value,
+    InTarget, ObjectName, Query, Select, SelectItem, SelectItemQualifiedWildcardKind, TableAlias,
+    TableFactor, TableFunctionArgs, TableWithJoins, UnaryOperator, Value,
+    WildcardAdditionalOptions,
 };
 
 use crate::classifier::expansion::call_matches_declared;
@@ -26,9 +27,10 @@ use crate::generator::db_lookup::{
     column_kind, resolve_row_identity, row_uniquely_keys, single_identity_column,
 };
 use crate::generator::model_bounds::MAX_CONDITIONS;
-use crate::parser::expr::CastChain;
+use crate::parser::expr::{peel_noting_casts, CastChain};
 use crate::parser::names::{
-    lookup_table, lookup_table_id, stored_ident_name, stored_relation_name, table_identity,
+    lookup_table, lookup_table_id, stored_ident_name, stored_identifier, stored_relation_name,
+    table_identity,
 };
 use crate::parser::sql_parser::{
     CallerGate, CapLift, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike, DatabaseLike,
@@ -38,6 +40,7 @@ use crate::parser::sql_parser::{
 };
 use crate::types::{ColumnKind, ColumnName, RequestNormalization, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
+use sql_traits::utils::normalize_sqlparser_type;
 
 /// Why a call to a declared helper does not translate.
 #[derive(Debug, thiserror::Error)]
@@ -287,23 +290,23 @@ pub(crate) enum HelperRefusal {
     },
     /// A cap returns some of its pairs through a parent or a walk, which no row keys.
     #[error(
-        "declared helper '{function}' is capped by '{cap}', which returns pairs through a \
-         parent or a walk, while a pair is read from the row returning it"
+        "{capped} is capped by '{cap}', which returns pairs through a parent or a walk, \
+         while a pair is read from the row returning it"
     )]
     CapByParentOrWalk {
-        /// The capped helper.
-        function: String,
+        /// What the cap keeps rows of.
+        capped: Capped,
         /// The helper returning the pairs.
         cap: String,
     },
     /// The rows returning a cap's pairs are capped in turn.
     #[error(
-        "declared helper '{function}' is capped by '{cap}', whose own rows '{nested}' caps, \
-         while a pair object carries no cap"
+        "{capped} is capped by '{cap}', whose own rows '{nested}' caps, while a pair object \
+         carries no cap"
     )]
     CappedCap {
-        /// The capped helper.
-        function: String,
+        /// What the cap keeps rows of.
+        capped: Capped,
         /// The helper returning the pairs.
         cap: String,
         /// The helper capping the cap's rows.
@@ -324,12 +327,12 @@ pub(crate) enum HelperRefusal {
     },
     /// A cap operand is neither a column nor a literal the model spells.
     #[error(
-        "declared helper '{function}' pairs '{operand}' with the rows '{cap}' returns, which \
-         is no literal a pair is named by"
+        "{capped} pairs '{operand}' with the rows '{cap}' returns, which is no literal a pair \
+         is named by"
     )]
     CapOperand {
-        /// The capped helper.
-        function: String,
+        /// What the cap keeps rows of.
+        capped: Capped,
         /// The helper returning the pairs.
         cap: String,
         /// The operand as written.
@@ -354,13 +357,13 @@ pub(crate) enum HelperRefusal {
     },
     /// A cap pairs literals with no column.
     #[error(
-        "declared helper '{function}' pairs literals with the rows '{cap}' returns beside no \
-         column of '{table}', so no pair names the row it returns"
+        "{capped} pairs literals with the rows '{cap}' returns beside no column of '{table}', \
+         so no pair names the row it returns"
     )]
     CapLiteralsBeside {
-        /// The capped helper.
-        function: String,
-        /// The table the arm reads.
+        /// What the cap keeps rows of.
+        capped: Capped,
+        /// The table whose rows the cap keeps.
         table: String,
         /// The helper returning the pairs.
         cap: String,
@@ -384,13 +387,13 @@ pub(crate) enum HelperRefusal {
     /// A cap pairs columns whose types differ, or whose text spelling does not decide
     /// equality.
     #[error(
-        "declared helper '{function}' pairs column '{column}' of '{table}' with column \
-         '{paired}' of the rows '{cap}' returns, and the two are not of one type whose text \
-         spelling decides equality, which names a pair"
+        "{capped} pairs column '{column}' of '{table}' with column '{paired}' of the rows \
+         '{cap}' returns, and the two are not of one type whose text spelling decides \
+         equality, which names a pair"
     )]
     CapUnlikeTypes {
-        /// The capped helper.
-        function: String,
+        /// What the cap keeps rows of.
+        capped: Capped,
         /// The table of the arm's row or of the joined row the column belongs to.
         table: String,
         /// The paired column of that table.
@@ -521,6 +524,17 @@ pub(crate) enum UnsetCallerGateRefusal {
     CapArm,
 }
 
+/// What a cap keeps rows of, as its refusals name it.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum Capped {
+    /// A grant arm of this declared helper.
+    #[error("declared helper '{0}'")]
+    Helper(String),
+    /// The rows of the table a policy clause guards.
+    #[error("the policy")]
+    Policy,
+}
+
 /// Recognize `<column> = ANY (ARRAY(SELECT h(...)))`, `<column> = ANY (SELECT h(...))`
 /// and `<column> IN (SELECT h(...))` for a declared helper `h`, and the same spellings
 /// comparing a declared request value in place of the column.
@@ -585,6 +599,132 @@ pub(crate) fn recognize_excluded_helper<DB: DatabaseLike>(
     helper_compared_with(compared, query, db, registry, table)
 }
 
+/// Recognize `(<operands>) IN (SELECT * FROM h(...))` and `(<operands>) = ANY (SELECT *
+/// FROM h(...))` for a declared helper `h` returning `TABLE (...)`, the subquery naming
+/// each column `h` returns in order in place of `*` or not.
+///
+/// `None` where the expression has another shape or reads no declared helper.
+pub(crate) fn recognize_row_in_helper_pairs<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> Option<ClassifiedExpr> {
+    let (compared, query) = helper_set_operands(expr)?;
+    let Expr::Tuple(operands) = compared else {
+        return None;
+    };
+    let (function, arguments, overloaded) = pairs_read_in_from(query, db, registry)?;
+    // PostgreSQL refuses a row compared with rows of another width, so a dump holds none.
+    if function.returned_columns(db).count() != operands.len() {
+        return None;
+    }
+    let guarded = lookup_table(db, table)?;
+    let pattern = if overloaded {
+        Err(HelperRefusal::Overloaded {
+            function: function.target_name().to_string(),
+        })
+    } else {
+        row_in_helper_pairs(
+            operands,
+            function,
+            arguments,
+            (table, guarded),
+            db,
+            registry,
+        )
+    };
+    Some(match pattern {
+        Ok(pattern) => ClassifiedExpr {
+            pattern: PatternClass::P30RowInHelperPairs(pattern),
+            confidence: ConfidenceLevel::A,
+        },
+        Err(refusal) => ClassifiedExpr {
+            pattern: PatternClass::Unknown(UnclassifiedExpr {
+                sql_text: expr.to_string(),
+                reason: refusal.to_string(),
+            }),
+            confidence: ConfidenceLevel::D,
+        },
+    })
+}
+
+/// The pattern for `operands` of `table` compared with the rows one call of `function`
+/// returns, each a column of `table` or a literal, plain or cast to the type `function`
+/// declares the column it pairs with in.
+fn row_in_helper_pairs<DB: DatabaseLike>(
+    operands: &[Expr],
+    function: &DB::Function,
+    arguments: &[FunctionArg],
+    (table, guarded): (&str, &DB::Table),
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<RowInHelperPairs, HelperRefusal> {
+    let (values, set) = answered_call(function, arguments, db, registry)?;
+    let (pairs, rows) = helper_pairs(&Capped::Policy, function, &values, &set, db, registry)?;
+    let arms = CapArms {
+        capped: &Capped::Policy,
+        cap: &pairs.function,
+        pairs: &rows,
+    };
+    let mut columns = Vec::with_capacity(operands.len());
+    let mut literals = Vec::new();
+    for ((position, operand), (_, declared)) in operands
+        .iter()
+        .enumerate()
+        .zip(function.returned_columns(db))
+    {
+        if let Some(name) = compared_column(operand, table) {
+            let column = guarded
+                .columns(db)?
+                .find(|column| column.stored_column_name() == name.as_str())
+                .ok_or_else(|| arms.operand(operand.to_string()))?;
+            arms.pairs_alike(guarded, column, position, db)?;
+            columns.push((position, name));
+        } else {
+            let value = paired_literal(operand, &declared)
+                .ok_or_else(|| arms.operand(operand.to_string()))?;
+            literals.push((position, value));
+        }
+    }
+    if columns.is_empty() {
+        return Err(HelperRefusal::CapLiteralsBeside {
+            capped: Capped::Policy,
+            table: table_identity(guarded).to_string(),
+            cap: pairs.function,
+        });
+    }
+    Ok(RowInHelperPairs {
+        columns,
+        literals,
+        pairs,
+    })
+}
+
+/// The literal `operand` writes, plain or a quoted string cast only to `declared`, the type
+/// a helper declares the column it pairs with in, so the tuple query coerces it alike.
+fn paired_literal(operand: &Expr, declared: &str) -> Option<AttributeLiteral> {
+    let mut cast = false;
+    let mut converted = false;
+    let peeled = peel_noting_casts(operand, |data_type| {
+        cast = true;
+        converted |= normalize_sqlparser_type(data_type) != declared;
+    });
+    match peeled {
+        Expr::Value(value)
+            if !converted
+                && (!cast
+                    || matches!(
+                        value.value,
+                        Value::SingleQuotedString(_) | Value::DollarQuotedString(_)
+                    )) =>
+        {
+            literal(&value.value)
+        }
+        _ => None,
+    }
+}
+
 /// The helper `query` calls compared with `compared`, `None` where `query` calls no
 /// declared helper or `compared` is no column of `table`.
 fn helper_compared_with<DB: DatabaseLike>(
@@ -627,15 +767,27 @@ fn declared_call<'query, 'db, DB: DatabaseLike>(
     registry: &FunctionRegistry,
 ) -> Option<(&'db DB::Function, &'query [FunctionArg], bool)> {
     let (name, arguments) = called_helper(query)?;
+    let (function, overloaded) = declared_function(name, arguments.len(), db, registry)?;
+    Some((function, arguments, overloaded))
+}
+
+/// The declared helper `name` calls with `arguments` arguments, and whether another
+/// declaration takes as many. `None` where the call reaches no declared helper.
+fn declared_function<'db, DB: DatabaseLike>(
+    name: &ObjectName,
+    arguments: usize,
+    db: &'db DB,
+    registry: &FunctionRegistry,
+) -> Option<(&'db DB::Function, bool)> {
     let mut reached = db
         .functions()
         .filter(|declared| call_matches_declared(name, *declared, db))
-        .filter(|declared| declared.stored_argument_names(db).count() == arguments.len());
+        .filter(|declared| declared.stored_argument_names(db).count() == arguments);
     let function = reached.next()?;
     if !registry.declares_helper(function) {
         return None;
     }
-    Some((function, arguments, reached.next().is_some()))
+    Some((function, reached.next().is_some()))
 }
 
 /// The compared value and the query of the three spellings of set membership, the
@@ -730,10 +882,43 @@ fn projected_call(select: &Select) -> Option<(&ObjectName, &[FunctionArg])> {
 
 /// The call `SELECT c FROM h(...) a(c)` reads as its only relation, projecting the one
 /// column a set-returning function of a base type returns and keeping every row.
+fn call_read_in_from(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
+    let read = function_read(query)?;
+    let [SelectItem::UnnamedExpr(projected)
+    | SelectItem::ExprWithAlias {
+        expr: projected, ..
+    }] = read.select.projection.as_slice()
+    else {
+        return None;
+    };
+    let function = read.name.0.last()?.as_ident()?;
+    let (relation, column) = returned_column(function, read.alias)?;
+    projects_column(
+        unparenthesize(projected),
+        relation,
+        &stored_ident_name(column),
+    )
+    .then_some((read.name, read.arguments))
+}
+
+/// One function call a query reads as its only relation, keeping every row it returns.
+struct FunctionRead<'query> {
+    /// The query's `SELECT`.
+    select: &'query Select,
+    /// The function called.
+    name: &'query ObjectName,
+    /// The alias the call is read under.
+    alias: Option<&'query TableAlias>,
+    /// Its arguments.
+    arguments: &'query [FunctionArg],
+}
+
+/// The call `query` reads as its only relation, with no filter, join or clause thinning
+/// the rows it returns.
 ///
 /// The factor is spelled exhaustively so a field the parser adds to a `FROM` item is a
 /// compile error here rather than a set admitted without a proof.
-fn call_read_in_from(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
+fn function_read(query: &Query) -> Option<FunctionRead<'_>> {
     if set_limiting_clause(query).is_some() {
         return None;
     }
@@ -769,17 +954,89 @@ fn call_read_in_from(query: &Query) -> Option<(&ObjectName, &[FunctionArg])> {
     // Hints, partitions and index directives are other dialects' syntax, which a
     // PostgreSQL dump never carries, so any of them leaves the set unproven.
     let plain = with_hints.is_empty() && partitions.is_empty() && index_directives.is_empty();
-    let [SelectItem::UnnamedExpr(projected)
-    | SelectItem::ExprWithAlias {
-        expr: projected, ..
-    }] = select.projection.as_slice()
-    else {
-        return None;
+    plain.then_some(FunctionRead {
+        select,
+        name,
+        alias: alias.as_ref(),
+        arguments: args,
+    })
+}
+
+/// The declared helper returning `TABLE (...)` whose every column `query` reads from the
+/// one call it reads, through `*` or naming each in the order the helper returns them,
+/// beside the call's arguments and whether another declaration takes as many. `None`
+/// where `query` reads anything else.
+fn pairs_read_in_from<'query, 'db, DB: DatabaseLike>(
+    query: &'query Query,
+    db: &'db DB,
+    registry: &FunctionRegistry,
+) -> Option<(&'db DB::Function, &'query [FunctionArg], bool)> {
+    let read = function_read(query)?;
+    let (function, overloaded) = declared_function(read.name, read.arguments.len(), db, registry)?;
+    let relation = match read.alias {
+        Some(alias) => &alias.name,
+        None => read.name.0.last()?.as_ident()?,
     };
-    let function = name.0.last()?.as_ident()?;
-    let (relation, column) = returned_column(function, alias.as_ref())?;
-    (plain && projects_column(unparenthesize(projected), relation, column))
-        .then_some((name, args.as_slice()))
+    // An alias listing columns renames the first ones the call returns.
+    let renamed = read.alias.map_or(&[][..], |alias| alias.columns.as_slice());
+    let returned: Vec<_> = function
+        .returned_columns(db)
+        .map(|(name, _)| name)
+        .collect();
+    if returned.len() < 2
+        || renamed.len() > returned.len()
+        || renamed.iter().any(|column| column.data_type.is_some())
+    {
+        return None;
+    }
+    let names: Vec<_> = returned
+        .iter()
+        .enumerate()
+        .map(|(position, name)| {
+            renamed.get(position).map_or_else(
+                || stored_identifier(name.name(), name.name_is_quoted()),
+                |column| stored_ident_name(&column.name),
+            )
+        })
+        .collect();
+    let reads_every = match read.select.projection.as_slice() {
+        [SelectItem::Wildcard(options)] => adds_nothing(options),
+        [SelectItem::QualifiedWildcard(
+            SelectItemQualifiedWildcardKind::ObjectName(qualifier),
+            options,
+        )] => {
+            matches!(qualifier.0.as_slice(), [part] if part
+                .as_ident()
+                .is_some_and(|part| stored_ident_name(part) == stored_ident_name(relation)))
+                && adds_nothing(options)
+        }
+        items => {
+            items.len() == names.len()
+                && items.iter().zip(&names).all(|(item, column)| {
+                    matches!(item, SelectItem::UnnamedExpr(projected)
+                        | SelectItem::ExprWithAlias { expr: projected, .. }
+                        if projects_column(unparenthesize(projected), relation, column))
+                })
+        }
+    };
+    reads_every.then_some((function, read.arguments, overloaded))
+}
+
+/// Whether a `*` keeps every column as the relation returns it, which every option other
+/// dialects add to it changes.
+fn adds_nothing(options: &WildcardAdditionalOptions) -> bool {
+    matches!(
+        options,
+        WildcardAdditionalOptions {
+            wildcard_token: _,
+            opt_ilike: None,
+            opt_exclude: None,
+            opt_except: None,
+            opt_replace: None,
+            opt_rename: None,
+            opt_alias: None,
+        }
+    )
 }
 
 /// The relation name and the column name `PostgreSQL` gives the one column a function of
@@ -799,14 +1056,15 @@ fn returned_column<'a>(
     }
 }
 
-/// Whether `projected` reads `column` of `relation`, bare or qualified by the relation.
-fn projects_column(projected: &Expr, relation: &Ident, column: &Ident) -> bool {
-    let same = |left: &Ident, right: &Ident| stored_ident_name(left) == stored_ident_name(right);
+/// Whether `projected` reads the column stored as `column` of `relation`, bare or
+/// qualified by the relation.
+fn projects_column(projected: &Expr, relation: &Ident, column: &str) -> bool {
     match projected {
-        Expr::Identifier(read) => same(read, column),
+        Expr::Identifier(read) => stored_ident_name(read) == column,
         Expr::CompoundIdentifier(parts) => matches!(
             parts.as_slice(),
-            [qualifier, read] if same(qualifier, relation) && same(read, column)
+            [qualifier, read] if stored_ident_name(qualifier) == stored_ident_name(relation)
+                && stored_ident_name(read) == column
         ),
         _ => false,
     }
@@ -1812,25 +2070,54 @@ fn helper_cap<DB: DatabaseLike>(
             called: called.target_name().to_string(),
         });
     }
+    let capped = Capped::Helper(function.to_string());
+    let (pairs, rows) = helper_pairs(&capped, called, cap.arguments(), cap.set(), db, registry)?;
+    let paired = PairedCap {
+        function,
+        grant,
+        arms: CapArms {
+            capped: &capped,
+            cap: &pairs.function,
+            pairs: &rows,
+        },
+    };
+    let link = paired.held_link(cap.operands(), db)?;
+    let lift = cap
+        .lift()
+        .map(|lift| lifting_source(function, lift, registry))
+        .transpose()?;
+    Ok(HelperCap { pairs, link, lift })
+}
+
+/// The pairs `called` returns for `arguments`, each read from the arm of `set` returning
+/// it, beside those arms for the checks pairing operands with their columns.
+fn helper_pairs<'set, 'db, DB: DatabaseLike>(
+    capped: &Capped,
+    called: &DB::Function,
+    arguments: &[Value],
+    set: &'set HelperSet<'db, DB>,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<(HelperPairs, Vec<&'set GrantArm<'db, DB>>), HelperRefusal> {
     let name = registry.resolved_target_name(&called.target_name());
-    let mut arms = Vec::with_capacity(cap.set().arms().len());
-    let mut pairs = Vec::with_capacity(cap.set().arms().len());
-    for arm in cap.set().arms() {
-        let HelperArm::Grant(rows) = arm else {
+    let mut arms = Vec::with_capacity(set.arms().len());
+    let mut rows = Vec::with_capacity(set.arms().len());
+    for arm in set.arms() {
+        let HelperArm::Grant(grant) = arm else {
             return Err(HelperRefusal::CapByParentOrWalk {
-                function: function.to_string(),
+                capped: capped.clone(),
                 cap: name,
             });
         };
-        unjoined(&name, rows)?;
-        if let Some(nested) = rows.caps().first() {
+        unjoined(&name, grant)?;
+        if let Some(nested) = grant.caps().first() {
             return Err(HelperRefusal::CappedCap {
-                function: function.to_string(),
+                capped: capped.clone(),
                 cap: name,
                 nested: nested.function().target_name().to_string(),
             });
         }
-        let paired_arm = helper_grant(&name, rows, rows.columns(), db, registry)?;
+        let paired_arm = helper_grant(&name, grant, grant.columns(), db, registry)?;
         if let Some(caller) = &paired_arm.carried_caller {
             return Err(HelperRefusal::GateOnUnsetCaller {
                 function: name,
@@ -1839,26 +2126,16 @@ fn helper_cap<DB: DatabaseLike>(
             });
         }
         arms.push(paired_arm);
-        pairs.push(rows);
+        rows.push(grant);
     }
-    let paired = PairedCap {
-        function,
-        cap: &name,
-        grant,
-        pairs: &pairs,
-    };
-    let link = paired.held_link(cap.operands(), db)?;
-    let lift = cap
-        .lift()
-        .map(|lift| lifting_source(function, lift, registry))
-        .transpose()?;
-    Ok(HelperCap {
-        arguments: cap.arguments().iter().map(ToString::to_string).collect(),
-        function: name,
-        arms,
-        link,
-        lift,
-    })
+    Ok((
+        HelperPairs {
+            function: name,
+            arguments: arguments.iter().map(ToString::to_string).collect(),
+            arms,
+        },
+        rows,
+    ))
 }
 
 /// The declared value whose absence lifts a cap, read only through `NULLIF(<read>, '')`
@@ -1921,7 +2198,7 @@ fn place_caps<DB: DatabaseLike>(
             .into_iter()
             .find(|cap| level_shape(&cap.link, &object, keyed).is_none())
             .map_or_else(Default::default, |cap| {
-                (paired_column(&cap.link, &object), cap.function)
+                (paired_column(&cap.link, &object), cap.pairs.function)
             });
         return Err(HelperRefusal::CapOnSeveralRows {
             function: function.to_string(),
@@ -2011,16 +2288,24 @@ struct HeldOperand<'a, 'db, DB: DatabaseLike> {
     own: Option<&'db DB::Column>,
 }
 
+/// The arms returning a cap's pairs, for the refusals naming them.
+struct CapArms<'a, 'db, DB: DatabaseLike> {
+    /// What the cap keeps rows of.
+    capped: &'a Capped,
+    /// The helper returning the pairs.
+    cap: &'a str,
+    /// The cap's arms.
+    pairs: &'a [&'a GrantArm<'db, DB>],
+}
+
 /// A cap's operands beside the arms returning its pairs, for the refusals naming them.
 struct PairedCap<'a, 'db, DB: DatabaseLike> {
     /// The helper whose arm the cap keeps.
     function: &'a str,
-    /// The helper returning the pairs.
-    cap: &'a str,
     /// The capped arm.
     grant: &'a GrantArm<'db, DB>,
-    /// The cap's arms.
-    pairs: &'a [&'a GrantArm<'db, DB>],
+    /// The arms returning the pairs.
+    arms: CapArms<'a, 'db, DB>,
 }
 
 impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
@@ -2039,7 +2324,8 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
         for (position, operand) in operands.iter().enumerate() {
             match operand {
                 CapOperand::Column(column) => {
-                    self.pairs_alike(self.grant.table(), column, position, db)?;
+                    self.arms
+                        .pairs_alike(self.grant.table(), column, position, db)?;
                     columns.push(HeldOperand {
                         position,
                         joined: None,
@@ -2048,21 +2334,21 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
                     });
                 }
                 CapOperand::Joined { row, column } => {
-                    let joined = self.grant.joined_rows().get(*row).ok_or_else(|| {
-                        HelperRefusal::CapOperand {
-                            function: self.function.to_string(),
-                            cap: self.cap.to_string(),
-                            operand: column.column_name().to_string(),
-                        }
-                    })?;
-                    self.pairs_alike(joined.table(), column, position, db)?;
+                    let joined = self
+                        .grant
+                        .joined_rows()
+                        .get(*row)
+                        .ok_or_else(|| self.arms.operand(column.column_name().to_string()))?;
+                    self.arms
+                        .pairs_alike(joined.table(), column, position, db)?;
                     let own = joined
                         .columns()
                         .iter()
                         .find(|(_, named)| same_column::<DB>(named, column))
                         .map(|(own, _)| *own);
                     if let Some(own) = own {
-                        self.pairs_alike(self.grant.table(), own, position, db)?;
+                        self.arms
+                            .pairs_alike(self.grant.table(), own, position, db)?;
                     }
                     columns.push(HeldOperand {
                         position,
@@ -2072,20 +2358,17 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
                     });
                 }
                 CapOperand::Value(value) => {
-                    let value = literal(value).ok_or_else(|| HelperRefusal::CapOperand {
-                        function: self.function.to_string(),
-                        cap: self.cap.to_string(),
-                        operand: value.to_string(),
-                    })?;
+                    let value =
+                        literal(value).ok_or_else(|| self.arms.operand(value.to_string()))?;
                     literals.push((position, value));
                 }
             }
         }
         if columns.is_empty() {
             return Err(HelperRefusal::CapLiteralsBeside {
-                function: self.function.to_string(),
+                capped: Capped::Helper(self.function.to_string()),
                 table: table_identity(self.grant.table()).to_string(),
-                cap: self.cap.to_string(),
+                cap: self.arms.cap.to_string(),
             });
         }
         let reader = columns.iter().find_map(|operand| match operand {
@@ -2132,10 +2415,11 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
                     function: self.function.to_string(),
                     first: table_identity(first).to_string(),
                     second: table_identity(reader.table()).to_string(),
-                    cap: self.cap.to_string(),
+                    cap: self.arms.cap.to_string(),
                 });
             };
-            self.pairs_alike(reader.table(), column, operand.position, db)?;
+            self.arms
+                .pairs_alike(reader.table(), column, operand.position, db)?;
             read.push((
                 operand.position,
                 ColumnName::from_stored(column.stored_column_name()),
@@ -2146,6 +2430,17 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
             columns: read,
             literals,
         })
+    }
+}
+
+impl<DB: DatabaseLike> CapArms<'_, '_, DB> {
+    /// The refusal of `operand`, neither a column nor a literal a pair is named by.
+    fn operand(&self, operand: String) -> HelperRefusal {
+        HelperRefusal::CapOperand {
+            capped: self.capped.clone(),
+            cap: self.cap.to_string(),
+            operand,
+        }
     }
 
     /// Refuses `column` of `table` paired with the column at `position` of a cap arm,
@@ -2176,7 +2471,7 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
             );
             if !decides || declared.normalized_name(db) != spelled.normalized_name(db) {
                 return Err(HelperRefusal::CapUnlikeTypes {
-                    function: self.function.to_string(),
+                    capped: self.capped.clone(),
                     table: table.to_string(),
                     column: column.stored_column_name().into_owned(),
                     cap: self.cap.to_string(),

@@ -354,6 +354,7 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P4ExistsMembership(_)
             | PatternClass::P19IndirectMembership(_)
             | PatternClass::P20DeclaredHelper(_)
+            | PatternClass::P30RowInHelperPairs(_)
             | PatternClass::P11ArrayMembership(_)
             | PatternClass::P12JsonbFieldOwnership(_)
             | PatternClass::P26OwnerExpression(_)

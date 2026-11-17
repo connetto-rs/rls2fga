@@ -1459,6 +1459,48 @@ pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
     reach_level_relation(&call.level, column, returned, ctx, table_plan)
 }
 
+/// The guarded rows whose columns name a pair a declared helper returns, each linked to
+/// that pair, which holds whoever the helper's rows return it to.
+///
+/// The helper reads as its owner, past every policy, and the tuple queries read the same
+/// rows.
+pub(crate) fn emit_row_in_helper_pairs<DB: DatabaseLike>(
+    pattern: &RowInHelperPairs,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> UsersetExpr {
+    let RowInHelperPairs {
+        columns,
+        literals,
+        pairs,
+    } = pattern;
+    let source_table = ctx.source_table;
+    let Some(identity) = resolve_row_identity(source_table, ctx.db) else {
+        skip_source_without_row_identity(table_plan, source_table, "helper pair links", ctx.db);
+        return deny_expr(table_plan);
+    };
+    let Some(holder) = pairs_holder(pairs, ctx, table_plan, all_types) else {
+        return deny_expr(table_plan);
+    };
+    let reach = CapReach::Rows {
+        table: source_table,
+        keys: &identity,
+        positions: columns.iter().map(|(position, _)| *position).collect(),
+        columns: columns.iter().map(|(_, column)| column.clone()).collect(),
+        literals,
+    };
+    let level_type = table_plan.type_name.clone();
+    reached_pairs(
+        (pairs, holder),
+        reach,
+        (source_table, &level_type),
+        ctx,
+        table_plan,
+        all_types,
+    )
+}
+
 /// `relation` of the `level` row `column` names, as that relation itself where the column is
 /// the guarded row's own key, or through the column's bridge.
 fn reach_level_relation<DB: DatabaseLike>(
@@ -2055,7 +2097,10 @@ fn capped_grant_parts<DB: DatabaseLike>(
             return Vec::new();
         };
         name.push_str("_within_");
-        name.push_str(&helper_call_relation_name(&cap.function, &cap.arguments));
+        name.push_str(&helper_call_relation_name(
+            &cap.pairs.function,
+            &cap.pairs.arguments,
+        ));
         kept.push(capped);
     }
     let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
@@ -2118,7 +2163,10 @@ fn held_grant_expr<DB: DatabaseLike>(
             cap, grant, held, &row_type, ctx, table_plan, all_types,
         )?);
         name.push_str("_within_");
-        name.push_str(&helper_call_relation_name(&cap.function, &cap.arguments));
+        name.push_str(&helper_call_relation_name(
+            &cap.pairs.function,
+            &cap.pairs.arguments,
+        ));
     }
     let mut rule = combine_intersection(kept)?;
     if let Some(subtract) = combine_union(blocking) {
@@ -2284,7 +2332,7 @@ fn held_cap_expr<DB: DatabaseLike>(
     )?;
     let joined_plan = helper_level_plan(&joined_type, Some(&joined.table), table_plan, all_types);
     let within = joined_plan.ensure_computed(
-        helper_call_relation_name(&cap.function, &cap.arguments),
+        helper_call_relation_name(&cap.pairs.function, &cap.pairs.arguments),
         capped,
     );
     let row_plan = helper_level_plan(row_type, Some(&grant.table), table_plan, all_types);
@@ -2315,11 +2363,8 @@ enum CapReach<'a> {
 
 /// The objects of `level_type` `cap` keeps, `None` where it keeps none.
 ///
-/// Each pair the cap returns is an object of its own, holding whoever the cap's arms
-/// return it to, and each object of `level_type` links to the pairs its operands name as
-/// `reach` reads them. Column operands beside literals name an object of their own, keyed
-/// by the columns' values, which links to every pair holding those values beside those
-/// literals. While the request leaves the lifting value absent, every object is kept.
+/// Each object of `level_type` links to the pairs the cap's operands name as `reach` reads
+/// them, and while the request leaves the lifting value absent, every object is kept.
 fn cap_expr<DB: DatabaseLike>(
     cap: &HelperCap,
     reach: CapReach<'_>,
@@ -2329,18 +2374,7 @@ fn cap_expr<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<UsersetExpr> {
-    let call = helper_call_relation_name(&cap.function, &cap.arguments);
-    let pair_type = cap_type_name(cap, "pair", ctx.table_types);
-    let mut held = Vec::new();
-    for arm in &cap.arms {
-        held.extend(helper_grant_parts(
-            arm, None, &pair_type, ctx, table_plan, all_types,
-        ));
-    }
-    let holder = combine_union(held).map(|held| {
-        helper_level_plan(&pair_type, None, table_plan, all_types)
-            .ensure_computed(call.clone(), held)
-    });
+    let holder = pairs_holder(&cap.pairs, ctx, table_plan, all_types);
     let mut kept = Vec::with_capacity(2);
     if let Some(lift) = &cap.lift {
         let absent = RequestFormula::Presence(PresenceAtom::new(lift, false));
@@ -2349,63 +2383,14 @@ fn cap_expr<DB: DatabaseLike>(
         ));
     }
     if let Some(holder) = holder {
-        let reached = match reach {
-            CapReach::Pairs { object, literals } => {
-                let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
-                UsersetExpr::TupleToUserset {
-                    tupleset: cap_link(&pair_type, literal_links(cap, &[object], literals), plan),
-                    computed: holder,
-                }
-            }
-            CapReach::Rows {
-                table,
-                keys,
-                columns,
-                literals: [],
-                ..
-            } => {
-                let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
-                let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
-                UsersetExpr::TupleToUserset {
-                    tupleset: cap_link(&pair_type, rows, plan),
-                    computed: holder,
-                }
-            }
-            CapReach::Rows {
-                table,
-                keys,
-                positions,
-                columns,
-                literals,
-            } => {
-                let mut suffix = String::from("key");
-                for position in &positions {
-                    suffix.push('_');
-                    suffix.push_str(&position.to_string());
-                }
-                let key_type = cap_type_name(cap, &suffix, ctx.table_types);
-                let key_plan = helper_level_plan(&key_type, None, table_plan, all_types);
-                let pairs = cap_link(
-                    &pair_type,
-                    literal_links(cap, &positions, literals),
-                    key_plan,
-                );
-                let at_key = key_plan.ensure_computed(
-                    call,
-                    UsersetExpr::TupleToUserset {
-                        tupleset: pairs,
-                        computed: holder,
-                    },
-                );
-                let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
-                let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
-                UsersetExpr::TupleToUserset {
-                    tupleset: cap_link(&key_type, rows, plan),
-                    computed: at_key,
-                }
-            }
-        };
-        kept.push(reached);
+        kept.push(reached_pairs(
+            (&cap.pairs, holder),
+            reach,
+            (level, level_type),
+            ctx,
+            table_plan,
+            all_types,
+        ));
     }
     combine_union(kept)
 }
@@ -2440,14 +2425,109 @@ fn level_request_gate<DB: DatabaseLike>(
     Some(gated)
 }
 
-/// The type named after the call `cap` makes and `suffix`, `capped_kinds_reader_pair` for
-/// the pairs `authz.capped_kinds('reader')` returns.
-fn cap_type_name(cap: &HelperCap, suffix: &str, table_types: &TableTypes) -> TypeName {
-    let call = helper_call_relation_name(&cap.function, &cap.arguments);
+/// The relation on the type of the pairs `pairs` returns holding whoever its arms return
+/// each pair to, `None` where they return none.
+fn pairs_holder<DB: DatabaseLike>(
+    pairs: &HelperPairs,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<RelationName> {
+    let pair_type = cap_type_name(pairs, "pair", ctx.table_types);
+    let mut held = Vec::new();
+    for arm in &pairs.arms {
+        held.extend(helper_grant_parts(
+            arm, None, &pair_type, ctx, table_plan, all_types,
+        ));
+    }
+    combine_union(held).map(|held| {
+        helper_level_plan(&pair_type, None, table_plan, all_types).ensure_computed(
+            helper_call_relation_name(&pairs.function, &pairs.arguments),
+            held,
+        )
+    })
+}
+
+/// The objects of `level_type` reaching a pair `holder` holds, each linked to the pairs
+/// `pairs` returns as `reach` reads them.
+///
+/// Column operands beside literals name an object of their own, keyed by the columns'
+/// values, which links to every pair holding those values beside those literals.
+fn reached_pairs<DB: DatabaseLike>(
+    (pairs, holder): (&HelperPairs, RelationName),
+    reach: CapReach<'_>,
+    (level, level_type): (&TableId, &TypeName),
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> UsersetExpr {
+    let pair_type = cap_type_name(pairs, "pair", ctx.table_types);
+    match reach {
+        CapReach::Pairs { object, literals } => {
+            let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+            UsersetExpr::TupleToUserset {
+                tupleset: cap_link(&pair_type, literal_links(pairs, &[object], literals), plan),
+                computed: holder,
+            }
+        }
+        CapReach::Rows {
+            table,
+            keys,
+            columns,
+            literals: [],
+            ..
+        } => {
+            let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+            let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
+            UsersetExpr::TupleToUserset {
+                tupleset: cap_link(&pair_type, rows, plan),
+                computed: holder,
+            }
+        }
+        CapReach::Rows {
+            table,
+            keys,
+            positions,
+            columns,
+            literals,
+        } => {
+            let mut suffix = String::from("key");
+            for position in &positions {
+                suffix.push('_');
+                suffix.push_str(&position.to_string());
+            }
+            let key_type = cap_type_name(pairs, &suffix, ctx.table_types);
+            let key_plan = helper_level_plan(&key_type, None, table_plan, all_types);
+            let linked = cap_link(
+                &pair_type,
+                literal_links(pairs, &positions, literals),
+                key_plan,
+            );
+            let at_key = key_plan.ensure_computed(
+                helper_call_relation_name(&pairs.function, &pairs.arguments),
+                UsersetExpr::TupleToUserset {
+                    tupleset: linked,
+                    computed: holder,
+                },
+            );
+            let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+            let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
+            UsersetExpr::TupleToUserset {
+                tupleset: cap_link(&key_type, rows, plan),
+                computed: at_key,
+            }
+        }
+    }
+}
+
+/// The type named after the call `pairs` makes and `suffix`, `capped_kinds_reader_pair`
+/// for the pairs `authz.capped_kinds('reader')` returns.
+fn cap_type_name(pairs: &HelperPairs, suffix: &str, table_types: &TableTypes) -> TypeName {
+    let call = helper_call_relation_name(&pairs.function, &pairs.arguments);
     let base = canonical_fga_type_name(&format!("{call}_{suffix}"));
     if table_types.claims(&base) {
-        let mut key = cap.function.clone();
-        for argument in &cap.arguments {
+        let mut key = pairs.function.clone();
+        for argument in &pairs.arguments {
             source_key_part(&mut key, argument);
         }
         return canonical_fga_type_name(&format!("{base}_{}", stable_hex_suffix(&key)));
@@ -2464,14 +2544,16 @@ type CapLinkRows<'a> = (
     ResidualPredicates,
 );
 
-/// The rows of `cap`'s arms linking the object their columns at `positions` name to the
-/// pair they return, kept where their columns hold `literals` at those literals' positions.
+/// The rows of the arms of `pairs` linking the object their columns at `positions` name to
+/// the pair they return, kept where their columns hold `literals` at those literals'
+/// positions.
 fn literal_links<'a>(
-    cap: &'a HelperCap,
+    pairs: &'a HelperPairs,
     positions: &[usize],
     literals: &[(usize, AttributeLiteral)],
 ) -> Vec<CapLinkRows<'a>> {
-    cap.arms
+    pairs
+        .arms
         .iter()
         .filter_map(|arm| {
             let held = literals
