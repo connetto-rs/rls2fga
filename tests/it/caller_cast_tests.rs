@@ -35,6 +35,8 @@ CREATE FUNCTION renamed_uid() RETURNS TEXT LANGUAGE sql STABLE
   AS 'SELECT current_setting(''app.user_id'', true)::integer::text';
 CREATE FUNCTION app_tenant() RETURNS UUID LANGUAGE sql STABLE
   AS 'SELECT current_setting(''app.tenant'', true)::uuid';
+CREATE FUNCTION tenant_text() RETURNS TEXT LANGUAGE sql STABLE
+  AS 'SELECT current_setting(''app.tenant'', true)';
 CREATE FUNCTION subjects() RETURNS SETOF UUID LANGUAGE sql STABLE
   AS 'SELECT unnest(string_to_array(current_setting(''app.subjects'', true), '',''))::uuid';
 ALTER TABLE folders ENABLE ROW LEVEL SECURITY;
@@ -116,6 +118,7 @@ type Declarations = &'static [(&'static str, &'static str)];
 const NONE: Declarations = &[];
 const USER_INTEGER: Declarations = &[("app.user_id", "integer")];
 const USER_UUID: Declarations = &[("app.user_id", "uuid")];
+const TENANT_UUID: Declarations = &[("app.tenant", "uuid")];
 
 /// Every reader of a request value, each spelling paired with the declaration that
 /// decides it. A refused spelling sits beside the accepted one it differs from by one
@@ -260,10 +263,40 @@ const CASES: &[(&str, Declarations, bool)] = &[
     ("current_setting('app.tenant', true) = '7'", NONE, true),
     ("current_setting('app.tenant', true)::integer = '7'", &[("app.tenant", "integer")], false),
     ("current_setting('app.tenant', true) = '07'::integer::text", NONE, false),
+    // A literal already spelled as the type's canonical output is what `PostgreSQL` compares,
+    // whether the read's cast coerces it or its own cast does. The request side still needs
+    // its declaration, and any other spelling of the same uuid stays refused.
+    ("current_setting('app.tenant', true)::uuid = '00000000-0000-0000-0000-000000000000'", TENANT_UUID, true),
+    ("current_setting('app.tenant', true)::uuid = '00000000-0000-0000-0000-000000000000'", NONE, false),
+    ("current_setting('app.tenant', true)::uuid = '00000000-0000-0000-0000-000000000000'::uuid", TENANT_UUID, true),
+    ("(SELECT current_setting('app.tenant', true)::uuid) = '00000000-0000-0000-0000-000000000000'", TENANT_UUID, true),
+    // A call is compared as the type it returns, so a literal beside it is coerced too.
+    ("'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' = app_tenant()", TENANT_UUID, true),
+    ("'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11' = app_tenant()", TENANT_UUID, false),
+    ("'{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}' = app_tenant()", TENANT_UUID, false),
+    ("tenant_text() = 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'", NONE, true),
+    ("'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11' IN (SELECT subjects())", &[("app.subjects", "uuid")], true),
+    ("'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11' IN (SELECT subjects())", &[("app.subjects", "uuid")], false),
+    ("current_setting('app.tenant', true)::uuid = 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'", TENANT_UUID, false),
+    ("current_setting('app.tenant', true)::uuid = '{a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11}'", TENANT_UUID, false),
+    ("current_setting('app.tenant', true)::uuid = 'a0eebc999c0b4ef8bb6d6bb9bd380a11'", TENANT_UUID, false),
+    ("current_setting('app.tenant', true) = 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11'::uuid::text", NONE, false),
+    ("current_setting('app.tenant', true) = 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11'::uuid::text", NONE, true),
+    (
+        "'00000000-0000-0000-0000-000000000000' = ANY (string_to_array(current_setting('app.subjects', true), ',')::uuid[])",
+        &[("app.subjects", "uuid")],
+        true,
+    ),
+    (
+        "'00000000-0000-0000-0000-00000000000A' = ANY (string_to_array(current_setting('app.subjects', true), ',')::uuid[])",
+        &[("app.subjects", "uuid")],
+        false,
+    ),
     // P21, the declared value differing from a constant, the casts judged as for `=`.
     ("current_setting('app.tenant', true) <> '7'", NONE, true),
     ("current_setting('app.tenant', true)::integer <> '7'", NONE, false),
     ("current_setting('app.tenant', true)::integer <> '7'", &[("app.tenant", "integer")], false),
+    ("current_setting('app.tenant', true)::uuid <> '00000000-0000-0000-0000-000000000000'", TENANT_UUID, true),
     // P22, the declared value in a list of constants, one cast on the read and the list.
     ("current_setting('app.tenant', true) IN ('a', 'b')", NONE, true),
     ("current_setting('app.tenant', true) NOT IN ('a', 'b')", NONE, true),
@@ -272,6 +305,16 @@ const CASES: &[(&str, Declarations, bool)] = &[
     (
         "current_setting('app.tenant', true)::integer IN ('7', '8')",
         &[("app.tenant", "integer")],
+        false,
+    ),
+    (
+        "current_setting('app.tenant', true)::uuid IN ('00000000-0000-0000-0000-000000000000', 'a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11')",
+        TENANT_UUID,
+        true,
+    ),
+    (
+        "current_setting('app.tenant', true)::uuid IN ('00000000-0000-0000-0000-000000000000', 'A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11')",
+        TENANT_UUID,
         false,
     ),
     // The caller's presence beside a rule, which a cast turns into a filter of its own.
@@ -296,6 +339,38 @@ fn every_request_reader_refuses_a_cast_that_can_rename_the_value() {
         })
         .collect();
     assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// A wrapper whose body reads a setting a request may leave unset through `NULLIF(_, '')`
+/// returns its own type, so a literal compared with a call to it is coerced into that type
+/// like one compared with any other wrapper.
+#[test]
+fn a_literal_beside_an_emptied_wrapper_is_judged_by_its_return_type() {
+    let translate = |literal: &str| {
+        let sql = format!(
+            "{TABLES}
+             CREATE FUNCTION tenant_or_null() RETURNS UUID LANGUAGE sql STABLE
+               AS 'SELECT NULLIF(current_setting(''app.tenant'', true), '''')::uuid';
+             CREATE POLICY docs_read ON docs FOR SELECT USING (tenant_or_null() = '{literal}');"
+        );
+        let settings = [
+            support::deployment::caller("app.user_id"),
+            SessionSetting::value("app.tenant", SettingValue::Scalar(DataType::Uuid))
+                .expect("a setting name")
+                .may_be_unset(),
+        ];
+        TranslatorBuilder::new(support::deployment::deployment(settings))
+            .with_min_confidence(ConfidenceLevel::B)
+            .build()
+            .translate(&support::deployment::db(&sql))
+            .expect("translation plans")
+    };
+    assert!(translated_faithfully(translate(
+        "a0eebc99-9c0b-4ef8-bb6d-6bb9bd380a11"
+    )));
+    assert!(!translated_faithfully(translate(
+        "A0EEBC99-9C0B-4EF8-BB6D-6BB9BD380A11"
+    )));
 }
 
 /// P2, a role function handed the caller.
@@ -684,5 +759,52 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (true);
         })
         .await
         .expect("the row-side cast must finish within 300 seconds");
+    }
+
+    /// A literal already spelled as `uuid`'s canonical output is what `PostgreSQL` compares,
+    /// so beside a tenant declared `uuid` the model agrees with the database on both the
+    /// tenant it names and any other.
+    #[tokio::test]
+    #[ignore = "requires Docker, PostgreSQL and OpenFGA"]
+    async fn a_canonical_uuid_literal_agrees_beside_a_declared_cast() {
+        const OTHER: &str = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        tokio::time::timeout(std::time::Duration::from_secs(300), async {
+            let cluster = Cluster::start().await;
+            for (name, clause) in [
+                (
+                    "coerced-literal",
+                    "current_setting('app.tenant', true)::uuid = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'",
+                ),
+                (
+                    "cast-literal",
+                    "(SELECT current_setting('app.tenant', true)::uuid) \
+                     = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'::uuid",
+                ),
+            ] {
+                let declared = case(name, clause, &[LOWER, OTHER], Some(("app.tenant", "uuid")));
+                let run_declared = run(&cluster, &declared).await;
+                for object in ["docs:d01", "docs:d1"] {
+                    assert_postgres(
+                        &declared,
+                        &run_declared,
+                        LOWER,
+                        object,
+                        ActionStatement::Select,
+                        true,
+                    );
+                    assert_postgres(
+                        &declared,
+                        &run_declared,
+                        OTHER,
+                        object,
+                        ActionStatement::Select,
+                        false,
+                    );
+                }
+                assert_agrees(&declared, &run_declared);
+            }
+        })
+        .await
+        .expect("canonical literals must finish within 300 seconds");
     }
 }

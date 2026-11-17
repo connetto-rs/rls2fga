@@ -46,26 +46,47 @@ pub(crate) fn peel_noting_casts<'e>(
 }
 
 /// The casts written around one value, outermost first, each named the way a
-/// deployment declares it.
+/// deployment declares it, and the type the call the value comes from returns.
 ///
 /// A cast through `text` or an unbounded `varchar` renders the value it is given, which is
 /// how the model compares every value, so it renames nothing. Any other cast can rename
 /// it: `'01'::integer` is `1`, and `uuid` lower-cases. Such a cast is proven only by a
-/// declaration that the value already arrives canonical for that type.
+/// declaration that the value already arrives canonical for that type, or, for a literal,
+/// by its text already being that type's canonical output.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct CastChain(Vec<String>);
+pub(crate) struct CastChain {
+    /// The casts, outermost first.
+    casts: Vec<String>,
+    /// The type the call at the bottom of the chain returns, inside every cast. The call's
+    /// body was judged when the call was read as a request value, so it renames nothing
+    /// here, but a literal compared with the call is coerced into it.
+    returned: Option<String>,
+}
 
 impl CastChain {
     /// The casts [`peel_noting_casts`] finds around `expr`, and what they wrap.
     pub(crate) fn peeled(expr: &Expr) -> (Self, &Expr) {
         let mut chain = Self::default();
-        let inner = peel_noting_casts(expr, |data_type| chain.0.push(cast_type_name(data_type)));
+        let inner = peel_noting_casts(expr, |data_type| {
+            chain.casts.push(cast_type_name(data_type));
+        });
         (chain, inner)
+    }
+
+    /// The value of a call returning `returned`, under no cast.
+    pub(crate) fn returning(returned: &str) -> Self {
+        Self {
+            casts: Vec::new(),
+            returned: Some(returned.to_string()),
+        }
     }
 
     /// Record the casts `inner` holds inside those already recorded.
     pub(crate) fn extend(&mut self, inner: CastChain) {
-        self.0.extend(inner.0);
+        self.casts.extend(inner.casts);
+        if inner.returned.is_some() {
+            self.returned = inner.returned;
+        }
     }
 
     /// The first cast that can rename the value, given the type the value is declared to
@@ -80,7 +101,7 @@ impl CastChain {
     /// The first cast that can rename the value, given the spellings of the types the
     /// value already arrives canonical for.
     pub(crate) fn renaming_beyond(&self, canonical_for: &[&str]) -> Option<&str> {
-        self.0.iter().map(String::as_str).find(|cast| {
+        self.casts.iter().map(String::as_str).find(|cast| {
             !renders_as_text(cast)
                 && !canonical_for
                     .iter()
@@ -88,9 +109,22 @@ impl CastChain {
         })
     }
 
-    /// The outermost cast, which decides the type the value is compared as.
+    /// The first cast that can rename the literal `text`. A cast whose canonical output
+    /// `text` already spells leaves it as written.
+    pub(crate) fn renaming_literal(&self, text: &str) -> Option<&str> {
+        self.casts
+            .iter()
+            .map(String::as_str)
+            .find(|cast| !keeps_literal(cast, text))
+    }
+
+    /// The type the value is compared as, its outermost cast or else the type its call
+    /// returns.
     pub(crate) fn outermost(&self) -> Option<&str> {
-        self.0.first().map(String::as_str)
+        self.casts
+            .first()
+            .or(self.returned.as_ref())
+            .map(String::as_str)
     }
 
     /// Whether the value the chain yields is text, so a literal it is compared with keeps
@@ -102,18 +136,21 @@ impl CastChain {
     /// Whether the outermost cast renders the value as unbounded text, so it compares as
     /// `text` whatever type it held.
     pub(crate) fn casts_to_text(&self) -> bool {
-        self.outermost().is_some_and(renders_as_text)
+        self.casts
+            .first()
+            .map(String::as_str)
+            .is_some_and(renders_as_text)
     }
 
     /// The chain without the parse into `json` or `jsonb` that an arrow or a jsonb
     /// expander needs, which is the read's structure rather than a renaming.
     pub(crate) fn without_json_parse(mut self) -> Self {
         if self
-            .0
+            .casts
             .first()
             .is_some_and(|outermost| matches!(outermost.as_str(), "json" | "jsonb"))
         {
-            self.0.remove(0);
+            self.casts.remove(0);
         }
         self
     }
@@ -133,6 +170,29 @@ pub(crate) fn cast_type_name(data_type: &DataType) -> String {
 /// bounded `varchar(n)` truncates and `char(n)` pads, so both can rename.
 fn renders_as_text(name: &str) -> bool {
     matches!(element_type(name), "text" | "varchar" | "character varying")
+}
+
+/// Whether a cast to `name` hands the literal `text` back as written, because it renders
+/// text or because `text` already spells its canonical output.
+///
+/// An array cast is judged by its element type, which is what `= ANY` coerces the literal
+/// into. A literal in array syntax never spells an element's canonical output, so it
+/// stays refused.
+pub(crate) fn keeps_literal(name: &str, text: &str) -> bool {
+    renders_as_text(name)
+        || match element_type(name) {
+            "uuid" => is_canonical_uuid(text),
+            _ => false,
+        }
+}
+
+/// Whether `text` is how `PostgreSQL` prints a `uuid`, lower-case hex grouped 8-4-4-4-12.
+fn is_canonical_uuid(text: &str) -> bool {
+    text.len() == 36
+        && text.bytes().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => byte == b'-',
+            _ => matches!(byte, b'0'..=b'9' | b'a'..=b'f'),
+        })
 }
 
 /// The element type an array cast names, or the type itself.

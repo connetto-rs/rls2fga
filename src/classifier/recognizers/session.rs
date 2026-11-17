@@ -277,7 +277,9 @@ pub(super) fn fallback_read(
                     registry,
                 )?);
             }
-            (first, rest, outer)
+            let mut tested_side = outer;
+            tested_side.extend(call_result(other, registry));
+            (first, rest, tested_side)
         }
     };
     Some((first, rest, tested_side))
@@ -772,7 +774,7 @@ pub(crate) fn row_valued_set(expr: &Expr, registry: &FunctionRegistry) -> Option
             key: key.clone(),
             path: path.clone(),
             separator: separator.clone(),
-            casts: CastChain::default(),
+            casts: call_result(peeled, registry),
         }
     } else {
         let FunctionArguments::List(list) = &function.args else {
@@ -1013,7 +1015,11 @@ pub(super) fn normalized_accessor_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<NormalizedAccessorRead<'r>> {
-    let AccessorRead { root, path, casts } = accessor_read(expr)?;
+    let AccessorRead {
+        root,
+        path,
+        mut casts,
+    } = accessor_read(expr)?;
     let Expr::Function(function) = root else {
         return None;
     };
@@ -1031,6 +1037,7 @@ pub(super) fn normalized_accessor_read<'r>(
     let source = registry
         .declared_source(key, &[])
         .filter(|source| source.is_scalar())?;
+    casts.extend(call_result(root, registry));
     Some(NormalizedAccessorRead {
         source,
         skips_empty: *skips_empty,
@@ -1067,11 +1074,18 @@ pub(super) fn bare_declared_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<(&'r DeclaredSource, CastChain)> {
-    let AccessorRead { root, path, casts } = accessor_read(expr)?;
+    let AccessorRead {
+        root,
+        path,
+        mut casts,
+    } = accessor_read(expr)?;
     let key = setting_key_read_by(root, registry)?;
     let source = registry
         .declared_source(&key, &path)
         .filter(|source| source.is_scalar())?;
+    if path.is_empty() {
+        casts.extend(call_result(root, registry));
+    }
     Some((source, casts))
 }
 
@@ -1120,16 +1134,26 @@ fn emptied_setting_read(expr: &Expr, registry: &FunctionRegistry) -> Option<Empt
             casts: inner,
         } = accessor_read(wrapped)?;
         casts.extend(inner);
+        if path.is_empty() {
+            casts.extend(call_result(root, registry));
+        }
         return Some(EmptiedRead {
             key: setting_key_read_by(root, registry)?,
             path,
             casts,
         });
     }
-    let AccessorRead { root, path, casts } = accessor_read(expr)?;
+    let AccessorRead {
+        root,
+        path,
+        mut casts,
+    } = accessor_read(expr)?;
     let (key, true) = setting_read_by(root, registry)? else {
         return None;
     };
+    if path.is_empty() {
+        casts.extend(call_result(root, registry));
+    }
     Some(EmptiedRead { key, path, casts })
 }
 
@@ -1147,6 +1171,17 @@ fn emptied_value(expr: &Expr) -> Option<(CastChain, &Expr)> {
     };
     casts.extend(inner_casts);
     Some((casts, wrapped))
+}
+
+/// The type `root` hands over when it calls a function the schema defines, which a literal
+/// compared with the call is coerced into.
+pub(super) fn call_result(root: &Expr, registry: &FunctionRegistry) -> CastChain {
+    match root {
+        Expr::Function(function) => registry
+            .return_type(&function.name.to_string())
+            .map_or_else(CastChain::default, CastChain::returning),
+        _ => CastChain::default(),
+    }
 }
 
 /// The `current_setting` key a node reads bare, written inline or as a call to a function
