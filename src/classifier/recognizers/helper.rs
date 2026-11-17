@@ -1408,9 +1408,14 @@ fn restriction<DB: DatabaseLike>(kept: &Restriction<'_, DB>) -> AttributePredica
     }
 }
 
-/// The table whose rows the values of `column` name, which are the rows its one
-/// single-column foreign key references, else its own table's where it is that table's
-/// key, and `None` where it is neither.
+/// The table whose rows the values of `column` name, which are the rows of the one table
+/// whose key column its foreign keys pair it with, else its own table's where it is that
+/// table's key, and `None` where it is neither.
+///
+/// A key of any width pairing `column` with the referenced table's key column makes every
+/// value one row of that table. A single-column key referencing another column names rows
+/// by something other than their key and refuses, while a wider one pairs `column` with
+/// part of a key, which says nothing of `column` alone.
 fn rows_named_by<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
@@ -1418,17 +1423,24 @@ fn rows_named_by<DB: DatabaseLike>(
 ) -> Result<Option<TableId>, HelperRefusal> {
     let mut referenced: Option<TableId> = None;
     for foreign_key in table.foreign_keys(db)? {
-        let mut host = foreign_key.host_columns(db)?;
-        if !(host.next().is_some_and(|host| core::ptr::eq(host, column)) && host.next().is_none()) {
+        let Some(paired) = foreign_key
+            .host_columns(db)?
+            .zip(foreign_key.referenced_columns(db)?)
+            .find_map(|(host, paired)| core::ptr::eq(host, column).then_some(paired))
+        else {
             continue;
-        }
+        };
         let parent = table_identity(foreign_key.referenced_table(db)?);
-        let names_key = foreign_key
-            .referenced_columns(db)?
-            .map(|column| ColumnName::from_stored(column.stored_column_name()))
-            .eq(single_identity_column(&parent, db));
+        let names_key = single_identity_column(&parent, db)
+            .is_some_and(|key| key.as_str() == paired.stored_column_name());
+        if !names_key {
+            if foreign_key.is_composite(db)? {
+                continue;
+            }
+            return Err(names_no_rows(table, column));
+        }
         // Two keys referencing different tables leave the rows the value names open.
-        if !names_key || referenced.as_ref().is_some_and(|held| *held != parent) {
+        if referenced.as_ref().is_some_and(|held| *held != parent) {
             return Err(names_no_rows(table, column));
         }
         referenced = Some(parent);
