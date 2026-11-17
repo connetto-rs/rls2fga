@@ -201,17 +201,6 @@ pub(crate) enum HelperRefusal {
         /// The principal's type, as the deployment declares it.
         kind: String,
     },
-    /// An arm compares a column with a whole JSON setting, which holds no one value.
-    #[error(
-        "declared helper '{function}' compares a column with the whole JSON setting \
-         '{setting}'"
-    )]
-    JsonSetting {
-        /// The helper.
-        function: String,
-        /// The JSON setting compared with.
-        setting: String,
-    },
     /// A request value is compared with arms whose rows depend on the request.
     #[error(
         "declared helper '{function}' is compared with the request's value \
@@ -1881,40 +1870,27 @@ fn helper_grant<DB: DatabaseLike>(
     let grantee = match grant.granted_to() {
         GrantedTo::Request(compared) => {
             let column = ColumnName::from_stored(compared.column().stored_column_name());
-            // `sql-traits` compares a column with the caller, with another principal the
-            // deployment declares, with a declared scalar, normalized or not, or with the
-            // elements of a whole setting declared as a set.
-            match compared.setting().content() {
-                SettingContent::Value(value @ SettingValue::Set { .. }) => {
-                    HelperGrantee::RequestValue {
-                        value_column: column,
-                        source: DeclaredSource::whole(compared.setting(), value.clone()),
-                    }
-                }
-                SettingContent::Value(SettingValue::Scalar(_)) => HelperGrantee::RequestValue {
+            match compared.value() {
+                value @ SettingValue::Set { .. } => HelperGrantee::RequestValue {
+                    value_column: column,
+                    source: DeclaredSource::whole(compared.setting(), value.clone()),
+                },
+                SettingValue::Scalar(_) => HelperGrantee::RequestValue {
                     value_column: column,
                     source: compared_scalar(function, compared, registry)?,
                 },
-                SettingContent::Value(SettingValue::Principal { kind, .. }) => {
-                    HelperGrantee::Principal {
-                        principal_column: column,
-                        principal_type: TypeName::try_from(kind.clone()).map_err(|_| {
-                            HelperRefusal::UnspellablePrincipalType {
-                                function: function.to_string(),
-                                kind: kind.clone(),
-                            }
-                        })?,
-                    }
-                }
-                SettingContent::Value(SettingValue::Caller(_)) => HelperGrantee::Caller {
+                SettingValue::Principal { kind, .. } => HelperGrantee::Principal {
+                    principal_column: column,
+                    principal_type: TypeName::try_from(kind.clone()).map_err(|_| {
+                        HelperRefusal::UnspellablePrincipalType {
+                            function: function.to_string(),
+                            kind: kind.clone(),
+                        }
+                    })?,
+                },
+                SettingValue::Caller(_) => HelperGrantee::Caller {
                     user_column: column,
                 },
-                SettingContent::Json(_) => {
-                    return Err(HelperRefusal::JsonSetting {
-                        function: function.to_string(),
-                        setting: compared.setting().name().to_string(),
-                    });
-                }
             }
         }
         GrantedTo::Set(set) => {

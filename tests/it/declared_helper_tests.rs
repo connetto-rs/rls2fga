@@ -16,7 +16,7 @@ use rls2fga::types::{
 use sqlparser::ast::DataType;
 
 use crate::support::deployment::{
-    caller, delimited_set, deployment, scalar, typed_caller, typed_scalar,
+    caller, delimited_set, deployment, principal, scalar, typed_caller, typed_scalar,
 };
 use crate::support::footgun::{db_of, relation_definition, relation_definitions};
 
@@ -255,6 +255,49 @@ fn a_parent_arm_reaching_an_undeclared_helper_is_refused_naming_it() {
         "orders_read",
     );
     assert!(reason.contains("'authz.teams_with'"), "{reason}");
+}
+
+/// A helper keeping rows that name a principal of a kind no `OpenFGA` type name spells is
+/// refused naming the kind.
+#[test]
+fn a_principal_kind_no_type_name_spells_is_refused() {
+    let sql = format!(
+        "{LEVELS}{OWNER_READS}
+         CREATE FUNCTION authz.installed_projects() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT g.project_id FROM public.project_grants g
+           WHERE g.principal_id = current_setting('app.installation_id', true)
+         $$;
+         ALTER FUNCTION authz.installed_projects() OWNER TO authz_owner;
+         ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY orders_read ON orders FOR SELECT USING (
+           project_id = ANY (ARRAY(SELECT authz.installed_projects())));"
+    );
+    let classified = TranslatorBuilder::new(deployment([
+        caller("app.user_id"),
+        principal("app.installation_id", "self", DataType::Text),
+    ]))
+    .with_min_confidence(ConfidenceLevel::B)
+    .with_declared_helpers(["authz.installed_projects"])
+    .build()
+    .classify(&db_of(&sql))
+    .into_iter()
+    .find(|classified| classified.name() == "orders_read")
+    .expect("orders_read should classify")
+    .using_classification()
+    .expect("USING should classify")
+    .clone();
+    assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
+    let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = classified.pattern else {
+        panic!(
+            "orders_read should be refused, got {:?}",
+            classified.pattern
+        );
+    };
+    assert!(
+        reason.contains("principal of type 'self', which no type name spells"),
+        "{reason}"
+    );
 }
 
 #[test]
