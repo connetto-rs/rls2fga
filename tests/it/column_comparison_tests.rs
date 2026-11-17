@@ -118,7 +118,8 @@ fn outputs_for(columns: &str, policy: &str) -> Outputs {
 }
 
 const NUMBERED: &str = "low INTEGER, high BIGINT, label TEXT, other_label TEXT, root_id UUID, \
-     parent_id UUID, active BOOLEAN, archived BOOLEAN, starts_on DATE, ends_on DATE";
+     parent_id UUID, active BOOLEAN, archived BOOLEAN, starts_on DATE, ends_on DATE, \
+     code TEXT COLLATE \"C\", other_code TEXT COLLATE \"C\"";
 
 /// The gate relation `clause` grants `SELECT` through on `items` with [`NUMBERED`] columns.
 fn gate_for(clause: &str) -> String {
@@ -162,7 +163,8 @@ fn each_operator_qualifies_rows_in_sql() {
     }
 }
 
-/// One comparison mints one gate in either spelling, and each other comparison its own.
+/// One comparison mints one gate in either spelling, and each other comparison its own, two
+/// columns under one named collation included.
 #[test]
 fn each_comparison_is_a_gate_of_its_own() {
     let equal = gate_for("low = high");
@@ -173,6 +175,7 @@ fn each_comparison_is_a_gate_of_its_own() {
         "low < high",
         "low <= high",
         "label = other_label",
+        "code = other_code",
     ] {
         assert_ne!(equal, gate_for(other), "`{other}`");
     }
