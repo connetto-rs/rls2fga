@@ -1014,136 +1014,8 @@ fn classify_expr_inner<DB: DatabaseLike>(
         );
     }
 
-    // Try P1: numeric threshold
-    if let Some(classified) = recognizers::recognize_p1(expr, db, registry, command) {
+    if let Some(classified) = recognize_leaf(expr, db, registry, table, command, state) {
         return classified;
-    }
-
-    // Try P2: role name IN-list
-    if let Some(classified) = recognizers::recognize_p2(expr, db, registry) {
-        return classified;
-    }
-
-    // Try P14 to P17: a value the request carries, which a deployment declared. Before
-    // P3, since a declared source is never the caller and ownership must not claim it.
-    if let Some(classified) = recognizers::recognize_session_attribute(expr, registry) {
-        return classified;
-    }
-
-    // Try P3: direct ownership
-    if let Some(classified) = recognizers::recognize_p3(expr, db, registry) {
-        return classified;
-    }
-
-    // Try P12: the caller's identity held in a jsonb field.
-    if let Some(classified) = recognizers::recognize_jsonb_field_ownership(expr, registry) {
-        return classified;
-    }
-
-    // Try P26: the caller equal to an immutable function of one column.
-    if let Some(classified) = recognizers::recognize_owner_expression(expr, db, registry) {
-        return classified;
-    }
-
-    // Try P20: a column compared with the set a declared definer helper returns. Before
-    // the membership recognizers, whose `IN` and `= ANY` spellings it shares.
-    if let Some(classified) = recognizers::recognize_declared_helper(expr, db, registry, table) {
-        return classified;
-    }
-
-    // Try P5: parent inheritance via correlated EXISTS
-    if let Some(classified) = recognizers::recognize_p5(expr, db, registry, table, command, state) {
-        return classified;
-    }
-
-    if let Some(classified) =
-        recognizers::recognize_p19_indirect_membership(expr, db, registry, table, state)
-    {
-        return classified;
-    }
-
-    // Try P4: EXISTS membership
-    if let Some(classified) = recognizers::recognize_p4(expr, db, registry, table, state) {
-        return classified;
-    }
-
-    // Try P4 and P5: the IN-subquery spellings, normalized into the EXISTS one.
-    if let Some(classified) =
-        recognizers::recognize_p4_in_subquery(expr, db, registry, table, command, state)
-    {
-        return classified;
-    }
-
-    // Try P29: a row its own columns flag. After every membership spelling, since a
-    // membership reads the caller and a flag never does.
-    if let Some(flagged) = recognizers::recognize_flagged_row(expr, db, table, state) {
-        return match flagged {
-            Ok(flagged) => flagged_row_classified(flagged, db, registry),
-            Err(refusal) => unknown_d(expr, refusal.to_string()),
-        };
-    }
-
-    if let Some(reason) = recognizers::diagnose_p5_parent_inheritance_ambiguity(
-        expr, db, registry, table, command, state,
-    ) {
-        return unknown_d(expr, reason);
-    }
-
-    if let Some(reason) =
-        recognizers::diagnose_p4_membership_ambiguity(expr, db, registry, table, state)
-    {
-        return unknown_d(expr, reason);
-    }
-
-    // Detect negated public-flag: `is_public = FALSE`, `col IS FALSE`, `col IS NOT TRUE`.
-    // to P9 (attribute condition) since they cannot be expressed as static OpenFGA tuples.
-    if let Some(col) = recognizers::is_negated_boolean_flag(expr) {
-        return unknown_d(
-            expr,
-            format!(
-                "Negated boolean-flag check on column '{col}' cannot be expressed as static \
-                 OpenFGA tuples because negation requires runtime filtering"
-            ),
-        );
-    }
-
-    // Try P6: boolean flag
-    if let Some(classified) = recognizers::recognize_p6(expr, db, registry) {
-        return classified;
-    }
-
-    // Try P10: constant boolean policy
-    if let Some(classified) = recognizers::recognize_p10_constant_bool(expr, db, registry) {
-        return classified;
-    }
-
-    // Try array membership / overlap (Phase 6e): = ANY(...) and &&.
-    if let Some(classified) = recognizers::recognize_array_patterns(expr, registry) {
-        return classified;
-    }
-
-    // Try P9: standalone attribute condition, only a literal one decided by the row.
-    if let Some(col) = recognizers::is_attribute_check(expr) {
-        let value_desc = describe_comparison_value(expr);
-        let predicate = recognizers::attribute_literal_predicate(expr);
-        let request_predicate = recognizers::attribute_request_predicate(expr);
-        // No confirmation vouches for a request value, which the service evaluates.
-        let confidence = if predicate.is_some() {
-            literal_attribute_confidence(db, registry, table, &col)
-        } else if request_predicate.is_some() {
-            ConfidenceLevel::B
-        } else {
-            ConfidenceLevel::C
-        };
-        return ClassifiedExpr {
-            pattern: PatternClass::P9AttributeCondition(AttributeCondition {
-                column: col,
-                value_description: value_desc,
-                predicate,
-                request_predicate,
-            }),
-            confidence,
-        };
     }
 
     // A call naming a declared function expands to that function's body, so the
@@ -1201,6 +1073,155 @@ fn classify_expr_inner<DB: DatabaseLike>(
         };
     }
 
+    unrecognized(expr, registry)
+}
+
+/// The pattern a recognizer that never classifies a subexpression reads in `expr`, a
+/// refusal where one names why it cannot translate, `None` where none matches.
+///
+/// Kept out of `classify_expr_inner`, whose frame every nesting level repeats.
+fn recognize_leaf<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    command: PolicyCommand,
+    state: &ExpansionState,
+) -> Option<ClassifiedExpr> {
+    // Try P1: numeric threshold
+    if let Some(classified) = recognizers::recognize_p1(expr, db, registry, command) {
+        return Some(classified);
+    }
+
+    // Try P2: role name IN-list
+    if let Some(classified) = recognizers::recognize_p2(expr, db, registry) {
+        return Some(classified);
+    }
+
+    // Try P14 to P17: a value the request carries, which a deployment declared. Before
+    // P3, since a declared source is never the caller and ownership must not claim it.
+    if let Some(classified) = recognizers::recognize_session_attribute(expr, registry) {
+        return Some(classified);
+    }
+
+    // Try P3: direct ownership
+    if let Some(classified) = recognizers::recognize_p3(expr, db, registry) {
+        return Some(classified);
+    }
+
+    // Try P12: the caller's identity held in a jsonb field.
+    if let Some(classified) = recognizers::recognize_jsonb_field_ownership(expr, registry) {
+        return Some(classified);
+    }
+
+    // Try P26: the caller equal to an immutable function of one column.
+    if let Some(classified) = recognizers::recognize_owner_expression(expr, db, registry) {
+        return Some(classified);
+    }
+
+    // Try P20: a column compared with the set a declared definer helper returns. Before
+    // the membership recognizers, whose `IN` and `= ANY` spellings it shares.
+    if let Some(classified) = recognizers::recognize_declared_helper(expr, db, registry, table) {
+        return Some(classified);
+    }
+
+    // Try P5: parent inheritance via correlated EXISTS
+    if let Some(classified) = recognizers::recognize_p5(expr, db, registry, table, command, state) {
+        return Some(classified);
+    }
+
+    if let Some(classified) =
+        recognizers::recognize_p19_indirect_membership(expr, db, registry, table, state)
+    {
+        return Some(classified);
+    }
+
+    // Try P4: EXISTS membership
+    if let Some(classified) = recognizers::recognize_p4(expr, db, registry, table, state) {
+        return Some(classified);
+    }
+
+    // Try P4 and P5: the IN-subquery spellings, normalized into the EXISTS one.
+    if let Some(classified) =
+        recognizers::recognize_p4_in_subquery(expr, db, registry, table, command, state)
+    {
+        return Some(classified);
+    }
+
+    // Try P29: a row its own columns flag. After every membership spelling, since a
+    // membership reads the caller and a flag never does.
+    if let Some(flagged) = recognizers::recognize_flagged_row(expr, db, table, state) {
+        return Some(match flagged {
+            Ok(flagged) => flagged_row_classified(flagged, db, registry),
+            Err(refusal) => unknown_d(expr, refusal.to_string()),
+        });
+    }
+
+    if let Some(reason) = recognizers::diagnose_p5_parent_inheritance_ambiguity(
+        expr, db, registry, table, command, state,
+    ) {
+        return Some(unknown_d(expr, reason));
+    }
+
+    if let Some(reason) =
+        recognizers::diagnose_p4_membership_ambiguity(expr, db, registry, table, state)
+    {
+        return Some(unknown_d(expr, reason));
+    }
+
+    // Detect negated public-flag: `is_public = FALSE`, `col IS FALSE`, `col IS NOT TRUE`.
+    // to P9 (attribute condition) since they cannot be expressed as static OpenFGA tuples.
+    if let Some(col) = recognizers::is_negated_boolean_flag(expr) {
+        return Some(unknown_d(
+            expr,
+            format!(
+                "Negated boolean-flag check on column '{col}' cannot be expressed as static \
+                 OpenFGA tuples because negation requires runtime filtering"
+            ),
+        ));
+    }
+
+    // Try P6: boolean flag
+    if let Some(classified) = recognizers::recognize_p6(expr, db, registry) {
+        return Some(classified);
+    }
+
+    // Try P10: constant boolean policy
+    if let Some(classified) = recognizers::recognize_p10_constant_bool(expr, db, registry) {
+        return Some(classified);
+    }
+
+    // Try array membership / overlap (Phase 6e): = ANY(...) and &&.
+    if let Some(classified) = recognizers::recognize_array_patterns(expr, registry) {
+        return Some(classified);
+    }
+
+    // Try P9: standalone attribute condition, only a literal one decided by the row.
+    let col = recognizers::is_attribute_check(expr)?;
+    let value_desc = describe_comparison_value(expr);
+    let predicate = recognizers::attribute_literal_predicate(expr);
+    let request_predicate = recognizers::attribute_request_predicate(expr);
+    // No confirmation vouches for a request value, which the service evaluates.
+    let confidence = if predicate.is_some() {
+        literal_attribute_confidence(db, registry, table, &col)
+    } else if request_predicate.is_some() {
+        ConfidenceLevel::B
+    } else {
+        ConfidenceLevel::C
+    };
+    Some(ClassifiedExpr {
+        pattern: PatternClass::P9AttributeCondition(AttributeCondition {
+            column: col,
+            value_description: value_desc,
+            predicate,
+            request_predicate,
+        }),
+        confidence,
+    })
+}
+
+/// `expr` refused, naming the declaration, call, set constructor or operator it lacks.
+fn unrecognized(expr: &Expr, registry: &FunctionRegistry) -> ClassifiedExpr {
     // A set read that no declaration covers is refused naming the declaration, since the
     // splitter and the setting reader it calls are not what is missing.
     let undeclared_sets = recognizers::undeclared_set_reads(expr, registry);
@@ -2147,6 +2168,35 @@ ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
                 "`{expr_sql}`: a SQL keyword is not a missing function: {reason}"
             );
         }
+    }
+
+    /// A role keyword in an expanded body is refused for the deployment that names it, and
+    /// the refusal names the function whose body reads it.
+    #[test]
+    fn a_role_keyword_in_an_expanded_body_names_the_function() {
+        let db = parse_schema(
+            r"
+CREATE TABLE docs (id UUID PRIMARY KEY, status TEXT);
+CREATE FUNCTION held_by_caller(holder TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE AS $$ SELECT holder = current_user $$;
+",
+        )
+        .expect("schema should parse");
+        let registry = FunctionRegistry::new();
+        let classified = classify_expr(
+            &parse_expr("held_by_caller(status)"),
+            &db,
+            &registry,
+            "docs",
+            PolicyCommand::Select,
+        );
+        let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &classified.pattern else {
+            panic!("expected Unknown, got: {:?}", classified.pattern);
+        };
+        assert!(
+            reason.contains("held_by_caller") && reason.contains("no deployment names one"),
+            "{reason}"
+        );
     }
 
     /// Lead 3 named the unrecognized call. An operator carries no function to name, so
