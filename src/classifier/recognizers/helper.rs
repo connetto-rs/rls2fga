@@ -196,6 +196,17 @@ pub(crate) enum HelperRefusal {
         /// The principal's type, as the deployment declares it.
         kind: String,
     },
+    /// An arm compares a column with a whole JSON setting, which holds no one value.
+    #[error(
+        "declared helper '{function}' compares a column with the whole JSON setting \
+         '{setting}'"
+    )]
+    JsonSetting {
+        /// The helper.
+        function: String,
+        /// The JSON setting compared with.
+        setting: String,
+    },
     /// A request value is compared with arms whose rows depend on the request.
     #[error(
         "declared helper '{function}' is compared with the request's value \
@@ -1106,9 +1117,15 @@ fn helper_grant<DB: DatabaseLike>(
                         })?,
                     }
                 }
-                _ => HelperGrantee::Caller {
+                SettingContent::Value(SettingValue::Caller(_)) => HelperGrantee::Caller {
                     user_column: column,
                 },
+                SettingContent::Json(_) => {
+                    return Err(HelperRefusal::JsonSetting {
+                        function: function.to_string(),
+                        setting: compared.setting().name().to_string(),
+                    });
+                }
             }
         }
         GrantedTo::Set(set) => {
