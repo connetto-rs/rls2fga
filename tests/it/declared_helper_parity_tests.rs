@@ -13,8 +13,8 @@ use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UN
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, founded_through_kind, GranteeArms, ABSENT_INSTALLATION, AUDIENCES,
-    EDGE_FOLDERS, EXPIRING, FOUNDED, GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, LEVELS,
-    MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
+    EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED, GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS,
+    LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
@@ -1711,6 +1711,79 @@ async fn a_helper_returning_its_own_key_agrees_with_postgres_17_and_18() {
                 expect("bob", "notes:n1", false);
                 assert_agrees(&case, &run);
             }
+        }
+    }
+}
+
+const EXTENSION_HELPERS: &str = r#"{
+    "authz.ownables_granted": { "kind": "declared_helper" },
+    "authz.resources_granted": { "kind": "declared_helper" }
+}"#;
+
+/// `alice` is granted `r1` and `bob` `r2`, two ownables each extended by a template, a
+/// procedure template, a weighing template and a paired template.
+fn extensions_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-extensions-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        EXTENSIONS,
+        &[
+            "INSERT INTO resources VALUES ('r1', 'ownable', 'o1'), ('r2', 'ownable', 'o1');
+             INSERT INTO ownables (id, project_id) VALUES ('r1', 'p1'), ('r2', 'p1');
+             INSERT INTO templates VALUES ('r1', 'p1'), ('r2', 'p1');
+             INSERT INTO procedure_templates VALUES ('r1', 'o1', 'p1'), ('r2', 'o1', 'p1');
+             INSERT INTO weighing_templates VALUES ('r1'), ('r2');
+             INSERT INTO paired_templates VALUES ('r1'), ('r2');
+             INSERT INTO resource_grants VALUES ('r1', 'alice'), ('r2', 'bob')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON templates, procedure_templates, weighing_templates,
+               paired_templates TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        ["alice", "bob", "erin"].into_iter().map(caller).collect(),
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(EXTENSION_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// Each table extending an ownable holds the grants on the resource its key reaches through
+/// one, two or three keys, or through two tables it extends.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn keys_extending_a_resource_agree_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = extensions_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for table in [
+                "templates",
+                "procedure_templates",
+                "weighing_templates",
+                "paired_templates",
+            ] {
+                let expect = |subject: &str, row: &str, allowed| {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        &format!("{table}:{row}"),
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                };
+                expect("alice", "r1", true);
+                expect("alice", "r2", false);
+                expect("bob", "r2", true);
+                expect("erin", "r1", false);
+            }
+            assert_agrees(&case, &run);
         }
     }
 }
