@@ -597,23 +597,75 @@ CREATE POLICY invitations_capped ON invitations FOR SELECT
 pub(crate) const POLICY_CAP_HELPERS: &[&str] =
     &["authz.capped_kinds", "authz.member_organizations"];
 
-/// A policy clause capped by a declared helper's pairs grades A and translates.
+/// A policy clause capped by a declared helper's pairs grades A, translates and is reported
+/// by its README row.
 #[test]
 fn policy_clauses_capped_by_helper_pairs_translate() {
-    for policy in ["projects_capped", "reports_capped", "invitations_capped"] {
-        let using = using_of(POLICY_CAPS, POLICY_CAP_HELPERS, policy);
-        assert_eq!(
-            using.confidence,
-            ConfidenceLevel::A,
-            "{policy}: {:?}",
-            using.pattern
-        );
+    let listed = "SELECT capped.organization_id, capped.kind\n      FROM authz.capped_kinds('reader') capped";
+    for schema in [
+        POLICY_CAPS.to_string(),
+        POLICY_CAPS.replace(
+            listed,
+            "SELECT capped.* FROM authz.capped_kinds('reader') capped",
+        ),
+        POLICY_CAPS.replace(
+            listed,
+            "SELECT capped.org, capped.k FROM authz.capped_kinds('reader') AS capped(org, k)",
+        ),
+    ] {
+        for policy in ["projects_capped", "reports_capped", "invitations_capped"] {
+            let using = using_of(&schema, POLICY_CAP_HELPERS, policy);
+            assert_eq!(
+                using.confidence,
+                ConfidenceLevel::A,
+                "{policy}: {:?}",
+                using.pattern
+            );
+        }
     }
-    installation_translator(POLICY_CAP_HELPERS)
-        .translate(&db_of(POLICY_CAPS))
+    let capped = "USING ((SELECT authz.acting_installation_id()) IS NULL\n    \
+                  OR (organization_id, kind) IN (SELECT * FROM authz.capped_kinds('writer')));";
+    for (operands, row) in [
+        (
+            "organization_id, kind",
+            "P30 ((organization_id, kind) in authz.capped_kinds('writer'))",
+        ),
+        (
+            "organization_id, 'organization'::authz.resource_kind",
+            "P30 ((organization_id, 'organization') in authz.capped_kinds('writer'))",
+        ),
+    ] {
+        let schema = POLICY_CAPS.replace(
+            capped,
+            &format!("USING (({operands}) IN (SELECT * FROM authz.capped_kinds('writer')));"),
+        );
+        let report = installation_translator(POLICY_CAP_HELPERS)
+            .translate(&db_of(&schema))
+            .expect("the schema plans")
+            .outputs()
+            .expect("the schema translates")
+            .report();
+        assert!(report.contains(row), "{row} in {report}");
+    }
+}
+
+/// A policy cap on a table no key names a row of is refused naming the pair links it drops.
+#[test]
+fn a_policy_cap_on_a_table_without_a_key_names_the_dropped_pair_links() {
+    let schema = POLICY_CAPS.replacen(
+        "id UUID PRIMARY KEY,\n  organization_id",
+        "id UUID,\n  organization_id",
+        1,
+    );
+    let refused = installation_translator(POLICY_CAP_HELPERS)
+        .translate(&db_of(&schema))
         .expect("the schema plans")
         .outputs()
-        .expect("the schema translates");
+        .expect_err("no row of 'projects' can be named");
+    assert!(
+        format!("{refused:?}").contains("helper pair links"),
+        "{refused:?}"
+    );
 }
 
 /// A policy cap no pair object can keep is refused naming why.
@@ -674,6 +726,47 @@ fn policy_caps_with_no_pair_relation_are_refused() {
             "projects_capped",
             "the policy pairs '1::authz.resource_kind' with the rows 'authz.capped_kinds' \
              returns, which is no literal a pair is named by",
+        ),
+        (
+            POLICY_CAPS.replace(
+                star,
+                "(organization_id, kind, id) IN (SELECT * FROM authz.capped_kinds('writer'))",
+            ),
+            POLICY_CAP_HELPERS,
+            "projects_capped",
+            "Subquery reads the rows function 'authz.capped_kinds' returns",
+        ),
+        (
+            POLICY_CAPS.replace(
+                star,
+                "(organization_id, projects.missing) IN (SELECT * FROM authz.capped_kinds('writer'))",
+            ),
+            POLICY_CAP_HELPERS,
+            "projects_capped",
+            "the policy pairs 'projects.missing' with the rows 'authz.capped_kinds' returns",
+        ),
+        (
+            POLICY_CAPS.replace(
+                star,
+                "NOT ((organization_id, kind) IN (SELECT * FROM authz.capped_kinds('writer')))",
+            ),
+            POLICY_CAP_HELPERS,
+            "projects_capped",
+            "NOT applied to row among a declared helper's pairs",
+        ),
+        (
+            POLICY_CAPS.replace(
+                "ALTER FUNCTION authz.caller_id()",
+                "CREATE FUNCTION authz.capped_kinds(min_role TEXT)\n\
+                 RETURNS TABLE (organization_id UUID, kind authz.resource_kind)\n\
+                 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$\n  \
+                 SELECT permission.organization_id, permission.kind\n  \
+                 FROM public.installation_permissions permission\n$$;\n\
+                 ALTER FUNCTION authz.caller_id()",
+            ),
+            POLICY_CAP_HELPERS,
+            "projects_capped",
+            "more than one declaration of 'authz.capped_kinds' takes this call's arguments",
         ),
     ] {
         let using = using_of(&schema, helpers, policy);
