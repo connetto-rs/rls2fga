@@ -801,7 +801,7 @@ pub(crate) fn row_valued_set(expr: &Expr, registry: &FunctionRegistry) -> Option
 }
 
 /// The single expression a subquery projects, when nothing in it can drop that row.
-pub(super) fn sole_projection(query: &Query) -> Option<&Expr> {
+pub(crate) fn sole_projection(query: &Query) -> Option<&Expr> {
     let [SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. }] =
         projected_select(query)?.projection.as_slice()
     else {

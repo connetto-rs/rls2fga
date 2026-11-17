@@ -12,12 +12,13 @@ use core::cell::{Cell, RefCell};
 use core::ops::ControlFlow;
 
 use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, FunctionArguments, FunctionCalledOnNull, FunctionSecurity,
-    FunctionSetValue, Ident, ObjectName, ObjectNamePart, Query, TableFactor, Value, Visit,
-    VisitMut, Visitor, VisitorMut,
+    Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, FunctionCalledOnNull,
+    FunctionSecurity, FunctionSetValue, Ident, ObjectName, ObjectNamePart, Query, TableFactor,
+    Value, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 use crate::classifier::function_registry::FunctionRegistry;
+use crate::classifier::recognizers::{sole_projection, unparenthesize};
 use crate::parser::function_analyzer::{body_reads_effective_user, body_single_projection};
 use crate::parser::names::{
     lookup_table, stored_ident_name, stored_identifier, stored_relation_name, table_has_column,
@@ -145,7 +146,8 @@ pub(crate) enum Expansion {
 }
 
 /// Expand `expr` when it is a call to a declared, unregistered,
-/// single-expression `LANGUAGE sql` function.
+/// single-expression `LANGUAGE sql` function, bare or as the whole projection of a
+/// scalar subquery that keeps its one row.
 ///
 /// `None` means the expression is not such a call, and the caller's ordinary
 /// blame path stands.
@@ -156,9 +158,7 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
     table: &str,
     state: &ExpansionState,
 ) -> Option<Expansion> {
-    let Expr::Function(func) = expr else {
-        return None;
-    };
+    let func = called_function(expr)?;
     // A window, filter or parameterized call is not the plain boolean call this
     // expands, and an argument list with modifiers is not plain either.
     if func.over.is_some()
@@ -519,6 +519,19 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
 
 fn refused(reason: String) -> Expansion {
     Expansion::Refused { reason }
+}
+
+/// The call `expr` makes, bare or as all a scalar subquery projects.
+///
+/// `(SELECT f(...))` with nothing that can drop its one row is the value of the call, and
+/// is how a policy has `PostgreSQL` run a call reading no row column once per statement
+/// rather than once per row. A subquery that can return no row is `NULL` instead.
+fn called_function(expr: &Expr) -> Option<&Function> {
+    match expr {
+        Expr::Function(function) => Some(function),
+        Expr::Subquery(query) => called_function(unparenthesize(sole_projection(query)?)),
+        _ => None,
+    }
 }
 
 enum FunctionSearchPath {
