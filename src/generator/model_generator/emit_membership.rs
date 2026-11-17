@@ -1629,7 +1629,7 @@ fn helper_call_relation<DB: DatabaseLike>(
     let mut walked = Vec::new();
     for arm in &call.arms {
         match arm {
-            HelperSetArm::Grant(grant) => parts.extend(capped_grant_parts(
+            HelperSetArm::Grant(grant) => parts.extend(caller_gated_grant_parts(
                 grant,
                 &call.level,
                 &level_type,
@@ -1946,6 +1946,40 @@ fn helper_grant_parts<DB: DatabaseLike>(
             grant_relation_exprs(grant, grantees, &base, &rows, &subjects, level_type, plan)
         })
         .collect()
+}
+
+/// The rows of the level a grant arm returns, as [`capped_grant_parts`] reads them, kept
+/// only while the request carries the caller the arm's gate requires, which a request
+/// without a caller does not, whatever subject its check names.
+fn caller_gated_grant_parts<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
+    let parts = capped_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
+    let Some(caller) = &grant.carried_caller else {
+        return parts;
+    };
+    let Some(granted) = combine_union(parts) else {
+        return Vec::new();
+    };
+    let carried = RequestFormula::Presence(PresenceAtom::new(caller, true));
+    let Some(gate) = level_request_gate(&carried, level, level_type, ctx, table_plan, all_types)
+    else {
+        return Vec::new();
+    };
+    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    let name = format!(
+        "{}_carrying_caller",
+        stored_relation_name(grant.table.name())
+    );
+    vec![UsersetExpr::Computed(plan.ensure_computed(
+        name,
+        UsersetExpr::Intersection(vec![granted, gate]),
+    ))]
 }
 
 /// The rows of the level a grant arm returns, as [`helper_grant_parts`] reads them, kept
@@ -2285,29 +2319,10 @@ fn cap_expr<DB: DatabaseLike>(
     });
     let mut kept = Vec::with_capacity(2);
     if let Some(lift) = &cap.lift {
-        let absent = RequestFormula::Presence(PresenceAtom::of(&RequestValueAbsent {
-            source: lift.clone(),
-            negated: false,
-        }));
-        // The gate object stands for the level's type, so its plan leaves `all_types` while
-        // the request-gate plan there takes the formula.
-        let gated = if table_plan.type_name == *level_type {
-            request_gate_on(&absent, level, ctx, table_plan, all_types)
-        } else {
-            let mut plan = all_types.remove(level_type).unwrap_or_else(|| {
-                TypePlan::new_with_well_known(level_type.clone(), &table_plan.well_known)
-            });
-            plan.names_rows_of(level);
-            let gated = request_gate_on(&absent, level, ctx, &mut plan, all_types);
-            all_types.insert(level_type.clone(), plan);
-            gated
-        };
-        if let Some((lifted, entries)) = gated {
-            for entry in entries {
-                table_plan.add_source(entry);
-            }
-            kept.push(lifted);
-        }
+        let absent = RequestFormula::Presence(PresenceAtom::new(lift, false));
+        kept.extend(level_request_gate(
+            &absent, level, level_type, ctx, table_plan, all_types,
+        ));
     }
     if let Some(holder) = holder {
         let reached = match reach {
@@ -2369,6 +2384,36 @@ fn cap_expr<DB: DatabaseLike>(
         kept.push(reached);
     }
     combine_union(kept)
+}
+
+/// `formula` stated on the request gate each row of `level` links to, a rule of
+/// `level_type`, the tuples it writes added to `table_plan`. `None` where no tuple names a
+/// row of `level`.
+fn level_request_gate<DB: DatabaseLike>(
+    formula: &RequestFormula,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<UsersetExpr> {
+    // The gate object stands for the level's type, so its plan leaves `all_types` while
+    // the request-gate plan there takes the formula.
+    let (gated, entries) = if table_plan.type_name == *level_type {
+        request_gate_on(formula, level, ctx, table_plan, all_types)
+    } else {
+        let mut plan = all_types.remove(level_type).unwrap_or_else(|| {
+            TypePlan::new_with_well_known(level_type.clone(), &table_plan.well_known)
+        });
+        plan.names_rows_of(level);
+        let gated = request_gate_on(formula, level, ctx, &mut plan, all_types);
+        all_types.insert(level_type.clone(), plan);
+        gated
+    }?;
+    for entry in entries {
+        table_plan.add_source(entry);
+    }
+    Some(gated)
 }
 
 /// The type named after the call `cap` makes and `suffix`, `capped_kinds_reader_pair` for
@@ -2559,6 +2604,7 @@ fn set_subjects<DB: DatabaseLike>(
     let inline = call.arms.iter().all(|arm| {
         matches!(arm, HelperSetArm::Grant(grant)
             if grant.caps.is_empty()
+                && grant.carried_caller.is_none()
                 && (grant.returns_the_caller() || grant.grantee == HelperGrantee::Anyone))
     });
     if !inline {

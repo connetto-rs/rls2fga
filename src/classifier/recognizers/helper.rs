@@ -114,17 +114,19 @@ pub(crate) enum HelperRefusal {
         /// The table the helper returns keys of.
         level: String,
     },
-    /// A gate on a caller the deployment lets go unset keeps rows for a request no
-    /// subject names apart from a caller's.
+    /// A gate on a caller the deployment lets go unset decides the arm in a way the request
+    /// gate on whether the request carries a caller does not state.
     #[error(
         "declared helper '{function}' tests whether setting '{setting}' holds a caller, \
-         which the deployment lets a request leave unset, so no subject names such a request"
+         which the deployment lets a request leave unset, {reason}"
     )]
     GateOnUnsetCaller {
         /// The helper.
         function: String,
         /// The caller setting.
         setting: String,
+        /// Why the request carrying a caller does not decide the gate.
+        reason: UnsetCallerGateRefusal,
     },
     /// A gate excludes a caller spelled otherwise than the identity a check sends.
     #[error(
@@ -496,6 +498,27 @@ pub(crate) enum LiftRefusal {
     /// The deployment declares the setting no single value a request may leave unset.
     #[error("which the deployment does not declare as one value a request may leave unset")]
     NotMaybeUnset,
+}
+
+/// Why whether the request carries a caller it may leave unset does not decide a gate
+/// on that caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum UnsetCallerGateRefusal {
+    /// `current_setting(name)` raises `42704` on a setting the request never set.
+    #[error(
+        "but reads it through current_setting without missing_ok, which raises 42704 where \
+         a request never set it"
+    )]
+    RaisesWhenUnset,
+    /// The read is `''` on a pooled connection whose earlier transaction set it.
+    #[error(
+        "but reads it without NULLIF(..., '') or <> '', so the '' a pooled connection reads \
+         for an unset caller keeps the arm's rows, or raises where the read is cast"
+    )]
+    ReadBare,
+    /// The gate sits on an arm returning the pairs of a cap, which no request gate reaches.
+    #[error("but gates an arm of a cap, whose pairs no request gate reaches")]
+    CapArm,
 }
 
 /// Recognize `<column> = ANY (ARRAY(SELECT h(...)))`, `<column> = ANY (SELECT h(...))`
@@ -1153,9 +1176,12 @@ fn helper_grant<DB: DatabaseLike>(
             table: table_identity(table).to_string(),
         });
     }
-    let excluded = match grant.gate() {
-        None => Vec::new(),
-        Some(gate) => excluded_callers(function, gate, &grantee)?,
+    let (carried_caller, excluded) = match grant.gate() {
+        None => (None, Vec::new()),
+        Some(gate) => (
+            carried_caller(function, gate, &grantee, registry)?,
+            excluded_callers(function, gate, &grantee)?,
+        ),
     };
     let (caps, held) = match objects {
         [object] => {
@@ -1178,6 +1204,7 @@ fn helper_grant<DB: DatabaseLike>(
             .collect(),
         grantee,
         excluded,
+        carried_caller,
         rows: grant_rows(table, grant.restrictions(), db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
         caps,
@@ -1299,28 +1326,57 @@ fn grant_rows<DB: DatabaseLike>(
     })
 }
 
+/// The caller `gate` keeps rows only for a request carrying, where the deployment lets a
+/// request leave it unset and `grantee` compares no column with it.
+///
+/// No subject names a check without a caller apart from a caller's, so the gate is stated
+/// on whether the request carries the caller under its `settings` key, which holds where
+/// `PostgreSQL` reads neither `NULL` nor `''`. A gate keeping rows for `''`, or raising
+/// where the setting was never set, is refused.
+fn carried_caller(
+    function: &str,
+    gate: &CallerGate<'_>,
+    grantee: &HelperGrantee,
+    registry: &FunctionRegistry,
+) -> Result<Option<DeclaredSource>, HelperRefusal> {
+    let setting = gate.setting();
+    if setting.presence() != SettingPresence::MayBeUnset
+        || matches!(grantee, HelperGrantee::Caller { .. })
+    {
+        return Ok(None);
+    }
+    let refusal = |reason| HelperRefusal::GateOnUnsetCaller {
+        function: function.to_string(),
+        setting: setting.name().to_string(),
+        reason,
+    };
+    if gate.raises_when_unset() {
+        return Err(refusal(UnsetCallerGateRefusal::RaisesWhenUnset));
+    }
+    if !gate.excludes_unset() {
+        return Err(refusal(UnsetCallerGateRefusal::ReadBare));
+    }
+    registry
+        .sources()
+        .caller(setting.name(), &[])
+        .cloned()
+        .map(Some)
+        .ok_or_else(|| HelperRefusal::NoDeployment {
+            function: function.to_string(),
+        })
+}
+
 /// The callers a gate on the caller setting keeps no row for, as the identities their
 /// checks send.
 ///
-/// A check always names a caller, so `IS NOT NULL` and `<> ''` exclude nobody it can
-/// send. That holds only where the deployment promises a caller on every request: a
-/// request it lets leave the setting unset reads `NULL` or `''`, and no subject names
-/// such a check apart from a caller's, unless the arm compares a column with the caller
-/// and so keeps nothing for it anyway.
+/// `IS NOT NULL` and `<> ''` exclude no caller a check names, and a request carrying no
+/// caller is [`carried_caller`]'s to gate.
 fn excluded_callers(
     function: &str,
     gate: &CallerGate<'_>,
     grantee: &HelperGrantee,
 ) -> Result<Vec<String>, HelperRefusal> {
     let setting = gate.setting();
-    if setting.presence() == SettingPresence::MayBeUnset
-        && !matches!(grantee, HelperGrantee::Caller { .. })
-    {
-        return Err(HelperRefusal::GateOnUnsetCaller {
-            function: function.to_string(),
-            setting: setting.name().to_string(),
-        });
-    }
     let data_type = match setting.content() {
         SettingContent::Value(SettingValue::Caller(data_type)) => Some(data_type),
         _ => None,
@@ -1762,7 +1818,15 @@ fn helper_cap<DB: DatabaseLike>(
                 nested: nested.function().target_name().to_string(),
             });
         }
-        arms.push(helper_grant(&name, rows, rows.columns(), db, registry)?);
+        let paired_arm = helper_grant(&name, rows, rows.columns(), db, registry)?;
+        if let Some(caller) = &paired_arm.carried_caller {
+            return Err(HelperRefusal::GateOnUnsetCaller {
+                function: name,
+                setting: caller.setting_key().to_string(),
+                reason: UnsetCallerGateRefusal::CapArm,
+            });
+        }
+        arms.push(paired_arm);
         pairs.push(rows);
     }
     let paired = PairedCap {

@@ -14,7 +14,7 @@ use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, GRANTEES,
     GROUPS, INSTALLATIONS, INVITATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
-    REQUEST_VALUES, RESOURCES,
+    REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::row_cap_tests::INSTALLATION_CAPS;
@@ -995,6 +995,121 @@ async fn grants_naming_typed_grantees_agree_with_postgres_17_and_18() {
                 expect("anonymous", "docs:d_anonymous", !gated);
                 assert_agrees(&case, &run);
             }
+        }
+    }
+}
+
+const SIGNED_IN_REGISTRY: &str = r#"{
+    "authz.signed_in_grantees": { "kind": "declared_helper" },
+    "authz.signed_in_reach": { "kind": "declared_helper" }
+}"#;
+
+/// `ALICE` holds a user grantee and `BOB` none, and `INSTALLATION` acts without a user.
+const ALICE: &str = "00000000-0000-0000-0000-00000000000a";
+const BOB: &str = "00000000-0000-0000-0000-00000000000b";
+const INSTALLATION: &str = "00000000-0000-0000-0000-0000000000f1";
+
+/// [`SIGNED_IN`] with a resource shared with `ALICE`, one with everyone, one with every
+/// signed-in user and one with nobody, read by both callers, by a request carrying no
+/// caller, by one whose pooled connection reads the caller as `''`, and by an
+/// installation acting alone. Where `excluding`, the signed-in arm's gate excludes `BOB`.
+fn signed_in_case(major: &str, excluding: bool, loading_from_rows: bool) -> ParityCase {
+    let caller_set = |subject: &str, value: &str| {
+        Principal::with_setting(subject, "app_reader", "app.user_id", value)
+    };
+    let mut installation = Principal::as_role("installation", "app_reader");
+    installation
+        .session
+        .push(("app.installation_id".into(), INSTALLATION.into()));
+    let schema = if excluding {
+        SIGNED_IN.replace(
+            "authz.caller_id() IS NOT NULL",
+            &format!("authz.caller_id() <> '{BOB}'"),
+        )
+    } else {
+        SIGNED_IN.to_string()
+    };
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-signed-in-pg{major}{}{}",
+            if excluding { "-excluding" } else { "" },
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &schema,
+        &[
+            &format!(
+                "INSERT INTO grantees VALUES ('{ALICE}', 'user'),
+                   ('00000000-0000-0000-0000-0000000000e1', 'everyone'),
+                   ('00000000-0000-0000-0000-0000000000e2', 'signed_in');
+                 INSERT INTO resources VALUES ('00000000-0000-0000-0000-0000000000a1'),
+                   ('00000000-0000-0000-0000-0000000000a2'), ('00000000-0000-0000-0000-0000000000a3'),
+                   ('00000000-0000-0000-0000-0000000000a4');
+                 INSERT INTO grants VALUES ('00000000-0000-0000-0000-0000000000a1', '{ALICE}'),
+                   ('00000000-0000-0000-0000-0000000000a2', '00000000-0000-0000-0000-0000000000e1'),
+                   ('00000000-0000-0000-0000-0000000000a3', '00000000-0000-0000-0000-0000000000e2')"
+            ),
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON resources TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller_set(ALICE, ALICE),
+            caller_set(BOB, BOB),
+            Principal::as_role("anonymous", "app_reader"),
+            caller_set("pooled", ""),
+            installation,
+        ],
+    )
+    .with_settings([
+        support::deployment::typed_caller("app.user_id", DataType::Uuid).may_be_unset(),
+        support::deployment::principal("app.installation_id", "installation", DataType::Uuid)
+            .may_be_unset(),
+    ])
+    .with_registry(SIGNED_IN_REGISTRY);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A resource shared with every signed-in user reaches a request carrying a caller, but
+/// the one the gate excludes, and neither one carrying none, one whose pooled connection
+/// reads `''`, nor an installation acting without a user, while a resource shared with
+/// everyone reaches them all.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_signed_in_audience_behind_an_unset_caller_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for (excluding, loading_from_rows) in
+            [(false, false), (false, true), (true, false), (true, true)]
+        {
+            let case = signed_in_case(major, excluding, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (subject, own, everyone, signed_in) in [
+                (ALICE, true, true, true),
+                (BOB, false, true, !excluding),
+                ("anonymous", false, true, false),
+                ("pooled", false, true, false),
+                ("installation", false, true, false),
+            ] {
+                for (resource, allowed) in [
+                    ("a1", own),
+                    ("a2", everyone),
+                    ("a3", signed_in),
+                    ("a4", false),
+                ] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        &format!("resources:00000000-0000-0000-0000-0000000000{resource}"),
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                }
+            }
+            assert_agrees(&case, &run);
         }
     }
 }

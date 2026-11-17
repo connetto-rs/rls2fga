@@ -111,6 +111,15 @@ impl DeclaredSource {
         )
     }
 
+    /// Whether a check carries the value in its `settings` map under
+    /// [`request_parameter`](Self::request_parameter) whenever the request sets it, which
+    /// holds for one value other than the caller, and for the caller where a request may
+    /// leave it unset, so that the model tells a request carrying none apart.
+    #[must_use]
+    pub fn travels_in_settings(&self) -> bool {
+        self.is_scalar() || (self.is_caller() && self.may_be_unset())
+    }
+
     /// The type of the principal the source identifies, when it identifies one other than
     /// the caller.
     pub(crate) fn principal_kind(&self) -> Option<&str> {

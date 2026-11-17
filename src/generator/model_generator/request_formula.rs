@@ -35,13 +35,18 @@ pub(crate) struct PresenceAtom {
 }
 
 impl PresenceAtom {
+    /// Whether the request carries `source`, or leaves it absent where not `carried`.
+    pub(crate) fn new(source: &DeclaredSource, carried: bool) -> Self {
+        Self {
+            request_parameter: source.condition_parameter().clone(),
+            setting_key: source.setting_key().to_string(),
+            carried,
+        }
+    }
+
     /// `<NULLIF read> IS NULL`, or `IS NOT NULL` where negated.
     pub(crate) fn of(test: &RequestValueAbsent) -> Self {
-        Self {
-            request_parameter: test.source.condition_parameter().clone(),
-            setting_key: test.source.setting_key().to_string(),
-            carried: test.negated,
-        }
+        Self::new(&test.source, test.negated)
     }
 
     /// The test as the recipe states it.
