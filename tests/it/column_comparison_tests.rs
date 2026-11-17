@@ -117,8 +117,8 @@ fn outputs_for(columns: &str, policy: &str) -> Outputs {
         .unwrap_or_else(|divergent| panic!("`{policy}` must translate in full: {divergent:?}"))
 }
 
-const NUMBERED: &str =
-    "low INTEGER, high BIGINT, label TEXT, other_label TEXT, root_id UUID, parent_id UUID";
+const NUMBERED: &str = "low INTEGER, high BIGINT, label TEXT, other_label TEXT, root_id UUID, \
+     parent_id UUID, active BOOLEAN, archived BOOLEAN, starts_on DATE, ends_on DATE";
 
 /// The gate relation `clause` grants `SELECT` through on `items` with [`NUMBERED`] columns.
 fn gate_for(clause: &str) -> String {
@@ -258,11 +258,11 @@ fn the_gate_record_follows_three_valued_logic() {
     }
 }
 
-/// Two text columns are equal byte for byte under the default collation, and two `uuid`
-/// columns by value, which the row decides, while the order of text follows a collation only
-/// the database knows.
+/// Two text columns are equal byte for byte under the default collation, and two `uuid` or
+/// `boolean` columns by value, which the row decides, while the order of text and of dates
+/// follows rules only the database applies.
 #[test]
-fn text_and_uuid_columns_decide_equality_alone() {
+fn columns_of_one_type_decide_what_the_row_can() {
     let root = "22222222-2222-2222-2222-22222222222a";
     for (clause, mut row, expected) in [
         (
@@ -299,6 +299,21 @@ fn text_and_uuid_columns_decide_equality_alone() {
             "root_id <> parent_id",
             json!({ "root_id": root, "parent_id": ITEM_ID }),
             Some(1),
+        ),
+        (
+            "active = archived",
+            json!({ "active": true, "archived": true }),
+            Some(1),
+        ),
+        (
+            "active < archived",
+            json!({ "active": true, "archived": false }),
+            Some(0),
+        ),
+        (
+            "starts_on < ends_on",
+            json!({ "starts_on": "2026-01-01", "ends_on": "2026-02-01" }),
+            None,
         ),
     ] {
         row["id"] = json!(ITEM_ID);
