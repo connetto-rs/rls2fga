@@ -328,6 +328,7 @@ where
         | PatternClass::P6BooleanFlag(BooleanFlag { .. })
         | PatternClass::P19IndirectMembership(_)
         | PatternClass::P20DeclaredHelper(_)
+        | PatternClass::P30RowInHelperPairs(_)
         | PatternClass::P27RequestValueInHelperSet(_)
         | PatternClass::P28RequestValueAbsent(_)
         | PatternClass::P29FlaggedRow(_)

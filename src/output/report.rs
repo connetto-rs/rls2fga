@@ -10,10 +10,10 @@ use crate::classifier::patterns::{
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, FlaggedRow, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowValueEqualsCallerScalar,
-    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
+    RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
-use crate::generator::tuple_generator::render_attribute_test;
+use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
 use crate::types::TranslationNote;
 
 /// Remove Markdown table control characters and escape pipes.
@@ -207,6 +207,29 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                 "P20 ({column} in {}({}))",
                 call.function,
                 call.arguments.join(", ")
+            )
+        }
+        PatternClass::P30RowInHelperPairs(RowInHelperPairs {
+            columns,
+            literals,
+            pairs,
+        }) => {
+            let mut operands: Vec<(usize, String)> = columns
+                .iter()
+                .map(|(at, column)| (*at, column.as_str().to_string()))
+                .chain(
+                    literals
+                        .iter()
+                        .filter_map(|(at, value)| Some((*at, render_attribute_literal(value)?))),
+                )
+                .collect();
+            operands.sort_unstable_by_key(|(at, _)| *at);
+            let operands: Vec<String> = operands.into_iter().map(|(_, operand)| operand).collect();
+            format!(
+                "P30 (({}) in {}({}))",
+                operands.join(", "),
+                pairs.function,
+                pairs.arguments.join(", ")
             )
         }
         PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet {

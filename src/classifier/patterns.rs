@@ -772,10 +772,22 @@ impl HelperGrant {
 /// arm's condition, keeping a row only where the pair its operands name is one the helper
 /// returns, unless the request leaves the lifting value absent.
 ///
-/// Each pair the helper returns is an object of its own, holding whoever the cap's rows
-/// grant it to, and each row of the level reaches the pair its operands name.
+/// Each row of the level reaches the pair its operands name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperCap {
+    /// The pairs the cap keeps rows by.
+    pub pairs: HelperPairs,
+    /// The rows naming the pair each row of the level, or each held row, reaches.
+    pub link: CapLink,
+    /// The declared single value whose absence lifts the cap, `None` where it holds for
+    /// every request.
+    pub lift: Option<DeclaredSource>,
+}
+
+/// The rows one call of a declared helper returning `TABLE (...)` returns, each pair of
+/// values an object of its own holding whoever the rows returning it grant it to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HelperPairs {
     /// The helper returning the pairs, as declared.
     pub function: String,
     /// Its arguments, each a literal as SQL spells it.
@@ -783,11 +795,21 @@ pub struct HelperCap {
     /// The rows returning the pairs, each keyed by its columns in the order the helper
     /// returns them, none where the helper returns nothing.
     pub arms: Vec<HelperGrant>,
-    /// The rows naming the pair each row of the level, or each held row, reaches.
-    pub link: CapLink,
-    /// The declared single value whose absence lifts the cap, `None` where it holds for
-    /// every request.
-    pub lift: Option<DeclaredSource>,
+}
+
+/// `(<operands>) IN (SELECT * FROM <function>(<arguments>))` in a policy clause, keeping a
+/// row of the guarded table only where the pair its operands name is one a declared helper
+/// returns. The subquery may list the returned columns in order instead of `*`.
+///
+/// Each row reaches the pair its column operands name beside its literal operands.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RowInHelperPairs {
+    /// Each column operand, a column of the guarded table, beside its position.
+    pub columns: Vec<(usize, ColumnName)>,
+    /// Each literal operand beside its position.
+    pub literals: Vec<(usize, AttributeLiteral)>,
+    /// The pairs the row is compared with.
+    pub pairs: HelperPairs,
 }
 
 /// Which rows name the pair a row of the level or a held row reaches.
@@ -1151,6 +1173,10 @@ pub enum PatternClass {
     /// from it up edge tables: `EXISTS (SELECT 1 FROM objects o WHERE o.id = objects.id
     /// AND o.archived)`, usually read through a `SECURITY DEFINER` boolean function.
     P29FlaggedRow(FlaggedRow),
+    /// P30: The guarded row's columns, or one beside literals, name a pair a declared
+    /// `SECURITY DEFINER` helper returning `TABLE (...)` returns:
+    /// `(organization_id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))`.
+    P30RowInHelperPairs(RowInHelperPairs),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

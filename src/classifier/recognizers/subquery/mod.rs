@@ -1711,11 +1711,9 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
                  guarded row, so drop the inner scan and correlate against '{outer_table}' \
                  directly"
             )),
-            MembershipSelectAnalysis::ReadsFunctionRows { function } => Some(format!(
-                "Subquery reads the rows function '{function}' returns, which translate only \
-                 when '{function}' is a declared helper and the column is compared with every \
-                 row it returns"
-            )),
+            MembershipSelectAnalysis::ReadsFunctionRows { function } => {
+                Some(reads_function_rows(&function))
+            }
             MembershipSelectAnalysis::UnkeyedPairing { reason } => Some(reason),
             MembershipSelectAnalysis::Unique { .. }
             | MembershipSelectAnalysis::Uncorrelated { .. }
@@ -1735,7 +1733,13 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
     if let Some(refusal) = refusal {
         return Some(refusal.reason());
     }
-    if projected_columns(query_select(query)?).is_none() {
+    let select = query_select(query)?;
+    // A function read through `*` projects no column either, and the call is what names
+    // the refusal.
+    if let Some(function) = called_source(select) {
+        return Some(reads_function_rows(&function));
+    }
+    if projected_columns(select).is_none() {
         return Some(
             "Subquery selects an expression rather than a column, so nothing links it to the \
              guarded row, so project the correlating column instead"
@@ -1749,6 +1753,15 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
         return None;
     };
     diagnose_select(query_select(subquery)?, db, registry, outer_table, state)
+}
+
+/// Why a subquery reading the rows `function` returns does not translate.
+fn reads_function_rows(function: &str) -> String {
+    format!(
+        "Subquery reads the rows function '{function}' returns, which translate only when \
+         '{function}' is a declared helper and the column is compared with every row it \
+         returns"
+    )
 }
 
 pub(crate) fn diagnose_p5_parent_inheritance_ambiguity<DB: DatabaseLike>(
