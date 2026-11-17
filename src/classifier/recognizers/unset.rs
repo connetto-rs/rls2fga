@@ -12,7 +12,10 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator};
 
-use super::session::{bare_declared_read, fallback_read, lowered_value, set_read, sole_projection};
+use super::session::{
+    bare_declared_read, fallback_read, lowered_value, normalized_accessor_read, set_read,
+    sole_projection,
+};
 use super::{accessor_read, caller_source, string_literal, unparenthesize};
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::parser::expr::unwrap_cast_or_nested;
@@ -274,7 +277,8 @@ fn compare<'r>(
 
 /// The declaration of the single value `expr` reads, the caller or a scalar, when a
 /// request may leave it unset. A read wrapped in `NULLIF` reads `''` as `NULL` and is
-/// not one, while `lower('')` is `''`, so a lowered bare read is.
+/// not one, while `lower('')` is `''`, so a lowered bare read is, inline or through an
+/// accessor.
 fn unset_value<'r>(expr: &Expr, registry: &'r FunctionRegistry) -> Option<&'r DeclaredSource> {
     let caller = accessor_read(expr).and_then(|read| caller_source(&read, registry));
     caller
@@ -285,6 +289,11 @@ fn unset_value<'r>(expr: &Expr, registry: &'r FunctionRegistry) -> Option<&'r De
                         .and_then(|(_, argument)| bare_declared_read(argument, registry))
                 })
                 .map(|(source, _)| source)
+        })
+        .or_else(|| {
+            normalized_accessor_read(expr, registry)
+                .filter(|read| !read.skips_empty)
+                .map(|read| read.source)
         })
         .filter(|source| source.may_be_unset())
 }
@@ -321,8 +330,10 @@ fn unset_delimited_set<'r>(
 mod tests {
     use super::*;
     use crate::parser::expr::parse_expr_for_tests as parse_expr;
+    use crate::parser::function_analyzer::FunctionSemantic;
     use crate::parser::sql_parser::{SessionSetting, SetPacking, SettingValue};
     use crate::test_support::{caller, delimited_set, json_field, registry, scalar};
+    use crate::types::RequestNormalization;
     use sqlparser::ast::DataType;
 
     fn settings_read(expr: &str, settings: Vec<SessionSetting>) -> Vec<String> {
@@ -358,7 +369,8 @@ mod tests {
     }
 
     /// `lower('')` is `''`, so a lowered value compared with a row value matches the rows
-    /// holding `''` as the value itself does, and a read through `NULLIF` never does.
+    /// holding `''` as the value itself does, inline or through an accessor, and a read
+    /// through `NULLIF` never does.
     #[test]
     fn a_lowered_value_matches_the_empty_text_as_the_value_does() {
         let unset = || vec![scalar("app.email").may_be_unset()];
@@ -371,6 +383,28 @@ mod tests {
                 "email = lower(NULLIF(current_setting('app.email', true), ''))",
                 unset()
             ),
+            Vec::<String>::new()
+        );
+        let mut accessors = registry(unset());
+        for (name, skips_empty) in [("app.lowered_email", false), ("app.verified_email", true)] {
+            accessors.register_if_absent(
+                name,
+                &FunctionSemantic::SettingReader {
+                    key: "app.email".to_string(),
+                    skips_empty,
+                    normalization: Some(RequestNormalization::Lower),
+                },
+            );
+        }
+        let read = |expr: &str| -> Vec<String> {
+            empty_readings(&parse_expr(expr), &accessors)
+                .into_iter()
+                .map(|(source, _)| source.setting_key().to_string())
+                .collect()
+        };
+        assert_eq!(read("email = (SELECT app.lowered_email())"), ["app.email"]);
+        assert_eq!(
+            read("email = (SELECT app.verified_email())"),
             Vec::<String>::new()
         );
     }

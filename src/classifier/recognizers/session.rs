@@ -618,9 +618,14 @@ pub(crate) fn refused_emptied_reads(expr: &Expr, registry: &FunctionRegistry) ->
 
 /// Why `expr`, a read through `NULLIF(<read>, '')`, is not the value the request sends,
 /// or `None` when it is no such read of a declared single value or the request never
-/// sends the `''` the wrap hides.
+/// sends the `''` the wrap hides. A call to an accessor normalizing such a read is one.
 fn emptied_read_refusal(expr: &Expr, registry: &FunctionRegistry) -> Option<String> {
-    let EmptiedRead { key, path, .. } = emptied_setting_read(expr, registry)?;
+    let (key, path) = match emptied_setting_read(expr, registry) {
+        Some(EmptiedRead { key, path, .. }) => (key, path),
+        None => normalized_accessor_read(expr, registry)
+            .filter(|read| read.skips_empty)
+            .map(|read| (read.source.setting_key().to_string(), Vec::new()))?,
+    };
     let source = registry
         .declared_source(&key, &path)
         .filter(|source| source.is_scalar() || source.is_caller())?;
@@ -960,13 +965,23 @@ pub(super) fn declared_read<'r>(
 
 /// `lower(<read of a declared single value>)`, the read bare or through [`nullif_read`],
 /// as the value of its own the caller sends in the value's place, and the casts around
-/// the call, outermost first.
+/// the call, outermost first, written inline or as a call to an accessor whose whole body
+/// is the call.
 ///
 /// `lower` follows the database's collation, which CEL cannot read, so the model never
 /// applies it and the caller sends what the database returns. The caller lowers the
 /// value it carries, so a cast inside the call that renames the value is refused, and so
 /// is a key a declared source already takes.
 fn lowered_read(expr: &Expr, registry: &FunctionRegistry) -> Option<(DeclaredSource, CastChain)> {
+    if let Some(read) = normalized_accessor_read(expr, registry) {
+        if read.skips_empty && !read.source.may_be_unset() {
+            return None;
+        }
+        let normalized = registry
+            .sources()
+            .normalized(read.source, read.normalization)?;
+        return Some((normalized, read.casts));
+    }
     let (casts, argument) = lowered_value(expr)?;
     let (source, inner) =
         bare_declared_read(argument, registry).or_else(|| nullif_read(argument, registry))?;
@@ -979,9 +994,54 @@ fn lowered_read(expr: &Expr, registry: &FunctionRegistry) -> Option<(DeclaredSou
     Some((lowered, casts))
 }
 
+/// A call to an accessor whose whole body applies a normalization to a read of a whole
+/// declared single value, bare or through `NULLIF(_, '')`.
+pub(super) struct NormalizedAccessorRead<'r> {
+    /// The declared single value the body reads.
+    pub(super) source: &'r DeclaredSource,
+    /// True where the body wraps the read in `NULLIF(_, '')`.
+    pub(super) skips_empty: bool,
+    /// The function the body applies to the read.
+    normalization: RequestNormalization,
+    /// Every cast around the call, outermost first.
+    casts: CastChain,
+}
+
+/// The read `expr` makes through a call to an accessor whose whole body normalizes a
+/// declared single value, under casts and a scalar subquery.
+pub(super) fn normalized_accessor_read<'r>(
+    expr: &Expr,
+    registry: &'r FunctionRegistry,
+) -> Option<NormalizedAccessorRead<'r>> {
+    let AccessorRead { root, path, casts } = accessor_read(expr)?;
+    let Expr::Function(function) = root else {
+        return None;
+    };
+    if !path.is_empty() {
+        return None;
+    }
+    let FunctionSemantic::SettingReader {
+        key,
+        skips_empty,
+        normalization: Some(normalization),
+    } = registry.get(&function.name.to_string())?
+    else {
+        return None;
+    };
+    let source = registry
+        .declared_source(key, &[])
+        .filter(|source| source.is_scalar())?;
+    Some(NormalizedAccessorRead {
+        source,
+        skips_empty: *skips_empty,
+        normalization: *normalization,
+        casts,
+    })
+}
+
 /// The value `pg_catalog.lower(<value>)` lowers, under casts and a scalar subquery, and
 /// the casts around the call, outermost first.
-pub(super) fn lowered_value(expr: &Expr) -> Option<(CastChain, &Expr)> {
+pub(crate) fn lowered_value(expr: &Expr) -> Option<(CastChain, &Expr)> {
     let (mut casts, peeled) = CastChain::peeled(expr);
     let (inner_casts, argument) = match peeled {
         Expr::Subquery(query) => lowered_value(sole_projection(query)?)?,
@@ -1100,7 +1160,9 @@ pub(super) fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> O
 }
 
 /// The `current_setting` key a node reads, written inline or as a call to a function
-/// whose whole body reads it, and whether that body wraps the read in `NULLIF(_, '')`.
+/// whose whole body reads it, and whether that body wraps the read in `NULLIF(_, '')`. A
+/// function applying a normalization to the read returns another value than the
+/// setting's, which [`normalized_accessor_read`] reads.
 fn setting_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<(String, bool)> {
     if let Some(key) = current_setting_literal_key(root) {
         return Some((key, false));
@@ -1109,7 +1171,11 @@ fn setting_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<(String, 
         return None;
     };
     match registry.get(&function.name.to_string())? {
-        FunctionSemantic::SettingReader { key, skips_empty } => Some((key.clone(), *skips_empty)),
+        FunctionSemantic::SettingReader {
+            key,
+            skips_empty,
+            normalization: None,
+        } => Some((key.clone(), *skips_empty)),
         _ => None,
     }
 }
@@ -2061,19 +2127,70 @@ mod tests {
     }
 
     /// A registry reading `app.mode` for a request that may leave it unset, with an
-    /// accessor whose body returns the read through `NULLIF` and one returning it bare.
+    /// accessor whose body returns the read through `NULLIF` and one returning it bare,
+    /// and one returning `lower` of each.
     fn accessor_registry(mode: SessionSetting) -> FunctionRegistry {
         let mut registry = registry([mode]);
-        for (name, skips_empty) in [("app.wrapped_mode", true), ("app.bare_mode", false)] {
+        for (name, skips_empty, normalization) in [
+            ("app.wrapped_mode", true, None),
+            ("app.bare_mode", false, None),
+            ("app.lowered_mode", true, Some(RequestNormalization::Lower)),
+            (
+                "app.lowered_bare_mode",
+                false,
+                Some(RequestNormalization::Lower),
+            ),
+        ] {
             registry.register_if_absent(
                 name,
                 &FunctionSemantic::SettingReader {
                     key: "app.mode".to_string(),
                     skips_empty,
+                    normalization,
                 },
             );
         }
         registry
+    }
+
+    /// A call to an accessor whose body returns `lower` of a read is that lowered read,
+    /// bare, inside a scalar subquery and under a cast that renames nothing, compared with
+    /// a row value or a constant. A cast renaming what the call returns, `lower` of the
+    /// call, and a test of the call for `NULL` stay refused as they are inline, and so
+    /// does the wrapped call on a value every request sets.
+    #[test]
+    fn a_call_to_an_accessor_returning_a_lowered_read_is_that_lowered_read() {
+        let unset = accessor_registry(scalar("app.mode").may_be_unset());
+        let read = |clause: &str, registry: &FunctionRegistry| {
+            recognize_session_attribute(&parse_expr(clause), registry).map(|c| c.pattern)
+        };
+        for (call, inline) in [
+            (
+                "mode = (SELECT app.lowered_mode())",
+                "mode = lower(NULLIF(current_setting('app.mode', true), ''))",
+            ),
+            (
+                "app.lowered_bare_mode() = mode",
+                "lower(current_setting('app.mode', true)) = mode",
+            ),
+            (
+                "app.lowered_mode()::text = 'main'",
+                "lower(NULLIF(current_setting('app.mode', true), '')) = 'main'",
+            ),
+        ] {
+            let expected = read(inline, &unset);
+            assert!(expected.is_some(), "`{inline}` reads");
+            assert_eq!(read(call, &unset), expected, "`{call}` reads as `{inline}`");
+        }
+        let always = accessor_registry(scalar("app.mode"));
+        for (clause, registry) in [
+            ("mode = lower(app.lowered_mode())", &unset),
+            ("id = app.lowered_mode()::uuid", &unset),
+            ("app.lowered_mode() IS NULL", &unset),
+            ("mode = app.lowered_mode()", &always),
+        ] {
+            assert!(read(clause, registry).is_none(), "`{clause}` stays refused");
+        }
     }
 
     /// A call to an accessor whose body returns `NULLIF(<read>, '')` is that read, so it
@@ -2156,6 +2273,11 @@ mod tests {
                 "Setting 'app.mode' is declared set by every request",
             ),
             (
+                "mode = (SELECT app.lowered_mode())",
+                &always,
+                "Setting 'app.mode' is declared set by every request",
+            ),
+            (
                 "owner = NULLIF(current_setting('app.user_id', true), '')",
                 &always_caller,
                 "Setting 'app.user_id' is declared set by every request",
@@ -2171,6 +2293,7 @@ mod tests {
         let unset = accessor_registry(scalar("app.mode").may_be_unset());
         for (clause, registry) in [
             ("mode = (SELECT app.wrapped_mode())", &unset),
+            ("mode = (SELECT app.lowered_mode())", &unset),
             (
                 "mode = NULLIF(current_setting('app.other', true), '')",
                 &unset,

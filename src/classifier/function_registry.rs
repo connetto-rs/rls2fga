@@ -6,7 +6,7 @@ use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
     body_role_keyword, body_setting_fallback, body_setting_read, body_single_projection,
-    normalize_setting_key, renamed_caller_body, FunctionSemantic,
+    normalize_setting_key, renamed_caller_body, BodySettingRead, FunctionSemantic,
 };
 use crate::parser::names::{resolve_table_id, stored_relation_name, RoleKeyword};
 use crate::parser::sql_parser::{
@@ -768,8 +768,9 @@ impl FunctionRegistry {
     }
 
     /// Read a body that is no role keyword. A wrapper around one declared setting, bare or
-    /// through `NULLIF(_, '')`, is that read, a body reading the caller through a cast
-    /// that can rename it is noted with the reason, and any other `LANGUAGE sql` body is
+    /// through `NULLIF(_, '')`, either way optionally under a normalization the
+    /// deployment can carry, is that read, a body reading the caller through a cast that
+    /// can rename it is noted with the reason, and any other `LANGUAGE sql` body is
     /// recorded as read by nothing. A built-in arrives with an empty body, since the
     /// server provides it, so it is never recorded.
     fn read_setting_body(
@@ -782,31 +783,9 @@ impl FunctionRegistry {
     ) {
         // A wrapper around a declared source is that read, so the inline and the wrapped
         // spelling reach one declaration and cannot disagree.
-        if let Some((key, skips_empty)) = body_setting_read(body)
-            .map(|read| {
-                (
-                    normalize_setting_key(&read.key),
-                    read.casts.without_json_parse(),
-                    read.skips_empty,
-                )
-            })
-            .filter(|(key, casts, _)| {
-                self.sources.declares_key(key)
-                    && casts
-                        .renaming(
-                            self.sources
-                                .get(key, &[])
-                                .map(DeclaredSource::canonical_type)
-                                .as_deref(),
-                        )
-                        .is_none()
-            })
-            .map(|(key, _, skips_empty)| (key, skips_empty))
+        if let Some(semantic) = body_setting_read(body).and_then(|read| self.declared_reader(read))
         {
-            self.register_target_if_absent(
-                target,
-                &FunctionSemantic::SettingReader { key, skips_empty },
-            );
+            self.register_target_if_absent(target, &semantic);
         } else if let Some(sources) = body_setting_fallback(body, &self.sources) {
             self.register_target_if_absent(target, &FunctionSemantic::SettingFallback { sources });
         } else if let Some(reason) = renamed_caller_body(body, return_type, language, &self.sources)
@@ -815,6 +794,39 @@ impl FunctionRegistry {
         } else if language == "sql" && !body.trim().is_empty() {
             self.unread_bodies.insert(target_key);
         }
+    }
+
+    /// The reader `read` is, where it reads a declared setting through casts that rename
+    /// nothing and, where it is normalized, one single value whose normalized value the
+    /// caller can send under a key of its own, through casts around the call that rename
+    /// nothing either.
+    fn declared_reader(&self, read: BodySettingRead) -> Option<FunctionSemantic> {
+        let key = normalize_setting_key(&read.key);
+        let whole = self.sources.get(&key, &[]);
+        if !self.sources.declares_key(&key)
+            || read
+                .casts
+                .without_json_parse()
+                .renaming(whole.map(DeclaredSource::canonical_type).as_deref())
+                .is_some()
+        {
+            return None;
+        }
+        let normalization = match read.normalization {
+            None => None,
+            Some((normalization, casts)) => {
+                let normalized = self.sources.normalized(whole?, normalization)?;
+                if casts.renaming(Some(&normalized.canonical_type())).is_some() {
+                    return None;
+                }
+                Some(normalization)
+            }
+        };
+        Some(FunctionSemantic::SettingReader {
+            key,
+            skips_empty: read.skips_empty,
+            normalization,
+        })
     }
 
     /// Read `db` for `deployment` by adopting the sources it declares and then inferring
@@ -924,7 +936,7 @@ impl Default for FunctionRegistry {
 mod tests {
     use super::*;
     use crate::parser::sql_parser::parse_schema;
-    use crate::test_support::{caller, caller_deployment, deployment, sources};
+    use crate::test_support::{caller, caller_deployment, deployment, scalar, sources};
 
     #[test]
     fn load_from_json_reports_invalid_payload() {
@@ -1152,5 +1164,67 @@ CREATE FUNCTION plpgsql_user_id() RETURNS UUID
             !registry.is_current_user_accessor("plpgsql_user_id"),
             "a plpgsql function must not be inferred as a current-user accessor"
         );
+    }
+
+    /// A body lowering a read of a declared single value is that lowered read, bare or
+    /// through `NULLIF`. A body lowering the caller, lowering under a cast that renames
+    /// the value or its lowered result, lowering a value whose key a declared setting
+    /// takes, or applying another function is read by nothing.
+    #[test]
+    fn a_body_lowering_a_declared_value_is_that_lowered_read() {
+        let sql = r"
+CREATE FUNCTION wrapped() RETURNS TEXT LANGUAGE sql STABLE
+  AS $$ SELECT lower(NULLIF(current_setting('app.email', true), '')) $$;
+CREATE FUNCTION bare() RETURNS TEXT LANGUAGE sql STABLE
+  AS $$ SELECT pg_catalog.lower(current_setting('app.email', true)::text)::text $$;
+CREATE FUNCTION caller_lowered() RETURNS TEXT LANGUAGE sql STABLE
+  AS $$ SELECT lower(current_setting('app.user_id', true)) $$;
+CREATE FUNCTION renamed_inside() RETURNS TEXT LANGUAGE sql STABLE
+  AS $$ SELECT lower(current_setting('app.email', true)::integer::text) $$;
+CREATE FUNCTION renamed_outside() RETURNS INTEGER LANGUAGE sql STABLE
+  AS $$ SELECT lower(current_setting('app.email', true))::integer $$;
+CREATE FUNCTION key_taken() RETURNS TEXT LANGUAGE sql STABLE
+  AS $$ SELECT lower(current_setting('app.alias', true)) $$;
+CREATE FUNCTION shouted() RETURNS TEXT LANGUAGE sql STABLE
+  AS $$ SELECT upper(current_setting('app.email', true)) $$;
+";
+        let db = parse_schema(sql).expect("schema should parse");
+        let mut registry = FunctionRegistry::new();
+        registry.enrich_from_schema(
+            &db,
+            &deployment([
+                scalar("app.email").may_be_unset(),
+                scalar("app.alias"),
+                scalar("app.alias_lower"),
+                caller("app.user_id"),
+            ]),
+        );
+        for (name, wraps) in [("wrapped", true), ("bare", false)] {
+            assert!(
+                matches!(
+                    registry.get(name),
+                    Some(FunctionSemantic::SettingReader {
+                        key,
+                        skips_empty,
+                        normalization: Some(RequestNormalization::Lower),
+                    }) if key == "app.email" && *skips_empty == wraps
+                ),
+                "{name}: {:?}",
+                registry.get(name)
+            );
+        }
+        for name in [
+            "caller_lowered",
+            "renamed_inside",
+            "renamed_outside",
+            "key_taken",
+            "shouted",
+        ] {
+            assert!(
+                registry.has_unread_body(name),
+                "{name}: {:?}",
+                registry.get(name)
+            );
+        }
     }
 }
