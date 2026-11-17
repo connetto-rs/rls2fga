@@ -555,9 +555,7 @@ pub(crate) fn refused_absence_tests(expr: &Expr, registry: &FunctionRegistry) ->
 /// Why testing `tested` for `NULL` has no translation, or `None` when it is no declared
 /// single value or [`absence_test`] reads it.
 fn absence_refusal(tested: &Expr, registry: &FunctionRegistry) -> Option<String> {
-    if let Some((casts, wrapped)) = emptied_value(tested) {
-        let AccessorRead { root, path, .. } = accessor_read(wrapped)?;
-        let key = setting_key_read_by(root, registry)?;
+    if let Some(EmptiedRead { key, path, casts }) = emptied_setting_read(tested, registry) {
         let source = registry
             .declared_source(&key, &path)
             .filter(|source| source.is_scalar())?;
@@ -598,6 +596,48 @@ fn absence_refusal(tested: &Expr, registry: &FunctionRegistry) -> Option<String>
              no state the request can be in"
         )
     })
+}
+
+/// Why every read of a declared single value through `NULLIF(<read>, '')` in `expr`,
+/// inline or through an accessor whose body is the wrap, is not the value the request
+/// sends, where the wrap hides a `''` the request may send.
+///
+/// Answers for diagnosis, after recognition failed.
+pub(crate) fn refused_emptied_reads(expr: &Expr, registry: &FunctionRegistry) -> Vec<String> {
+    let mut reasons: Vec<String> = Vec::new();
+    let _ = sqlparser::ast::visit_expressions(expr, |node| {
+        if let Some(reason) = emptied_read_refusal(node, registry) {
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+        }
+        core::ops::ControlFlow::<()>::Continue(())
+    });
+    reasons
+}
+
+/// Why `expr`, a read through `NULLIF(<read>, '')`, is not the value the request sends,
+/// or `None` when it is no such read of a declared single value or the request never
+/// sends the `''` the wrap hides.
+fn emptied_read_refusal(expr: &Expr, registry: &FunctionRegistry) -> Option<String> {
+    let EmptiedRead { key, path, .. } = emptied_setting_read(expr, registry)?;
+    let source = registry
+        .declared_source(&key, &path)
+        .filter(|source| source.is_scalar() || source.is_caller())?;
+    if !path.is_empty() {
+        Some(format!(
+            "NULLIF hides a field of setting '{key}' holding '', which a request may carry, \
+             so the wrapped field is not the value the request sends"
+        ))
+    } else if !source.may_be_unset() {
+        Some(format!(
+            "Setting '{key}' is declared set by every request, which may set it to '', and \
+             NULLIF reads that value as NULL, so the wrapped read is not the value the \
+             request sends"
+        ))
+    } else {
+        None
+    }
 }
 
 /// What the declared value is being compared against.
@@ -976,7 +1016,8 @@ pub(super) fn bare_declared_read<'r>(
 }
 
 /// `NULLIF(<read of a whole declared single value>, '')`, of a setting a request may
-/// leave unset, and the casts around and inside the wrap, outermost first.
+/// leave unset, and the casts around and inside the wrap, outermost first, written inline
+/// or as a call to an accessor whose whole body is the wrap.
 ///
 /// `PostgreSQL` reads such a setting as `NULL` on a fresh connection and as `''` once a
 /// transaction-local value has ended, and the wrap reads both as `NULL`. A request
@@ -989,21 +1030,47 @@ pub(super) fn nullif_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<(&'r DeclaredSource, CastChain)> {
-    let (mut casts, wrapped) = emptied_value(expr)?;
-    let AccessorRead {
-        root,
-        path,
-        casts: inner,
-    } = accessor_read(wrapped)?;
+    let EmptiedRead { key, path, casts } = emptied_setting_read(expr, registry)?;
     if !path.is_empty() {
         return None;
     }
-    let key = setting_key_read_by(root, registry)?;
     let source = registry
         .declared_source(&key, &[])
         .filter(|source| source.is_scalar() && source.may_be_unset())?;
-    casts.extend(inner);
     Some((source, casts))
+}
+
+/// A setting read through `NULLIF(_, '')`.
+struct EmptiedRead {
+    /// The `current_setting` key the wrap reads.
+    key: String,
+    /// The field path taken out of that key's value.
+    path: Vec<String>,
+    /// Every cast around and inside the wrap, outermost first.
+    casts: CastChain,
+}
+
+/// The setting `expr` reads through `NULLIF(<read>, '')`, written inline or as a call to
+/// an accessor whose whole body is the wrap.
+fn emptied_setting_read(expr: &Expr, registry: &FunctionRegistry) -> Option<EmptiedRead> {
+    if let Some((mut casts, wrapped)) = emptied_value(expr) {
+        let AccessorRead {
+            root,
+            path,
+            casts: inner,
+        } = accessor_read(wrapped)?;
+        casts.extend(inner);
+        return Some(EmptiedRead {
+            key: setting_key_read_by(root, registry)?,
+            path,
+            casts,
+        });
+    }
+    let AccessorRead { root, path, casts } = accessor_read(expr)?;
+    let (key, true) = setting_read_by(root, registry)? else {
+        return None;
+    };
+    Some(EmptiedRead { key, path, casts })
 }
 
 /// The value `NULLIF(<value>, '')` wraps, under casts and a scalar subquery, and the
@@ -1022,17 +1089,27 @@ fn emptied_value(expr: &Expr) -> Option<(CastChain, &Expr)> {
     Some((casts, wrapped))
 }
 
-/// The `current_setting` key a node names, written inline or wrapped in a function whose
-/// whole body reads it. Both spellings reach one declaration, so they cannot disagree.
+/// The `current_setting` key a node reads bare, written inline or as a call to a function
+/// whose whole body is that read. Both spellings reach one declaration, so they cannot
+/// disagree.
 pub(super) fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<String> {
+    let (key, false) = setting_read_by(root, registry)? else {
+        return None;
+    };
+    Some(key)
+}
+
+/// The `current_setting` key a node reads, written inline or as a call to a function
+/// whose whole body reads it, and whether that body wraps the read in `NULLIF(_, '')`.
+fn setting_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<(String, bool)> {
     if let Some(key) = current_setting_literal_key(root) {
-        return Some(key);
+        return Some((key, false));
     }
     let Expr::Function(function) = root else {
         return None;
     };
     match registry.get(&function.name.to_string())? {
-        FunctionSemantic::SettingReader { key } => Some(key.clone()),
+        FunctionSemantic::SettingReader { key, skips_empty } => Some((key.clone(), *skips_empty)),
         _ => None,
     }
 }
@@ -1896,16 +1973,7 @@ mod tests {
                 "declared set by every request",
             ),
         ] {
-            let expr = parse_expr(clause);
-            assert!(
-                recognize_session_attribute(&expr, registry).is_none(),
-                "`{clause}` stays refused"
-            );
-            let reasons = refused_absence_tests(&expr, registry);
-            assert!(
-                reasons.len() == 1 && reasons[0].contains(reason),
-                "`{clause}` names why: {reasons:?}"
-            );
+            assert_refused_naming(clause, registry, refused_absence_tests, reason);
         }
         assert_eq!(
             refused_absence_tests(
@@ -1990,5 +2058,149 @@ mod tests {
                 "`{clause}` stays refused"
             );
         }
+    }
+
+    /// A registry reading `app.mode` for a request that may leave it unset, with an
+    /// accessor whose body returns the read through `NULLIF` and one returning it bare.
+    fn accessor_registry(mode: SessionSetting) -> FunctionRegistry {
+        let mut registry = registry([mode]);
+        for (name, skips_empty) in [("app.wrapped_mode", true), ("app.bare_mode", false)] {
+            registry.register_if_absent(
+                name,
+                &FunctionSemantic::SettingReader {
+                    key: "app.mode".to_string(),
+                    skips_empty,
+                },
+            );
+        }
+        registry
+    }
+
+    /// A call to an accessor whose body returns `NULLIF(<read>, '')` is that read, so it
+    /// reads as the value the request carries and its absence test as the request
+    /// omitting it. The bare accessor keeps the bare read's refusal, and on a setting
+    /// every request sets the wrapped one keeps the inline wrap's refusal.
+    #[test]
+    fn a_call_to_an_accessor_returning_a_nullif_read_is_that_read() {
+        let unset = accessor_registry(scalar("app.mode").may_be_unset());
+        let read = |clause: &str| {
+            recognize_session_attribute(&parse_expr(clause), &unset).map(|c| c.pattern)
+        };
+        assert_eq!(
+            read("(SELECT app.wrapped_mode()) = 'main'"),
+            Some(PatternClass::P17CallerScalarEqualsConstant(
+                CallerScalarEqualsConstant {
+                    value: "main".to_string(),
+                    source: unset_mode_source(),
+                }
+            ))
+        );
+        assert_eq!(
+            read("app.wrapped_mode()::text IS NULL"),
+            Some(PatternClass::P28RequestValueAbsent(RequestValueAbsent {
+                source: unset_mode_source(),
+                negated: false,
+            }))
+        );
+        let always = accessor_registry(scalar("app.mode"));
+        for (clause, registry, reason) in [
+            (
+                "app.bare_mode() IS NULL",
+                &unset,
+                "Test NULLIF(current_setting('app.mode', true), '') instead",
+            ),
+            (
+                "app.wrapped_mode()::integer IS NULL",
+                &unset,
+                "through a cast to integer",
+            ),
+            (
+                "app.wrapped_mode() IS NULL",
+                &always,
+                "declared set by every request",
+            ),
+        ] {
+            assert_refused_naming(clause, registry, refused_absence_tests, reason);
+        }
+        assert!(
+            recognize_session_attribute(&parse_expr("app.wrapped_mode() = 'main'"), &always)
+                .is_none(),
+            "a value every request sets may be '', which the wrap hides"
+        );
+    }
+
+    /// A wrapped read of a value every request sets, or of a field, hides a `''` the
+    /// request may send, so each is named once however often the clause repeats it,
+    /// inline or through an accessor, the caller among them. A wrapped read the request
+    /// answers, and a setting the deployment does not declare, name nothing.
+    #[test]
+    fn a_nullif_read_hiding_a_value_the_request_sends_names_why() {
+        let always = accessor_registry(scalar("app.mode"));
+        let field = registry([json_field(
+            "request.jwt.claims",
+            &["mode"],
+            SettingValue::Scalar(DataType::Text),
+        )
+        .may_be_unset()]);
+        let always_caller = registry([caller("app.user_id")]);
+        for (clause, registry, reason) in [
+            (
+                "mode = NULLIF(current_setting('app.mode', true), '') \
+                 OR mode = NULLIF(current_setting('app.mode', true), '')::text",
+                &always,
+                "Setting 'app.mode' is declared set by every request",
+            ),
+            (
+                "mode = (SELECT app.wrapped_mode())",
+                &always,
+                "Setting 'app.mode' is declared set by every request",
+            ),
+            (
+                "owner = NULLIF(current_setting('app.user_id', true), '')",
+                &always_caller,
+                "Setting 'app.user_id' is declared set by every request",
+            ),
+            (
+                "mode = NULLIF(current_setting('request.jwt.claims', true)::jsonb ->> 'mode', '')",
+                &field,
+                "NULLIF hides a field of setting 'request.jwt.claims'",
+            ),
+        ] {
+            assert_refused_naming(clause, registry, refused_emptied_reads, reason);
+        }
+        let unset = accessor_registry(scalar("app.mode").may_be_unset());
+        for (clause, registry) in [
+            ("mode = (SELECT app.wrapped_mode())", &unset),
+            (
+                "mode = NULLIF(current_setting('app.other', true), '')",
+                &unset,
+            ),
+        ] {
+            assert_eq!(
+                refused_emptied_reads(&parse_expr(clause), registry),
+                Vec::<String>::new(),
+                "`{clause}` names nothing"
+            );
+        }
+    }
+
+    /// Asserts that `clause` stays unrecognized and that `diagnose` names exactly one
+    /// reason, which contains `reason`.
+    fn assert_refused_naming(
+        clause: &str,
+        registry: &FunctionRegistry,
+        diagnose: fn(&Expr, &FunctionRegistry) -> Vec<String>,
+        reason: &str,
+    ) {
+        let expr = parse_expr(clause);
+        assert!(
+            recognize_session_attribute(&expr, registry).is_none(),
+            "`{clause}` stays refused"
+        );
+        let reasons = diagnose(&expr, registry);
+        assert!(
+            reasons.len() == 1 && reasons[0].contains(reason),
+            "`{clause}` names why: {reasons:?}"
+        );
     }
 }

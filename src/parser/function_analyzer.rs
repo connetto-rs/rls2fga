@@ -97,6 +97,10 @@ pub enum FunctionSemantic {
     SettingReader {
         /// The key the body reads.
         key: String,
+        /// True where the body wraps the whole read in `NULLIF(_, '')`, so calling it is
+        /// that wrapped read.
+        #[serde(default)]
+        skips_empty: bool,
     },
 
     /// A function whose whole body is a `COALESCE` of declared sources, so calling it
@@ -356,16 +360,36 @@ struct BodyCallerRead {
     renaming: Option<String>,
 }
 
-/// The caller a body expression reads, a setting the deployment declares as the caller.
-/// A role keyword names a role, never the caller.
+/// The caller a body expression reads, a setting the deployment declares as the caller,
+/// bare or wrapped in `NULLIF(_, '')` where a request may leave it unset. Such a request
+/// never sends `''`, so the wrap turns only the unset readings into `NULL`, while on a
+/// caller every request sets `''` is a caller the wrap would hide. A role keyword names a
+/// role, never the caller.
 fn body_caller_read(expr: &Expr, sources: &DeclaredSources) -> Option<BodyCallerRead> {
-    let (casts, peeled) = CastChain::peeled(expr);
-    let key = current_setting_literal_key(peeled)?;
-    let declared = sources.caller(&key, &[])?.canonical_type();
+    let (casts, read, skips_empty) = emptied_read(expr)?;
+    let key = current_setting_literal_key(read)?;
+    let declared = sources
+        .caller(&key, &[])
+        .filter(|source| !skips_empty || source.may_be_unset())?
+        .canonical_type();
     Some(BodyCallerRead {
         renaming: casts.renaming(Some(&declared)).map(str::to_string),
         key,
     })
+}
+
+/// The read under `expr`'s casts, seen through `NULLIF(<read>, '')`, with every cast
+/// around and inside the wrap, outermost first, and whether the wrap is there.
+fn emptied_read(expr: &Expr) -> Option<(CastChain, &Expr, bool)> {
+    let (mut casts, peeled) = CastChain::peeled(expr);
+    match peeled {
+        Expr::Function(function) if empty_sentinel_nullif(function) => {
+            let (inner, read) = CastChain::peeled(positional_function_arg(function, 0)?);
+            casts.extend(inner);
+            Some((casts, read, true))
+        }
+        _ => Some((casts, peeled, false)),
+    }
 }
 
 /// The role keyword a whole body returns, when the body is nothing but that keyword and
@@ -455,12 +479,26 @@ fn body_caller_read_of(
     body_caller_read(&body_single_projection(body)?, sources)
 }
 
-/// The `current_setting` key a whole body reads and the casts around that read, so a call
-/// to the function is a call to that key.
-pub(crate) fn body_setting_key(body: &str) -> Option<(String, CastChain)> {
+/// The `current_setting` read a whole body returns.
+pub(crate) struct BodySettingRead {
+    /// The key the body reads.
+    pub(crate) key: String,
+    /// Every cast around and inside the read, outermost first.
+    pub(crate) casts: CastChain,
+    /// True where the body wraps the read in `NULLIF(_, '')`.
+    pub(crate) skips_empty: bool,
+}
+
+/// The `current_setting` read a whole body returns, bare or wrapped in `NULLIF(_, '')`,
+/// so a call to the function is that read.
+pub(crate) fn body_setting_read(body: &str) -> Option<BodySettingRead> {
     let expr = body_single_projection(body)?;
-    let (casts, peeled) = CastChain::peeled(&expr);
-    Some((current_setting_literal_key(peeled)?, casts))
+    let (casts, read, skips_empty) = emptied_read(&expr)?;
+    Some(BodySettingRead {
+        key: current_setting_literal_key(read)?,
+        casts,
+        skips_empty,
+    })
 }
 
 /// One source of a fallback body read.
@@ -944,6 +982,57 @@ mod tests {
         )
         .is_some());
         assert!(analyze("SELECT current_user::uuid", DataType::Text).is_none());
+    }
+
+    /// `NULLIF(<caller read>, '')` of a caller a request may leave unset reads both unset
+    /// readings as `NULL`, and a request carrying a caller never sends `''`, so a body
+    /// returning it is the accessor the bare read is, its casts proven the same way. On a
+    /// caller every request sets `''` is a caller the wrap would hide, and a wrap against
+    /// another value changes the caller, so neither is an accessor.
+    #[test]
+    fn a_body_reading_the_caller_through_nullif_is_an_accessor() {
+        let analyze = |body: &str, declared: DataType| {
+            FunctionSemantic::analyze_body_with_sources(
+                body,
+                "UUID",
+                "sql",
+                &sources([typed_caller("app.user_id", declared).may_be_unset()]),
+            )
+        };
+        let wrapped = "SELECT NULLIF(current_setting('app.user_id', true), '')::uuid";
+        assert!(matches!(
+            analyze(wrapped, DataType::Uuid),
+            Some(FunctionSemantic::CurrentUserAccessor { ref returns }) if returns == "uuid"
+        ));
+        assert!(
+            FunctionSemantic::analyze_body_with_sources(
+                wrapped,
+                "UUID",
+                "sql",
+                &sources([typed_caller("app.user_id", DataType::Uuid)]),
+            )
+            .is_none(),
+            "a caller every request sets may be ''"
+        );
+        assert!(
+            analyze(wrapped, DataType::Text).is_none(),
+            "a cast the declaration does not prove renames the caller"
+        );
+        assert!(analyze(
+            "SELECT NULLIF(current_setting('app.user_id', true)::text, '')::uuid",
+            DataType::Uuid
+        )
+        .is_some());
+        assert!(analyze(
+            "SELECT NULLIF(current_setting('app.user_id', true)::integer::text, '')::uuid",
+            DataType::Uuid
+        )
+        .is_none());
+        assert!(analyze(
+            "SELECT NULLIF(current_setting('app.user_id', true), 'none')::uuid",
+            DataType::Uuid
+        )
+        .is_none());
     }
 
     /// A role keyword names the role a request acts as, which every request of a

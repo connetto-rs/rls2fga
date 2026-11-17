@@ -2660,6 +2660,65 @@ fn current_user_expr_detection_supports_identity_casts_and_nested() {
     assert!(!is_current_user_expr(&other, &accessor_registry));
 }
 
+/// `NULLIF(<caller read>, '')` of a caller a request may leave unset reads both unset
+/// readings as `NULL`, and a request carrying a caller never sends `''`, so the wrapped
+/// read is the caller wherever the bare one is, its casts proven the same way. On a
+/// caller every request sets `''` is a caller the wrap would hide, and a wrap against
+/// another value or around a field changes the caller, so none of them is the caller.
+#[test]
+fn a_caller_read_through_nullif_is_the_caller() {
+    use crate::parser::sql_parser::SettingValue;
+    use crate::test_support::{json_field, typed_caller};
+    use sqlparser::ast::DataType;
+
+    let unset = registry([typed_caller("app.user_id", DataType::Uuid).may_be_unset()]);
+    for (clause, reads) in [
+        ("NULLIF(current_setting('app.user_id', true), '')", true),
+        (
+            "NULLIF(current_setting('app.user_id', true), '')::uuid",
+            true,
+        ),
+        (
+            "(SELECT NULLIF(current_setting('app.user_id', true)::text, '')::uuid)",
+            true,
+        ),
+        (
+            "NULLIF(current_setting('app.user_id', true), '')::integer",
+            false,
+        ),
+        (
+            "NULLIF(current_setting('app.user_id', true)::integer::text, '')",
+            false,
+        ),
+        (
+            "NULLIF(current_setting('app.user_id', true), 'none')",
+            false,
+        ),
+        ("NULLIF(current_setting('app.tenant_id', true), '')", false),
+    ] {
+        assert_eq!(
+            is_current_user_expr(&parse_expr(clause), &unset),
+            reads,
+            "{clause}"
+        );
+    }
+    let always = registry([typed_caller("app.user_id", DataType::Uuid)]);
+    assert!(!is_current_user_expr(
+        &parse_expr("NULLIF(current_setting('app.user_id', true), '')"),
+        &always
+    ));
+    let field = registry([json_field(
+        "request.jwt.claims",
+        &["sub"],
+        SettingValue::Caller(DataType::Text),
+    )
+    .may_be_unset()]);
+    assert!(!is_current_user_expr(
+        &parse_expr("NULLIF(current_setting('request.jwt.claims', true)::jsonb ->> 'sub', '')"),
+        &field
+    ));
+}
+
 #[test]
 fn is_attribute_check_supports_literal_on_left_and_not_equal_operator() {
     let reverse_literal = parse_expr("3 <= priority");

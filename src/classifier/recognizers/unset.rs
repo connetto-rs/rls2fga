@@ -334,7 +334,8 @@ mod tests {
     }
 
     /// The caller compared with a row value matches the rows holding `''` when the empty
-    /// reading is in force, and only a setting a request may leave unset reaches it.
+    /// reading is in force, and only a setting a request may leave unset reaches it. A
+    /// read wrapped in `NULLIF` reads `''` as `NULL` and matches none.
     #[test]
     fn a_caller_that_may_be_unset_matches_rows_holding_the_empty_text() {
         let owner = "owner = current_setting('app.user_id', true)";
@@ -345,6 +346,14 @@ mod tests {
         assert!(
             settings_read(owner, vec![caller("app.user_id")]).is_empty(),
             "a setting every request sets has no empty reading"
+        );
+        assert!(
+            settings_read(
+                "owner = NULLIF(current_setting('app.user_id', true), '')",
+                vec![caller("app.user_id").may_be_unset()]
+            )
+            .is_empty(),
+            "the wrapped read has no empty reading"
         );
     }
 

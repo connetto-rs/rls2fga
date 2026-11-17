@@ -15,7 +15,7 @@ use sqlparser::ast::{BinaryOperator, Expr, InTarget};
 
 use super::session::{declared_read, set_read, sole_projection};
 use super::{
-    accessor_read, caller_renaming_cast, caller_source, comparison_renaming_cast,
+    caller_read_of, caller_renaming_cast, caller_source, comparison_renaming_cast,
     is_coalesce_wrapped, positional_function_arg, reads_the_caller,
 };
 use crate::classifier::function_registry::FunctionRegistry;
@@ -168,7 +168,7 @@ fn caller_read(
     registry: &FunctionRegistry,
 ) -> Option<RequestRead> {
     let renaming = caller_renaming_cast(caller, &outer, registry);
-    let read = accessor_read(caller)?;
+    let read = caller_read_of(caller, registry)?;
     let declarable = caller_source(&read, registry).map(|source| source.setting_key().to_string());
     outer.extend(read.casts);
     Some(RequestRead {

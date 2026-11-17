@@ -5,7 +5,7 @@ use alloc::collections::{BTreeMap, BTreeSet};
 use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
-    body_role_keyword, body_setting_fallback, body_setting_key, body_single_projection,
+    body_role_keyword, body_setting_fallback, body_setting_read, body_single_projection,
     normalize_setting_key, renamed_caller_body, FunctionSemantic,
 };
 use crate::parser::names::{resolve_table_id, stored_relation_name, RoleKeyword};
@@ -758,11 +758,11 @@ impl FunctionRegistry {
         self.deployment = Some(deployment.clone());
     }
 
-    /// Read a body that is no role keyword. A wrapper around one declared setting is that
-    /// setting, a body reading the caller through a cast that can rename it is noted with
-    /// the reason, and any other `LANGUAGE sql` body is recorded as read by nothing. A
-    /// built-in arrives with an empty body, since the server provides it, so it is never
-    /// recorded.
+    /// Read a body that is no role keyword. A wrapper around one declared setting, bare or
+    /// through `NULLIF(_, '')`, is that read, a body reading the caller through a cast
+    /// that can rename it is noted with the reason, and any other `LANGUAGE sql` body is
+    /// recorded as read by nothing. A built-in arrives with an empty body, since the
+    /// server provides it, so it is never recorded.
     fn read_setting_body(
         &mut self,
         target: &TargetName<'_>,
@@ -771,11 +771,17 @@ impl FunctionRegistry {
         return_type: &str,
         language: &str,
     ) {
-        // A wrapper around a declared source is that source, so the inline and the wrapped
+        // A wrapper around a declared source is that read, so the inline and the wrapped
         // spelling reach one declaration and cannot disagree.
-        if let Some(key) = body_setting_key(body)
-            .map(|(key, casts)| (normalize_setting_key(&key), casts.without_json_parse()))
-            .filter(|(key, casts)| {
+        if let Some((key, skips_empty)) = body_setting_read(body)
+            .map(|read| {
+                (
+                    normalize_setting_key(&read.key),
+                    read.casts.without_json_parse(),
+                    read.skips_empty,
+                )
+            })
+            .filter(|(key, casts, _)| {
                 self.sources.declares_key(key)
                     && casts
                         .renaming(
@@ -786,9 +792,12 @@ impl FunctionRegistry {
                         )
                         .is_none()
             })
-            .map(|(key, _)| key)
+            .map(|(key, _, skips_empty)| (key, skips_empty))
         {
-            self.register_target_if_absent(target, &FunctionSemantic::SettingReader { key });
+            self.register_target_if_absent(
+                target,
+                &FunctionSemantic::SettingReader { key, skips_empty },
+            );
         } else if let Some(sources) = body_setting_fallback(body, &self.sources) {
             self.register_target_if_absent(target, &FunctionSemantic::SettingFallback { sources });
         } else if let Some(reason) = renamed_caller_body(body, return_type, language, &self.sources)
