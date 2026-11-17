@@ -760,6 +760,61 @@ CREATE POLICY optional_read ON optional_tables FOR SELECT USING (
     );
 }
 
+/// Organizations whose key is also a grantee's, and a helper returning those the caller
+/// founded, compared with the organization each project belongs to and with the grantee
+/// each note is about.
+pub(crate) const FOUNDED: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE grantees (id TEXT PRIMARY KEY, kind TEXT NOT NULL, UNIQUE (id, kind));
+CREATE TABLE organizations (id TEXT PRIMARY KEY REFERENCES grantees (id), created_by_id TEXT NOT NULL);
+CREATE TABLE projects (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations (id));
+CREATE TABLE notes (id TEXT PRIMARY KEY, grantee_id TEXT NOT NULL REFERENCES grantees (id));
+GRANT SELECT ON grantees, organizations TO authz_owner;
+CREATE FUNCTION authz.founded_organizations() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT o.id FROM public.organizations o WHERE o.created_by_id = current_setting('app.user_id', true)
+$$;
+ALTER FUNCTION authz.founded_organizations() OWNER TO authz_owner;
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY projects_founded ON projects FOR SELECT USING (
+  organization_id = ANY (ARRAY(SELECT authz.founded_organizations())));
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_founded ON notes FOR SELECT USING (
+  grantee_id = ANY (ARRAY(SELECT authz.founded_organizations())));
+";
+
+/// [`FOUNDED`] with the organization's key referencing the grantee's through the pair
+/// of its key and its kind.
+pub(crate) fn founded_through_kind() -> String {
+    FOUNDED.replace(
+        "organizations (id TEXT PRIMARY KEY REFERENCES grantees (id),",
+        "organizations (id TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'organization',
+  FOREIGN KEY (id, kind) REFERENCES grantees (id, kind),",
+    )
+}
+
+/// A helper returning its table's own key returns that table's rows, whether or not the
+/// key also references a grantee's, so it holds on the organization a project names and
+/// on the grantee a note names.
+#[test]
+fn a_grant_arm_returning_its_own_key_returns_its_own_rows_through_any_reference() {
+    for schema in [FOUNDED.to_owned(), founded_through_kind()] {
+        let dsl = model(&schema, &["authz.founded_organizations"]);
+        assert_eq!(
+            relation_definition(&dsl, "projects", "can_select").as_deref(),
+            Some("founded_organizations from organizations and acting_app_user from request_gate"),
+            "{dsl}"
+        );
+        assert_eq!(
+            relation_definition(&dsl, "notes", "can_select").as_deref(),
+            Some("founded_organizations from grantees and acting_app_user from request_gate"),
+            "{dsl}"
+        );
+    }
+}
+
 /// R100's installations, whose `owner` may be a team or a project and references
 /// neither, administered through a helper reading it once per level.
 pub(crate) const INSTALLATIONS: &str = "
