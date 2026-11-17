@@ -214,28 +214,23 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
             literals,
             pairs,
         }) => {
-            let mut rendered = String::from("P30 ((");
-            for position in 0..columns.len() + literals.len() {
-                if position != 0 {
-                    rendered.push_str(", ");
-                }
-                if let Some((_, column)) = columns.iter().find(|(at, _)| *at == position) {
-                    rendered.push_str(column.as_str());
-                } else if let Some(value) = literals
-                    .iter()
-                    .find(|(at, _)| *at == position)
-                    .and_then(|(_, value)| render_attribute_literal(value))
-                {
-                    rendered.push_str(&value);
-                }
-            }
-            let _ = write!(
-                rendered,
-                ") in {}({}))",
+            let mut operands: Vec<(usize, String)> = columns
+                .iter()
+                .map(|(at, column)| (*at, column.as_str().to_string()))
+                .chain(
+                    literals
+                        .iter()
+                        .filter_map(|(at, value)| Some((*at, render_attribute_literal(value)?))),
+                )
+                .collect();
+            operands.sort_unstable_by_key(|(at, _)| *at);
+            let operands: Vec<String> = operands.into_iter().map(|(_, operand)| operand).collect();
+            format!(
+                "P30 (({}) in {}({}))",
+                operands.join(", "),
                 pairs.function,
                 pairs.arguments.join(", ")
-            );
-            rendered
+            )
         }
         PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet {
             source,
