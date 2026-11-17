@@ -65,7 +65,7 @@ pub use owner_expression::recognize_owner_expression;
 pub use session::recognize_session_attribute;
 pub(crate) use session::{
     caller_set, caller_set_in_subquery, lowered_value, refused_absence_tests,
-    refused_emptied_reads, row_valued_set, undeclared_set_reads,
+    refused_emptied_reads, row_valued_set, sole_projection, undeclared_set_reads,
 };
 pub(crate) use subquery::owner_key_of;
 pub(crate) use subquery::projected_select;

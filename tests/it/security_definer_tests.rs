@@ -3,8 +3,9 @@
 //! translates from the dump alone. Every guard refuses by falling closed.
 
 use rls2fga::classifier::patterns::{
-    ExistsMembership, ExpandedFunction, PatternClass, UnclassifiedExpr,
+    ClassifiedPolicy, ExistsMembership, ExpandedFunction, PatternClass, UnclassifiedExpr,
 };
+use rls2fga::parser::sql_parser::Deployment;
 use rls2fga::translator::{Translator, TranslatorBuilder};
 use rls2fga::types::ConfidenceLevel;
 use rls2fga::types::{NoteSeverity, TranslationNote};
@@ -1094,4 +1095,103 @@ CREATE POLICY docs_sel ON docs FOR SELECT USING (other.is_member(id));
         ),
         "the qualified call runs its own schema's body: {pattern:?}"
     );
+}
+
+/// A no-argument definer helper standing as the whole clause, the caller a request may
+/// leave unset.
+fn operator_events_schema(using: &str) -> String {
+    format!(
+        "
+CREATE ROLE app NOLOGIN;
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+CREATE TABLE operators (id UUID PRIMARY KEY);
+CREATE TABLE events (id BIGINT PRIMARY KEY, note TEXT);
+ALTER TABLE events ENABLE ROW LEVEL SECURITY;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.is_operator() RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.operators operator WHERE operator.id = authz.caller_id())
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.is_operator() OWNER TO authz_owner;
+GRANT SELECT ON operators TO authz_owner;
+GRANT SELECT ON events TO app;
+CREATE POLICY events_select ON events FOR SELECT TO app USING ({using});
+"
+    )
+}
+
+/// The one policy on `events`, classified.
+fn events_policy(using: &str) -> ClassifiedPolicy {
+    let db = db_of(&operator_events_schema(using));
+    let translator = TranslatorBuilder::new(
+        Deployment::new(
+            "app",
+            ["app"],
+            [typed_caller("app.user_id", DataType::Uuid).may_be_unset()],
+        )
+        .expect("a valid deployment"),
+    )
+    .build();
+    translator
+        .classify(&db)
+        .into_iter()
+        .find(|policy| policy.table_name() == "events")
+        .expect("events policy should classify")
+}
+
+/// `(SELECT helper())` returns the one value the call does, and is the spelling that has
+/// `PostgreSQL` run the helper once per statement, so it reads as the bare call.
+#[test]
+fn a_scalar_subquery_wrapping_a_definer_call_expands_as_the_bare_call() {
+    let bare_policy = events_policy("authz.is_operator()");
+    let bare = bare_policy
+        .using_classification()
+        .expect("USING should classify");
+    assert!(
+        matches!(
+            &bare.pattern,
+            PatternClass::ExpandedFunction(ExpandedFunction { inner, .. })
+                if matches!(&inner.pattern, PatternClass::P13UncorrelatedMembership(_))
+        ),
+        "the bare call expands to the membership its body tests, got {:?}",
+        bare.pattern
+    );
+    assert_eq!(bare.confidence, ConfidenceLevel::A);
+    for wrapped in [
+        "(SELECT authz.is_operator())",
+        "(SELECT authz.is_operator() AS operating)",
+        "(SELECT (authz.is_operator()))",
+    ] {
+        assert_eq!(
+            events_policy(wrapped).using_classification(),
+            Some(bare),
+            "{wrapped} returns exactly the value of the call inside it"
+        );
+    }
+}
+
+/// A wrapper that can return no row is `NULL`, which hides every row, so reading it as the
+/// call would grant operators what the policy refuses them.
+#[test]
+fn a_scalar_subquery_that_can_drop_its_row_is_not_the_call() {
+    for wrapped in [
+        "(SELECT authz.is_operator() WHERE false)",
+        "(SELECT authz.is_operator() LIMIT 0)",
+        "(SELECT authz.is_operator() FROM operators)",
+    ] {
+        let policy = events_policy(wrapped);
+        let pattern = &policy
+            .using_classification()
+            .expect("USING should classify")
+            .pattern;
+        assert!(
+            !matches!(pattern, PatternClass::ExpandedFunction(_)),
+            "{wrapped} can return no row, got {pattern:?}"
+        );
+    }
 }
