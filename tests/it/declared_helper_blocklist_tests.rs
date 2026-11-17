@@ -305,14 +305,14 @@ fn an_edge_table_returning_a_nullable_child_is_refused() {
     );
 }
 
-/// A walk up adds the parent column of every row it reaches, the `NULL` of a root
-/// included, so the parent column has to be proven `NOT NULL`.
-#[test]
-fn a_walk_up_to_a_nullable_parent_is_refused() {
-    let sql = format!(
+/// [`BLOCKS`] with units under one another, each owner reading their own, outside the
+/// units `authz.blocked_units` returns through `last`, its walk going up from the units
+/// blocking the caller.
+pub(crate) fn blocked_units(last: &str) -> String {
+    format!(
         "{BLOCKS}
          CREATE TABLE units (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES units (id),
-           owner_id TEXT NOT NULL);
+           owner_id TEXT NOT NULL, kind TEXT NOT NULL);
          CREATE TABLE unit_blocks (unit_id TEXT NOT NULL REFERENCES units (id),
            principal_id TEXT NOT NULL, PRIMARY KEY (unit_id, principal_id));
          GRANT SELECT ON units, unit_blocks TO authz_owner;
@@ -324,7 +324,7 @@ fn a_walk_up_to_a_nullable_parent_is_refused() {
              UNION
              SELECT u.parent_id FROM public.units u JOIN reached ON u.id = reached.id
            )
-           SELECT id FROM reached
+           {last}
          $$;
          ALTER FUNCTION authz.blocked_units() OWNER TO authz_owner;
          ALTER TABLE units ENABLE ROW LEVEL SECURITY;
@@ -332,11 +332,37 @@ fn a_walk_up_to_a_nullable_parent_is_refused() {
            USING (owner_id = current_setting('app.user_id', true));
          CREATE POLICY units_unblocked ON units AS RESTRICTIVE FOR SELECT
            USING (id NOT IN (SELECT authz.blocked_units()));"
-    );
+    )
+}
+
+/// A walk's final query returning the teams and projects it reached by their key.
+pub(crate) const UNITS_RESELECTED: &str = "SELECT u.id FROM public.units u \
+    WHERE u.id IN (SELECT id FROM reached) AND u.kind IN ('team', 'project')";
+
+/// A walk up adds the parent column of every row it reaches, the `NULL` of a root
+/// included, so the parent column has to be proven `NOT NULL`.
+#[test]
+fn a_walk_up_to_a_nullable_parent_is_refused() {
+    let sql = blocked_units("SELECT id FROM reached");
     let reason = refusal_of(&sql, &["authz.blocked_units"], "units_unblocked");
     assert!(
         reason.contains("units.parent_id") && reason.contains("provably non-null"),
         "{reason}"
+    );
+}
+
+/// A final query reselecting the units a walk up reached returns their keys, never the
+/// `NULL` above a root, so the units it returns are subtracted.
+#[test]
+fn a_walk_up_reselecting_its_units_by_key_subtracts_them() {
+    let dsl = crate::declared_helper_tests::model(
+        &blocked_units(UNITS_RESELECTED),
+        &["authz.blocked_units"],
+    );
+    assert_eq!(
+        relation_definition(&dsl, "units", "can_select").as_deref(),
+        Some("(owner but not blocked_units) and acting_app_user from request_gate"),
+        "{dsl}"
     );
 }
 

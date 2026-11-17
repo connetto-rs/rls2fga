@@ -9,7 +9,9 @@ use core::time::Duration;
 use rls2fga::types::ActionStatement;
 use sqlparser::ast::DataType;
 
-use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
+use crate::declared_helper_blocklist_tests::{
+    blocked_units, BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED, UNITS_RESELECTED,
+};
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, founded_through_kind, reselected_groups, GranteeArms,
@@ -576,6 +578,70 @@ async fn a_blocklist_through_a_declared_helper_agrees_with_postgres_17_and_18() 
             // No grant, and no caller at all, read nothing.
             expect("erin", "projects:P2", ActionStatement::Select, false);
             expect("anonymous", "projects:P2", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+/// `root`, an organization, holds the team `mid`, which holds the project `leaf`, and the
+/// team `other` stands alone. A block on `leaf` walks up to `root` and past it to the
+/// `NULL` above, and the final query keeps the teams and projects among them.
+fn blocked_units_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-blocked-units-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &blocked_units(UNITS_RESELECTED),
+        &[
+            "INSERT INTO units VALUES ('root', NULL, 'alice', 'organization'),
+               ('mid', 'root', 'bob', 'team'), ('leaf', 'mid', 'alice', 'project'),
+               ('other', NULL, 'alice', 'team');
+             INSERT INTO unit_blocks VALUES ('leaf', 'alice'), ('mid', 'bob')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON units TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(r#"{ "authz.blocked_units": { "kind": "declared_helper" } }"#);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_blocklist_reselecting_the_units_a_walk_up_reached_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = blocked_units_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            // A block hides the team or project and those above it, never an organization.
+            expect("alice", "units:leaf", false);
+            expect("alice", "units:root", true);
+            expect("alice", "units:other", true);
+            expect("bob", "units:mid", false);
+            expect("erin", "units:other", false);
+            expect("anonymous", "units:other", false);
             assert_agrees(&case, &run);
         }
     }

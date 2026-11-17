@@ -689,6 +689,7 @@ fn flag_union(flags: Vec<ClassifiedExpr>) -> ClassifiedExpr {
 /// has no tuple either, so it would hide nothing. So every column an arm returns has to
 /// be proven `NOT NULL`, a grant arm's object column, the child column of the edges a
 /// parent arm or a walk down reads, and the parent column of the edges a walk up reads.
+/// A walk whose final query reselects its rows returns what the reselecting arms return.
 fn excluded_helper<DB: DatabaseLike>(
     helper: DeclaredHelper,
     db: &DB,
@@ -711,6 +712,11 @@ fn excluded_helper<DB: DatabaseLike>(
 /// The first column an arm of `call`, or of a call it reads, returns without a proof it
 /// holds no `NULL`.
 fn nullable_projection<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<ExclusionError> {
+    if let Some(reselected) = &call.selection {
+        return reselected
+            .iter()
+            .find_map(|grant| unproven_projection(&grant.table, &grant.object_columns, db));
+    }
     for arm in &call.arms {
         let (returned_from, returned) = match arm {
             HelperSetArm::Grant(grant) => (&grant.table, grant.object_columns.as_slice()),
@@ -727,16 +733,26 @@ fn nullable_projection<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<E
                 None => continue,
             },
         };
-        for returned in returned {
-            if !column_proven_not_null(db, returned_from, returned.as_str()) {
-                return Some(ExclusionError::NullableProjection {
-                    table: returned_from.clone(),
-                    column: returned.clone(),
-                });
-            }
+        if let Some(refusal) = unproven_projection(returned_from, returned, db) {
+            return Some(refusal);
         }
     }
     None
+}
+
+/// The first of `returned` of `returned_from` without a proof it holds no `NULL`.
+fn unproven_projection<DB: DatabaseLike>(
+    returned_from: &TableId,
+    returned: &[ColumnName],
+    db: &DB,
+) -> Option<ExclusionError> {
+    returned
+        .iter()
+        .find(|returned| !column_proven_not_null(db, returned_from, returned.as_str()))
+        .map(|returned| ExclusionError::NullableProjection {
+            table: returned_from.clone(),
+            column: returned.clone(),
+        })
 }
 
 /// Accept only `P4`, excluding caller-set and parent-inheritance patterns.
