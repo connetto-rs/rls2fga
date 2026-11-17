@@ -12,9 +12,9 @@ use sqlparser::ast::DataType;
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
-    caller_and_audiences_only, GranteeArms, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING,
-    GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
-    REQUEST_VALUES, RESOURCES, SIGNED_IN,
+    caller_and_audiences_only, founded_through_kind, GranteeArms, ABSENT_INSTALLATION, AUDIENCES,
+    EDGE_FOLDERS, EXPIRING, FOUNDED, GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, LEVELS,
+    MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::row_cap_tests::{INSTALLATION_CAPS, POLICY_CAPS};
@@ -1630,6 +1630,86 @@ async fn contained_row_keys_agree_with_postgres_17_and_18() {
             expect("erin", "folders:f2", ActionStatement::Select, false);
             expect("anonymous", "folders:f2", ActionStatement::Select, false);
             assert_agrees(&case, &run);
+        }
+    }
+}
+
+const FOUNDED_HELPERS: &str = r#"{
+    "authz.founded_organizations": { "kind": "declared_helper" }
+}"#;
+
+/// `alice` founded `o1` and `bob` `o2`, each with a project, and a note on `o1` and one on
+/// `alice`. Where `through_kind`, the organization's key references the grantee's through
+/// the pair of its key and its kind.
+fn founded_case(major: &str, through_kind: bool, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-founded-pg{major}{}{}",
+            if through_kind { "-kind" } else { "" },
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &if through_kind {
+            founded_through_kind()
+        } else {
+            FOUNDED.to_owned()
+        },
+        &[
+            "INSERT INTO grantees VALUES ('alice', 'user'), ('bob', 'user'),
+               ('o1', 'organization'), ('o2', 'organization');
+             INSERT INTO organizations (id, created_by_id) VALUES ('o1', 'alice'), ('o2', 'bob');
+             INSERT INTO projects VALUES ('p1', 'o1'), ('p2', 'o2');
+             INSERT INTO notes VALUES ('n1', 'o1'), ('n2', 'alice')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON projects, notes TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(FOUNDED_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_helper_returning_its_own_key_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for through_kind in [false, true] {
+            for loading_from_rows in [false, true] {
+                let case = founded_case(major, through_kind, loading_from_rows);
+                let run =
+                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+                let expect = |subject: &str, object: &str, allowed| {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        object,
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                };
+                expect("alice", "projects:p1", true);
+                expect("alice", "projects:p2", false);
+                expect("bob", "projects:p2", true);
+                expect("erin", "projects:p1", false);
+                expect("anonymous", "projects:p1", false);
+                // The organization is a grantee, while its founder's own grantee is not
+                // an organization.
+                expect("alice", "notes:n1", true);
+                expect("alice", "notes:n2", false);
+                expect("bob", "notes:n1", false);
+                assert_agrees(&case, &run);
+            }
         }
     }
 }

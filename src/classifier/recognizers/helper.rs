@@ -1220,7 +1220,7 @@ fn helper_call<DB: DatabaseLike>(
             HelperArm::Grant(grant) => {
                 let column = granted_column(&name, grant)?;
                 (
-                    rows_named_by(grant.table(), column, db)?
+                    rows_returned_by(grant.table(), column, db)?
                         .ok_or_else(|| names_no_rows(grant.table(), column))?,
                     HelperSetArm::Grant(Box::new(helper_grant(
                         &name,
@@ -1259,6 +1259,20 @@ fn helper_call<DB: DatabaseLike>(
         level: level.clone(),
         arms,
     })
+}
+
+/// The table whose rows an arm returning `column` of `table` returns, `table` itself
+/// where `column` is its key, since a key referencing another table's makes each row
+/// one of that table's too, and else the rows [`rows_named_by`] reads.
+fn rows_returned_by<DB: DatabaseLike>(
+    table: &DB::Table,
+    column: &DB::Column,
+    db: &DB,
+) -> Result<Option<TableId>, HelperRefusal> {
+    match keyed_table(table, column, db) {
+        Some(own) => Ok(Some(own)),
+        None => rows_named_by(table, column, db),
+    }
 }
 
 /// Whether every key of `table` is a key of `level`, its one-column key referencing
@@ -1743,10 +1757,19 @@ fn rows_named_by<DB: DatabaseLike>(
     if referenced.is_some() {
         return Ok(referenced);
     }
+    Ok(keyed_table(table, column, db))
+}
+
+/// `table`, where `column` is its one key column.
+fn keyed_table<DB: DatabaseLike>(
+    table: &DB::Table,
+    column: &DB::Column,
+    db: &DB,
+) -> Option<TableId> {
     let own = table_identity(table);
     let is_key = single_identity_column(&own, db)
         .is_some_and(|key| key.as_str() == column.stored_column_name());
-    Ok(is_key.then_some(own))
+    is_key.then_some(own)
 }
 
 fn names_no_rows<T: TableLike, C: ColumnLike>(table: &T, column: &C) -> HelperRefusal {
