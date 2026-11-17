@@ -12,9 +12,10 @@ use sqlparser::ast::DataType;
 use crate::declared_helper_blocklist_tests::{BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED};
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_tests::{
-    caller_and_audiences_only, founded_through_kind, GranteeArms, ABSENT_INSTALLATION, AUDIENCES,
-    EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED, GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS,
-    LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
+    caller_and_audiences_only, founded_through_kind, reselected_groups, GranteeArms,
+    ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED, GRANTEES, GROUPS,
+    INSTALLATIONS, INVITATIONS, KIND_RESELECTION, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
+    REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
@@ -245,6 +246,82 @@ async fn a_walk_down_the_group_tree_agrees_with_postgres_17_and_18() {
             expect("alice", "docs:d_loop_a", ActionStatement::Select, false);
             // No grant, and no caller at all, read nothing.
             expect("erin", "docs:d_squad", ActionStatement::Select, false);
+            expect("anonymous", "docs:d_org", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+/// `org`, a folder, holds `team`, which holds `squad`, a project, and `other` is a folder
+/// of its own. The walk reads every group it reached, and changes only the folders and
+/// projects among them.
+fn reselected_groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-reselection-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!(
+            "{LEVELS}{OWNER_READS}{}{GROUP_READS}",
+            reselected_groups(KIND_RESELECTION)
+        ),
+        &[
+            "INSERT INTO groups (id, parent_id, kind) VALUES
+               ('org', NULL, 'folder'), ('team', 'org', 'team'), ('squad', 'team', 'project'),
+               ('other', NULL, 'folder');
+             INSERT INTO docs VALUES ('d_org', 'org', NULL), ('d_team', 'team', NULL),
+               ('d_squad', 'squad', NULL), ('d_other', 'other', NULL);
+             INSERT INTO group_grants VALUES ('team', 'alice', 'read'), ('org', 'bob', 'write')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON docs, groups TO app_reader;
+             GRANT UPDATE ON docs TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("erin"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(GROUP_HELPERS)
+    .writing(
+        "docs",
+        Mutations {
+            update_set: Some("title = 'changed'".into()),
+            check_neutral: true,
+        },
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_walk_reselecting_the_groups_it_reached_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = reselected_groups_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, statement, allowed| {
+                assert_postgres(&case, &run, subject, object, statement, allowed);
+            };
+            // Reading keeps every group the walk reached.
+            expect("alice", "docs:d_team", ActionStatement::Select, true);
+            expect("alice", "docs:d_squad", ActionStatement::Select, true);
+            expect("alice", "docs:d_org", ActionStatement::Select, false);
+            expect("bob", "docs:d_team", ActionStatement::Select, true);
+            // Changing keeps the folders and projects among them, not the team.
+            expect("bob", "docs:d_org", ActionStatement::Update, true);
+            expect("bob", "docs:d_squad", ActionStatement::Update, true);
+            expect("bob", "docs:d_team", ActionStatement::Update, false);
+            expect("bob", "docs:d_other", ActionStatement::Update, false);
+            expect("alice", "docs:d_squad", ActionStatement::Update, false);
+            expect("erin", "docs:d_org", ActionStatement::Select, false);
             expect("anonymous", "docs:d_org", ActionStatement::Select, false);
             assert_agrees(&case, &run);
         }

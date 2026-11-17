@@ -1804,6 +1804,94 @@ fn a_walk_composes_with_a_parent_arm() {
     );
 }
 
+/// [`GROUPS`] whose rows carry a kind, its walk reselecting the groups it reached through
+/// `last`.
+pub(crate) fn reselected_groups(last: &str) -> String {
+    GROUPS
+        .replace(
+            "team_id TEXT REFERENCES teams (id));",
+            "team_id TEXT REFERENCES teams (id), kind TEXT NOT NULL);",
+        )
+        .replace("  SELECT id FROM reached\n", &format!("  {last}\n"))
+}
+
+/// A walk's final query keeping the groups of some kinds, or every group it reached where
+/// the minimum role is `read`.
+pub(crate) const KIND_RESELECTION: &str = "SELECT g.id FROM public.groups g \
+    WHERE g.id IN (SELECT id FROM reached) AND (g.kind IN ('folder', 'project') OR min_role = 'read')";
+
+/// The call holds the rows the walk reached that the final query keeps, and the walk
+/// itself grows from every row it reached, as `PostgreSQL`'s working table does.
+#[test]
+fn a_walk_reselecting_its_rows_keeps_the_ones_its_conditions_keep() {
+    let sql = format!(
+        "{LEVELS}{OWNER_READS}{}",
+        reselected_groups(KIND_RESELECTION)
+    );
+    let dsl = model(&sql, &["authz.groups_with"]);
+    let definition = |type_name: &str, relation: &str| {
+        relation_definition(&dsl, type_name, relation).unwrap_or_else(|| panic!("{dsl}"))
+    };
+    assert_eq!(
+        definition("groups", "groups_with_read"),
+        "read or write or groups_with_read from groups",
+        "the final query keeps every reached group at read"
+    );
+    assert_eq!(
+        definition("groups", "groups_with_write_reached"),
+        "write or groups_with_write_reached from groups"
+    );
+    let kept = definition("groups", "groups_with_write");
+    let (reached, kinds) = kept.split_once(" and ").unwrap_or_else(|| panic!("{dsl}"));
+    assert_eq!(reached, "groups_with_write_reached");
+    assert_eq!(
+        definition("docs", "can_update"),
+        "groups_with_write from groups and acting_app_user from request_gate and can_select"
+    );
+    assert!(
+        !kinds.contains(" from "),
+        "the kinds are a relation on the group: {dsl}"
+    );
+    assert_eq!(definition("groups", kinds), "[user:*]", "{dsl}");
+}
+
+/// A final query keeping the groups of teams another helper returns reads that helper's
+/// rows, so the call is refused while that helper goes undeclared.
+#[test]
+fn a_reselection_calling_an_undeclared_helper_is_refused() {
+    let last = "SELECT g.id FROM public.groups g WHERE g.id IN (SELECT id FROM reached) \
+                AND g.team_id IN (SELECT authz.teams_with('read'))";
+    let sql = format!("{LEVELS}{OWNER_READS}{}", reselected_groups(last));
+    let reason = refusal_of(&sql, &["authz.groups_with"], "docs_read");
+    assert_eq!(
+        reason,
+        "declared helper 'authz.groups_with' calls 'authz.teams_with', which is not declared"
+    );
+}
+
+/// `PostgreSQL` finds a case-insensitive owner equal to the caller where `OpenFGA` compares
+/// bytes, so a final query keeping the groups the caller owns refuses the call.
+#[test]
+fn a_reselection_comparing_the_caller_under_a_nondeterministic_collation_is_refused() {
+    let last = "SELECT g.id FROM public.groups g \
+                WHERE g.id IN (SELECT id FROM reached) \
+                AND g.owner_id = current_setting('app.user_id', true)";
+    let sql = format!(
+        "CREATE COLLATION case_insensitive \
+           (provider = icu, locale = 'und-u-ks-level2', deterministic = false);
+         {LEVELS}{OWNER_READS}{}",
+        reselected_groups(last).replace(
+            "kind TEXT NOT NULL);",
+            "kind TEXT NOT NULL, owner_id TEXT COLLATE case_insensitive);",
+        )
+    );
+    let reason = refusal_of(&sql, &["authz.groups_with"], "docs_read");
+    assert!(
+        reason.contains("compares under the collation case_insensitive"),
+        "{reason}"
+    );
+}
+
 /// `OpenFGA` resolves a walk only so deep, and the schema cannot say how deep the tree
 /// goes, so each walk the model resolves is noted once, however many clauses call it.
 #[test]

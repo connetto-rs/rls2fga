@@ -675,6 +675,9 @@ pub struct HelperCall {
     /// return keys of another table whose key references `level`'s, an organization or a
     /// team among the grantees, each of them a key of `level` too.
     pub arms: Vec<HelperSetArm>,
+    /// The grant arms a walk's final query keeps the reached rows to, `None` where it
+    /// keeps every one.
+    pub selection: Option<Vec<HelperGrant>>,
 }
 
 /// One `SELECT` of a helper's body.
