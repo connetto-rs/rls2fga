@@ -196,6 +196,8 @@ pub(crate) enum TupleSource {
         subject: GranteeSubject,
         /// Residual predicate, with the joins typing an inline grantee among them.
         extra_predicates: ResidualPredicates,
+        /// The clock condition its tuple names, absent for a grant kept at every instant.
+        gate: Option<MembershipGate>,
     },
 
     /// P4/P5 child-to-parent link. Produces `(type:pk, relation, parent_type:fk_cols)`.
@@ -619,6 +621,7 @@ pub(crate) enum TupleSourceKey<'a> {
         relation: &'a RelationName,
         subject: &'a GranteeSubject,
         extra_predicates: ResidualSqlKey<'a>,
+        gate: Option<&'a MembershipGate>,
     },
     ParentBridge {
         table: &'a TableId,
@@ -1026,13 +1029,15 @@ impl TupleSource {
                 relation,
                 subject,
                 extra_predicates,
+                gate,
             } => TupleSourceKey::GranteeGrant {
                 join_table,
                 fk_cols,
                 parent_type,
                 relation,
                 subject,
-                extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::No),
+                extra_predicates: ResidualSqlKey::of(extra_predicates, Gated::when(gate.is_some())),
+                gate: gate.as_ref(),
             },
             Self::ParentBridge {
                 table,

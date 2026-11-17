@@ -300,6 +300,16 @@ fn type_plan_to_definition(plan: &TypePlan) -> TypeDefinition {
                     wildcard: None,
                     condition: None,
                 },
+                DirectSubject::ConditionalUserset {
+                    type_name,
+                    relation,
+                    condition,
+                } => RelationReference {
+                    type_name: type_name.clone(),
+                    relation: Some(relation.clone()),
+                    wildcard: None,
+                    condition: Some(condition.clone()),
+                },
             })
             .collect::<Vec<_>>();
 

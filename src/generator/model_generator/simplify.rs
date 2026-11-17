@@ -624,6 +624,11 @@ fn reach_direct_usersets(
         if let DirectSubject::Userset {
             type_name,
             relation,
+        }
+        | DirectSubject::ConditionalUserset {
+            type_name,
+            relation,
+            ..
         } = subject
         {
             // A subject `type#relation` is evaluated on that type, so whatever its

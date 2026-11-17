@@ -224,17 +224,6 @@ pub(crate) enum HelperRefusal {
         /// The table the arm reads.
         table: String,
     },
-    /// An arm naming a set of grantees or everyone keeps its rows by the statement time.
-    #[error(
-        "declared helper '{function}' keeps the rows of '{table}' naming a set of grantees \
-         or everyone by the statement time, which those grants do not carry"
-    )]
-    TimeBoundedGrantees {
-        /// The helper.
-        function: String,
-        /// The table the arm reads.
-        table: String,
-    },
     /// A grant arm bounds its rows against the clock more than once, while several of
     /// its rows can grant one caller one row, so no one tuple carries the bounds of the
     /// row that meets them all.
@@ -1168,14 +1157,6 @@ fn helper_grant<DB: DatabaseLike>(
         }
         GrantedTo::Anyone => HelperGrantee::Anyone,
     };
-    if !grant.time_bounds().is_empty()
-        && matches!(grantee, HelperGrantee::Set { .. } | HelperGrantee::Anyone)
-    {
-        return Err(HelperRefusal::TimeBoundedGrantees {
-            function: function.to_string(),
-            table: table_identity(table).to_string(),
-        });
-    }
     let (carried_caller, excluded) = match grant.gate() {
         None => (None, Vec::new()),
         Some(gate) => (

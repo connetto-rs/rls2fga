@@ -127,6 +127,18 @@ impl ResidualPredicates {
         Self(self.0.iter().chain(more).cloned().collect())
     }
 
+    /// These conjuncts but the ones the request clock completes.
+    #[must_use]
+    pub(crate) fn without_requests(&self) -> Self {
+        Self(
+            self.0
+                .iter()
+                .filter(|conjunct| conjunct.request.is_none())
+                .cloned()
+                .collect(),
+        )
+    }
+
     /// True when the shape carries no residual at all.
     #[must_use]
     pub fn is_empty(&self) -> bool {
@@ -738,8 +750,17 @@ impl HelperGrant {
     /// The columns keying one tuple of the arm's relations, its object, the column naming
     /// its grantee where one does and, for a relation per role, its role.
     pub(crate) fn tuple_key(&self) -> Vec<&ColumnName> {
-        let mut key: Vec<&ColumnName> = self.object_columns.iter().collect();
-        key.extend(self.grantee.compared_column());
+        self.tuple_key_naming(self.grantee.compared_column())
+    }
+
+    /// The columns keying one tuple of the arm's relations naming the grantee `grantee`
+    /// holds, or every caller where there is no such column, as [`Self::tuple_key`] reads
+    /// them.
+    pub(crate) fn tuple_key_naming<'a>(
+        &'a self,
+        grantee: Option<&'a ColumnName>,
+    ) -> Vec<&'a ColumnName> {
+        let mut key: Vec<&ColumnName> = self.object_columns.iter().chain(grantee).collect();
         if let GrantRows::Roles { column, .. } = &self.rows {
             key.push(column);
         }
