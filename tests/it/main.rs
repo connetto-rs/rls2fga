@@ -51,6 +51,7 @@ mod generator_tests;
 mod generic_catalog_tests;
 mod indirect_membership_tests;
 mod joined_inner_rule_tests;
+mod labelled_helper_tests;
 mod membership_term_tests;
 mod model_equivalence_tests;
 mod money_literal_tests;

@@ -1679,6 +1679,9 @@ fn flag_edge_link(
 /// The relation holding everyone `call` returns a row for, defined on its level's type
 /// with the relations and sources it reads. `None` where it returns nothing.
 ///
+/// An arm returning another call's rows is that call's relation, which is defined on the
+/// same level's type.
+///
 /// A walk arm makes the relation name itself through its tree's parent or child, which
 /// is how `OpenFGA` spells every row below or above one the rest of the call returns. An
 /// arm returning keys of a table whose key references the level's, an organization or a
@@ -1718,6 +1721,11 @@ fn helper_call_relation<DB: DatabaseLike>(
                 });
             }
             HelperSetArm::Walk(walk) => walked.push(walk),
+            HelperSetArm::Called(called) => {
+                if let Some(returned) = helper_call_relation(called, ctx, table_plan, all_types) {
+                    parts.push(UsersetExpr::Computed(returned));
+                }
+            }
         }
     }
     // Next to nothing is nothing, so a walk alone returns no row.
@@ -1725,7 +1733,7 @@ fn helper_call_relation<DB: DatabaseLike>(
         return None;
     }
     let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
-    let name = helper_call_relation_name(&call.function, &call.arguments);
+    let name = helper_call_relation_name(&call.function, call.arguments.iter().chain(&call.labels));
     if walked.is_empty() {
         return combine_union(parts).map(|returned| plan.ensure_computed(name, returned));
     }
@@ -1864,8 +1872,11 @@ fn helper_level_plan<'p>(
 }
 
 /// The call spelled as a relation name, `projects_with_read` for
-/// `authz.projects_with('read')`.
-fn helper_call_relation_name(function: &str, arguments: &[String]) -> String {
+/// `authz.projects_with('read')`, each label it is read at following its arguments.
+fn helper_call_relation_name<'a>(
+    function: &str,
+    arguments: impl IntoIterator<Item = &'a String>,
+) -> String {
     let mut name = stored_relation_name(function);
     for argument in arguments {
         name.push('_');
@@ -2048,13 +2059,47 @@ fn caller_gated_grant_parts<DB: DatabaseLike>(
     ))]
 }
 
+/// The rows of the level a grant arm returns, as [`kept_grant_parts`] reads them, kept
+/// again by each call the arm's own key is read within.
+fn capped_grant_parts<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
+    let parts = kept_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
+    if grant.within.is_empty() {
+        return parts;
+    }
+    let Some(granted) = combine_union(parts) else {
+        return Vec::new();
+    };
+    let mut kept = vec![granted];
+    let mut name = stored_relation_name(grant.table.name());
+    for call in &grant.within {
+        // A call returning no row keeps none.
+        let Some(within) = helper_call_relation(call, ctx, table_plan, all_types) else {
+            return Vec::new();
+        };
+        name.push_str("_within_");
+        name.push_str(within.as_str());
+        kept.push(UsersetExpr::Computed(within));
+    }
+    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    vec![UsersetExpr::Computed(
+        plan.ensure_computed(name, UsersetExpr::Intersection(kept)),
+    )]
+}
+
 /// The rows of the level a grant arm returns, as [`helper_grant_parts`] reads them, kept
 /// by each cap on the arm as one relation, or as [`held_grant_expr`] reads them where the
 /// arm's rows are held.
 ///
 /// A cap read on the level's row has operands the level's row or the arm's own row where the
 /// level's row keys it, so the rows keeping the pair are the ones granting the level's row.
-fn capped_grant_parts<DB: DatabaseLike>(
+fn kept_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
     level: &TableId,
     level_type: &TypeName,
@@ -2769,6 +2814,7 @@ fn set_subjects<DB: DatabaseLike>(
         && call.arms.iter().all(|arm| {
             matches!(arm, HelperSetArm::Grant(named)
                 if named.caps.is_empty()
+                    && named.within.is_empty()
                     && named.carried_caller.is_none()
                     && named.time_bounds.is_empty()
                     && (named.returns_the_caller() || named.grantee == HelperGrantee::Anyone))
@@ -3316,7 +3362,10 @@ fn grant_relation_exprs<DB: DatabaseLike>(
             source_key_part(&mut key, "grantees");
             source_key_part(
                 &mut key,
-                &helper_call_relation_name(&call.function, &call.arguments),
+                &helper_call_relation_name(
+                    &call.function,
+                    call.arguments.iter().chain(&call.labels),
+                ),
             );
         }
         None => source_key_part(&mut key, "anyone"),

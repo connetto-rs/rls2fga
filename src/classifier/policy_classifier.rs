@@ -418,9 +418,11 @@ fn apply_collation_check<DB: DatabaseLike>(
 /// Why a column `pattern` lets `OpenFGA` compare with another key or a request value cannot
 /// be compared there, if one cannot.
 ///
-/// Matched exhaustively, as [`guarded_column`] is. A composite's parts and an inheritance's
-/// inner rule pass through [`classify_expr_depth`] in their own right, and an object's own
-/// key names the row it was read from without being compared, so neither is listed.
+/// Matched exhaustively, as [`guarded_column`] is. A composite's parts are checked again,
+/// since a recognizer reading one comparison as several, as a row compared with a helper's
+/// labelled rows is, builds parts no [`classify_expr_depth`] passed. An inheritance's inner
+/// rule passes through it in its own right, and an object's own key names the row it was
+/// read from without being compared, so neither is listed.
 fn compared_key_refusal<DB: DatabaseLike>(
     pattern: &PatternClass,
     guarded: &TableId,
@@ -512,10 +514,12 @@ fn compared_key_refusal<DB: DatabaseLike>(
                     .iter()
                     .find_map(|membership| membership_refusal(membership, owner_table, db))
             }),
+        PatternClass::P8Composite(Composite { parts, .. }) => parts
+            .iter()
+            .find_map(|part| compared_key_refusal(&part.pattern, guarded, db, registry)),
         PatternClass::ExpandedFunction(ExpandedFunction { .. })
         | PatternClass::P6BooleanFlag(BooleanFlag { .. })
         | PatternClass::P7AbacAnd(AbacAnd { .. })
-        | PatternClass::P8Composite(Composite { .. })
         | PatternClass::P9AttributeCondition(AttributeCondition { .. })
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
@@ -603,6 +607,7 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
             tree_edges_refusal(&parent.edges, db).or_else(|| helper_call_refusal(&parent.call, db))
         }
         HelperSetArm::Walk(walk) => tree_edges_refusal(&walk.edges, db),
+        HelperSetArm::Called(called) => helper_call_refusal(called, db),
     })
 }
 
@@ -620,6 +625,12 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
             | HelperGrantee::Principal { .. }
             | HelperGrantee::RequestValue { .. }
             | HelperGrantee::Anyone => None,
+        })
+        .or_else(|| {
+            grant
+                .within
+                .iter()
+                .find_map(|call| helper_call_refusal(call, db))
         })
         .or_else(|| {
             grant.caps.iter().find_map(|cap| {

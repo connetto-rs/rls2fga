@@ -476,7 +476,8 @@ ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
             ),
             "resources_select",
             "declared helper 'authz.owned_resources' is capped by \
-             'authz.installation_resources', which returns pairs through a parent or a walk",
+             'authz.installation_resources', which returns pairs through a parent, a walk or \
+             another helper's rows",
         ),
         (
             INSTALLATION_CAPS.replace(

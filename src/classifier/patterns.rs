@@ -657,13 +657,18 @@ pub struct HelperValues {
     pub predicates: Vec<AttributePredicate>,
 }
 
-/// One call of a declared helper and the rows of `level` it returns.
+/// One call of a declared helper and the rows of `level` it returns, at the labels it is
+/// read at where the helper returns labels beside its keys.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperCall {
     /// The helper, as declared.
     pub function: String,
     /// Its arguments, each a literal as SQL spells it.
     pub arguments: Vec<String>,
+    /// The label each column of labels the helper returns beside its keys holds, each a
+    /// literal as SQL spells it, in the order the helper returns those columns. Empty
+    /// where the call returns its keys whatever labels they come with.
+    pub labels: Vec<String>,
     /// The table whose keys the call returns.
     pub level: TableId,
     /// The sets whose union the call returns, none where it returns nothing. An arm may
@@ -681,6 +686,8 @@ pub enum HelperSetArm {
     Parent(HelperParent),
     /// The rows of the level next to the ones this same call returns, along its tree.
     Walk(HelperWalk),
+    /// The keys of the level another call returns, at the labels the arm reads it at.
+    Called(HelperCall),
 }
 
 /// `SELECT <object columns> FROM <table> WHERE <grantee> [AND <rows>] [AND <time bounds>]
@@ -711,6 +718,9 @@ pub struct HelperGrant {
     pub time_bounds: Vec<HelperTimeBound>,
     /// The caps a kept row meets, all of them.
     pub caps: Vec<HelperCap>,
+    /// The calls whose keys the level's row the arm returns has to be among, all of them,
+    /// from `<key> IN (SELECT <function>(<arguments>))` on the arm's table's own key.
+    pub within: Vec<HelperCall>,
     /// Each row of the arm's table held as its own object, with the rows of other tables
     /// it names, `None` where the level's row holds the grant.
     pub held: Option<HeldRows>,

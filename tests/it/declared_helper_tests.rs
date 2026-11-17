@@ -2856,8 +2856,7 @@ fn a_capped_arm_against_a_request_value_or_returning_several_columns_is_refused(
         ),
         (
             "id IN (SELECT authz.capped_kinds())",
-            "declared helper 'authz.capped_kinds' returns 2 columns of 'public.approved_kinds' \
-             from one arm",
+            "declared helper 'authz.capped_kinds' returns 2 columns no arm returns labels in",
         ),
     ] {
         let sql =
