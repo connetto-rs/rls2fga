@@ -55,7 +55,7 @@ pub(crate) use attribute::{
 };
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use containment::contained_keys_as_memberships;
-pub(crate) use flag::{recognize_flagged_row, FlagRefusal};
+pub(crate) use flag::{recognize_flagged_row, recognize_parent_flag, FlagRefusal, ParentFlag};
 pub(crate) use helper::{recognize_declared_helper, recognize_excluded_helper, HelperRefusal};
 pub(crate) use invariant::{residual_relations, MembershipScope};
 pub use owner_expression::recognize_owner_expression;

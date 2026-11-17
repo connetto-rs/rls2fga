@@ -1496,16 +1496,29 @@ fn reach_level_relation<DB: DatabaseLike>(
 /// row as a declared helper's set is.
 ///
 /// Every predicate is an attribute gate on the flagged type, and a walk makes the relation
-/// name itself through one link per edge table, filled from that table's rows.
+/// name itself through one link per edge table, filled from that table's rows. Each step
+/// the test climbs first is the relation one link up.
 pub(crate) fn emit_flagged_row<DB: DatabaseLike>(
     flag: &FlaggedRow,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> UsersetExpr {
-    let Some(flagged) = flag_relation(flag, ctx, table_plan, all_types) else {
+    let Some(mut flagged) = flag_relation(flag, ctx, table_plan, all_types) else {
         return deny_expr(table_plan);
     };
+    let flagged_type = ctx.table_types.resolve(&flag.table);
+    let plan = helper_level_plan(&flagged_type, Some(&flag.table), table_plan, all_types);
+    for step in flag.steps.iter().rev() {
+        let (link, _) = flag_edge_link(plan, step, &flagged_type);
+        flagged = plan.ensure_computed(
+            format!("{flagged}_from_{link}"),
+            UsersetExpr::TupleToUserset {
+                tupleset: link,
+                computed: flagged,
+            },
+        );
+    }
     reach_level_relation(&flag.table, &flag.column, flagged, ctx, table_plan)
 }
 
@@ -1537,32 +1550,8 @@ fn flag_relation<DB: DatabaseLike>(
     }
     let mut links = Vec::with_capacity(flag.edges.len());
     for edge in &flag.edges {
-        let TreeEdges {
-            table,
-            child_column,
-            parent_column,
-        } = edge;
-        let edge_key = format!(
-            "flag-edge:{}:{table}:{}:{child_column}:{}:{parent_column}",
-            table.to_string().len(),
-            child_column.as_str().len(),
-            parent_column.as_str().len()
-        );
+        let (link, edge_key) = flag_edge_link(plan, edge, &flagged_type);
         let _ = write!(key, ":{}:{edge_key}", edge_key.len());
-        let link = plan.membership_source_relation(
-            &edge_key,
-            format!("{}_{parent_column}", table.name()),
-            vec![DirectSubject::Type(flagged_type.clone())],
-        );
-        plan.add_source(TupleSource::ClosureBridge {
-            link_table: table.clone(),
-            object_cols: vec![child_column.clone()],
-            subject_cols: vec![parent_column.clone()],
-            guarded_type: flagged_type.clone(),
-            owner_type: flagged_type.clone(),
-            relation: link.clone(),
-            extra_predicates: ResidualPredicates::default(),
-        });
         links.push(link);
     }
     let relation =
@@ -1608,6 +1597,41 @@ fn attribute_gates(
         gates.push(UsersetExpr::Computed(relation));
     }
     Some(gates)
+}
+
+/// The tupleset naming, on the flagged row each edge's child names, the flagged row its
+/// parent names, with the source loading it and the key it is held under.
+fn flag_edge_link(
+    plan: &mut TypePlan,
+    edge: &TreeEdges,
+    flagged_type: &TypeName,
+) -> (RelationName, String) {
+    let TreeEdges {
+        table,
+        child_column,
+        parent_column,
+    } = edge;
+    let edge_key = format!(
+        "flag-edge:{}:{table}:{}:{child_column}:{}:{parent_column}",
+        table.to_string().len(),
+        child_column.as_str().len(),
+        parent_column.as_str().len()
+    );
+    let link = plan.membership_source_relation(
+        &edge_key,
+        format!("{}_{parent_column}", table.name()),
+        vec![DirectSubject::Type(flagged_type.clone())],
+    );
+    plan.add_source(TupleSource::ClosureBridge {
+        link_table: table.clone(),
+        object_cols: vec![child_column.clone()],
+        subject_cols: vec![parent_column.clone()],
+        guarded_type: flagged_type.clone(),
+        owner_type: flagged_type.clone(),
+        relation: link.clone(),
+        extra_predicates: ResidualPredicates::default(),
+    });
+    (link, edge_key)
 }
 
 /// The relation holding everyone `call` returns a row for, defined on its level's type

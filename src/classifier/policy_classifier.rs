@@ -470,14 +470,10 @@ fn compared_key_refusal<DB: DatabaseLike>(
                 ExcludedSet::Helper(DeclaredHelper { column, call }) => {
                     check(guarded, column).or_else(|| helper_call_refusal(call, db))
                 }
-                ExcludedSet::Flag(flag) => flagged_row(&flag.pattern).and_then(|flagged| {
-                    check(guarded, &flagged.column).or_else(|| flagged_row_refusal(flagged, db))
-                }),
+                ExcludedSet::Flag(flag) => flags_refusal(&flag.pattern, guarded, db),
             })
         }
-        PatternClass::P29FlaggedRow(flagged) => {
-            check(guarded, &flagged.column).or_else(|| flagged_row_refusal(flagged, db))
-        }
+        PatternClass::P29FlaggedRow(_) => flags_refusal(pattern, guarded, db),
         PatternClass::P13UncorrelatedMembership(UncorrelatedMembership {
             member_table,
             user_column,
@@ -658,16 +654,30 @@ fn tree_edges_refusal<DB: DatabaseLike>(edges: &TreeEdges, db: &DB) -> Option<St
         .or_else(|| key_collation_refusal(&edges.table, &edges.parent_column, db))
 }
 
-/// Why the flagged table's key or an edge column the walk follows cannot be compared in
-/// `OpenFGA`.
+/// Why the guarded row's column the flags `pattern` tests start from, a flagged table's key,
+/// or an edge column a walk follows or a test climbs cannot be compared in `OpenFGA`.
+fn flags_refusal<DB: DatabaseLike>(
+    pattern: &PatternClass,
+    guarded: &TableId,
+    db: &DB,
+) -> Option<String> {
+    flagged_rows(pattern)?.into_iter().find_map(|flagged| {
+        key_collation_refusal(guarded, &flagged.column, db)
+            .or_else(|| flagged_row_refusal(flagged, db))
+    })
+}
+
+/// Why the flagged table's key or an edge column the walk follows or the test climbs cannot
+/// be compared in `OpenFGA`.
 fn flagged_row_refusal<DB: DatabaseLike>(flagged: &FlaggedRow, db: &DB) -> Option<String> {
     resolve_row_identity(&flagged.table, db)?
         .iter()
         .find_map(|key| key_collation_refusal(&flagged.table, key, db))
         .or_else(|| {
             flagged
-                .edges
+                .steps
                 .iter()
+                .chain(&flagged.edges)
                 .find_map(|edges| tree_edges_refusal(edges, db))
         })
 }
@@ -695,6 +705,30 @@ pub(crate) fn flagged_row_classified<DB: DatabaseLike>(
         pattern: PatternClass::P29FlaggedRow(flagged),
         confidence,
     }
+}
+
+/// The flags a call tests on the parent one edge row names for the guarded row, refused as
+/// `D` where they cannot translate, `None` where `expr` tests none.
+///
+/// Checked here, since the flags of a union never pass [`classify_expr_depth`] one by one.
+fn classify_parent_flag<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    state: &ExpansionState,
+) -> Option<ClassifiedExpr> {
+    let flagged =
+        crate::classifier::exclusion::classify_parent_flag(expr, db, registry, table, state)?;
+    let refusal = match &flagged {
+        Ok(classified) => resolve_table_id(db, table)
+            .and_then(|guarded| flags_refusal(&classified.pattern, &guarded, db)),
+        Err(refusal) => Some(refusal.to_string()),
+    };
+    Some(match refusal {
+        Some(reason) => unknown_d(expr, reason),
+        None => flagged.ok()?,
+    })
 }
 
 fn classify_expr_inner<DB: DatabaseLike>(
@@ -941,7 +975,7 @@ fn classify_expr_inner<DB: DatabaseLike>(
                 format!("NOT applied to an expression that does not translate: {reason}"),
             );
         }
-        if flagged_row(&inner_classified.pattern).is_some() {
+        if flagged_rows(&inner_classified.pattern).is_some() {
             return unknown_d(
                 expr,
                 "NOT applied to a row flag in a spelling the exclusion does not read, so write \
@@ -1125,6 +1159,16 @@ fn recognize_leaf<DB: DatabaseLike>(
         return Some(classified);
     }
 
+    // Try P29 on a flag the parent one edge row names carries. Before P5, whose correlated
+    // `EXISTS` it shares, and refused only once no membership spelling reads it.
+    let parent_refusal = match classify_parent_flag(expr, db, registry, table, state) {
+        Some(classified) if matches!(classified.pattern, PatternClass::Unknown(_)) => {
+            Some(classified)
+        }
+        Some(classified) => return Some(classified),
+        None => None,
+    };
+
     // Try P5: parent inheritance via correlated EXISTS
     if let Some(classified) = recognizers::recognize_p5(expr, db, registry, table, command, state) {
         return Some(classified);
@@ -1155,6 +1199,10 @@ fn recognize_leaf<DB: DatabaseLike>(
             Ok(flagged) => flagged_row_classified(flagged, db, registry),
             Err(refusal) => unknown_d(expr, refusal.to_string()),
         });
+    }
+
+    if parent_refusal.is_some() {
+        return parent_refusal;
     }
 
     if let Some(reason) = recognizers::diagnose_p5_parent_inheritance_ambiguity(

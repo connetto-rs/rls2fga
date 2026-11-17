@@ -930,7 +930,7 @@ impl HelperWalk {
 }
 
 /// P29: a row of `table` its own columns flag, named by `column` of the guarded row or
-/// reached from that row as an ancestor up `edges`.
+/// reached from that row as an ancestor up `edges`, after climbing `steps` first.
 ///
 /// `EXISTS (SELECT 1 FROM objects o WHERE o.id = objects.id AND o.archived)`, or the same
 /// test over a `WITH RECURSIVE` walk up edge tables. Only rows decide it, never the
@@ -947,6 +947,13 @@ pub struct FlaggedRow {
     pub predicates: Vec<AttributePredicate>,
     /// The edge tables the test walks up, empty where it reads the named row alone.
     pub edges: Vec<TreeEdges>,
+    /// Edges climbed one each, in order, from the row `column` names to the rows the test
+    /// starts from. Empty where it starts at the named row itself.
+    ///
+    /// `EXISTS (SELECT 1 FROM resource_parents e WHERE e.id = resources.id AND
+    /// authz.is_archived(e.parent_id))` climbs `resource_parents` once, and the flag
+    /// `authz.is_archived` reads starts from each parent it reaches.
+    pub steps: Vec<TreeEdges>,
 }
 
 /// The rows linking a row of a tree to its parent, each naming a child and its parent by
@@ -982,20 +989,31 @@ pub enum ExcludedSet {
     /// column and every value the helper can return proven non-null.
     Helper(DeclaredHelper),
     /// The rows a [`FlaggedRow`] flags for every caller alike, `NOT authz.is_archived(id)`,
-    /// classified as the positive test, through the calls it expanded.
+    /// classified as the positive test, through the calls it expanded, or the union of
+    /// several where an `OR` joins them.
     Flag(Box<ClassifiedExpr>),
 }
 
-/// The flag `pattern` tests, through the function calls it expanded.
+/// The flags `pattern` tests, through the function calls it expanded and the `OR`s joining
+/// them, `None` where it tests anything else.
 #[must_use]
-pub fn flagged_row(pattern: &PatternClass) -> Option<&FlaggedRow> {
-    match pattern {
-        PatternClass::P29FlaggedRow(flagged) => Some(flagged),
-        PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) => {
-            flagged_row(&inner.pattern)
+pub fn flagged_rows(pattern: &PatternClass) -> Option<Vec<&FlaggedRow>> {
+    let mut flags = Vec::new();
+    let mut pending = vec![pattern];
+    while let Some(pattern) = pending.pop() {
+        match pattern {
+            PatternClass::P29FlaggedRow(flagged) => flags.push(flagged),
+            PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) => {
+                pending.push(&inner.pattern);
+            }
+            PatternClass::P8Composite(Composite {
+                op: BoolOp::Or,
+                parts,
+            }) => pending.extend(parts.iter().map(|part| &part.pattern)),
+            _ => return None,
         }
-        _ => None,
     }
+    Some(flags)
 }
 
 /// No known pattern matched.

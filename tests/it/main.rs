@@ -29,6 +29,7 @@ mod dump_round_trip_tests;
 mod duplication_guard_tests;
 mod end_to_end_tests;
 mod exact_support_tests;
+mod flagged_row_parity_tests;
 mod flagged_row_tests;
 mod footgun_clauses_tests;
 mod footgun_inheritance_tests;

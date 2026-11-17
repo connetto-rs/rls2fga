@@ -802,6 +802,14 @@ fn the_report_names_the_flag_and_the_walk_depth() {
         "{walked}"
     );
     assert!(walked.contains("resolveNodeLimit"), "{walked}");
+    let below = report_of(format!("{RESOURCES}{BELOW_ARCHIVED}{NEGATED_BELOW}"));
+    assert!(
+        below.contains(
+            "P29 (public.resources flagged at id one edge up through \
+             public.resource_parents.parent_id or above it through"
+        ),
+        "{below}"
+    );
     let keyed = report_of(format!("{OBJECTS}{NEGATED_KEYED}"));
     assert!(
         keyed.contains("P29 (public.objects flagged at id)"),
@@ -970,4 +978,382 @@ fn a_flag_over_confirmed_attribute_columns_grades_a() {
     };
     assert_eq!(grades(true), expected(ConfidenceLevel::A));
     assert_eq!(grades(false), expected(ConfidenceLevel::B));
+}
+
+/// A resource below an archived one, its parent read up `resource_parents` and tested with
+/// the walk, which leaves the archived resource itself out.
+const BELOW_ARCHIVED: &str = "
+CREATE FUNCTION authz.has_archived_ancestor(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                 WHERE edge.id = resource AND authz.is_archived(edge.parent_id))
+$$;
+ALTER FUNCTION authz.has_archived_ancestor(TEXT) OWNER TO authz_owner;
+";
+
+const NEGATED_BELOW: &str = "CREATE POLICY resources_below_archived ON resources AS RESTRICTIVE
+  FOR SELECT USING (NOT authz.has_archived_ancestor(id));";
+
+/// Both edge tables read as parents, a resource below an archived one through either.
+const BELOW_ARCHIVED_EITHER: &str = "
+CREATE FUNCTION authz.has_archived_ancestor(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                 WHERE edge.id = resource AND authz.is_archived(edge.parent_id))
+    OR EXISTS (SELECT 1 FROM public.ownables ownable
+               WHERE ownable.id = resource AND authz.is_archived(ownable.project_id))
+$$;
+ALTER FUNCTION authz.has_archived_ancestor(TEXT) OWNER TO authz_owner;
+";
+
+/// The relation of `resources` holding the walked flag one `link` edge up.
+fn flag_one_edge_up(dsl: &str, link: &str) -> String {
+    let definitions = relation_definitions(dsl, "resources");
+    let walked = definitions
+        .iter()
+        .find(|(name, definition)| definition.contains(&format!(" or {name} from {link}")))
+        .unwrap_or_else(|| panic!("the walked flag should be defined: {dsl}"))
+        .0
+        .clone();
+    let up = format!("{walked} from {link}");
+    definitions
+        .into_iter()
+        .find(|(_, definition)| *definition == up)
+        .unwrap_or_else(|| panic!("a relation should hold {up}: {dsl}"))
+        .0
+}
+
+/// A flag called on the parent an edge row names is the flag one edge up, so `NOT` of it
+/// subtracts every row below a flagged one and never the flagged row itself.
+#[test]
+fn a_negated_flag_on_the_parents_subtracts_the_flag_one_edge_up() {
+    let dsl = archive_model(RESOURCES, &format!("{BELOW_ARCHIVED}{NEGATED_BELOW}"));
+    let above = flag_one_edge_up(&dsl, "resource_parents_parent_id");
+    assert_eq!(
+        relation_definition(&dsl, "resources", "can_select").as_deref(),
+        Some(format!("(owner but not {above}) and acting_app_user from request_gate").as_str()),
+        "{dsl}"
+    );
+}
+
+/// The flag one edge up grants too, reached from another table through its foreign key.
+#[test]
+fn a_flag_on_the_parents_grants_through_a_foreign_key() {
+    let dsl = archive_model(
+        RESOURCES,
+        &format!(
+            "{BELOW_ARCHIVED}
+             CREATE POLICY grants_below_archived ON grants FOR SELECT
+               USING (authz.has_archived_ancestor(resource_id));"
+        ),
+    );
+    let above = flag_one_edge_up(&dsl, "resource_parents_parent_id");
+    assert_eq!(
+        relation_definition(&dsl, "grants", "can_select").as_deref(),
+        Some(
+            format!("({above} from resources or user) and acting_app_user from request_gate")
+                .as_str()
+        ),
+        "{dsl}"
+    );
+}
+
+/// Parents read over two edge tables, either of them flagged, subtract the union of the
+/// flag one edge up each.
+#[test]
+fn a_negated_flag_on_the_parents_over_two_edge_tables_subtracts_either() {
+    let dsl = archive_model(
+        RESOURCES,
+        &format!("{BELOW_ARCHIVED_EITHER}{NEGATED_BELOW}"),
+    );
+    let parents = flag_one_edge_up(&dsl, "resource_parents_parent_id");
+    let ownables = flag_one_edge_up(&dsl, "ownables_project_id");
+    assert_eq!(
+        relation_definition(&dsl, "resources", "can_select").as_deref(),
+        Some(
+            format!(
+                "(owner but not ({parents} or {ownables})) and acting_app_user from request_gate"
+            )
+            .as_str()
+        ),
+        "{dsl}"
+    );
+}
+
+/// A `NULL` from a `STRICT` flag beside a false one leaves the `OR` `NULL`, which `NOT`
+/// keeps, so the row is hidden where no tuple flags it.
+#[test]
+fn a_negated_union_with_a_strict_flag_over_a_nullable_column_is_refused() {
+    let reason = refusal_of(
+        &format!(
+            "{RESOURCES}
+             CREATE TABLE notes (id TEXT PRIMARY KEY, resource_id TEXT REFERENCES resources (id));
+             CREATE FUNCTION authz.is_archived_strict(resource TEXT) RETURNS BOOLEAN
+             LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = '' AS $$
+               SELECT EXISTS (SELECT 1 FROM public.resources r
+                              WHERE r.id = resource AND r.archived_at IS NOT NULL)
+             $$;
+             ALTER FUNCTION authz.is_archived_strict(TEXT) OWNER TO authz_owner;
+             ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY notes_live ON notes FOR SELECT
+               USING (NOT (authz.is_archived(resource_id)
+                           OR authz.is_archived_strict(resource_id)));"
+        ),
+        &[],
+        "notes_live",
+    );
+    assert!(
+        reason.contains("STRICT") && reason.contains("resource_id"),
+        "{reason}"
+    );
+}
+
+/// An invoker reads the edge table through the caller's own policies, so the parent it
+/// finds is the caller's and no tuple decides it.
+#[test]
+fn a_parent_read_through_the_callers_own_policies_is_refused() {
+    let invoker = BELOW_ARCHIVED.replace(" SECURITY DEFINER", "");
+    let reason = refusal_of(
+        &format!("{RESOURCES}{invoker}{NEGATED_BELOW}"),
+        &[],
+        "resources_below_archived",
+    );
+    assert!(
+        reason.contains("resource_parents") && reason.contains("row level security"),
+        "{reason}"
+    );
+}
+
+/// Resources whose edge rows may also name a previous parent, with `STRICT` archive tests
+/// on one resource or either of two.
+fn with_previous_parent() -> String {
+    format!(
+        "{}
+CREATE FUNCTION authz.is_archived_strict(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resources r
+                 WHERE r.id = resource AND r.archived_at IS NOT NULL)
+$$;
+ALTER FUNCTION authz.is_archived_strict(TEXT) OWNER TO authz_owner;
+CREATE FUNCTION authz.either_archived(one TEXT, other TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE STRICT SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resources r WHERE r.id = one AND r.archived_at IS NOT NULL)
+      OR EXISTS (SELECT 1 FROM public.resources r WHERE r.id = other AND r.archived_at IS NOT NULL)
+$$;
+ALTER FUNCTION authz.either_archived(TEXT, TEXT) OWNER TO authz_owner;
+",
+        RESOURCES.replace(
+            "parent_id TEXT NOT NULL REFERENCES resources (id));",
+            "parent_id TEXT NOT NULL REFERENCES resources (id),
+  previous_parent_id TEXT REFERENCES resources (id));",
+        )
+    )
+}
+
+/// Grants on resources below a parent `call` flags, the edge read by a definer.
+fn grants_below(schema: &str, call: &str) -> String {
+    format!(
+        "{schema}
+CREATE FUNCTION authz.below_archived(resource TEXT) RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                 WHERE edge.id = resource AND {call})
+$$;
+ALTER FUNCTION authz.below_archived(TEXT) OWNER TO authz_owner;
+CREATE POLICY grants_below_archived ON grants FOR SELECT
+  USING (authz.below_archived(resource_id));"
+    )
+}
+
+/// A `STRICT` call is `NULL` where the edge row lacks a previous parent, which hides the row,
+/// while the flag on the parent alone grants it.
+#[test]
+fn a_parent_flag_beside_a_nullable_strict_argument_is_refused() {
+    let reason = refusal_of(
+        &grants_below(
+            &with_previous_parent(),
+            "authz.either_archived(edge.parent_id, edge.previous_parent_id)",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(
+        reason.contains("STRICT") && reason.contains("previous_parent_id"),
+        "{reason}"
+    );
+}
+
+/// A `STRICT` call on the one nullable column it climbs is `NULL` exactly where no edge links
+/// a parent, so the flag on that parent decides it.
+#[test]
+fn a_strict_parent_flag_over_its_own_nullable_column_translates() {
+    let classified = using_of(
+        &grants_below(
+            &with_previous_parent(),
+            "authz.is_archived_strict(edge.previous_parent_id)",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert_ne!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
+}
+
+/// Every flag of a union a parent call tests is compared by its own edge column, so a
+/// nondeterministic collation on it is refused.
+#[test]
+fn a_union_of_parent_flags_over_a_case_insensitive_edge_is_refused() {
+    let schema = with_previous_parent().replace(
+        "parent_id TEXT NOT NULL REFERENCES",
+        "parent_id TEXT COLLATE ci NOT NULL REFERENCES",
+    );
+    let reason = refusal_of(
+        &grants_below(
+            &format!(
+                "CREATE COLLATION ci (provider = icu, locale = 'und-u-ks-level2', \
+                 deterministic = false);
+                 {schema}"
+            ),
+            "authz.either_archived(edge.parent_id, edge.parent_id)",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(reason.contains("collation"), "{reason}");
+}
+
+/// The edge row's correlation and the call on its parent are one conjunction, read in
+/// either order.
+#[test]
+fn a_parent_flag_reads_the_same_after_its_correlation() {
+    let call_first = archive_model(
+        RESOURCES,
+        "CREATE FUNCTION authz.below_archived(resource TEXT) RETURNS BOOLEAN
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT EXISTS (SELECT 1 FROM public.resource_parents edge
+                          WHERE authz.is_archived(edge.parent_id) AND edge.id = resource)
+         $$;
+         ALTER FUNCTION authz.below_archived(TEXT) OWNER TO authz_owner;
+         CREATE POLICY grants_below_archived ON grants FOR SELECT
+           USING (authz.below_archived(resource_id));",
+    );
+    assert_eq!(
+        call_first,
+        model(
+            &grants_below(RESOURCES, "authz.is_archived(edge.parent_id)"),
+            &[]
+        ),
+    );
+}
+
+/// A call on the parent naming its argument is not read as a flag one edge up, and the
+/// refusal names the call.
+#[test]
+fn a_parent_call_with_a_named_argument_is_refused() {
+    let reason = refusal_of(
+        &grants_below(RESOURCES, "authz.is_archived(resource => edge.parent_id)"),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(reason.contains("authz.is_archived"), "{reason}");
+}
+
+/// A literal argument stays as written, so a call also testing a constant row is refused
+/// for that test and names the call.
+#[test]
+fn a_parent_call_also_testing_a_literal_row_is_refused() {
+    let reason = refusal_of(
+        &grants_below(
+            &with_previous_parent(),
+            "authz.either_archived(edge.parent_id, 'root')",
+        ),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(reason.contains("authz.either_archived"), "{reason}");
+}
+
+/// The flag a parent call tests is refused by name where its walk is.
+#[test]
+fn a_parent_flag_over_a_walk_the_model_cannot_follow_is_refused_by_name() {
+    let union_all = RESOURCES.replace(
+        "SELECT resource
+    UNION
+",
+        "SELECT resource
+    UNION ALL
+",
+    );
+    let reason = refusal_of(
+        &grants_below(&union_all, "authz.is_archived(edge.parent_id)"),
+        &[],
+        "grants_below_archived",
+    );
+    assert!(reason.contains("UNION ALL"), "{reason}");
+}
+
+/// The guarded row names its edge row by a key of another type than the flagged parent's,
+/// so no tuple names both.
+#[test]
+fn a_parent_flag_climbed_from_a_key_of_another_type_is_refused() {
+    let reason = refusal_of(
+        &format!(
+            "{RESOURCES}
+             CREATE TABLE folder_links (id UUID PRIMARY KEY,
+               parent_id TEXT NOT NULL REFERENCES resources (id));
+             CREATE TABLE uploads (id TEXT PRIMARY KEY,
+               folder_id UUID NOT NULL REFERENCES folder_links (id));
+             GRANT SELECT ON folder_links TO authz_owner;
+             CREATE FUNCTION authz.in_archived(folder UUID) RETURNS BOOLEAN
+             LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+               SELECT EXISTS (SELECT 1 FROM public.folder_links edge
+                              WHERE edge.id = folder AND authz.is_archived(edge.parent_id))
+             $$;
+             ALTER FUNCTION authz.in_archived(UUID) OWNER TO authz_owner;
+             ALTER TABLE uploads ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY uploads_archived ON uploads FOR SELECT
+               USING (authz.in_archived(folder_id));"
+        ),
+        &[],
+        "uploads_archived",
+    );
+    assert!(
+        reason.contains("uploads.folder_id") && reason.contains("resources.id"),
+        "{reason}"
+    );
+}
+
+/// A parent the caller reads through its own policies is inherited from, whatever it tests.
+#[test]
+fn a_flagged_parent_read_under_its_policies_is_inherited() {
+    let classified = using_of(
+        "CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+         CREATE SCHEMA authz;
+         GRANT USAGE ON SCHEMA authz TO authz_owner;
+         CREATE TABLE projects (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL,
+           archived BOOLEAN NOT NULL, locked BOOLEAN NOT NULL);
+         CREATE TABLE docs (id TEXT PRIMARY KEY,
+           project_id TEXT NOT NULL REFERENCES projects (id));
+         GRANT SELECT ON projects TO authz_owner;
+         CREATE FUNCTION authz.held(project TEXT) RETURNS BOOLEAN
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project AND p.archived)
+               OR EXISTS (SELECT 1 FROM public.projects p WHERE p.id = project AND p.locked)
+         $$;
+         ALTER FUNCTION authz.held(TEXT) OWNER TO authz_owner;
+         ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY projects_owner ON projects FOR SELECT
+           USING (owner_id = current_setting('app.user_id', true));
+         CREATE POLICY docs_held ON docs FOR SELECT USING (EXISTS (
+           SELECT 1 FROM projects p WHERE p.id = docs.project_id AND authz.held(p.id)));",
+        &[],
+        "docs_held",
+    );
+    assert!(
+        matches!(
+            classified.pattern,
+            rls2fga::classifier::patterns::PatternClass::P5ParentInheritance(_)
+        ),
+        "{classified:?}"
+    );
 }
