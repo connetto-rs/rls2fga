@@ -388,3 +388,50 @@ CREATE POLICY pairs_insert ON pairs FOR INSERT
         assert_agrees(&case, &run);
     }
 }
+
+/// An insert declaring one column of a two-column key writes onto the key it declares,
+/// the other column copied, so a check reading that other column still decides.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_declared_key_column_keeps_the_rest_of_the_key_on_postgres_17_and_18() {
+    let schema = "
+CREATE TABLE labels (owner_id TEXT, label TEXT, PRIMARY KEY (owner_id, label));
+ALTER TABLE labels ENABLE ROW LEVEL SECURITY;
+CREATE POLICY labels_select ON labels FOR SELECT
+  USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY labels_insert ON labels FOR INSERT
+  WITH CHECK (owner_id = current_setting('app.user_id', true));
+";
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        let case = ParityCase::reading(
+            &format!("resulting-row-declared-key-pg{major}"),
+            schema,
+            &[
+                "INSERT INTO labels VALUES ('alice', 'a'), ('bob', 'b')",
+                "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT ON labels TO app_reader",
+            ],
+            vec![caller("alice"), caller("bob")],
+        )
+        .with_settings([support::deployment::caller("app.user_id")])
+        .inserting_values("labels", &[("label", "fresh")]);
+        let run = support::parity::run(&cluster, &case).await;
+        assert_postgres(
+            &case,
+            &run,
+            "alice",
+            "labels:alice|a",
+            ActionStatement::Insert,
+            true,
+        );
+        assert_postgres(
+            &case,
+            &run,
+            "alice",
+            "labels:bob|b",
+            ActionStatement::Insert,
+            false,
+        );
+        assert_agrees(&case, &run);
+    }
+}

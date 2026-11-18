@@ -56,6 +56,8 @@ async fn every_parity_case_agrees() {
         cluster,
         [
             the_runner_agrees_on_direct_ownership,
+            one_user_acting_as_two_callers_is_asked_as_that_user,
+            variants_decide_together_what_neither_decides_alone,
             the_runner_agrees_on_membership,
             the_runner_agrees_on_a_role_scoped_restriction,
             a_set_split_on_an_undeclared_delimiter_shows_nothing,
@@ -63,6 +65,7 @@ async fn every_parity_case_agrees() {
             both_one_sided_cases_pass,
             the_runner_finds_a_planted_divergence,
             an_update_candidate_exercises_with_check,
+            a_row_the_database_completes_is_judged_as_written,
             a_nested_protected_read_denies_on_both_sides,
             a_split_function_owner_does_not_bypass_row_level_security,
             a_strict_function_hides_the_null_row,
@@ -211,8 +214,10 @@ async fn table_privileges_agree_on_postgres_17_and_18() {
 /// The probe's constraint-block reading, on `PostgreSQL` 17 and 18.
 ///
 /// A write the policy admits meets the table's own declared integrity when the copy
-/// itself breaks one, and the probe reads it as allowed. A trigger that `RAISE`s the same
-/// SQLSTATE names no constraint, and the probe must fail loudly instead.
+/// itself breaks one, and the probe reads it as allowed. A delete reaches its trigger only
+/// for a row its policy admits, so any declared key the trigger's writes break reads as
+/// allowed too. A trigger that `RAISE`s the same SQLSTATE names no constraint, and the
+/// probe must fail loudly instead.
 #[tokio::test]
 #[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
 async fn the_probe_tells_a_constraint_block_from_a_trigger_raise() {
@@ -220,6 +225,11 @@ async fn the_probe_tells_a_constraint_block_from_a_trigger_raise() {
         let cluster = Arc::new(Cluster::start_on(major).await);
         a_declared_check_block_is_read_as_allowed(Arc::clone(&cluster), major).await;
         a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(Arc::clone(&cluster), major).await;
+        a_delete_whose_trigger_breaks_another_tables_key_is_read_as_allowed(
+            Arc::clone(&cluster),
+            major,
+        )
+        .await;
         a_trigger_raise_is_not_a_constraint_block(Arc::clone(&cluster), major).await;
         a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(
             Arc::clone(&cluster),
@@ -308,6 +318,69 @@ GRANT ALL ON papers, paper_copies TO archivist;
     assert_eq!(
         run.postgres_answered("archivist", "papers:p1", ActionStatement::Delete),
         Some(true)
+    );
+}
+
+/// A delete whose trigger removes a row another table's foreign key still references is
+/// refused by declared integrity after its policy admitted the row, so the probe reads
+/// the owner's delete as allowed and the other caller's as the policy's denial.
+async fn a_delete_whose_trigger_breaks_another_tables_key_is_read_as_allowed(
+    cluster: Arc<Cluster>,
+    major: &str,
+) {
+    let case = ParityCase::reading(
+        &format!("probe-trigger-delete-fk-{major}"),
+        "
+CREATE ROLE curator NOLOGIN;
+CREATE TABLE heads (id TEXT PRIMARY KEY);
+ALTER TABLE heads ENABLE ROW LEVEL SECURITY;
+ALTER TABLE heads FORCE ROW LEVEL SECURITY;
+CREATE TABLE head_shares (
+    head_id TEXT NOT NULL REFERENCES heads (id),
+    grantee TEXT NOT NULL,
+    PRIMARY KEY (head_id, grantee)
+);
+ALTER TABLE head_shares ENABLE ROW LEVEL SECURITY;
+ALTER TABLE head_shares FORCE ROW LEVEL SECURITY;
+CREATE TABLE items (
+    id TEXT PRIMARY KEY REFERENCES heads (id),
+    owner_id TEXT NOT NULL
+);
+ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+ALTER TABLE items FORCE ROW LEVEL SECURITY;
+CREATE POLICY items_select ON items FOR SELECT TO curator USING (true);
+CREATE POLICY items_delete ON items FOR DELETE TO curator
+    USING (owner_id = current_setting('app.user_id', true));
+GRANT SELECT, DELETE ON items TO curator;
+CREATE FUNCTION delete_head() RETURNS trigger
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+    DELETE FROM heads WHERE id = OLD.id;
+    RETURN NULL;
+END;
+$$;
+CREATE TRIGGER items_head_removed AFTER DELETE ON items
+    FOR EACH ROW EXECUTE FUNCTION delete_head();
+",
+        &[
+            "INSERT INTO heads VALUES ('i1')",
+            "INSERT INTO items VALUES ('i1', 'alice')",
+            "INSERT INTO head_shares VALUES ('i1', 'carol')",
+        ],
+        vec![
+            Principal::with_setting("alice", "curator", "app.user_id", "alice"),
+            Principal::with_setting("bob", "curator", "app.user_id", "bob"),
+        ],
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    assert_agrees(&case, &run);
+    assert_eq!(
+        run.postgres_answered("alice", "items:i1", ActionStatement::Delete),
+        Some(true)
+    );
+    assert_eq!(
+        run.postgres_answered("bob", "items:i1", ActionStatement::Delete),
+        Some(false)
     );
 }
 
@@ -1176,6 +1249,77 @@ async fn the_runner_agrees_on_direct_ownership(cluster: Arc<Cluster>) {
     assert_agrees(&case, &mismatches);
 }
 
+/// One user acting as two callers is asked about as that user under each caller's own
+/// subject, so both keep the user's answers.
+async fn one_user_acting_as_two_callers_is_asked_as_that_user(cluster: Arc<Cluster>) {
+    let mut case = ownership_case();
+    case.name = "runner-one-user-two-callers".to_string();
+    case.principals.push(
+        Principal::with_setting("alice-again", "alice", "app.user_id", "alice").acting_for("alice"),
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    for subject in ["alice", "alice-again"] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            subject,
+            "docs:d1",
+            ActionStatement::Select,
+            true,
+        );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// Two states of one schema, the owner alone and a stranger alone, each decide one side of
+/// the same clause, so either alone fails and together they pass.
+async fn variants_decide_together_what_neither_decides_alone(cluster: Arc<Cluster>) {
+    let variant = |name: &str, subject: &str| {
+        ParityCase::reading(
+            name,
+            "
+CREATE TABLE notes(id TEXT PRIMARY KEY, owner_id TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_select ON notes FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
+",
+            &[
+                "INSERT INTO notes VALUES ('n1', 'alice')",
+                "CREATE ROLE note_reader LOGIN; GRANT SELECT ON notes TO note_reader",
+            ],
+            vec![Principal::with_setting(
+                subject,
+                "note_reader",
+                "app.user_id",
+                subject,
+            )],
+        )
+    };
+    let owner = variant("runner-variants-owner", "alice");
+    let alone = Arc::clone(&cluster);
+    let handle = tokio::spawn(async move {
+        support::parity::run(&alone, &owner).await;
+    });
+    let message = panic_message(handle.await.unwrap_err());
+    assert!(
+        message.contains("notes_select on public.notes, USING, deny side"),
+        "{message}"
+    );
+    let variants = [
+        variant("runner-variants-owner", "alice"),
+        variant("runner-variants-stranger", "bob"),
+    ];
+    let runs = support::parity::run_variants_before(
+        &cluster,
+        &variants,
+        core::time::Duration::from_mins(5),
+    )
+    .await;
+    for (case, run) in variants.iter().zip(&runs) {
+        assert_agrees(case, run);
+    }
+}
+
 async fn the_runner_agrees_on_membership(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
         "runner-membership",
@@ -1458,6 +1602,60 @@ CREATE POLICY docs_update ON docs FOR UPDATE
         kept.mismatches().is_empty() && given.mismatches().is_empty(),
         "neither shape may disagree"
     );
+}
+
+/// An insert naming only some columns is judged on the row the database completes.
+///
+/// The owner defaults to the caller's own setting, the key is an identity and the kind is
+/// generated, so only the database knows the row the check reads. A rehearsal outside the
+/// caller's session would write a row owned by nobody, which the table refuses.
+async fn a_row_the_database_completes_is_judged_as_written(cluster: Arc<Cluster>) {
+    let schema = "
+CREATE TABLE docs (
+    id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    owner_id TEXT NOT NULL DEFAULT current_setting('app.user_id', true),
+    kind TEXT GENERATED ALWAYS AS ('doc') STORED,
+    title TEXT NOT NULL);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_select ON docs FOR SELECT
+    USING (owner_id = current_setting('app.user_id', true));
+CREATE POLICY docs_insert ON docs FOR INSERT
+    WITH CHECK (owner_id = current_setting('app.user_id', true) AND kind = 'doc'
+                AND title <> 'locked');
+";
+    let case = ParityCase::reading(
+        "runner-completed-row",
+        schema,
+        &[
+            "INSERT INTO docs (owner_id, title) VALUES ('alice', 'open'), ('bob', 'locked')",
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT ON docs TO app_reader",
+        ],
+        vec![
+            Principal::with_setting("alice", "app_reader", "app.user_id", "alice"),
+            Principal::with_setting("bob", "app_reader", "app.user_id", "bob"),
+        ],
+    )
+    .inserting_columns("docs", &["title"]);
+    let run = support::parity::run(&cluster, &case).await;
+    for subject in ["alice", "bob"] {
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            subject,
+            "docs:1",
+            ActionStatement::Insert,
+            true,
+        );
+        support::parity::assert_postgres(
+            &case,
+            &run,
+            subject,
+            "docs:2",
+            ActionStatement::Insert,
+            false,
+        );
+    }
+    assert_agrees(&case, &run);
 }
 
 /// Ported from `quoted_nested_membership_parity_postgres18_and_openfga`.

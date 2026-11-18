@@ -24,7 +24,12 @@ use crate::support::containers::{connect_postgres_with_retry, PG_DB, PG_PASSWORD
 /// Fixtures whose dump cannot parse yet, each waiting on a named sqlparser
 /// gap. An entry whose dump starts parsing fails the run, which is the signal
 /// to promote it into the round trip.
-const DUMP_BLOCKED_ON_SQLPARSER: [(&str, &str); 2] = [
+const DUMP_BLOCKED_ON_SQLPARSER: [(&str, &str); 3] = [
+    (
+        "core_schema",
+        "its enum types dump as ALTER TYPE ... OWNER TO, and OWNER TO is gated to the table \
+         target upstream, the unfiled owner-to-uneven finding",
+    ),
     (
         "current_user_equality",
         "a SERIAL key dumps as CREATE SEQUENCE options in an order sqlparser #2414 \
