@@ -1369,12 +1369,12 @@ pub(super) fn attribute_literal(expr: &Expr) -> Option<AttributeLiteral> {
 
 /// The value `PostgreSQL` makes of a literal through its chain of casts, applied innermost
 /// first, as the literal that compares like it, or `None` where any cast in the chain is
-/// one `sql-values` does not compute.
+/// one `sql-values` does not compute or yields SQL `NULL`.
 ///
 /// A date or time result is not folded, since how it compares with a zoned column depends
-/// on the session's `TimeZone`, and `char(n)` reads without the blank padding its cast to
-/// `text` drops. A last cast to `money` stays for the database, which reads it under
-/// `lc_monetary`.
+/// on the session's `TimeZone`, nor a `jsonb` one, which no attribute literal spells, and
+/// `char(n)` reads without the blank padding its cast to `text` drops. A last cast to
+/// `money` stays for the database, which reads it under `lc_monetary`.
 fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
     let mut targets = Vec::new();
     let peeled = peel_noting_casts(expr, |data_type| targets.push(data_type));
@@ -1414,12 +1414,14 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         }
         sql_values::postgres::CastValue::Date(_)
         | sql_values::postgres::CastValue::Timestamp(_)
-        | sql_values::postgres::CastValue::TimestampTz(_) => None,
+        | sql_values::postgres::CastValue::TimestampTz(_)
+        | sql_values::postgres::CastValue::Jsonb(_) => None,
     }
 }
 
 /// The value a literal takes through `targets`, listed outermost first and applied
-/// innermost first, or `None` where `sql-values` computes no step.
+/// innermost first, or `None` where `sql-values` computes no step or a step yields SQL
+/// `NULL`.
 fn folded_cast(
     literal: sql_values::postgres::Literal<'_>,
     targets: &[&DataType],
@@ -1427,7 +1429,9 @@ fn folded_cast(
     let mut targets = targets.iter().rev();
     let first = sql_values::postgres::cast_literal(literal, cast_target(targets.next()?)?).ok()?;
     targets.try_fold(first, |value, data_type| {
-        sql_values::postgres::cast_value(value, cast_target(data_type)?).ok()
+        sql_values::postgres::cast_value(value, cast_target(data_type)?)
+            .ok()
+            .flatten()
     })
 }
 
