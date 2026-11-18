@@ -39,6 +39,7 @@ mod patterns;
 mod policy_reads;
 mod records;
 mod relations;
+mod resulting;
 mod row_naming;
 
 pub use action_relations::{
@@ -66,6 +67,7 @@ pub use relations::{
     FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestNormalization,
     RequestPredicate, RequestPrincipal, RowDecision,
 };
+pub use resulting::ResultingRow;
 pub use row_naming::RowNaming;
 
 pub(crate) mod prelude {

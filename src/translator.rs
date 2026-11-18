@@ -314,6 +314,18 @@ impl Translation {
         &self.derived.row_naming
     }
 
+    /// Per table a write judges, how a check about the row the write produces names it
+    /// and which facts it carries.
+    ///
+    /// Every [`RowVersion::Resulting`](crate::types::RowVersion::Resulting) judgement is
+    /// asked on the type it names, about
+    /// [`ResultingRow::object`](crate::types::ResultingRow::object), with
+    /// [`ResultingRow::records`](crate::types::ResultingRow::records) as contextual tuples.
+    #[must_use]
+    pub fn resulting_rows(&self) -> &[crate::types::ResultingRow] {
+        &self.plan.resulting_rows
+    }
+
     /// Which relations answer each action the model covers, and which version of the
     /// row each of them judges.
     ///

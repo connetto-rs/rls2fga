@@ -12,23 +12,39 @@ pub enum RowVersion {
     /// The row as it is, which a `USING` clause reads.
     Existing,
     /// The row as it will be, which a `WITH CHECK` clause reads.
+    ///
+    /// No store holds that row, so a check names it with
+    /// [`ResultingRow::object`](crate::ResultingRow::object) and carries
+    /// [`ResultingRow::records`](crate::ResultingRow::records) as contextual tuples, and
+    /// nothing else the row would state. What the clause reads through a helper or a
+    /// subquery the model reads from the stored row under the same key, as `PostgreSQL`
+    /// reads the statement's snapshot.
     Resulting,
 }
 
-/// One relation that must grant, and the version it judges.
+/// One relation that must grant, the version it judges, and the type it is asked on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ActionJudgement {
-    /// Relation to ask, always defined on the entry's type.
+    /// Relation to ask, defined on [`type_name`](Self::type_name).
     pub relation: RelationName,
     /// Version to ask it about.
     pub version: RowVersion,
+    /// Type the relation is asked on. The entry's own type for
+    /// [`RowVersion::Existing`], and for [`RowVersion::Resulting`] the type of the
+    /// table's [`ResultingRow`](crate::ResultingRow), whose object and facts the check
+    /// carries.
+    pub type_name: TypeName,
 }
 impl ActionJudgement {
     /// Build one required judgement.
     #[must_use]
-    pub fn new(relation: RelationName, version: RowVersion) -> Self {
-        Self { relation, version }
+    pub fn new(relation: RelationName, version: RowVersion, type_name: TypeName) -> Self {
+        Self {
+            relation,
+            version,
+            type_name,
+        }
     }
 }
 

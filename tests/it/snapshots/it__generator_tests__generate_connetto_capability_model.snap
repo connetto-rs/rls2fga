@@ -24,6 +24,16 @@ type paper_shares
     define can_update: no_access
     define can_update_without_reading: can_update
 
+type paper_shares_resulting
+  relations
+    define gate_shares_read_abbc62d2: [user:* with when_viewer_in_app_subjects_394712ea]
+    define papers: [papers]
+    define request_gate: [request_gate]
+    define stored: [paper_shares]
+    define can_insert: can_select from papers and acting_app_user from request_gate
+    define can_insert_returning: can_select from papers and acting_app_user from request_gate and can_select
+    define can_select: gate_shares_read_abbc62d2 and acting_app_user from request_gate
+
 type paper_shares_share
   relations
     define gate_papers_p_3b273139: [user:* with when_viewer_in_app_subjects_394712ea]
@@ -39,6 +49,16 @@ type papers
     define can_select_for_update: can_update
     define can_update: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
     define can_update_without_reading: (owner or gate_papers_p_3b273139 from paper_shares_share) and acting_app_user from request_gate
+    define gate_papers_p_3b273139_via_paper_shares_share: gate_papers_p_3b273139 from paper_shares_share
+
+type papers_resulting
+  relations
+    define owner: [user]
+    define request_gate: [request_gate]
+    define stored: [papers]
+    define can_insert: (owner or gate_papers_p_3b273139_via_paper_shares_share from stored) and acting_app_user from request_gate
+    define can_update: (owner or gate_papers_p_3b273139_via_paper_shares_share from stored) and acting_app_user from request_gate
+    define can_update_without_reading: (owner or gate_papers_p_3b273139_via_paper_shares_share from stored) and acting_app_user from request_gate
 
 type pg_role
   relations

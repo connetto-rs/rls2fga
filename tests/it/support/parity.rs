@@ -27,8 +27,8 @@ use rls2fga::classifier::function_registry::{DeclaredSource, DeclaredSources};
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ColumnCommand, ColumnName,
-    ConfidenceLevel, NoteSeverity, RequestAtom, RequestComparison, RequestPredicate, RowNaming,
-    RowVersion, TableId, TranslationNote, ValueSource,
+    ConfidenceLevel, NoteSeverity, RecordError, RequestAtom, RequestComparison, RequestPredicate,
+    RowNaming, RowVersion, TableId, TranslationNote, ValueSource,
 };
 
 use super::openfga;
@@ -244,6 +244,8 @@ pub(crate) struct ParityCase {
     pub(crate) principals: Vec<Principal>,
     /// Per table, keyed by the schema spelling, what a write would attempt.
     pub(crate) mutations: BTreeMap<String, Mutations>,
+    /// Per table, what an `INSERT` probe writes beyond the row it copies.
+    pub(crate) inserting: BTreeMap<String, Inserting>,
     /// Accessor metadata the deployment declares, as a fixture's
     /// `function_registry.json` holds it.
     pub(crate) registry_json: Option<String>,
@@ -305,6 +307,7 @@ impl ParityCase {
             seed: seed.iter().map(|sql| (*sql).to_string()).collect(),
             principals,
             mutations: BTreeMap::new(),
+            inserting: BTreeMap::new(),
             registry_json: None,
             settings: Vec::new(),
             not_read_directly: Vec::new(),
@@ -407,6 +410,23 @@ impl ParityCase {
         self.mutations.insert(table.to_string(), mutations);
         self
     }
+
+    /// The same case, whose `INSERT` probes on `table` write `values` in place of the copied
+    /// or minted ones, for a policy arm that admits one key alone.
+    pub(crate) fn inserting_values(mut self, table: &str, values: &[(&str, &str)]) -> Self {
+        self.inserting.entry(table.to_string()).or_default().values = values
+            .iter()
+            .map(|(column, value)| ((*column).to_string(), (*value).to_string()))
+            .collect();
+        self
+    }
+}
+
+/// Values a case's `INSERT` probes substitute for the copied or minted ones.
+#[derive(Clone, Default)]
+pub(crate) struct Inserting {
+    /// Values written in place of the copied or minted ones, as `(column, text)` pairs.
+    pub(crate) values: Vec<(String, String)>,
 }
 
 /// One compared pair and both answers.
@@ -431,6 +451,15 @@ impl Mismatch {
     pub(crate) fn disagrees(&self) -> bool {
         self.postgres != self.openfga
     }
+}
+
+/// What the database answered, and the row the write produces where the probe knows it.
+struct ProbeResult {
+    /// What the probe measured.
+    postgres: bool,
+    /// The row the write produces, absent where the database assigns a key the probe
+    /// cannot know or the statement keeps the seed row.
+    produced: Option<serde_json::Value>,
 }
 
 /// Everything one case observed.
@@ -553,6 +582,12 @@ struct Counted {
     rows: i64,
 }
 
+#[derive(QueryableByName)]
+struct ConstraintHit {
+    #[diesel(sql_type = diesel::sql_types::Integer)]
+    one: i32,
+}
+
 /// One object of one table: how it is named, and the predicate that selects its row.
 struct Object {
     name: String,
@@ -565,6 +600,8 @@ struct Object {
     keys: Vec<String>,
     /// One permission object shared by every row.
     singleton: bool,
+    /// What the case's `INSERT` probes on the table write beyond this row.
+    inserting: Option<Inserting>,
 }
 
 /// The key columns a table's objects are named from, or [`None`] where a column does not
@@ -602,7 +639,12 @@ fn key_predicate(row: &serde_json::Value, columns: &[&str]) -> String {
 
 /// Every object the model names, read as the owner so row-level security does not filter
 /// the enumeration.
-fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) -> Vec<Object> {
+fn objects(
+    conn: &mut PgConnection,
+    naming: &[RowNaming],
+    skipped: &[String],
+    inserting: &BTreeMap<String, &Inserting>,
+) -> Vec<Object> {
     let mut out = Vec::new();
     for entry in naming {
         if skipped.iter().any(|table| entry.table.name() == table) {
@@ -620,6 +662,7 @@ fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) ->
             None => continue,
         };
         let table = entry.table.sql_name();
+        let inserting = inserting.get(&table).map(|declared| (*declared).clone());
         let limit = if singleton { " LIMIT 1" } else { "" };
         // Case tables and columns are defined at runtime.
         let rows: Vec<JsonRow> =
@@ -642,6 +685,7 @@ fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) ->
                 row,
                 keys: Vec::new(),
                 singleton,
+                inserting: None,
             });
             continue;
         }
@@ -663,6 +707,7 @@ fn objects(conn: &mut PgConnection, naming: &[RowNaming], skipped: &[String]) ->
                 row,
                 keys: columns.iter().map(|column| (*column).to_string()).collect(),
                 singleton,
+                inserting: inserting.clone(),
             });
         }
     }
@@ -694,7 +739,7 @@ fn postgres_allows(
     mutations: Option<&Mutations>,
     // Set where a read raised because the caller set nothing, asked once per caller.
     raised: &mut bool,
-) -> Option<bool> {
+) -> Option<ProbeResult> {
     let table = &object.table;
     let predicate = &object.predicate;
     if matches!(
@@ -744,38 +789,86 @@ fn postgres_allows(
         Err(error) => Err(error),
         Ok(()) => unreachable!("the transaction body always rolls back"),
     };
-    match answered {
+    // Reads mint no row, so only the measured answer leaves this path.
+    let postgres = match answered {
         // Not asserted per read: `PostgreSQL` may settle a correlated EXISTS from the join
         // alone and never evaluate the accessor, so a row no membership row mentions is
         // denied without raising. Whether the claim still holds is asked once per caller,
         // which is a question about the caller rather than about the planner's order.
-        Ok(granted) => Some(granted),
+        Ok(granted) => granted,
         // Row-level security raises on exactly one thing when reading: a policy that
         // expands into itself. The read returns no row, so it is a denial, and the model
         // has to deny too.
-        Err(error) if reads_as_a_policy_refusal(&error) => Some(false),
+        Err(error) if reads_as_a_policy_refusal(&error) => false,
         // A caller that set nothing the policy reads is denied, where the case says so.
         Err(error) if principal.reads_an_unset_setting && reads_an_unset_setting(&error) => {
             *raised = true;
-            Some(false)
+            false
         }
         // A document that is not `JSON` raises where the read reaches it, which is a
         // denial, where the case says so.
         Err(error) if principal.reads_a_non_json_document && reads_a_non_json_document(&error) => {
             *raised = true;
-            Some(false)
+            false
         }
         // A caller without the table's privilege raises `42501`, which is a denial, and the
         // model has to deny too.
-        Err(error) if lacks_a_table_privilege(&error) => Some(false),
+        Err(error) if lacks_a_table_privilege(&error) => false,
         // Otherwise a plain read never raises, so an error is a case that named no column,
         // and calling it a denial would hide the mistake.
         Err(error) if statement == ActionStatement::Select => panic!(
             "{}: reading {table} as {} raised, which row-level security never does: {error}",
             case.name, principal.login_role
         ),
+        // A write the policy admits meets the table's own declared integrity when the
+        // statement itself breaks one, and the probe reads that as allowed.
+        Err(error) if is_constraint_violation(&error) => {
+            if declared_constraint_block(conn, &error, table) {
+                true
+            } else {
+                panic!(
+                    "{}: {statement:?} on {table} raised a constraint error the table does \
+                     not declare: {error}",
+                    case.name
+                )
+            }
+        }
         // A write the check refuses raises, and that is a denial.
-        Err(_) => Some(false),
+        Err(_) => false,
+    };
+    let produced = match (
+        statement,
+        mutations.and_then(|mutations| mutations.update_set.as_deref()),
+    ) {
+        (ActionStatement::Update, Some(set)) => updated_row(conn, case, table, set, predicate),
+        _ => None,
+    };
+    Some(ProbeResult { postgres, produced })
+}
+
+/// The row an `UPDATE` applying `set` to the row `predicate` names produces, written as the
+/// connection's own role, which no policy filters, and rolled back. [`None`] where no row
+/// matches or the table's own integrity refuses the change, so no row results.
+fn updated_row(
+    conn: &mut PgConnection,
+    case: &ParityCase,
+    table: &str,
+    set: &str,
+    predicate: &str,
+) -> Option<serde_json::Value> {
+    let mut produced = None;
+    match conn.transaction::<(), diesel::result::Error, _>(|conn| {
+        let rows: Vec<JsonRow> = diesel::sql_query(format!(
+            "UPDATE {table} AS written SET {set} WHERE {predicate} RETURNING to_jsonb(written) AS row"
+        ))
+        .load(conn)?;
+        produced = rows.into_iter().next().map(|JsonRow { row }| row);
+        Err(diesel::result::Error::RollbackTransaction)
+    }) {
+        Err(diesel::result::Error::RollbackTransaction) => produced,
+        Err(error) if is_constraint_violation(&error) => None,
+        Err(error) => panic!("{}: updating {table} as its owner: {error}", case.name),
+        Ok(()) => unreachable!("the transaction body always rolls back"),
     }
 }
 
@@ -805,6 +898,70 @@ fn reads_a_non_json_document(error: &diesel::result::Error) -> bool {
 fn lacks_a_table_privilege(error: &diesel::result::Error) -> bool {
     matches!(error, diesel::result::Error::DatabaseError(_, info)
         if info.message().contains("permission denied for table"))
+}
+
+/// Whether `error` is the `23503` or `23514` a blocked write raises.
+fn is_constraint_violation(error: &diesel::result::Error) -> bool {
+    matches!(
+        error,
+        diesel::result::Error::DatabaseError(_, info)
+            if info.sqlstate().is_some_and(|state| {
+                state.as_str() == "23503" || state.as_str() == "23514"
+            })
+    )
+}
+
+/// Whether `error` is the declared integrity of `probed_table` refusing a copy the policy
+/// already admitted, so the probe reads it as allowed rather than as the policy refusing:
+/// the `23514` of a `CHECK` the table declares, or the `23503` of a foreign key the table
+/// references or is referenced by.
+///
+/// The `PostgreSQL` fields the check matches are the error's own: the constraint it names
+/// must be a real constraint on the table the error names, in the probed table's schema,
+/// attached to the probed table on either side of the foreign key. A trigger that `RAISE`s
+/// the same SQLSTATE names no constraint and stays a loud failure. The catalog query is a
+/// raw `sql_query`, since the probed table is runtime data no `table!` can type, and the
+/// `regclass` casts keep every name resolved in the case's own search path.
+fn declared_constraint_block(
+    conn: &mut PgConnection,
+    error: &diesel::result::Error,
+    probed_table: &str,
+) -> bool {
+    let diesel::result::Error::DatabaseError(_, info) = error else {
+        return false;
+    };
+    let Some(state) = info.sqlstate() else {
+        return false;
+    };
+    let contype = if state.as_str() == "23514" {
+        "c"
+    } else if state.as_str() == "23503" {
+        "f"
+    } else {
+        return false;
+    };
+    let Some(constraint) = info.constraint_name() else {
+        return false;
+    };
+    // Without the table the violation sits on the constraint cannot be matched, and the
+    // unmatched code stays a loud failure.
+    let Some(error_table) = info.table_name() else {
+        return false;
+    };
+    diesel::sql_query(
+        "SELECT 1 AS one FROM pg_constraint
+         WHERE conname = $1
+           AND conrelid = $2::regclass
+           AND contype = $3
+           AND (conrelid = $4::regclass OR confrelid = $4::regclass)
+           AND connamespace = (SELECT relnamespace FROM pg_class WHERE oid = $4::regclass)",
+    )
+    .bind::<diesel::sql_types::Text, _>(constraint)
+    .bind::<diesel::sql_types::Text, _>(error_table)
+    .bind::<diesel::sql_types::Text, _>(contype)
+    .bind::<diesel::sql_types::Text, _>(probed_table)
+    .get_result::<ConstraintHit>(conn)
+    .is_ok_and(|ConstraintHit { one }| one == 1)
 }
 
 /// The model under test, as the three things every question about it needs.
@@ -841,6 +998,11 @@ fn clock_context(
 }
 
 /// Whether the model grants `principal` the statement on `object`.
+///
+/// `produced` is the row the write produces, which a `Resulting` judgement asks about
+/// under the type the translation names for it, carrying that row's facts. Where the probe
+/// cannot know it, a statement that keeps the seed row asks about the seed row, and any
+/// other declines the pair.
 async fn openfga_allows(
     model: &Model<'_>,
     principal: &Principal,
@@ -848,6 +1010,7 @@ async fn openfga_allows(
     object: &Object,
     statement: ActionStatement,
     mutations: Option<&Mutations>,
+    produced: Option<&serde_json::Value>,
 ) -> Option<bool> {
     let Model {
         client,
@@ -886,6 +1049,7 @@ async fn openfga_allows(
                         relations.relation(column).as_str(),
                         &answer.gate,
                         context.clone(),
+                        Vec::new(),
                     )
                     .await;
                     if !granted {
@@ -906,18 +1070,62 @@ async fn openfga_allows(
                 || mutations.is_some_and(|mutations| mutations.check_neutral)
                 || statement == ActionStatement::InsertOnConflictUpdate;
             for judgement in judgements {
-                // The tuples hold no facts about a row a write has yet to produce.
-                if judgement.version == RowVersion::Resulting && !settled {
-                    return None;
-                }
+                let (name, carried) = if judgement.version == RowVersion::Resulting {
+                    let row = match produced {
+                        Some(row) => row,
+                        None if settled => &object.row,
+                        None => return None,
+                    };
+                    let Some(resulting) = translation
+                        .resulting_rows()
+                        .iter()
+                        .find(|resulting| resulting.type_name == judgement.type_name)
+                    else {
+                        panic!(
+                            "{}: {statement:?} on '{type_name}' judges the written row on \
+                             '{}', which the translation gives no way to name",
+                            case.name, judgement.type_name
+                        )
+                    };
+                    let values = super::JsonRowValues(row);
+                    let name = match resulting.object(&values) {
+                        Ok(Some(name)) => name,
+                        Ok(None) => panic!(
+                            "{}: the row {statement:?} writes on '{type_name}' names no object",
+                            case.name
+                        ),
+                        // A minted key longer than the target names has no object to ask about.
+                        Err(RecordError::RowCannotBeNamed(_)) => return None,
+                        Err(error) => panic!(
+                            "{}: naming the row {statement:?} writes on '{type_name}': {error}",
+                            case.name
+                        ),
+                    };
+                    let carried = resulting
+                        .records(&values)
+                        .unwrap_or_else(|error| {
+                            panic!(
+                                "{}: the facts of the row {statement:?} writes on \
+                                 '{type_name}': {error:?}",
+                                case.name
+                            )
+                        })
+                        .iter()
+                        .map(openfga::record_tuple)
+                        .collect();
+                    (name, carried)
+                } else {
+                    (object.name.clone(), Vec::new())
+                };
                 let granted = openfga::check_as(
                     client,
                     &principal.login_role,
                     principals,
                     &user,
                     judgement.relation.as_str(),
-                    &object.name,
+                    &name,
                     context.clone(),
+                    carried,
                 )
                 .await;
                 if !granted {
@@ -1003,8 +1211,7 @@ fn touched_columns(
     Some(touched)
 }
 
-/// The first column outside the key, which an upsert probe assigns and a keyless
-/// `RETURNING` names.
+/// The first column the probe may assign, outside the key the probe replaces.
 fn settable_column(object: &Object) -> Option<&str> {
     object
         .row
@@ -1238,7 +1445,8 @@ async fn run_in(
 
     let answers = doctor(planned.translation().action_relations().to_vec());
     let naming = planned.translation().row_naming().to_vec();
-    let objects = objects(conn, &naming, &case.not_read_directly);
+    let inserting = resolved_declarations(case, &case.inserting, &naming);
+    let objects = objects(conn, &naming, &case.not_read_directly, &inserting);
     let tuples = if case.loading_from_rows {
         tuples_replaying_pure_queries(conn, case, planned.tuple_queries())
     } else {
@@ -1258,7 +1466,7 @@ async fn run_in(
         case,
         settings: &settings,
     };
-    let mutations = resolved_mutations(case, &naming);
+    let mutations = resolved_declarations(case, &case.mutations, &naming);
 
     let mut observations =
         compare_every_pair(cluster, database, &model, &objects, &mutations, &clock).await;
@@ -1439,7 +1647,7 @@ async fn compare_every_pair(
         for object in objects {
             for statement in COMPARED {
                 let candidate = mutations.get(&object.table).copied();
-                let Some(postgres) = postgres_allows(
+                let Some(answer) = postgres_allows(
                     conn,
                     case,
                     principal,
@@ -1450,16 +1658,17 @@ async fn compare_every_pair(
                 ) else {
                     continue;
                 };
-                let Some(openfga) = openfga_allows(
+                let openfga = openfga_allows(
                     model,
                     principal,
                     &asked_context(principal, &clock, &model.settings[&principal.subject]),
                     object,
                     statement,
                     candidate,
+                    answer.produced.as_ref(),
                 )
-                .await
-                else {
+                .await;
+                let Some(openfga) = openfga else {
                     continue;
                 };
                 observations.push(Mismatch {
@@ -1467,7 +1676,7 @@ async fn compare_every_pair(
                     object: object.name.clone(),
                     table: object.table.clone(),
                     statement,
-                    postgres,
+                    postgres: answer.postgres,
                     openfga,
                 });
             }
@@ -1833,6 +2042,7 @@ async fn compare_at_future_instant(
                 object,
                 ActionStatement::Select,
                 None,
+                None,
             )
             .await
             else {
@@ -1963,7 +2173,7 @@ fn postgres_allows_write_probe(
     attempt: &Attempt,
     // Set where the write raised because the caller set nothing, as a read does.
     raised: &mut bool,
-) -> Option<bool> {
+) -> Option<ProbeResult> {
     let Attempt {
         case,
         object,
@@ -1982,24 +2192,39 @@ fn postgres_allows_write_probe(
         .collect::<Vec<_>>()
         .join(", ");
     let settable = settable_column(object)?;
-
-    let payload = if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
-        object.row.to_string()
-    } else {
-        let mut probe = row.clone();
-        for key in keys {
-            let fresh = fresh_key(conn, table, key, row.get(key)?)?;
-            probe.insert(key.clone(), fresh);
-        }
-        serde_json::Value::Object(probe).to_string()
-    };
+    let (payload, produced) =
+        if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
+            assert!(
+                !keys.is_empty() || object.inserting.is_none(),
+                "{}: {table} has no key for a declared insert to replace",
+                case.name
+            );
+            (object.row.to_string(), Some(object.row.clone()))
+        } else {
+            let declared: &[(String, String)] = object
+                .inserting
+                .as_ref()
+                .map_or(&[], |inserting| &inserting.values);
+            let mut probe = row.clone();
+            for key in keys {
+                if !declared.iter().any(|(column, _)| column == key) {
+                    probe.insert(key.clone(), fresh_key(conn, table, key, row.get(key)?)?);
+                }
+            }
+            for (column, value) in declared {
+                probe.insert(column.clone(), serde_json::Value::String(value.clone()));
+            }
+            let probe_row = serde_json::Value::Object(probe);
+            (probe_row.to_string(), Some(probe_row))
+        };
     let source = format!(
         "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1::jsonb)"
     );
     if keys.is_empty() && statement == ActionStatement::InsertReturning {
         let sql =
             format!("WITH written AS ({source} RETURNING \"{settable}\") SELECT 1 FROM written");
-        return Some(attempt_write(conn, attempt, &sql, &payload, raised));
+        let postgres = attempt_write(conn, attempt, &sql, &payload, raised);
+        return Some(ProbeResult { postgres, produced });
     }
     let spellings = match statement {
         ActionStatement::Insert => {
@@ -2014,7 +2239,10 @@ fn postgres_allows_write_probe(
             let update = format!(
                 "{source} ON CONFLICT ({arbiter}) DO UPDATE SET \"{settable}\" = excluded.\"{settable}\""
             );
-            return Some(attempt_write(conn, attempt, &update, &payload, raised));
+            return Some(ProbeResult {
+                postgres: attempt_write(conn, attempt, &update, &payload, raised),
+                produced,
+            });
         }
         _ => return None,
     };
@@ -2029,7 +2257,10 @@ fn postgres_allows_write_probe(
          cannot cover both",
         case.name, object.name
     );
-    Some(answers[0])
+    Some(ProbeResult {
+        postgres: answers[0],
+        produced,
+    })
 }
 
 /// Run one write spelling as the caller and roll it back, reading a refusal as a denial.
@@ -2065,6 +2296,19 @@ fn attempt_write(
         Err(error) if reads_as_a_policy_refusal(&error) => false,
         // A caller without the table's privilege raises `42501`, which is a denial.
         Err(error) if lacks_a_table_privilege(&error) => false,
+        // A write the policy admits meets the table's own declared integrity when the
+        // copy itself breaks one, and the probe reads that as allowed.
+        Err(error) if is_constraint_violation(&error) => {
+            if declared_constraint_block(conn, &error, &object.table) {
+                true
+            } else {
+                panic!(
+                    "{}: {statement:?} on {} raised a constraint error the table does not \
+                     declare: {error}",
+                    case.name, object.name
+                )
+            }
+        }
         Err(error) => {
             let rendered = error.to_string();
             assert!(
@@ -2140,19 +2384,20 @@ pub(crate) fn assert_two_sided(case: &ParityCase, run: &Run) {
     );
 }
 
-/// The case's declared changes, keyed the way an object names its table.
+/// The case's declarations per table, keyed the way an object names its table.
 ///
 /// A case spells a table the way its schema does, `notes`, while an object carries
 /// `TableId::sql_name`, `"public"."notes"`. Comparing those as text finds nothing, so the
 /// spelling is resolved through the identities the model already named. A declaration
 /// matching no table is a typo in the case, and silently disabling it would look like the
 /// write simply not being compared.
-fn resolved_mutations<'case>(
+fn resolved_declarations<'case, T>(
     case: &'case ParityCase,
+    declared: &'case BTreeMap<String, T>,
     naming: &[RowNaming],
-) -> BTreeMap<String, &'case Mutations> {
+) -> BTreeMap<String, &'case T> {
     let mut resolved = BTreeMap::new();
-    for (spelling, mutations) in &case.mutations {
+    for (spelling, declaration) in declared {
         let matches: Vec<&RowNaming> = naming
             .iter()
             .filter(|entry| names_the_same_table(&entry.table, spelling))
@@ -2172,7 +2417,9 @@ fn resolved_mutations<'case>(
             ),
         };
         assert!(
-            resolved.insert(entry.table.sql_name(), mutations).is_none(),
+            resolved
+                .insert(entry.table.sql_name(), declaration)
+                .is_none(),
             "{}: two declarations resolve to '{}', and the second would win",
             case.name,
             entry.table.sql_name()
@@ -2243,12 +2490,13 @@ fn licence_of(note: &TranslationNote) -> Disclosure {
         TranslationNote::NullableBooleanFlagNarrowed { .. } => Licence::Anywhere {
             direction: Direction::Narrower,
         },
-        // Three that narrow and name their table: the parent reads its own rows only, so
-        // its children's fall closed on that type, and an expression nobody classified
-        // denies what the database may grant.
+        // Four that narrow and name their table: the parent reads its own rows only, so
+        // its children's fall closed on that type, an expression nobody classified denies
+        // what the database may grant, and a written row's unreadable fact denies its write.
         TranslationNote::InheritanceParentReadsOwnRowsOnly { table, .. }
         | TranslationNote::BridgeColumnMissing { table, .. }
-        | TranslationNote::RowsCannotBeNamed { table, .. } => Licence::Located {
+        | TranslationNote::RowsCannotBeNamed { table, .. }
+        | TranslationNote::ResultingRowFactUnreadable { table, .. } => Licence::Located {
             table: table.sql_name(),
             commands: Vec::new(),
             direction: Direction::Narrower,

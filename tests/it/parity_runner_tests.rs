@@ -208,6 +208,217 @@ async fn table_privileges_agree_on_postgres_17_and_18() {
     }
 }
 
+/// The probe's constraint-block reading, on `PostgreSQL` 17 and 18.
+///
+/// A write the policy admits meets the table's own declared integrity when the copy
+/// itself breaks one, and the probe reads it as allowed. A trigger that `RAISE`s the same
+/// SQLSTATE names no constraint, and the probe must fail loudly instead.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn the_probe_tells_a_constraint_block_from_a_trigger_raise() {
+    for major in ["17", "18"] {
+        let cluster = Arc::new(Cluster::start_on(major).await);
+        a_declared_check_block_is_read_as_allowed(Arc::clone(&cluster), major).await;
+        a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(Arc::clone(&cluster), major).await;
+        a_trigger_raise_is_not_a_constraint_block(Arc::clone(&cluster), major).await;
+        a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(
+            Arc::clone(&cluster),
+            major,
+        )
+        .await;
+    }
+}
+
+/// A `CHECK` the probed table declares blocking a copy the policy admits reads as allowed.
+async fn a_declared_check_block_is_read_as_allowed(cluster: Arc<Cluster>, major: &str) {
+    // The check binds the key column, so the probe's fresh key breaks it while the seeded
+    // rows keep it, and only the copy's own violation raises.
+    let case = ParityCase::reading(
+        &format!("probe-declared-check-{major}"),
+"
+CREATE ROLE checker NOLOGIN;
+CREATE TABLE checked_notes (
+    id TEXT PRIMARY KEY CHECK (left(id, 1) = 'f'),
+    body TEXT
+);
+ALTER TABLE checked_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE checked_notes FORCE ROW LEVEL SECURITY;
+CREATE POLICY checked_notes_select ON checked_notes FOR SELECT TO checker USING (true);
+CREATE POLICY checked_notes_insert ON checked_notes FOR INSERT TO checker WITH CHECK (true);
+CREATE POLICY checked_notes_update ON checked_notes FOR UPDATE TO checker USING (true) WITH CHECK (true);
+CREATE POLICY checked_notes_delete ON checked_notes FOR DELETE TO checker USING (true);
+GRANT ALL ON checked_notes TO checker;
+",
+        &["INSERT INTO checked_notes VALUES ('f1', 'a'), ('f2', 'b')"],
+        vec![Principal::with_setting("checker", "checker", "app.user_id", "checker")],
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    assert_agrees(&case, &run);
+    // The probe's copy violates the check, and the reading is the policy's allow, not the
+    // constraint's block.
+    assert_eq!(
+        run.postgres_answered("checker", "checked_notes:f1", ActionStatement::Insert),
+        Some(true)
+    );
+}
+
+/// A `DELETE` of a parent row its children reference reads as allowed, the foreign key
+/// being on the child, not the probed table.
+async fn a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(
+    cluster: Arc<Cluster>,
+    major: &str,
+) {
+    let case = ParityCase::reading(
+        &format!("probe-parent-delete-fk-{major}"),
+        "
+CREATE ROLE archivist NOLOGIN;
+CREATE TABLE papers (id TEXT PRIMARY KEY);
+ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+ALTER TABLE papers FORCE ROW LEVEL SECURITY;
+CREATE POLICY papers_select ON papers FOR SELECT TO archivist USING (true);
+CREATE POLICY papers_insert ON papers FOR INSERT TO archivist WITH CHECK (true);
+CREATE POLICY papers_update ON papers FOR UPDATE TO archivist USING (true) WITH CHECK (true);
+CREATE POLICY papers_delete ON papers FOR DELETE TO archivist USING (true);
+CREATE TABLE paper_copies (
+    id TEXT PRIMARY KEY,
+    paper_id TEXT REFERENCES papers(id)
+);
+ALTER TABLE paper_copies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE paper_copies FORCE ROW LEVEL SECURITY;
+CREATE POLICY paper_copies_select ON paper_copies FOR SELECT TO archivist USING (true);
+CREATE POLICY paper_copies_insert ON paper_copies FOR INSERT TO archivist WITH CHECK (true);
+CREATE POLICY paper_copies_update ON paper_copies FOR UPDATE TO archivist USING (true) WITH CHECK (true);
+CREATE POLICY paper_copies_delete ON paper_copies FOR DELETE TO archivist USING (true);
+GRANT ALL ON papers, paper_copies TO archivist;
+",
+        &[
+            "INSERT INTO papers VALUES ('p1')",
+            "INSERT INTO paper_copies VALUES ('c1', 'p1')",
+        ],
+        vec![Principal::with_setting(
+            "archivist",
+            "archivist",
+            "app.user_id",
+            "archivist",
+        )],
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    assert_agrees(&case, &run);
+    // The child's foreign key blocks the copy, and the reading is the policy's allow.
+    assert_eq!(
+        run.postgres_answered("archivist", "papers:p1", ActionStatement::Delete),
+        Some(true)
+    );
+}
+
+/// A trigger that `RAISE`s the check-violation SQLSTATE without naming a constraint is not
+/// a constraint block, so the probe fails loudly rather than reading the raise as allowed.
+async fn a_trigger_raise_is_not_a_constraint_block(cluster: Arc<Cluster>, major: &str) {
+    let case = ParityCase::reading(
+        &format!("probe-trigger-raise-{major}"),
+        "
+CREATE ROLE triggerer NOLOGIN;
+CREATE TABLE trigger_notes (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE trigger_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE trigger_notes FORCE ROW LEVEL SECURITY;
+CREATE POLICY trigger_notes_select ON trigger_notes FOR SELECT TO triggerer USING (true);
+CREATE POLICY trigger_notes_insert ON trigger_notes FOR INSERT TO triggerer WITH CHECK (true);
+CREATE POLICY trigger_notes_update ON trigger_notes FOR UPDATE TO triggerer USING (true) WITH CHECK (true);
+CREATE POLICY trigger_notes_delete ON trigger_notes FOR DELETE TO triggerer USING (true);
+GRANT ALL ON trigger_notes TO triggerer;
+",
+        &[
+            "INSERT INTO trigger_notes VALUES ('a1', 'a'), ('a2', 'b')",
+            // The trigger is planted after the seed, so the seed rows do not meet it.
+            "CREATE FUNCTION raise_fake_check() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    RAISE EXCEPTION 'fake check failure' USING ERRCODE = 'check_violation';
+END;
+$$;",
+            "CREATE TRIGGER raise_fake_check BEFORE INSERT ON trigger_notes
+    FOR EACH ROW EXECUTE FUNCTION raise_fake_check();",
+        ],
+        vec![Principal::with_setting(
+            "triggerer",
+            "triggerer",
+            "app.user_id",
+            "triggerer",
+        )],
+    );
+    let handle = tokio::spawn(async move {
+        support::parity::run(&cluster, &case).await;
+    });
+    let message = panic_message(handle.await.unwrap_err());
+    assert!(
+        message.contains("raised a constraint error the table does not declare"),
+        "{message}"
+    );
+}
+
+/// A `23503` naming a real foreign key that references neither the probed table nor is
+/// declared on it is not a constraint block of the probe's table, so the probe fails
+/// loudly rather than reading the violation as allowed.
+async fn a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(
+    cluster: Arc<Cluster>,
+    major: &str,
+) {
+    let case = ParityCase::reading(
+        &format!("probe-foreign-key-outside-{major}"),
+        "
+CREATE ROLE decoy NOLOGIN;
+CREATE TABLE decoy_notes (id TEXT PRIMARY KEY, body TEXT);
+ALTER TABLE decoy_notes ENABLE ROW LEVEL SECURITY;
+ALTER TABLE decoy_notes FORCE ROW LEVEL SECURITY;
+CREATE POLICY decoy_notes_select ON decoy_notes FOR SELECT TO decoy USING (true);
+CREATE POLICY decoy_notes_insert ON decoy_notes FOR INSERT TO decoy WITH CHECK (true);
+CREATE POLICY decoy_notes_update ON decoy_notes FOR UPDATE TO decoy USING (true) WITH CHECK (true);
+CREATE POLICY decoy_notes_delete ON decoy_notes FOR DELETE TO decoy USING (true);
+CREATE TABLE referenced_docs (id TEXT PRIMARY KEY);
+ALTER TABLE referenced_docs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE referenced_docs FORCE ROW LEVEL SECURITY;
+CREATE POLICY referenced_docs_select ON referenced_docs FOR SELECT TO decoy USING (true);
+CREATE POLICY referenced_docs_insert ON referenced_docs FOR INSERT TO decoy WITH CHECK (true);
+CREATE POLICY referenced_docs_update ON referenced_docs FOR UPDATE TO decoy USING (true) WITH CHECK (true);
+CREATE POLICY referenced_docs_delete ON referenced_docs FOR DELETE TO decoy USING (true);
+CREATE TABLE decoy_refs (
+    id TEXT PRIMARY KEY,
+    doc_id TEXT REFERENCES referenced_docs(id)
+);
+ALTER TABLE decoy_refs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE decoy_refs FORCE ROW LEVEL SECURITY;
+CREATE POLICY decoy_refs_select ON decoy_refs FOR SELECT TO decoy USING (true);
+CREATE POLICY decoy_refs_insert ON decoy_refs FOR INSERT TO decoy WITH CHECK (true);
+CREATE POLICY decoy_refs_update ON decoy_refs FOR UPDATE TO decoy USING (true) WITH CHECK (true);
+CREATE POLICY decoy_refs_delete ON decoy_refs FOR DELETE TO decoy USING (true);
+GRANT ALL ON decoy_notes, referenced_docs, decoy_refs TO decoy;
+",
+        &[
+            "INSERT INTO referenced_docs VALUES ('d1')",
+            "INSERT INTO decoy_refs VALUES ('r0', 'd1')",
+            "INSERT INTO decoy_notes VALUES ('n1', 'a'), ('n2', 'b')",
+            // The trigger is planted after the seed, so the seed rows do not meet it.
+            "CREATE FUNCTION insert_missing_reference() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+    INSERT INTO decoy_refs VALUES ('r1', 'absent');
+END;
+$$;",
+            "CREATE TRIGGER insert_missing_reference BEFORE INSERT ON decoy_notes
+    FOR EACH ROW EXECUTE FUNCTION insert_missing_reference();",
+        ],
+        vec![Principal::with_setting("decoy", "decoy", "app.user_id", "decoy")],
+    );
+    let handle = tokio::spawn(async move {
+        support::parity::run(&cluster, &case).await;
+    });
+    let message = panic_message(handle.await.unwrap_err());
+    assert!(
+        message.contains("raised a constraint error the table does not declare"),
+        "{message}"
+    );
+}
+
 /// Missing privileges deny rows an ownership policy admits.
 async fn a_withheld_privilege_refuses_what_the_policy_admits(cluster: &Cluster, major: &str) {
     let case = ParityCase::reading(
@@ -5192,9 +5403,8 @@ CREATE POLICY notes_all ON notes FOR ALL
             "alice",
         )],
     )
-    // Two tables declaring different changes, and disagreeing about neutrality: rewriting
-    // the body cannot alter any policy's answer, while handing the row to somebody else is
-    // the whole question, so that one may not be asked of the row that exists.
+    // Two tables declaring different changes: rewriting the body cannot alter any
+    // policy's answer, while handing the row to somebody else is the whole question.
     .writing(
         "notes",
         Mutations {
@@ -5218,14 +5428,15 @@ CREATE POLICY notes_all ON notes FOR ALL
         ActionStatement::Update,
         true,
     );
-    // The database refuses to hand the row away, and the model is not asked about a row
-    // that does not exist, so the pair is declined rather than compared.
-    assert!(
-        run.observations.iter().all(|observation| {
-            observation.object != "docs:d1" || observation.statement != ActionStatement::Update
-        }),
-        "a change the case does not call neutral must not be asked of the existing row: {:#?}",
-        run.observations
+    // The database refuses to hand the row away, and the model, asked about the row the
+    // update produces rather than the one that exists, refuses too.
+    support::parity::assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "docs:d1",
+        ActionStatement::Update,
+        false,
     );
     assert_agrees(&case, &run);
 }

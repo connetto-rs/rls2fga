@@ -336,11 +336,13 @@ fn type_plan_to_definition(plan: &TypePlan) -> TypeDefinition {
 
 fn expr_to_userset(expr: &UsersetExpr) -> Userset {
     match expr {
-        UsersetExpr::Computed(relation) => Userset::ComputedUserset {
-            computed_userset: ObjectRelation {
-                relation: relation.clone(),
-            },
-        },
+        UsersetExpr::Computed(relation) | UsersetExpr::StoredRow(relation) => {
+            Userset::ComputedUserset {
+                computed_userset: ObjectRelation {
+                    relation: relation.clone(),
+                },
+            }
+        }
         UsersetExpr::TupleToUserset { tupleset, computed } => Userset::TupleToUserset {
             tuple_to_userset: TupleToUsersetDef {
                 tupleset: ObjectRelation {

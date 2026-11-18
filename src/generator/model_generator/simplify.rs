@@ -103,8 +103,10 @@ pub(crate) fn rule_implies(
                     )
                 })
         }
-        // An exclusion can remove the rule's own members, so it admits nothing.
-        UsersetExpr::Exclusion { .. } => false,
+        // An exclusion can remove the rule's own members, so it admits nothing. A stored-row
+        // read differs from the new row's own read of the same relation on a written row, so
+        // only the identical read, matched above, implies it.
+        UsersetExpr::Exclusion { .. } | UsersetExpr::StoredRow(_) => false,
     }
 }
 
@@ -210,7 +212,7 @@ pub(crate) fn repoint_inlined_aliases(
     aliases: &BTreeMap<TypeName, BTreeMap<RelationName, RelationName>>,
 ) {
     match expr {
-        UsersetExpr::Computed(name) => {
+        UsersetExpr::Computed(name) | UsersetExpr::StoredRow(name) => {
             if let Some(replacement) = own.and_then(|dropped| dropped.get(name)) {
                 *name = replacement.clone();
             }
@@ -485,7 +487,9 @@ fn constant_expr<'a>(
     path: &mut Vec<(&'a TypeName, &'a RelationName)>,
 ) -> Option<bool> {
     match expr {
-        UsersetExpr::Computed(name) => constant_relation(plan, name, context, path),
+        UsersetExpr::Computed(name) | UsersetExpr::StoredRow(name) => {
+            constant_relation(plan, name, context, path)
+        }
         UsersetExpr::Intersection(children) | UsersetExpr::Union(children) => {
             let intersection = matches!(expr, UsersetExpr::Intersection(_));
             let mut known = true;
@@ -655,7 +659,7 @@ pub(crate) fn reach_userset(
     reached: &mut BTreeSet<(TypeName, RelationName)>,
 ) {
     match expr {
-        UsersetExpr::Computed(name) => {
+        UsersetExpr::Computed(name) | UsersetExpr::StoredRow(name) => {
             if !reached.insert((plan.type_name.clone(), name.clone())) {
                 return;
             }
@@ -719,6 +723,7 @@ mod tests {
             principals: Vec::new(),
             well_known,
             action_relations: Vec::new(),
+            resulting_rows: Vec::new(),
         }
     }
 

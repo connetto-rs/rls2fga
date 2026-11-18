@@ -253,6 +253,16 @@ pub enum TranslationNote {
         /// Policy carrying the clause.
         policy: String,
     },
+    /// A write's check reads a fact about the row it writes that neither the new row's
+    /// own columns state nor the stored row under the same key holds alone, so the check
+    /// is denied.
+    ResultingRowFactUnreadable {
+        /// Table whose writes the check judges.
+        #[serde(with = "table_id_as_str")]
+        table: TableId,
+        /// The relation judging the written row.
+        relation: RelationName,
+    },
     /// Reading a table expands its policies, and a loop there raises `infinite
     /// recursion` rather than filtering.
     PolicyReadRecursion {
@@ -572,6 +582,7 @@ impl TranslationNote {
             Self::OwnerBoundFunction { .. }
             | Self::UnresolvedPolicyTable { .. }
             | Self::RestrictiveAttributeRefused { .. }
+            | Self::ResultingRowFactUnreadable { .. }
             | Self::ParentRuleUntranslated { .. }
             | Self::StandaloneAttributePolicy { .. }
             | Self::ExpressionRefused { .. }
@@ -650,6 +661,9 @@ impl TranslationNote {
                 table: spelling, ..
             }
             | Self::ReadsDeniedSoWritesCannotName {
+                table: spelling, ..
+            }
+            | Self::ResultingRowFactUnreadable {
                 table: spelling, ..
             } => Cow::Owned(spelling.to_string()),
             Self::ClauseBelowThreshold { policy, .. }
@@ -739,6 +753,12 @@ impl fmt::Display for TranslationNote {
                 f,
                 "Policy '{policy}' names '{named}', which does not resolve to one table in the \
                  schema, so qualify it with a schema to have the policy translated"
+            ),
+            Self::ResultingRowFactUnreadable { table, relation } => write!(
+                f,
+                "'{relation}' on the rows of '{table}' a write produces reads a fact that \
+                 neither the new row's own columns state nor the stored row holds alone, so \
+                 the check is denied"
             ),
             Self::RestrictiveAttributeRefused { policy } => write!(
                 f,

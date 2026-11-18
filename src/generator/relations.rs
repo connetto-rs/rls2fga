@@ -33,13 +33,34 @@ pub(crate) fn relation_shapes<'plan, DB: DatabaseLike>(
     descriptions: &BTreeMap<RenderedSourceKey<'plan>, Option<RecordDescription>>,
     db: &DB,
 ) -> Vec<RelationShapes> {
-    let sources = index_sources(plan, descriptions);
+    let sources: SourceIndex<'_, '_> = index_sources(&plan.types, |type_plan, source| {
+        descriptions
+            .get(&rendered_source_key(
+                source,
+                &type_plan.type_name,
+                type_plan.reads_only_its_own_rows,
+            ))
+            .and_then(Option::as_ref)
+    });
 
     let mut out = Vec::new();
     for type_plan in &plan.types {
         let mut names: BTreeSet<&RelationName> = BTreeSet::new();
         names.extend(type_plan.direct_relations.keys());
         names.extend(type_plan.computed_relations.keys());
+        // Each check about a written row carries that row's facts, so no record fills a
+        // relation of the type judging it.
+        if type_plan.resulting_of.is_some() {
+            out.extend(names.into_iter().map(|relation| RelationShapes {
+                type_name: type_plan.type_name.clone(),
+                relation: relation.clone(),
+                from_one_row: false,
+                shapes: Vec::new(),
+                decision: None,
+                grants_nobody: false,
+            }));
+            continue;
+        }
         for relation in names {
             let mut visiting = BTreeSet::new();
             let decision = relation_decision(
@@ -63,19 +84,19 @@ pub(crate) fn relation_shapes<'plan, DB: DatabaseLike>(
     out
 }
 
-fn index_sources<'plan, 'description>(
-    plan: &'plan SchemaPlan,
-    descriptions: &'description BTreeMap<RenderedSourceKey<'plan>, Option<RecordDescription>>,
-) -> SourceIndex<'plan, 'description> {
-    let mut index: SourceIndex<'plan, 'description> = BTreeMap::new();
-    for type_plan in &plan.types {
+/// Every source feeding each `(type, relation)` of `types`, with what `describe` says of
+/// it.
+pub(crate) fn index_sources<'plan, D>(
+    types: impl IntoIterator<Item = &'plan TypePlan>,
+    mut describe: impl FnMut(&'plan TypePlan, &'plan TupleSource) -> D,
+) -> SourcesFeeding<'plan, D>
+where
+    D: Copy,
+{
+    let mut index: SourcesFeeding<'plan, D> = BTreeMap::new();
+    for type_plan in types {
         for source in &type_plan.table_tuple_sources {
-            let key = rendered_source_key(
-                source,
-                &type_plan.type_name,
-                type_plan.reads_only_its_own_rows,
-            );
-            let description = descriptions.get(&key).and_then(Option::as_ref);
+            let description = describe(type_plan, source);
             for target in source.feeds(&type_plan.type_name) {
                 index.entry(target).or_default().push(IndexedSource {
                     source,
@@ -87,40 +108,47 @@ fn index_sources<'plan, 'description>(
     index
 }
 
+/// One source feeding a relation, and what the index was told of it.
 #[derive(Clone, Copy)]
-struct IndexedSource<'plan, 'description> {
-    source: &'plan TupleSource,
-    description: Option<&'description RecordDescription>,
+pub(crate) struct IndexedSource<'plan, D> {
+    pub(crate) source: &'plan TupleSource,
+    pub(crate) description: D,
 }
 
-type SourceIndex<'plan, 'description> =
-    BTreeMap<(TypeName, RelationName), Vec<IndexedSource<'plan, 'description>>>;
+pub(crate) type SourcesFeeding<'plan, D> =
+    BTreeMap<(TypeName, RelationName), Vec<IndexedSource<'plan, D>>>;
 
-/// One shape per source. A source feeding the same relation from two type plans
-/// describes it twice, and the key the renderer deduplicates queries on is what
-/// says the two are the same. Scoping it by owner type would add nothing: a source
-/// keying its objects on the owning type only ever reaches the bucket named after
-/// that type.
+type SourceIndex<'plan, 'description> =
+    SourcesFeeding<'plan, Option<&'description RecordDescription>>;
+
+/// Each source feeding `relation` of `type_name`, once.
+///
+/// A source feeding the same relation from two type plans is indexed twice, and the key
+/// the renderer deduplicates queries on is what says the two are the same. Scoping it by
+/// owner type would add nothing, since a source keying its objects on the owning type
+/// only ever reaches the bucket named after that type.
+pub(crate) fn feeding_once<'index, 'plan, D>(
+    type_name: &TypeName,
+    relation: &RelationName,
+    sources: &'index SourcesFeeding<'plan, D>,
+) -> impl Iterator<Item = &'index IndexedSource<'plan, D>> {
+    let mut seen = BTreeSet::new();
+    sources
+        .get(&(type_name.clone(), relation.clone()))
+        .into_iter()
+        .flatten()
+        .filter(move |indexed| seen.insert(indexed.source.dedup_key()))
+}
+
+/// One shape per distinct source.
 fn shapes_filling(
     type_name: &TypeName,
     relation: &RelationName,
     sources: &SourceIndex<'_, '_>,
 ) -> Vec<RecordDescription> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::new();
-    for indexed in sources
-        .get(&(type_name.clone(), relation.clone()))
-        .into_iter()
-        .flatten()
-    {
-        if !seen.insert(indexed.source.dedup_key()) {
-            continue;
-        }
-        if let Some(description) = indexed.description {
-            out.push(description.clone());
-        }
-    }
-    out
+    feeding_once(type_name, relation, sources)
+        .filter_map(|indexed| indexed.description.cloned())
+        .collect()
 }
 
 fn find_type<'plan>(plan: &'plan SchemaPlan, type_name: &TypeName) -> Option<&'plan TypePlan> {
@@ -167,8 +195,9 @@ fn expr_decision<DB: DatabaseLike>(
 ) -> Option<RowDecision> {
     match expr {
         // A named relation stands for its own definition, so the recipe reaches
-        // through it to the relations records actually fill.
-        UsersetExpr::Computed(name) => {
+        // through it to the relations records actually fill. On a stored row, a read of
+        // its own key is that same relation.
+        UsersetExpr::Computed(name) | UsersetExpr::StoredRow(name) => {
             relation_decision(type_name, name, plan, sources, db, visiting)
         }
         // Every child has to decide, otherwise the composition does not either.
@@ -251,7 +280,11 @@ fn request_predicate(
         Some(UsersetExpr::Computed(name)) => request_predicate(gate_type, name, plan, sources),
         Some(UsersetExpr::Union(children)) => members(children).map(RequestPredicate::Any),
         Some(UsersetExpr::Intersection(children)) => members(children).map(RequestPredicate::All),
-        Some(UsersetExpr::TupleToUserset { .. } | UsersetExpr::Exclusion { .. }) => None,
+        Some(
+            UsersetExpr::TupleToUserset { .. }
+            | UsersetExpr::Exclusion { .. }
+            | UsersetExpr::StoredRow(_),
+        ) => None,
         None => {
             let feeding = sources.get(&(gate_type.clone(), relation.clone()))?;
             // Every guarded type's gate object holds the same kind under this relation.
@@ -305,17 +338,12 @@ fn leaf_decision<DB: DatabaseLike>(
     well_known: &WellKnownTypes,
     db: &DB,
 ) -> Option<RowDecision> {
-    let feeding = sources.get(&(type_name.clone(), relation.clone()))?;
-    if feeding.is_empty() {
+    let distinct: Vec<_> = feeding_once(type_name, relation, sources)
+        .copied()
+        .collect();
+    if distinct.is_empty() {
         return None;
     }
-
-    let mut seen = BTreeSet::new();
-    let distinct: Vec<_> = feeding
-        .iter()
-        .copied()
-        .filter(|indexed| seen.insert(indexed.source.dedup_key()))
-        .collect();
     if distinct
         .iter()
         .any(|indexed| matches!(indexed.source, TupleSource::SessionAttributeGate { .. }))
@@ -372,19 +400,16 @@ fn leaf_decision<DB: DatabaseLike>(
         });
     }
 
-    let mut unique = BTreeSet::new();
     let mut shapes = Vec::new();
     let mut kind = None;
-    for indexed in feeding {
+    for indexed in distinct {
         let description = indexed.description?;
         let subject = row_subject(&description.derivation, type_name, &well_known.user, db)?;
         // One relation's shapes fill one kind of leaf, so a mix falls closed.
         if *kind.get_or_insert(subject) != subject {
             return None;
         }
-        if unique.insert(indexed.source.dedup_key()) {
-            shapes.push(description.clone());
-        }
+        shapes.push(description.clone());
     }
     let relation = relation.clone();
     Some(match kind? {

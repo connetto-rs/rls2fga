@@ -20,30 +20,20 @@ use crate::generator::ir::{TupleSource, SINGLETON_OBJECT_KEY};
 use crate::generator::model_generator::{SchemaPlan, TypePlan};
 use crate::parser::names::table_identity;
 use crate::parser::sql_parser::{DatabaseLike, TableLike};
-use crate::types::{ColumnName, ColumnRead, ObjectKey, RowNaming, TableId, TypeName, ValueSource};
+use crate::types::{ColumnName, ColumnRead, ObjectKey, RowNaming, TableId, ValueSource};
 
-/// The type a table's rows are named by, and the columns that key them.
-fn named_by<DB: DatabaseLike>(
-    type_plan: &TypePlan,
-    db: &DB,
-) -> Option<(TypeName, Vec<ColumnName>)> {
-    let table = type_plan.source_table.as_ref()?;
-    let columns = resolve_row_identity(table, db)?;
-    Some((type_plan.type_name.clone(), columns))
+/// The columns that key the rows of the table `type_plan` names.
+fn key_columns<DB: DatabaseLike>(type_plan: &TypePlan, db: &DB) -> Option<Vec<ColumnName>> {
+    resolve_row_identity(type_plan.source_table.as_ref()?, db)
 }
 
 /// Name the shared object only when the plan emits its constant scope link.
-fn singleton_key(type_plan: &TypePlan) -> Option<(TypeName, ObjectKey)> {
+fn singleton_key(type_plan: &TypePlan) -> Option<ObjectKey> {
     type_plan
         .table_tuple_sources
         .iter()
         .any(|source| matches!(source, TupleSource::SingletonScope { .. }))
-        .then(|| {
-            (
-                type_plan.type_name.clone(),
-                ObjectKey::new(vec![ValueSource::Literal(SINGLETON_OBJECT_KEY.to_string())]),
-            )
-        })
+        .then(|| ObjectKey::new(vec![ValueSource::Literal(SINGLETON_OBJECT_KEY.to_string())]))
 }
 
 /// The plan whose objects a partition's rows are named as, walking up until one is
@@ -68,6 +58,15 @@ fn planned_partition_root<'plan, DB: DatabaseLike>(
     }
 }
 
+/// How a row of the table `type_plan` names is keyed as an object of it, `None` for a type
+/// naming no table's rows.
+pub(crate) fn row_key<DB: DatabaseLike>(type_plan: &TypePlan, db: &DB) -> Option<ObjectKey> {
+    let table = type_plan.source_table.as_ref()?;
+    key_columns(type_plan, db)
+        .map(|columns| object_key(table, columns, db))
+        .or_else(|| singleton_key(type_plan))
+}
+
 /// Name covered rows by their key or the plan's row-independent singleton, omitting unnamed tables.
 pub(crate) fn row_naming<DB: DatabaseLike>(plan: &SchemaPlan, db: &DB) -> Vec<RowNaming> {
     let mut entries: Vec<RowNaming> = plan
@@ -75,10 +74,12 @@ pub(crate) fn row_naming<DB: DatabaseLike>(plan: &SchemaPlan, db: &DB) -> Vec<Ro
         .iter()
         .filter_map(|type_plan| {
             let table = type_plan.source_table.as_ref()?;
-            let (type_name, key) = named_by(type_plan, db)
-                .map(|(type_name, columns)| (type_name, object_key(table, columns, db)))
-                .or_else(|| singleton_key(type_plan))?;
-            Some(RowNaming::new(table.clone(), type_name, key))
+            let key = row_key(type_plan, db)?;
+            Some(RowNaming::new(
+                table.clone(),
+                type_plan.type_name.clone(),
+                key,
+            ))
         })
         .collect();
     let planned: BTreeMap<TableId, &TypePlan> = plan
@@ -95,9 +96,8 @@ pub(crate) fn row_naming<DB: DatabaseLike>(plan: &SchemaPlan, db: &DB) -> Vec<Ro
         if planned.contains_key(&named) {
             return None;
         }
-        let (type_name, columns) = named_by(root, db)?;
-        let key = object_key(&named, columns, db);
-        Some(RowNaming::new(named, type_name, key))
+        let key = object_key(&named, key_columns(root, db)?, db);
+        Some(RowNaming::new(named, root.type_name.clone(), key))
     }));
     entries.sort_by(|left, right| left.table.cmp(&right.table));
     entries
