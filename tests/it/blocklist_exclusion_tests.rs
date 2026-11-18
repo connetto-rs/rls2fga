@@ -941,7 +941,9 @@ fn unkeyed_monotone_clock_blocklist_still_compresses() {
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
 mod parity {
     use super::*;
-    use crate::support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
+    use crate::support::parity::{
+        assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
+    };
     use rls2fga::types::ActionStatement;
 
     const SEED: &[&str] = &[
@@ -1187,7 +1189,9 @@ mod parity {
                  TO targeted USING (NOT {BLOCKED});",
                 schema(&shared_grant)
             );
-            let scoped = case("role-scoped-blocklist", &sql, &["GRANT targeted TO bob;"])
+            let scoped = case("role-scoped-blocklist", &sql, &[
+                "GRANT targeted TO bob; INSERT INTO docs VALUES ('d4', 'bob');",
+            ])
                 .after(&["CREATE ROLE targeted;"])
                 .loading_from_rows();
             let run = support::parity::run(&cluster, &scoped).await;
@@ -1202,7 +1206,21 @@ mod parity {
             let sql = format!(
                 "{TABLES} CREATE POLICY docs_blocks ON docs AS RESTRICTIVE FOR SELECT USING (NOT {BLOCKED});"
             );
-            let no_grant = case("blocklist-without-grant", &sql, &[]);
+            let no_grant = case("blocklist-without-grant", &sql, &[])
+                .unobservable(
+                    "docs",
+                    "docs_blocks",
+                    ClauseKind::Using,
+                    Side::Denies,
+                    "No permissive policy grants access to any row.",
+                )
+                .unobservable(
+                    "docs",
+                    "docs_blocks",
+                    ClauseKind::Using,
+                    Side::Grants,
+                    "No permissive policy grants access to any row.",
+                );
             let run = support::parity::run(&cluster, &no_grant).await;
             assert_postgres(&no_grant, &run, "alice", "docs:d1", ActionStatement::Select, false);
             assert_agrees(&no_grant, &run);

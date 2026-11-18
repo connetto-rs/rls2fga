@@ -210,26 +210,6 @@ fn request_fallback_holds(atom: &RequestAtom, context: &serde_json::Value) -> bo
     false
 }
 
-/// What a write would attempt on one table.
-///
-/// A no-op `UPDATE` exercises `USING` and never `WITH CHECK`, so the new row is named. An
-/// `INSERT` needs no declaration: the runner copies an existing row onto a fresh key.
-#[derive(Default)]
-pub(crate) struct Mutations {
-    /// `SET` clause an `UPDATE` applies, such as `title = 'changed'`.
-    pub(crate) update_set: Option<String>,
-    /// Whether the change touches no column any policy reads.
-    ///
-    /// The tuples state facts about rows the database holds, so a judgement about the row
-    /// a write would produce normally has nothing to read. Where the change cannot alter
-    /// any policy's decision the resulting row's facts are the existing row's, and the
-    /// question can be asked of the object that exists. Declared by the case because it is
-    /// a claim about the schema, and false by default so the runner declines rather than
-    /// guessing. An `INSERT` probe changes the key alone, so the claim there is that no
-    /// policy reads it.
-    pub(crate) check_neutral: bool,
-}
-
 /// One case, as data.
 pub(crate) struct ParityCase {
     /// Store name, and the label failures carry.
@@ -242,10 +222,14 @@ pub(crate) struct ParityCase {
     pub(crate) seed: Vec<String>,
     /// The callers to compare.
     pub(crate) principals: Vec<Principal>,
-    /// Per table, keyed by the schema spelling, what a write would attempt.
-    pub(crate) mutations: BTreeMap<String, Mutations>,
+    /// Per table, keyed by the schema spelling, the `SET` clause an `UPDATE` probe applies,
+    /// such as `title = 'changed'`. A table without one is probed with a no-op assignment.
+    pub(crate) update_sets: BTreeMap<String, String>,
     /// Per table, what an `INSERT` probe writes beyond the row it copies.
     pub(crate) inserting: BTreeMap<String, Inserting>,
+    /// Clause sides no seed can show, each with the reason, which the per-clause check
+    /// skips and fails on where they turn out to be shown.
+    pub(crate) unobservable: Vec<Unobservable>,
     /// Accessor metadata the deployment declares, as a fixture's
     /// `function_registry.json` holds it.
     pub(crate) registry_json: Option<String>,
@@ -306,8 +290,9 @@ impl ParityCase {
             schema: schema.to_string(),
             seed: seed.iter().map(|sql| (*sql).to_string()).collect(),
             principals,
-            mutations: BTreeMap::new(),
+            update_sets: BTreeMap::new(),
             inserting: BTreeMap::new(),
+            unobservable: Vec::new(),
             registry_json: None,
             settings: Vec::new(),
             not_read_directly: Vec::new(),
@@ -405,9 +390,9 @@ impl ParityCase {
         self
     }
 
-    /// The same case, with what a write on `table` would attempt.
-    pub(crate) fn writing(mut self, table: &str, mutations: Mutations) -> Self {
-        self.mutations.insert(table.to_string(), mutations);
+    /// The same case, whose `UPDATE` probes on `table` apply `set`.
+    pub(crate) fn updating(mut self, table: &str, set: &str) -> Self {
+        self.update_sets.insert(table.to_string(), set.to_string());
         self
     }
 
@@ -420,6 +405,34 @@ impl ParityCase {
             .collect();
         self
     }
+
+    /// The same case, declaring that no seed can show `side` of `policy`'s `clause` on
+    /// `table`, for `reason`.
+    ///
+    /// For a side whose every case is already decided elsewhere, such as an `UPDATE`
+    /// policy's `USING` repeating the `SELECT` policy's, which every `UPDATE` also applies.
+    pub(crate) fn unobservable(
+        mut self,
+        table: &str,
+        policy: &str,
+        clause: ClauseKind,
+        side: Side,
+        reason: &str,
+    ) -> Self {
+        assert!(
+            !reason.trim().is_empty(),
+            "{}: a waiver needs its reason",
+            self.name
+        );
+        self.unobservable.push(Unobservable {
+            table: table.to_string(),
+            policy: policy.to_string(),
+            clause,
+            side,
+            reason: reason.to_string(),
+        });
+        self
+    }
 }
 
 /// Values a case's `INSERT` probes substitute for the copied or minted ones.
@@ -427,6 +440,57 @@ impl ParityCase {
 pub(crate) struct Inserting {
     /// Values written in place of the copied or minted ones, as `(column, text)` pairs.
     pub(crate) values: Vec<(String, String)>,
+}
+
+/// Which clause of a policy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ClauseKind {
+    /// `USING`.
+    Using,
+    /// The `USING` expression of an `ALL` or `UPDATE` policy without `WITH CHECK`, which
+    /// checks the new row too.
+    UsingAsCheck,
+    /// `WITH CHECK`.
+    Check,
+}
+
+impl std::fmt::Display for ClauseKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Using => "USING",
+            Self::UsingAsCheck => "USING as WITH CHECK",
+            Self::Check => "WITH CHECK",
+        })
+    }
+}
+
+/// Which way a clause's value decides an answer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Side {
+    /// The clause being true grants.
+    Grants,
+    /// The clause being false denies.
+    Denies,
+}
+
+impl std::fmt::Display for Side {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Grants => "grant side",
+            Self::Denies => "deny side",
+        })
+    }
+}
+
+/// One clause side a case declares no seed can show.
+pub(crate) struct Unobservable {
+    /// The table, as the schema spells it, bare or schema-qualified.
+    table: String,
+    policy: String,
+    clause: ClauseKind,
+    side: Side,
+    /// Why no seed can show it.
+    reason: String,
 }
 
 /// One compared pair and both answers.
@@ -602,6 +666,9 @@ struct Object {
     singleton: bool,
     /// What the case's `INSERT` probes on the table write beyond this row.
     inserting: Option<Inserting>,
+    /// The `SET` clause the `UPDATE` probe applies, [`None`] where the table has no column
+    /// to assign.
+    update_set: Option<String>,
 }
 
 /// The key columns a table's objects are named from, or [`None`] where a column does not
@@ -644,6 +711,7 @@ fn objects(
     naming: &[RowNaming],
     skipped: &[String],
     inserting: &BTreeMap<String, &Inserting>,
+    update_sets: &BTreeMap<String, &String>,
 ) -> Vec<Object> {
     let mut out = Vec::new();
     for entry in naming {
@@ -656,13 +724,16 @@ fn objects(
                 .parts()
                 .iter()
                 .all(|part| matches!(part, ValueSource::Literal(_)));
-        let columns = match key_columns(entry) {
-            Some(columns) => columns,
-            None if singleton => Vec::new(),
-            None => continue,
+        let Some(columns) = key_columns(entry).or_else(|| singleton.then(Vec::new)) else {
+            panic!(
+                "{}: its objects are named by something other than its columns, so no \
+                 probe can select one and every pair on it would go uncompared",
+                entry.table.sql_name()
+            )
         };
         let table = entry.table.sql_name();
         let inserting = inserting.get(&table).map(|declared| (*declared).clone());
+        let declared_set = update_sets.get(&table).map(|set| (*set).clone());
         let limit = if singleton { " LIMIT 1" } else { "" };
         // Case tables and columns are defined at runtime.
         let rows: Vec<JsonRow> =
@@ -678,6 +749,7 @@ fn objects(
                 .render(&super::JsonRowValues(&row))
                 .expect("the fixed object name is valid")
                 .expect("a literal key names the permission object");
+            let update_set = declared_set.or_else(|| no_op_set(&row, &[]));
             out.push(Object {
                 name,
                 table,
@@ -686,6 +758,7 @@ fn objects(
                 keys: Vec::new(),
                 singleton,
                 inserting: None,
+                update_set,
             });
             continue;
         }
@@ -700,6 +773,7 @@ fn objects(
             };
 
             let predicate = key_predicate(&row, &columns);
+            let update_set = declared_set.clone().or_else(|| no_op_set(&row, &columns));
             out.push(Object {
                 name,
                 table: table.clone(),
@@ -708,10 +782,19 @@ fn objects(
                 keys: columns.iter().map(|column| (*column).to_string()).collect(),
                 singleton,
                 inserting: inserting.clone(),
+                update_set,
             });
         }
     }
     out
+}
+
+/// An assignment of a column to itself, which changes no value, so an `UPDATE` probe
+/// without a declared change still asks the `USING` clauses and the check about the row
+/// as it stands.
+fn no_op_set(row: &serde_json::Value, keys: &[&str]) -> Option<String> {
+    let column = assignable_column(row, keys)?;
+    Some(format!("\"{column}\" = \"{column}\""))
 }
 
 /// Switch to the caller's role and apply its session values, local to the transaction.
@@ -729,14 +812,14 @@ fn become_principal(conn: &mut PgConnection, principal: &Principal) -> QueryResu
 /// Whether the database lets `principal` reach `object` with `statement`.
 ///
 /// Every write runs inside a savepoint and is rolled back, so one probe cannot decide the
-/// next. [`None`] where the case declared no row for the write to attempt.
+/// next. [`None`] only where the statement cannot be written on the table at all, so no
+/// pair exists.
 fn postgres_allows(
     conn: &mut PgConnection,
     case: &ParityCase,
     principal: &Principal,
     object: &Object,
     statement: ActionStatement,
-    mutations: Option<&Mutations>,
     // Set where a read raised because the caller set nothing, asked once per caller.
     raised: &mut bool,
 ) -> Option<ProbeResult> {
@@ -764,16 +847,13 @@ fn postgres_allows(
             "SELECT count(*) AS rows FROM (SELECT 1 FROM {table} WHERE {predicate} FOR UPDATE) s"
         ),
         ActionStatement::Update => {
-            // This table's own change, or none. Reaching for the first one any table
-            // declared ran another table's `SET` here, which names a column this one does
-            // not have, and the error read as the policy refusing the write.
-            let set = mutations?.update_set.as_deref()?;
+            let set = object.update_set.as_deref()?;
             format!("WITH changed AS (UPDATE {table} SET {set} WHERE {predicate} RETURNING 1) SELECT count(*) AS rows FROM changed")
         }
         ActionStatement::Delete => format!(
             "WITH removed AS (DELETE FROM {table} WHERE {predicate} RETURNING 1) SELECT count(*) AS rows FROM removed"
         ),
-        _ => return None,
+        _ => unreachable!("{statement:?} is not a compared statement"),
     };
 
     // Always rolled back: a `DELETE` the caller may run would otherwise take the row away
@@ -836,10 +916,7 @@ fn postgres_allows(
         // A write the check refuses raises, and that is a denial.
         Err(_) => false,
     };
-    let produced = match (
-        statement,
-        mutations.and_then(|mutations| mutations.update_set.as_deref()),
-    ) {
+    let produced = match (statement, object.update_set.as_deref()) {
         (ActionStatement::Update, Some(set)) => updated_row(conn, case, table, set, predicate),
         _ => None,
     };
@@ -1000,18 +1077,17 @@ fn clock_context(
 /// Whether the model grants `principal` the statement on `object`.
 ///
 /// `produced` is the row the write produces, which a `Resulting` judgement asks about
-/// under the type the translation names for it, carrying that row's facts. Where the probe
-/// cannot know it, a statement that keeps the seed row asks about the seed row, and any
-/// other declines the pair.
+/// under the type the translation names for it, carrying that row's facts. A pair the
+/// database answered is always answered here too, and a pair this cannot ask about fails
+/// the case with the reason.
 async fn openfga_allows(
     model: &Model<'_>,
     principal: &Principal,
     context: &serde_json::Value,
     object: &Object,
     statement: ActionStatement,
-    mutations: Option<&Mutations>,
     produced: Option<&serde_json::Value>,
-) -> Option<bool> {
+) -> bool {
     let Model {
         client,
         answers,
@@ -1038,7 +1114,13 @@ async fn openfga_allows(
     let user = format!("user:{}", principal.subject);
     let rows = match &entry.answer {
         ActionAnswer::ByColumn(answer) => {
-            let touched = touched_columns(object, statement, mutations)?;
+            let touched = touched_columns(object, statement).unwrap_or_else(|| {
+                panic!(
+                    "{}: the database answered {statement:?} on {}, which the runner names \
+                     no columns for",
+                    case.name, object.name
+                )
+            });
             for relations in &answer.commands {
                 for column in touched.of(relations.command) {
                     let granted = openfga::check_as(
@@ -1053,7 +1135,7 @@ async fn openfga_allows(
                     )
                     .await;
                     if !granted {
-                        return Some(false);
+                        return false;
                     }
                 }
             }
@@ -1062,19 +1144,18 @@ async fn openfga_allows(
         answer => answer,
     };
     match rows {
-        ActionAnswer::Unrestricted => Some(true),
-        ActionAnswer::Denied => Some(false),
+        ActionAnswer::Unrestricted => true,
+        ActionAnswer::Denied => false,
         ActionAnswer::Judged(judgements) => {
-            // An upsert probe keeps the key and copies every column, so its resulting row is the existing one.
-            let settled = object.singleton
-                || mutations.is_some_and(|mutations| mutations.check_neutral)
-                || statement == ActionStatement::InsertOnConflictUpdate;
             for judgement in judgements {
                 let (name, carried) = if judgement.version == RowVersion::Resulting {
-                    let row = match produced {
-                        Some(row) => row,
-                        None if settled => &object.row,
-                        None => return None,
+                    let Some(row) = produced else {
+                        panic!(
+                            "{}: {statement:?} on {} as {} judges the row the write produces, \
+                             and the table's own integrity refuses that row even to its \
+                             owner, so the probe tests no policy",
+                            case.name, object.name, principal.subject
+                        )
                     };
                     let Some(resulting) = translation
                         .resulting_rows()
@@ -1094,8 +1175,9 @@ async fn openfga_allows(
                             "{}: the row {statement:?} writes on '{type_name}' names no object",
                             case.name
                         ),
-                        // A minted key longer than the target names has no object to ask about.
-                        Err(RecordError::RowCannotBeNamed(_)) => return None,
+                        // A checker that cannot name the written row cannot ask about it,
+                        // so it refuses the write.
+                        Err(RecordError::RowCannotBeNamed(_)) => return false,
                         Err(error) => panic!(
                             "{}: naming the row {statement:?} writes on '{type_name}': {error}",
                             case.name
@@ -1129,10 +1211,10 @@ async fn openfga_allows(
                 )
                 .await;
                 if !granted {
-                    return Some(false);
+                    return false;
                 }
             }
-            Some(true)
+            true
         }
         // Reading an unknown answer as no answer would drop the pair uncompared.
         other => panic!(
@@ -1162,12 +1244,9 @@ impl Touched {
     }
 }
 
-/// The columns the probe for `statement` on `object` touches, [`None`] where no probe runs.
-fn touched_columns(
-    object: &Object,
-    statement: ActionStatement,
-    mutations: Option<&Mutations>,
-) -> Option<Touched> {
+/// The columns the probe for `statement` on `object` touches, [`None`] where the statement
+/// cannot be written on the table.
+fn touched_columns(object: &Object, statement: ActionStatement) -> Option<Touched> {
     let keys = || object.keys.iter().map(ColumnName::from_stored);
     let row = || {
         object
@@ -1183,7 +1262,7 @@ fn touched_columns(
             touched.select.extend(keys());
         }
         ActionStatement::Update => {
-            (touched.update, touched.select) = set_columns(mutations?.update_set.as_deref()?);
+            (touched.update, touched.select) = set_columns(object.update_set.as_deref()?);
             touched.select.extend(keys());
         }
         ActionStatement::Insert => touched.insert.extend(row()),
@@ -1192,33 +1271,41 @@ fn touched_columns(
             if object.keys.is_empty() {
                 touched
                     .select
-                    .insert(ColumnName::from_stored(settable_column(object)?));
+                    .insert(ColumnName::from_stored(assignable_column(
+                        &object.row,
+                        &object.keys,
+                    )?));
             } else {
                 touched.select.extend(keys());
             }
             touched.insert.extend(row());
         }
         ActionStatement::InsertOnConflictUpdate => {
-            let settable = settable_column(object)?;
+            let settable = assignable_column(&object.row, &object.keys)?;
             touched.insert.extend(row());
             touched.update.insert(ColumnName::from_stored(settable));
             // The arbiter and the `excluded` column the update assigns are both read.
             touched.select.extend(keys());
             touched.select.insert(ColumnName::from_stored(settable));
         }
-        _ => return None,
+        _ => unreachable!("{statement:?} is not a compared statement"),
     }
     Some(touched)
 }
 
-/// The first column the probe may assign, outside the key the probe replaces.
-fn settable_column(object: &Object) -> Option<&str> {
-    object
-        .row
-        .as_object()?
-        .keys()
-        .map(String::as_str)
-        .find(|column| !object.keys.iter().any(|key| key == column))
+/// The column a probe assigns or returns, the first one outside the key the probe
+/// replaces, or the first key column where every column is in the key.
+fn assignable_column<'row>(
+    row: &'row serde_json::Value,
+    keys: &[impl AsRef<str>],
+) -> Option<&'row str> {
+    let mut columns = row.as_object()?.keys().map(String::as_str);
+    let first = columns.clone().next()?;
+    Some(
+        columns
+            .find(|column| !keys.iter().any(|key| key.as_ref() == *column))
+            .unwrap_or(first),
+    )
 }
 
 /// The columns a `SET` clause assigns, and the columns its expressions read.
@@ -1446,7 +1533,14 @@ async fn run_in(
     let answers = doctor(planned.translation().action_relations().to_vec());
     let naming = planned.translation().row_naming().to_vec();
     let inserting = resolved_declarations(case, &case.inserting, &naming);
-    let objects = objects(conn, &naming, &case.not_read_directly, &inserting);
+    let update_sets = resolved_declarations(case, &case.update_sets, &naming);
+    let objects = objects(
+        conn,
+        &naming,
+        &case.not_read_directly,
+        &inserting,
+        &update_sets,
+    );
     let tuples = if case.loading_from_rows {
         tuples_replaying_pure_queries(conn, case, planned.tuple_queries())
     } else {
@@ -1466,10 +1560,8 @@ async fn run_in(
         case,
         settings: &settings,
     };
-    let mutations = resolved_declarations(case, &case.mutations, &naming);
-
-    let mut observations =
-        compare_every_pair(cluster, database, &model, &objects, &mutations, &clock).await;
+    let mut observations = compare_every_pair(cluster, database, &model, &objects, &clock).await;
+    assert_every_clause_decides(cluster, database, case, &objects, &observations);
     observations
         .extend(compare_at_future_instant(conn, case, &model, &objects, &observations).await);
     Run {
@@ -1626,36 +1718,20 @@ async fn compare_every_pair(
     database: &str,
     model: &Model<'_>,
     objects: &[Object],
-    mutations: &BTreeMap<String, &Mutations>,
     instant: &Instant,
 ) -> Vec<Mismatch> {
     let case = model.case;
     let mut observations = Vec::new();
     for principal in &case.principals {
-        // A connection of its own, because a caller that set nothing is a real state and a
-        // shared one cannot spell it. Setting a custom key defines it for the whole session,
-        // so after one caller sets `app.who` the next reads it back as the empty string
-        // rather than finding it unset, and the answers would depend on the order the
-        // callers were declared in.
-        let mut owned = super::containers::connect_postgres_with_retry(&cluster.url(database));
+        let mut owned = caller_connection(cluster, database, case);
         let conn = &mut owned;
-        // Diesel sets `UTC` on connect, where a login runs in its database's zone.
-        conn.batch_execute("RESET TimeZone")
-            .unwrap_or_else(|error| panic!("{}: resetting the zone: {error}", case.name));
         let clock = clock_context(conn, model, instant);
         let mut raised = false;
         for object in objects {
             for statement in COMPARED {
-                let candidate = mutations.get(&object.table).copied();
-                let Some(answer) = postgres_allows(
-                    conn,
-                    case,
-                    principal,
-                    object,
-                    statement,
-                    candidate,
-                    &mut raised,
-                ) else {
+                let Some(answer) =
+                    postgres_allows(conn, case, principal, object, statement, &mut raised)
+                else {
                     continue;
                 };
                 let openfga = openfga_allows(
@@ -1664,13 +1740,9 @@ async fn compare_every_pair(
                     &asked_context(principal, &clock, &model.settings[&principal.subject]),
                     object,
                     statement,
-                    candidate,
                     answer.produced.as_ref(),
                 )
                 .await;
-                let Some(openfga) = openfga else {
-                    continue;
-                };
                 observations.push(Mismatch {
                     subject: principal.subject.clone(),
                     object: object.name.clone(),
@@ -1697,6 +1769,301 @@ async fn compare_every_pair(
         );
     }
     observations
+}
+
+/// A connection of one caller's own, in the zone a login runs in.
+///
+/// A caller that set nothing is a real state and a shared connection cannot spell it.
+/// Setting a custom key defines it for the whole session, so after one caller sets
+/// `app.who` the next reads it back as the empty string rather than finding it unset, and
+/// the answers would depend on the order the callers were declared in.
+fn caller_connection(cluster: &Cluster, database: &str, case: &ParityCase) -> PgConnection {
+    let mut conn = super::containers::connect_postgres_with_retry(&cluster.url(database));
+    // Diesel sets `UTC` on connect, where a login runs in its database's zone.
+    conn.batch_execute("RESET TimeZone")
+        .unwrap_or_else(|error| panic!("{}: resetting the zone: {error}", case.name));
+    conn
+}
+
+/// One policy as the catalog holds it.
+#[derive(QueryableByName)]
+struct PolicyRow {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    namespace: String,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    relation: String,
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    relation_oid: i64,
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    policy: String,
+    /// `polcmd`, `*` for `ALL`, `r`, `a`, `w` or `d`.
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    command: String,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    using_clause: Option<String>,
+    #[diesel(sql_type = diesel::sql_types::Nullable<diesel::sql_types::Text>)]
+    check_clause: Option<String>,
+}
+
+#[derive(QueryableByName)]
+struct RelationOid {
+    #[diesel(sql_type = diesel::sql_types::BigInt)]
+    oid: i64,
+}
+
+/// One `USING` or `WITH CHECK` clause of one policy, and the statements that fix its value.
+struct Clause {
+    /// The schema of the table the policy is on.
+    namespace: String,
+    /// The table the policy is on.
+    relation: String,
+    /// The `oid` of that table.
+    relation_oid: i64,
+    /// The policy's name.
+    policy: String,
+    /// Which of the policy's clauses this is.
+    kind: ClauseKind,
+    /// The `ALTER POLICY` setting the clause to `true`, which shows every answer its being
+    /// false decided. [`None`] where the clause is the literal `true` and denies nothing.
+    held: Option<String>,
+    /// The `ALTER POLICY` setting the clause to `false`, which shows every answer its being
+    /// true decided. [`None`] where the clause is the literal `false` and grants nothing.
+    refused: Option<String>,
+}
+
+impl Clause {
+    /// How a failure names one side of it.
+    fn label(&self, side: Side) -> String {
+        format!(
+            "policy {} on {}.{}, {}, {}",
+            self.policy, self.namespace, self.relation, self.kind, side
+        )
+    }
+
+    /// Whether `waiver` names this clause's `side`.
+    fn waived_by(&self, waiver: &Unobservable, side: Side) -> bool {
+        waiver.policy == self.policy
+            && waiver.clause == self.kind
+            && waiver.side == side
+            && (waiver.table == self.relation
+                || waiver.table == format!("{}.{}", self.namespace, self.relation))
+    }
+}
+
+/// Every clause of every policy in the case's database.
+///
+/// A policy for `ALL` or `UPDATE` without `WITH CHECK` checks the new row with its `USING`
+/// expression, so that clause is two, fixed apart. The expressions are re-applied as the
+/// catalog deparses them, in the session that deparsed them.
+fn clauses(conn: &mut PgConnection, case: &ParityCase) -> Vec<Clause> {
+    let policies: Vec<PolicyRow> = diesel::sql_query(
+        "SELECT n.nspname::text AS namespace, c.relname::text AS relation,
+                c.oid::bigint AS relation_oid, p.polname::text AS policy,
+                p.polcmd::text AS command,
+                pg_get_expr(p.polqual, p.polrelid) AS using_clause,
+                pg_get_expr(p.polwithcheck, p.polrelid) AS check_clause
+         FROM pg_policy p
+         JOIN pg_class c ON c.oid = p.polrelid
+         JOIN pg_namespace n ON n.oid = c.relnamespace
+         ORDER BY n.nspname, c.relname, p.polname",
+    )
+    .load(conn)
+    .unwrap_or_else(|error| panic!("{}: reading the policies: {error}", case.name));
+    let mut clauses = Vec::new();
+    for row in policies {
+        let quoted = |name: &str| format!("\"{}\"", name.replace('"', "\"\""));
+        let target = format!(
+            "{} ON {}.{}",
+            quoted(&row.policy),
+            quoted(&row.namespace),
+            quoted(&row.relation)
+        );
+        let clause =
+            |kind: ClauseKind, expression: &str, ablation: &dyn Fn(&str) -> String| Clause {
+                namespace: row.namespace.clone(),
+                relation: row.relation.clone(),
+                relation_oid: row.relation_oid,
+                policy: row.policy.clone(),
+                kind,
+                held: (!expression.eq_ignore_ascii_case("true")).then(|| ablation("true")),
+                refused: (!expression.eq_ignore_ascii_case("false")).then(|| ablation("false")),
+            };
+        let checks_with_using =
+            row.check_clause.is_none() && matches!(row.command.as_str(), "*" | "w");
+        if let Some(using) = &row.using_clause {
+            clauses.push(clause(ClauseKind::Using, using, &|value| {
+                if checks_with_using {
+                    format!("ALTER POLICY {target} USING ({value}) WITH CHECK ({using})")
+                } else {
+                    format!("ALTER POLICY {target} USING ({value})")
+                }
+            }));
+            if checks_with_using {
+                clauses.push(clause(ClauseKind::UsingAsCheck, using, &|value| {
+                    format!("ALTER POLICY {target} WITH CHECK ({value})")
+                }));
+            }
+        }
+        if let Some(check) = &row.check_clause {
+            clauses.push(clause(ClauseKind::Check, check, &|value| {
+                format!("ALTER POLICY {target} WITH CHECK ({value})")
+            }));
+        }
+    }
+    clauses
+}
+
+/// Fail unless each clause of each policy both grants and denies some compared answer on
+/// its table.
+///
+/// A clause's translation can be wrong two ways. The model granting where the clause is
+/// false shows only on a pair the clause's being false denied, and the model denying where
+/// it is true only on a pair its being true granted, so the seed has to hold both. Each is
+/// found by fixing the clause to the other value, alone, inside a transaction the probes
+/// run in and that is rolled back, and asking only the database again. Counting per table
+/// and statement would miss a clause another permissive one shadows.
+fn assert_every_clause_decides(
+    cluster: &Cluster,
+    database: &str,
+    case: &ParityCase,
+    objects: &[Object],
+    observations: &[Mismatch],
+) {
+    let mut owner = caller_connection(cluster, database, case);
+    let clauses = clauses(&mut owner, case);
+    let mut relation_oids: BTreeMap<&str, i64> = BTreeMap::new();
+    for object in objects {
+        if !relation_oids.contains_key(object.table.as_str()) {
+            let RelationOid { oid } = diesel::sql_query(format!(
+                "SELECT '{}'::regclass::oid::bigint AS oid",
+                object.table
+            ))
+            .get_result(&mut owner)
+            .unwrap_or_else(|error| panic!("{}: resolving {}: {error}", case.name, object.table));
+            relation_oids.insert(&object.table, oid);
+        }
+    }
+    let mut connections: Vec<PgConnection> = case
+        .principals
+        .iter()
+        .map(|_| caller_connection(cluster, database, case))
+        .collect();
+    let mut untested = Vec::new();
+    let mut stale = Vec::new();
+    let mut matched = vec![false; case.unobservable.len()];
+    for clause in &clauses {
+        let on_table: Vec<&Object> = objects
+            .iter()
+            .filter(|object| relation_oids[object.table.as_str()] == clause.relation_oid)
+            .collect();
+        let mut changes_an_answer = |ablation: &str| {
+            case.principals
+                .iter()
+                .zip(&mut connections)
+                .any(|(principal, conn)| {
+                    ablation_changes_an_answer(
+                        conn,
+                        case,
+                        principal,
+                        ablation,
+                        &on_table,
+                        observations,
+                    )
+                })
+        };
+        for (side, ablation) in [
+            (Side::Denies, clause.held.as_deref()),
+            (Side::Grants, clause.refused.as_deref()),
+        ] {
+            let Some(ablation) = ablation else {
+                continue;
+            };
+            let waiver = case
+                .unobservable
+                .iter()
+                .position(|waiver| clause.waived_by(waiver, side));
+            if let Some(at) = waiver {
+                matched[at] = true;
+            }
+            match (changes_an_answer(ablation), waiver) {
+                (false, None) => untested.push(clause.label(side)),
+                (true, Some(at)) => stale.push(format!(
+                    "{}, waived as \"{}\"",
+                    clause.label(side),
+                    case.unobservable[at].reason
+                )),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        untested.is_empty(),
+        "{}: fixing each of these clauses to the other value changed no compared answer on \
+         its table, so the seed never tests that side of it\n  {}",
+        case.name,
+        untested.join("\n  ")
+    );
+    assert!(
+        stale.is_empty(),
+        "{}: these sides are declared unobservable, and fixing the clause changed a compared \
+         answer, so the waiver is wrong\n  {}",
+        case.name,
+        stale.join("\n  ")
+    );
+    let unmatched: Vec<String> = case
+        .unobservable
+        .iter()
+        .zip(matched)
+        .filter(|(_, matched)| !matched)
+        .map(|(waiver, _)| {
+            format!(
+                "{}.{}, {}, {}",
+                waiver.table, waiver.policy, waiver.clause, waiver.side
+            )
+        })
+        .collect();
+    assert!(
+        unmatched.is_empty(),
+        "{}: these waivers name no clause side the case has\n  {}",
+        case.name,
+        unmatched.join("\n  ")
+    );
+}
+
+/// Whether some compared pair of `principal` on `on_table` gets another answer from the
+/// database while `ablation` holds.
+fn ablation_changes_an_answer(
+    conn: &mut PgConnection,
+    case: &ParityCase,
+    principal: &Principal,
+    ablation: &str,
+    on_table: &[&Object],
+    observations: &[Mismatch],
+) -> bool {
+    let mut changed = false;
+    let mut raised = false;
+    let outcome = conn.transaction::<(), diesel::result::Error, _>(|conn| {
+        conn.batch_execute(ablation)?;
+        changed = on_table.iter().any(|object| {
+            COMPARED.into_iter().any(|statement| {
+                let Some(before) = observations.iter().find(|observation| {
+                    observation.subject == principal.subject
+                        && observation.object == object.name
+                        && observation.statement == statement
+                }) else {
+                    return false;
+                };
+                postgres_allows(conn, case, principal, object, statement, &mut raised)
+                    .is_some_and(|after| after.postgres != before.postgres)
+            })
+        });
+        Err(diesel::result::Error::RollbackTransaction)
+    });
+    match outcome {
+        Err(diesel::result::Error::RollbackTransaction) => changed,
+        Err(error) => panic!("{}: {ablation}: {error}", case.name),
+        Ok(()) => unreachable!("the transaction body always rolls back"),
+    }
 }
 
 /// The context a check carries, with the clock parameters where the caller needs them
@@ -2035,19 +2402,15 @@ async fn compare_at_future_instant(
                     model.settings[&principal.subject].clone(),
                 );
             }
-            let Some(openfga) = openfga_allows(
+            let openfga = openfga_allows(
                 model,
                 principal,
                 &context,
                 object,
                 ActionStatement::Select,
                 None,
-                None,
             )
-            .await
-            else {
-                continue;
-            };
+            .await;
             observations.push(Mismatch {
                 subject: principal.subject.clone(),
                 object: object.name.clone(),
@@ -2181,8 +2544,12 @@ fn postgres_allows_write_probe(
         ..
     } = *attempt;
     let table = &object.table;
-    let row = object.row.as_object()?;
+    let row = object
+        .row
+        .as_object()
+        .expect("`to_jsonb` of a row is an object");
     let keys = &object.keys;
+    // An upsert without a key has no arbiter to conflict on, so it cannot be written.
     if keys.is_empty() && statement == ActionStatement::InsertOnConflictUpdate {
         return None;
     }
@@ -2191,7 +2558,6 @@ fn postgres_allows_write_probe(
         .map(|key| format!("\"{key}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let settable = settable_column(object)?;
     let (payload, produced) =
         if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
             assert!(
@@ -2206,10 +2572,27 @@ fn postgres_allows_write_probe(
                 .as_ref()
                 .map_or(&[], |inserting| &inserting.values);
             let mut probe = row.clone();
-            for key in keys {
-                if !declared.iter().any(|(column, _)| column == key) {
-                    probe.insert(key.clone(), fresh_key(conn, table, key, row.get(key)?)?);
-                }
+            // One fresh column makes the whole key fresh, and the others keep the values a
+            // policy may read.
+            let undeclared: Vec<&String> = keys
+                .iter()
+                .filter(|key| !declared.iter().any(|(column, _)| column == *key))
+                .collect();
+            if !undeclared.is_empty() {
+                let (key, fresh) = undeclared
+                    .iter()
+                    .find_map(|key| {
+                        let current = row.get(*key).expect("a key column is a column of its row");
+                        fresh_key(conn, case, table, key, current).map(|fresh| (*key, fresh))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{}: no key column of {table} has a type the runner mints a fresh \
+                             value for, so its inserts would go uncompared",
+                            case.name
+                        )
+                    });
+                probe.insert(key.clone(), fresh);
             }
             for (column, value) in declared {
                 probe.insert(column.clone(), serde_json::Value::String(value.clone()));
@@ -2221,8 +2604,10 @@ fn postgres_allows_write_probe(
         "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1::jsonb)"
     );
     if keys.is_empty() && statement == ActionStatement::InsertReturning {
+        // An empty row has no column to return, so the readback cannot be written.
+        let returned = assignable_column(&object.row, keys)?;
         let sql =
-            format!("WITH written AS ({source} RETURNING \"{settable}\") SELECT 1 FROM written");
+            format!("WITH written AS ({source} RETURNING \"{returned}\") SELECT 1 FROM written");
         let postgres = attempt_write(conn, attempt, &sql, &payload, raised);
         return Some(ProbeResult { postgres, produced });
     }
@@ -2236,6 +2621,7 @@ fn postgres_allows_write_probe(
             format!("{source} ON CONFLICT ({arbiter}) DO NOTHING"),
         ],
         ActionStatement::InsertOnConflictUpdate => {
+            let settable = assignable_column(&object.row, keys)?;
             let update = format!(
                 "{source} ON CONFLICT ({arbiter}) DO UPDATE SET \"{settable}\" = excluded.\"{settable}\""
             );
@@ -2244,7 +2630,7 @@ fn postgres_allows_write_probe(
                 produced,
             });
         }
-        _ => return None,
+        _ => unreachable!("{statement:?} is not a write probe"),
     };
 
     let answers: Vec<bool> = spellings
@@ -2324,14 +2710,16 @@ fn attempt_write(
     }
 }
 
-/// A key value the seeded rows do not carry, in the column's own type.
+/// A value no row of `table` carries in `column`, in the column's own type, and for text
+/// of the seed's own length, so a name spelled from it fits wherever the seed's does.
+/// [`None`] for a type the runner mints nothing for.
 ///
 /// The type has to be asked for rather than guessed from the JSON, which spells a `uuid`
-/// and a `text` the same way and would hand `uuid` a value it refuses. A type the runner
-/// cannot mint for declines the comparison rather than reporting a syntax error as a
-/// policy denying the write.
+/// and a `text` the same way and would hand `uuid` a value it refuses. Text keeps all but
+/// its last character, so a policy reading a key's prefix reads the seed's.
 fn fresh_key(
     conn: &mut PgConnection,
+    case: &ParityCase,
     table: &str,
     column: &str,
     current: &serde_json::Value,
@@ -2342,25 +2730,54 @@ fn fresh_key(
     ))
     .bind::<diesel::sql_types::Text, _>(column)
     .get_result(conn)
-    .ok()?;
-    match (kind.instant.as_str(), current) {
-        // One digit is enough, and keeping the shape keeps the value valid.
+    .unwrap_or_else(|error| panic!("{}: the type of {table}.{column}: {error}", case.name));
+    // `character varying(20)` is a `character varying`.
+    let base = kind.instant.split('(').next().unwrap_or_default();
+    let replacing_last = |text: &str, alphabet: &str| -> Vec<serde_json::Value> {
+        let kept = text.char_indices().last().map_or(0, |(at, _)| at);
+        alphabet
+            .chars()
+            .map(|last| serde_json::Value::String(format!("{}{last}", &text[..kept])))
+            .collect()
+    };
+    let candidates = match (base, current) {
         ("uuid", serde_json::Value::String(text)) => {
-            let mut digits = text.chars();
-            let first = digits.next()?;
-            let fresh = if first == 'f' { 'e' } else { 'f' };
-            Some(serde_json::Value::String(
-                core::iter::once(fresh).chain(digits).collect(),
-            ))
+            let rest: String = text.chars().skip(1).collect();
+            "0123456789abcdef"
+                .chars()
+                .map(|first| serde_json::Value::String(format!("{first}{rest}")))
+                .collect()
         }
-        ("text" | "character varying" | "name", serde_json::Value::String(text)) => {
-            Some(serde_json::Value::String(format!("probe-{text}")))
+        ("text" | "character varying" | "character" | "name", serde_json::Value::String(text))
+            if !text.is_empty() =>
+        {
+            replacing_last(text, "0123456789abcdefghijklmnopqrstuvwxyz")
         }
-        ("integer" | "bigint" | "smallint", serde_json::Value::Number(number)) => {
-            Some(serde_json::Value::from(number.as_i64()? + 1_000_000))
+        ("integer" | "bigint" | "smallint", serde_json::Value::Number(number))
+            if number.as_i64().is_some() =>
+        {
+            let start = number.as_i64().unwrap_or_default();
+            (1..=16)
+                .map(|step| serde_json::Value::from(start.wrapping_add(step)))
+                .collect()
         }
-        _ => None,
-    }
+        _ => return None,
+    };
+    let fresh = candidates.into_iter().find(|candidate| {
+        let taken: Counted = diesel::sql_query(format!(
+            "SELECT count(*) AS rows FROM {table} WHERE to_jsonb(\"{column}\") = $1::jsonb"
+        ))
+        .bind::<diesel::sql_types::Text, _>(candidate.to_string())
+        .get_result(conn)
+        .unwrap_or_else(|error| panic!("{}: reading {table}.{column}: {error}", case.name));
+        taken.rows == 0
+    });
+    Some(fresh.unwrap_or_else(|| {
+        panic!(
+            "{}: every fresh value the runner tried for {table}.{column} is taken",
+            case.name
+        )
+    }))
 }
 
 /// Refuse a case where every compared pair got the same answer.

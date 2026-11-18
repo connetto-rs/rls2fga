@@ -336,6 +336,7 @@ async fn a_membership_read_cap_some_caller_roles_run_under_keeps_the_table_guard
         "membership-cap-by-acting-role",
         CAPPED_FOR_ANON,
         &["GRANT SELECT ON docs, members TO anon, authenticated;
+             GRANT INSERT ON members TO anon, authenticated;
              INSERT INTO docs VALUES ('d1'), ('d2');
              INSERT INTO members VALUES ('d1', 'alice'), ('d2', 'alice'), ('d1', 'bob'), ('d1', 'carol')"],
         vec![

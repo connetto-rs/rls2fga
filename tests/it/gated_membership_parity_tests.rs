@@ -11,7 +11,9 @@ use rls2fga::types::ActionStatement;
 use crate::support;
 
 use crate::support::deployment;
-use crate::support::parity::{assert_agrees, assert_postgres, Cluster, ParityCase, Principal};
+use crate::support::parity::{
+    assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
+};
 
 /// The declared values a gated table reads beside the suite's callers, the caller's
 /// command list, its mode and its member set, the sets joined by the comma the gates split
@@ -143,6 +145,20 @@ async fn gated_membership_parity() {
                 mode_reader("missing", &["docs:read"], "enabled"),
                 mode_reader("nonmember", &["*"], "enabled"),
             ],
+        )
+        .unobservable(
+            "team_members",
+            "cap_mode",
+            ClauseKind::UsingAsCheck,
+            Side::Denies,
+            "No permissive policy grants inserts or updates.",
+        )
+        .unobservable(
+            "team_members",
+            "cap_mode",
+            ClauseKind::UsingAsCheck,
+            Side::Grants,
+            "No permissive policy grants inserts or updates.",
         ),
         &[
             ("wild", "docs:1", true),
@@ -163,6 +179,41 @@ async fn gated_membership_parity() {
                 CREATE POLICY cap_delete ON team_members AS RESTRICTIVE FOR DELETE USING (false);
                 CREATE POLICY cap_update ON team_members AS RESTRICTIVE FOR UPDATE USING (false);"),
             matrix(),
+        )
+        .unobservable(
+            "team_members",
+            "cap_delete",
+            ClauseKind::Using,
+            Side::Denies,
+            "No permissive policy grants deletes.",
+        )
+        .unobservable(
+            "team_members",
+            "cap_update",
+            ClauseKind::Using,
+            Side::Denies,
+            "No permissive policy grants updates.",
+        )
+        .unobservable(
+            "team_members",
+            "cap_update",
+            ClauseKind::UsingAsCheck,
+            Side::Denies,
+            "No permissive policy grants updates.",
+        )
+        .unobservable(
+            "team_members",
+            "cap_write",
+            ClauseKind::Check,
+            Side::Denies,
+            "No permissive policy grants inserts.",
+        )
+        .unobservable(
+            "team_members",
+            "cap_write",
+            ClauseKind::Check,
+            Side::Grants,
+            "No permissive policy grants inserts.",
         ),
         &[("unset", "docs:1", true), ("nonmember", "docs:1", false)],
     ).await;
@@ -351,9 +402,16 @@ async fn gated_membership_parity() {
                  GRANT SELECT ON teams, members, plain_docs, restricted_docs, delegated_docs
                     TO app_reader",
             ],
-            ["alice", "bob", "carol", "dave"]
+            ["alice", "bob", "carol", "dave", "missing"]
                 .into_iter()
-                .map(|user| Principal::with_bot_list(user, Some(&["members:read"])))
+                .map(|user| {
+                    let keys: &[&str] = if user == "missing" {
+                        &[]
+                    } else {
+                        &["members:read"]
+                    };
+                    Principal::with_bot_list(user, Some(keys))
+                })
                 .collect(),
         )
         .with_settings(gate_settings());
@@ -384,11 +442,15 @@ async fn gated_membership_parity() {
         } else {
             ""
         };
-        let principals = ["alice", "carol"]
+        let principals = ["alice", "carol", "missing"]
             .into_iter()
             .map(|user| {
-                let mut principal =
-                    Principal::with_bot_list(user, Some(&["members:read"])).with_clock();
+                let keys: &[&str] = if user == "missing" {
+                    &[]
+                } else {
+                    &["members:read"]
+                };
+                let mut principal = Principal::with_bot_list(user, Some(keys)).with_clock();
                 // The mode travels in the `settings` map the harness builds from the session.
                 principal.session.push(("app.mode".into(), "other".into()));
                 principal
@@ -453,15 +515,20 @@ async fn gated_membership_parity() {
         } else {
             "m.user_id = current_setting('app.user_id', true) AND m.expires_at > now()"
         };
-        let principals = ["alice", "carol"]
+        let principals = ["alice", "carol", "missing"]
             .into_iter()
             .map(|user| {
                 // The mode travels in the `settings` map the harness builds from the
                 // session, the two sets in their own list parameters.
-                let mut principal = Principal::with_bot_list(user, Some(&["members:read"]))
+                let keys: &[&str] = if user == "missing" {
+                    &[]
+                } else {
+                    &["members:read"]
+                };
+                let mut principal = Principal::with_bot_list(user, Some(keys))
                     .with_clock()
                     .with_context(serde_json::json!({
-                        "app_bot_list": ["members:read"],
+                        "app_bot_list": keys,
                         "app_members": [user]
                     }));
                 principal.session.extend([

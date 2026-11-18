@@ -22,7 +22,7 @@ use crate::support::footgun::{
     QUOTED_NESTED_MEMBERSHIP_SCHEMA, TWO_MEMBERSHIP_COLUMNS_SCHEMA, TWO_ROLE_THRESHOLD_REGISTRY,
     TWO_ROLE_THRESHOLD_SCHEMA,
 };
-use crate::support::parity::{assert_agrees, Cluster, Mutations, ParityCase, Principal};
+use crate::support::parity::{assert_agrees, ClauseKind, Cluster, ParityCase, Principal, Side};
 use crate::support::EXPIRING_SHARE_SCHEMA;
 
 /// One case, ready to run, beside the name a failure reports.
@@ -432,7 +432,7 @@ CREATE POLICY notes_write ON notes FOR UPDATE
 GRANT SELECT ON notes TO kind_anon;
 GRANT SELECT, UPDATE ON notes TO kind_user;
 ",
-        &["INSERT INTO notes(id, owner, body) VALUES (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', 'c')"],
+        &["INSERT INTO notes(id, owner, body) VALUES (1, 'alice', 'a'), (2, 'bob', 'b'), (3, 'carol', 'c'), (4, 'alice', 'transfer')"],
         vec![
             Principal::with_setting("alice", "alice", "app.user_id", "alice"),
             Principal::with_setting("bob", "kind_anon", "app.user_id", "bob"),
@@ -444,14 +444,7 @@ GRANT SELECT, UPDATE ON notes TO kind_user;
          CREATE ROLE kind_user NOLOGIN;
          CREATE ROLE alice LOGIN IN ROLE kind_user",
     ])
-    .writing(
-        "notes",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            // The policies read the owner, never the body.
-            check_neutral: true,
-        },
-    );
+    .updating("notes", "owner = CASE WHEN id = 4 THEN 'carol' ELSE owner END");
 
     let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
@@ -483,7 +476,7 @@ CREATE POLICY notes_write ON notes FOR UPDATE
 GRANT SELECT ON notes TO kind_anon, kind_user;
 GRANT UPDATE ON notes TO writers;
 ",
-        &["INSERT INTO notes(id, owner, body) VALUES (1, 'bob', 'b'), (2, 'carol', 'c')"],
+        &["INSERT INTO notes(id, owner, body) VALUES (1, 'bob', 'b'), (2, 'carol', 'c'), (3, 'carol', 'transfer')"],
         vec![
             Principal::with_setting("bob", "kind_anon", "app.user_id", "bob"),
             Principal::with_setting("carol", "kind_user", "app.user_id", "carol"),
@@ -493,13 +486,7 @@ GRANT UPDATE ON notes TO writers;
          CREATE ROLE kind_user NOLOGIN;
          CREATE ROLE writers NOLOGIN;
          GRANT writers TO kind_user"])
-    .writing(
-        "notes",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("notes", "owner = CASE WHEN id = 3 THEN 'bob' ELSE owner END");
 
     let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
@@ -541,20 +528,8 @@ REVOKE DELETE ON docs FROM editor;
     .after(&["CREATE ROLE admin LOGIN;
          CREATE ROLE editor LOGIN;
          CREATE ROLE stranger LOGIN"])
-    .writing(
-        "docs",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
-    )
-    .writing(
-        "secrets",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("docs", "body = body")
+    .updating("secrets", "body = body");
 
     let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
@@ -598,13 +573,7 @@ RESET ROLE;
     .after(&["CREATE ROLE app_owner NOLOGIN;
          CREATE ROLE reader LOGIN;
          GRANT app_owner TO reader"])
-    .writing(
-        "notes",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("notes", "body = body");
 
     let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
@@ -634,13 +603,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON scratch TO writer;
         ],
     )
     .after(&["CREATE ROLE reader LOGIN; CREATE ROLE writer LOGIN; CREATE ROLE stranger LOGIN"])
-    .writing(
-        "scratch",
-        Mutations {
-            update_set: Some("note = 'changed'".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("scratch", "note = 'changed'");
     let run = support::parity::run(cluster, &case).await;
     for (subject, statement, allowed) in [
         ("reader", ActionStatement::Select, true),
@@ -699,20 +662,8 @@ GRANT SELECT (id, body), INSERT, UPDATE (body) ON docs TO filer;
          CREATE ROLE remover LOGIN;
          CREATE ROLE drafter LOGIN;
          CREATE ROLE filer LOGIN"])
-    .writing(
-        "docs",
-        Mutations {
-            update_set: Some("body = 'changed'".to_string()),
-            check_neutral: true,
-        },
-    )
-    .writing(
-        "memos",
-        Mutations {
-            update_set: Some("title = body".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("docs", "body = 'changed'")
+    .updating("memos", "title = body");
     let run = support::parity::run(cluster, &case).await;
     for (subject, object, statement, allowed) in [
         // `SELECT` on the key the probe reads is enough, and on another column is not.
@@ -770,13 +721,7 @@ GRANT SELECT (tag), UPDATE (tag) ON scratch TO untagger;
         ],
     )
     .after(&["CREATE ROLE tagger LOGIN; CREATE ROLE untagger LOGIN; CREATE ROLE stranger LOGIN"])
-    .writing(
-        "scratch",
-        Mutations {
-            update_set: Some("note = 'changed'".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("scratch", "note = 'changed'");
     let run = support::parity::run(cluster, &case).await;
     for (subject, statement, allowed) in [
         ("tagger", ActionStatement::Select, true),
@@ -844,13 +789,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
         ],
     )
     .after(&["CREATE ROLE ledger_a LOGIN; CREATE ROLE ledger_b LOGIN"])
-    .writing(
-        "ledger",
-        Mutations {
-            update_set: Some("note = note".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("ledger", "note = note");
     let planned = translated(&case);
     assert!(
         unrestricted(&planned, "ledger", ActionStatement::Select),
@@ -962,7 +901,14 @@ GRANT SELECT ON open_memo, private_memo, windowed_memo TO memo_a, memo_b;
             Principal::with_setting("memo_b", "memo_b", "app.user_id", "memo_b").with_clock(),
         ],
     )
-    .after(&["CREATE ROLE memo_a LOGIN; CREATE ROLE memo_b LOGIN"]);
+    .after(&["CREATE ROLE memo_a LOGIN; CREATE ROLE memo_b LOGIN"])
+    .unobservable(
+        "open_memo",
+        "open_memo_all",
+        ClauseKind::Check,
+        Side::Grants,
+        "The schema grants only SELECT, so no caller reaches a write check.",
+    );
     let planned = translated(&case);
     assert!(
         unrestricted(&planned, "open_memo", ActionStatement::Select),
@@ -1215,6 +1161,13 @@ fn ownership_case() -> ParityCase {
             Principal::with_setting("bob", "bob", "app.user_id", "bob"),
         ],
     )
+    .unobservable(
+        "docs",
+        "docs_delete",
+        ClauseKind::Using,
+        Side::Denies,
+        "The identical SELECT predicate already hides every row DELETE would deny.",
+    )
 }
 
 async fn the_runner_agrees_on_direct_ownership(cluster: Arc<Cluster>) {
@@ -1251,7 +1204,7 @@ async fn a_set_split_on_an_undeclared_delimiter_shows_nothing(cluster: Arc<Clust
         "runner-undeclared-delimiter",
         SPLIT_NOTES,
         &[
-            "INSERT INTO split_notes(id, owner) VALUES ('n1', 'alice'), ('n2', 'bob')",
+            "INSERT INTO split_notes(id, owner) VALUES ('n1', 'alice'), ('n2', 'bob'), ('n3', 'alice,bob')",
             "CREATE ROLE app_reader LOGIN; GRANT SELECT ON split_notes TO app_reader",
         ],
         vec![subject_holder("alice", &["alice", "bob"])],
@@ -1439,43 +1392,65 @@ CREATE POLICY docs_update ON docs FOR UPDATE
     WITH CHECK (owner_id = current_setting('app.user_id', true));
 ";
     let seed = [
-        "INSERT INTO docs(id, owner_id) VALUES ('d1', 'alice'), ('d2', 'bob')",
-        "CREATE ROLE alice LOGIN; CREATE ROLE bob LOGIN;
-         GRANT SELECT, UPDATE ON docs TO alice, bob",
+        "INSERT INTO docs(id, owner_id) VALUES
+             ('d1', 'alice'), ('d2', 'bob'), ('d3', 'somebody_else'), ('d4', 'alice')",
+        "CREATE ROLE alice LOGIN; CREATE ROLE bob LOGIN; CREATE ROLE somebody_else LOGIN;
+         GRANT SELECT, UPDATE ON docs TO alice, bob, somebody_else",
     ];
     let principals = || {
         vec![
             Principal::with_setting("alice", "alice", "app.user_id", "alice"),
             Principal::with_setting("bob", "bob", "app.user_id", "bob"),
+            Principal::with_setting(
+                "somebody_else",
+                "somebody_else",
+                "app.user_id",
+                "somebody_else",
+            ),
         ]
     };
 
-    // Keeping the owner passes both clauses, so every own row updates.
+    // The extra row changes owner while the original rows keep theirs.
     let keeps_owner = ParityCase::reading("runner-update-keeps", schema, &seed, principals())
-        .writing(
+        .updating(
             "docs",
-            Mutations {
-                // `owner_id = owner_id` leaves the value the policy reads unchanged, so
-                // the resulting row decides as the existing one does.
-                update_set: Some("owner_id = owner_id".to_string()),
-                check_neutral: true,
-            },
+            "owner_id = CASE WHEN id = 'd4' THEN 'somebody_else' ELSE owner_id END",
+        )
+        .unobservable(
+            "docs",
+            "docs_update",
+            ClauseKind::Using,
+            Side::Denies,
+            "The identical SELECT predicate hides every old row this clause denies.",
+        )
+        .unobservable(
+            "docs",
+            "docs_update",
+            ClauseKind::Check,
+            Side::Denies,
+            "PostgreSQL checks the identical SELECT predicate on the new row of an UPDATE naming \
+             its rows.",
         );
     let kept = support::parity::run(&cluster, &keeps_owner).await;
     assert_agrees(&keeps_owner, &kept);
 
-    // Handing the row away passes `USING` and fails `WITH CHECK`, so PostgreSQL refuses
-    // and no row is updated. The model judges the row the write would produce, which the
-    // stored tuples say nothing about, so the runner declines to compare rather than
-    // comparing against the row that still exists. Naming that limit here is what stops a
-    // later reader believing this direction is covered.
+    // Handing the row away passes `USING` and fails `WITH CHECK`.
     let gives_away = ParityCase::reading("runner-update-gives", schema, &seed, principals())
-        .writing(
+        .updating("docs", "owner_id = 'somebody_else'")
+        .unobservable(
             "docs",
-            Mutations {
-                update_set: Some("owner_id = 'somebody_else'".to_string()),
-                check_neutral: false,
-            },
+            "docs_update",
+            ClauseKind::Using,
+            Side::Denies,
+            "The identical SELECT predicate hides every old row this clause denies.",
+        )
+        .unobservable(
+            "docs",
+            "docs_update",
+            ClauseKind::Check,
+            Side::Denies,
+            "PostgreSQL checks the identical SELECT predicate on the new row of an UPDATE naming \
+             its rows.",
         );
     let given = support::parity::run(&cluster, &gives_away).await;
     assert_agrees(&gives_away, &given);
@@ -1507,6 +1482,13 @@ async fn a_nested_protected_read_denies_on_both_sides(cluster: Arc<Cluster>) {
             "app.user_id",
             "app_reader",
         )],
+    )
+    .unobservable(
+        "docs",
+        "docs_members",
+        ClauseKind::Using,
+        Side::Grants,
+        "The nested Memberships table has RLS enabled without any admitting policy.",
     );
     support::parity::expect_denied(&cluster, &case, "app_reader", "docs:d1").await;
 }
@@ -1547,7 +1529,14 @@ CREATE POLICY docs_members ON docs FOR SELECT USING (is_member(id));
             "app_reader",
         )],
     )
-    .after(&[r#"CREATE ROLE actor; CREATE ROLE "Actor""#]);
+    .after(&[r#"CREATE ROLE actor; CREATE ROLE "Actor""#])
+    .unobservable(
+        "docs",
+        "docs_members",
+        ClauseKind::Using,
+        Side::Grants,
+        "The definer is not the membership table owner and its RLS has no admitting policy.",
+    );
     support::parity::expect_denied(&cluster, &case, "app_reader", "docs:d1").await;
 }
 
@@ -1703,7 +1692,7 @@ CREATE FUNCTION other.uid() RETURNS TEXT LANGUAGE sql AS
 CREATE POLICY docs_select ON docs FOR SELECT USING (owner_id = other.uid());
 ",
         &[
-            "INSERT INTO docs(id, owner_id) VALUES ('d1', 'app_reader')",
+            "INSERT INTO docs(id, owner_id) VALUES ('d1', 'app_reader'), ('d2', 'nobody')",
             "CREATE ROLE app_reader LOGIN; GRANT SELECT ON docs TO app_reader",
         ],
         app_reader(),
@@ -1741,7 +1730,7 @@ CREATE POLICY docs_select ON docs FOR SELECT USING (public.is_member(id));
 SET search_path TO a, public;
 ",
         &[
-            "INSERT INTO public.docs(id) VALUES ('d1');
+            "INSERT INTO public.docs(id) VALUES ('d1'), ('d2');
              INSERT INTO b.doc_members(id, doc_id, user_id) VALUES ('m1', 'd1', 'app_reader')",
             "CREATE ROLE app_reader LOGIN;
              GRANT USAGE ON SCHEMA b TO app_reader;
@@ -1782,8 +1771,8 @@ CREATE POLICY docs_member ON public.docs FOR SELECT USING (
     EXISTS (SELECT 1 FROM memberships m
         WHERE m.doc_id = docs.id
           AND m.user_id = current_setting('app.current_user_id', true)));
-INSERT INTO public.docs VALUES ('d1');
-INSERT INTO app.memberships VALUES ('d1', 'other_user');
+INSERT INTO public.docs VALUES ('d1'), ('d2');
+INSERT INTO app.memberships VALUES ('d1', 'other_user'), ('d2', 'app_reader');
 INSERT INTO public.memberships VALUES ('d1', 'app_reader');
 ",
         &[],
@@ -1889,6 +1878,13 @@ CREATE POLICY p ON docs FOR SELECT USING (expires_at > app.now());
              GRANT SELECT ON docs TO alice",
         ],
         vec![Principal::as_role("alice", "alice").with_clock()],
+    )
+    .unobservable(
+        "docs",
+        "p",
+        ClauseKind::Using,
+        Side::Grants,
+        "No timestamp is greater than the infinity returned by app.now().",
     );
     support::parity::expect_denied(&cluster, &case, "alice", "docs:1").await;
 }
@@ -1919,12 +1915,20 @@ async fn an_update_policy_without_using_updates_nothing(cluster: Arc<Cluster>) {
         ],
         two_setting_readers("alice", "bob"),
     )
-    .writing(
+    .updating("notes", "owner_id = owner_id")
+    .unobservable(
         "notes",
-        Mutations {
-            update_set: Some("owner_id = owner_id".to_string()),
-            check_neutral: true,
-        },
+        "notes_owner_writes",
+        ClauseKind::Check,
+        Side::Denies,
+        "The absent USING clause prevents every UPDATE from reaching WITH CHECK.",
+    )
+    .unobservable(
+        "notes",
+        "notes_owner_writes",
+        ClauseKind::Check,
+        Side::Grants,
+        "The absent USING clause prevents every UPDATE from reaching WITH CHECK.",
     );
     let run = support::parity::run(&cluster, &case).await;
     support::parity::assert_postgres(
@@ -2287,20 +2291,16 @@ CREATE POLICY notes_write ON notes FOR UPDATE USING (writer_user_id = auth_curre
                  ('bu-both', 'alice', 'alice', 'original'),
                  ('bu-write-only', 'bob', 'alice', 'original'),
                  ('bu-read-only', 'alice', 'bob', 'original'),
-                 ('bu-neither', 'bob', 'bob', 'original')",
+                 ('bu-neither', 'bob', 'bob', 'original'),
+                 ('bu-transfer', 'alice', 'alice', 'transfer')",
             "CREATE ROLE app_user LOGIN; GRANT SELECT, UPDATE ON notes TO app_user",
         ],
         two_setting_readers("alice", "bob"),
     )
     .with_registry(ACCESSOR)
-    .writing(
+    .updating(
         "notes",
-        Mutations {
-            // `body` is read by no policy, so the resulting row decides as the
-            // existing one does.
-            update_set: Some("body = 'changed'".to_string()),
-            check_neutral: true,
-        },
+        "writer_user_id = CASE WHEN body = 'transfer' THEN 'bob' ELSE writer_user_id END",
     );
     let run = support::parity::run(&cluster, &case).await;
     // A `WHERE` reads the row, so an `UPDATE` naming rows needs the read as well as the
@@ -2353,8 +2353,8 @@ CREATE POLICY m_owner ON "M" FOR SELECT USING (
 );
 "#,
         &[
-            r#"INSERT INTO "M"(id, owner_id) VALUES ('d1', 'other_owner');
-               INSERT INTO members(doc_id, owner_id) VALUES ('d1', 'app_reader')"#,
+            r#"INSERT INTO "M"(id, owner_id) VALUES ('d1', 'other_owner'), ('d2', 'app_reader');
+               INSERT INTO members(doc_id, owner_id) VALUES ('d1', 'app_reader'), ('d2', 'app_reader')"#,
             r#"CREATE ROLE app_reader LOGIN; GRANT SELECT ON "M", members TO app_reader"#,
         ],
         vec![Principal::with_setting(
@@ -2385,6 +2385,20 @@ async fn mutually_recursive_policies_return_no_row(cluster: Arc<Cluster>) {
             "CREATE ROLE app_user LOGIN; GRANT SELECT ON users, notes, folders TO app_user",
         ],
         two_setting_readers("alice", "bob"),
+    )
+    .unobservable(
+        "folders",
+        "folders_reads",
+        ClauseKind::Using,
+        Side::Grants,
+        "Recursive policy expansion raises before any row can be granted.",
+    )
+    .unobservable(
+        "notes",
+        "notes_reads",
+        ClauseKind::Using,
+        Side::Grants,
+        "Recursive policy expansion raises before any row can be granted.",
     );
     let run = support::parity::run(&cluster, &case).await;
     // Every read raises, so the database returns nothing to anybody.
@@ -2589,11 +2603,15 @@ CREATE POLICY p ON memos FOR SELECT TO "Admin" USING (TRUE);
 "#,
         &[
             "INSERT INTO docs (id) VALUES ('d1'); INSERT INTO memos (id) VALUES ('m1')",
-            "CREATE ROLE alice LOGIN;
-             GRANT SELECT ON docs, memos TO alice;
-             GRANT admin TO alice",
+            r#"CREATE ROLE alice LOGIN; CREATE ROLE bob LOGIN;
+             GRANT SELECT ON docs, memos TO alice, bob;
+             GRANT admin TO alice;
+             GRANT "Admin" TO bob"#,
         ],
-        vec![Principal::as_role("alice", "alice")],
+        vec![
+            Principal::as_role("alice", "alice"),
+            Principal::as_role("bob", "bob"),
+        ],
     )
     .after(&[r#"CREATE ROLE admin; CREATE ROLE "Admin""#]);
     let run = support::parity::run(&cluster, &case).await;
@@ -2628,7 +2646,7 @@ async fn a_declared_session_set_grants_beside_the_owner(cluster: Arc<Cluster>) {
         &[
             "INSERT INTO notes (id, owner) VALUES
                  (1, 'alice'), (2, 'team-a'), (3, 'bob'), (4, NULL)",
-            "CREATE ROLE app_writer LOGIN; GRANT SELECT ON notes TO app_writer",
+            "CREATE ROLE app_writer LOGIN; GRANT SELECT, INSERT ON notes TO app_writer",
         ],
         vec![
             // The owner arm alone, the set arm alone, and both together.
@@ -2952,7 +2970,10 @@ CREATE POLICY docs_members ON docs FOR SELECT USING (
         &[
             "INSERT INTO docs(id) VALUES ('d1');
              INSERT INTO doc_members(doc_id, user_id, tenant)
-                 VALUES ('d1', 'app_reader', 'tenant_a')",
+                 VALUES ('d1', 'app_reader', 'tenant_a');
+             INSERT INTO docs(id) VALUES ('d2');
+             INSERT INTO doc_members(doc_id, user_id, tenant)
+                 VALUES ('d2', 'app_reader', 'app_reader')",
             // The caller is deliberately not granted `tenant_a`.
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON docs, doc_members TO app_reader",
@@ -2988,9 +3009,9 @@ CREATE POLICY p ON leveled_docs FOR SELECT USING (can_see(id, coalesce(level, 0)
         &[
             // The poisoning row: the member's own `level` is high and `min_level` sits
             // between the two, so a captured reading admits what the row's level denies.
-            "INSERT INTO leveled_docs(id, level) VALUES ('d1', 0);
+            "INSERT INTO leveled_docs(id, level) VALUES ('d1', 0), ('d2', 60);
              INSERT INTO leveled_members(doc_id, user_id, level, min_level)
-                 VALUES ('d1', 'app_reader', 99, 50)",
+                 VALUES ('d1', 'app_reader', 99, 50), ('d2', 'app_reader', 99, 50)",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON leveled_docs, leveled_members TO app_reader",
         ],
@@ -3166,10 +3187,10 @@ async fn a_shared_paper_reads_through_either_arm(cluster: Arc<Cluster>) {
         "connetto_capability",
         &[
             // Paper 2 is shared with a key alice carries, paper 3 with one she does not.
-            "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, 'bob');
+            "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, 'bob'), (4, 'alice');
              INSERT INTO paper_shares (paper_id, viewer) VALUES (2, 'team-a'), (3, 'team-z')",
             "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT ON papers, paper_shares TO app_reader",
+             GRANT SELECT, INSERT, DELETE ON papers, paper_shares TO app_reader",
         ],
         vec![
             user_holder("alice", "app_reader", &["team-a"]),
@@ -3404,7 +3425,8 @@ async fn a_membership_row_compared_to_the_caller_twice_denies_either_half(cluste
         &[
             // alice is the member but holds no key, dave holds the key but is not the member.
             "INSERT INTO teams (id) VALUES (1);
-             INSERT INTO team_members (team_id, member, role) VALUES (1, 'alice', 'team-a');
+             INSERT INTO team_members (team_id, member, role)
+                 VALUES (1, 'alice', 'team-a'), (1, 'carol', 'team-a');
              INSERT INTO items (id, team_id) VALUES (1, 1)",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON items, teams, team_members TO app_reader",
@@ -3412,6 +3434,7 @@ async fn a_membership_row_compared_to_the_caller_twice_denies_either_half(cluste
         vec![
             user_holder("alice", "app_reader", &[]),
             user_holder("dave", "app_reader", &["team-a"]),
+            user_holder("carol", "app_reader", &["team-a"]),
         ],
     )
     .with_settings(caller_and_subjects());
@@ -3620,15 +3643,17 @@ CREATE POLICY sentinel_p ON sentinel_docs FOR SELECT USING (
 );
 ",
         &[
-            "INSERT INTO case_docs(id, archived, is_public) VALUES ('c1', TRUE, TRUE);
+            "INSERT INTO case_docs(id, archived, is_public)
+                 VALUES ('c1', TRUE, TRUE), ('c2', FALSE, TRUE);
              INSERT INTO filter_docs(id, owner_id, reviewer_id)
-                 VALUES ('f1', 'someone', 'someone_else');
-             INSERT INTO filter_members(doc_id, user_id) VALUES ('f1', 'app_reader');
-             INSERT INTO sentinel_docs(id, owner_id) VALUES ('s1', 'system')",
+                 VALUES ('f1', 'someone', 'someone_else'), ('f2', 'someone', 'someone');
+             INSERT INTO filter_members(doc_id, user_id)
+                 VALUES ('f1', 'app_reader'), ('f2', 'app_reader');
+             INSERT INTO sentinel_docs(id, owner_id) VALUES ('s1', 'system'), ('s2', 'app_reader')",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON case_docs, filter_docs, filter_members TO app_reader;
              CREATE ROLE system LOGIN;
-             GRANT SELECT ON sentinel_docs TO system",
+             GRANT SELECT ON sentinel_docs TO system, app_reader",
         ],
         vec![
             Principal::with_setting("app_reader", "app_reader", "app.user_id", "app_reader"),
@@ -3715,13 +3740,22 @@ async fn a_missing_session_setting_is_not_a_denial(cluster: Arc<Cluster>) {
         "a caller declaring a raise whose read succeeds has to fail the case"
     );
 
+    let mut bearer = Principal::as_role("bearer", "app_reader")
+        .with_context(serde_json::json!({ "request_jwt_claims_teams": ["team-a"] }));
+    bearer.session.push((
+        "request.jwt.claims".to_string(),
+        serde_json::json!({ "teams": ["team-a"] }).to_string(),
+    ));
     let declared = ParityCase::from_fixture(
         "runner-missing-setting-declared",
         "token_claim_set",
         &seed,
-        vec![Principal::as_role("nobody", "app_reader")
-            .with_context(empty())
-            .reading_an_unset_setting()],
+        vec![
+            Principal::as_role("nobody", "app_reader")
+                .with_context(empty())
+                .reading_an_unset_setting(),
+            bearer,
+        ],
     );
     let run = support::parity::run(&cluster, &declared).await;
     support::parity::assert_postgres(
@@ -4594,10 +4628,10 @@ async fn a_share_record_replays_onto_another_types_object(cluster: Arc<Cluster>)
         "runner-shared-paper-from-row",
         "connetto_capability",
         &[
-            "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, 'bob');
+            "INSERT INTO papers (id, owner) VALUES (1, 'alice'), (2, 'bob'), (3, 'bob'), (4, 'alice');
              INSERT INTO paper_shares (paper_id, viewer) VALUES (2, 'team-a'), (3, 'team-z')",
             "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT ON papers, paper_shares TO app_reader",
+             GRANT SELECT, INSERT, DELETE ON papers, paper_shares TO app_reader",
         ],
         vec![
             user_holder("alice", "app_reader", &["team-a"]),
@@ -4678,12 +4712,24 @@ CREATE POLICY docs_code ON docs FOR SELECT USING ({clause});
             ),
             &[
                 "INSERT INTO docs (id, code) VALUES
-                     ('d1', 'ab'), ('d2', ' ab'), ('d3', 'ab' || chr(9)), ('d4', '')",
+                     ('d1', 'ab'), ('d2', ' ab'), ('d3', 'ab' || chr(9)), ('d4', ''),
+                     ('d5', 'x'), ('d6', NULL)",
                 "CREATE ROLE app_user LOGIN; GRANT SELECT ON docs TO app_user",
             ],
             vec![Principal::as_role("app_user", "app_user")],
         )
         .loading_from_rows();
+        let case = if name == "text-column" {
+            case.unobservable(
+                "docs",
+                "docs_code",
+                ClauseKind::Using,
+                Side::Grants,
+                "Casting CHAR to text strips trailing spaces, so it cannot equal 'ab '.",
+            )
+        } else {
+            case
+        };
         let run = support::parity::run(&cluster, &case).await;
         for id in ["d1", "d2", "d3", "d4"] {
             support::parity::assert_postgres(
@@ -5057,7 +5103,8 @@ async fn a_role_ladder_answers_four_thresholds(cluster: Arc<Cluster>) {
                  INSERT INTO ownables (id, owner_id) VALUES
                      ('{DOC_1}', '{ALICE}'), ('{DOC_2}', '{ALPHA}');
                  INSERT INTO owner_grants (grantee_owner_id, granted_owner_id, role_id) VALUES
-                     ('{CAROL}', '{ALICE}', 3), ('{BETA}', '{ALICE}', 2), ('{EVE}', '{ALPHA}', 4)"
+                     ('{CAROL}', '{ALICE}', 3), ('{BETA}', '{ALICE}', 2), ('{EVE}', '{ALPHA}', 4),
+                     ('{CAROL}', '{ALPHA}', 2)"
             ),
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON users, teams, team_members, owner_grants TO app_reader;
@@ -5071,15 +5118,7 @@ async fn a_role_ladder_answers_four_thresholds(cluster: Arc<Cluster>) {
             reader(EVE),
         ],
     )
-    .writing(
-        "ownables",
-        Mutations {
-            // Rewriting the owner with itself exercises USING and WITH CHECK together, and
-            // the ladder reads the owner alone, so the probe's fresh key changes no answer.
-            update_set: Some("owner_id = owner_id".to_string()),
-            check_neutral: true,
-        },
-    );
+    .updating("ownables", &format!("owner_id = '{ALPHA}'"));
     let run = support::parity::run(&cluster, &case).await;
     let doc_1 = format!("ownables:{DOC_1}");
     for (subject, statement, allowed) in [
@@ -5125,14 +5164,6 @@ async fn an_insert_that_reads_back_applies_the_select_policy(cluster: Arc<Cluste
             setting_reader("alice", "app_user"),
             setting_reader("bob", "app_user"),
         ],
-    )
-    .writing(
-        "notes",
-        Mutations {
-            update_set: None,
-            // The policies read owner and author, never the key.
-            check_neutral: true,
-        },
     );
     let run = support::parity::run(&cluster, &case).await;
     for (subject, row, statement, allowed) in [
@@ -5194,14 +5225,7 @@ async fn an_upsert_applies_the_update_policy_too(cluster: Arc<Cluster>) {
             setting_reader("bob", "app_user"),
         ],
     )
-    .writing(
-        "notes",
-        Mutations {
-            update_set: None,
-            // The policies read owner, author and editor, never the key.
-            check_neutral: true,
-        },
-    );
+    .updating("notes", "editor_id = 'bob'");
     let run = support::parity::run(&cluster, &case).await;
     for (subject, row, statement, allowed) in [
         // Alice authors it and does not edit it: the insert stands, the upsert does not.
@@ -5288,15 +5312,10 @@ async fn every_exact_support_case_agrees(cluster: Arc<Cluster>) {
             // A partition is filtered by nothing when a read names it, so the case compares
             // reads through the root, which is what the model answers for.
             .not_reading_directly(&partitions);
-        // The grammar's write cases change a column no policy reads, and the probe changes
-        // the key alone, so the row a write produces carries the existing row's facts.
         let case = match &generated.writes {
-            Some(write) => case.writing(
+            Some(write) => case.updating(
                 "guarded",
-                Mutations {
-                    update_set: Some(write.update_set.clone()),
-                    check_neutral: true,
-                },
+                &format!("{}, editor = 'someone_else'", write.update_set),
             ),
             None => case,
         };
@@ -5391,8 +5410,8 @@ CREATE POLICY notes_all ON notes FOR ALL
     USING (owner_id = current_setting('app.user_id', true));
 ",
         &[
-            "INSERT INTO docs(id, owner_id, title) VALUES ('d1', 'alice', 'first');
-             INSERT INTO notes(id, owner_id, body) VALUES ('n1', 'alice', 'first')",
+            "INSERT INTO docs(id, owner_id, title) VALUES ('d1', 'alice', 'first'), ('d2', 'bob', 'second');
+             INSERT INTO notes(id, owner_id, body) VALUES ('n1', 'alice', 'first'), ('n2', 'bob', 'second')",
             "CREATE ROLE alice LOGIN;
              GRANT SELECT, INSERT, UPDATE, DELETE ON docs, notes TO alice",
         ],
@@ -5403,22 +5422,9 @@ CREATE POLICY notes_all ON notes FOR ALL
             "alice",
         )],
     )
-    // Two tables declaring different changes: rewriting the body cannot alter any
-    // policy's answer, while handing the row to somebody else is the whole question.
-    .writing(
-        "notes",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
-    )
-    .writing(
-        "docs",
-        Mutations {
-            update_set: Some("owner_id = 'someone_else'".to_string()),
-            check_neutral: false,
-        },
-    );
+    // Handing the document away exercises its ownership check.
+    .updating("notes", "body = body")
+    .updating("docs", "owner_id = 'someone_else'");
     let run = support::parity::run(&cluster, &case).await;
     support::parity::assert_postgres(
         &case,
@@ -5460,10 +5466,6 @@ CREATE POLICY left_all ON left_hand.notes FOR ALL
 CREATE POLICY right_all ON right_hand.notes FOR ALL
     USING (owner_id = current_setting('app.user_id', true));
 ";
-    let neutral = || Mutations {
-        update_set: Some("body = body".to_string()),
-        check_neutral: true,
-    };
     let two_schema_case = |name: &str| {
         ParityCase::reading(
             name,
@@ -5486,7 +5488,7 @@ CREATE POLICY right_all ON right_hand.notes FOR ALL
     };
 
     // A bare name two schemas both carry names neither of them.
-    let ambiguous = two_schema_case("runner-ambiguous-spelling").writing("notes", neutral());
+    let ambiguous = two_schema_case("runner-ambiguous-spelling").updating("notes", "body = body");
     let shared = Arc::clone(&cluster);
     let refused = tokio::spawn(async move {
         support::parity::run(&shared, &ambiguous).await;
@@ -5499,8 +5501,8 @@ CREATE POLICY right_all ON right_hand.notes FOR ALL
 
     // Two spellings of one table are one declaration twice, and the second would win.
     let doubled = two_schema_case("runner-doubled-spelling")
-        .writing("left_hand.notes", neutral())
-        .writing("\"left_hand\".\"notes\"", neutral());
+        .updating("left_hand.notes", "body = body")
+        .updating("\"left_hand\".\"notes\"", "body = body");
     let shared = Arc::clone(&cluster);
     let refused = tokio::spawn(async move {
         support::parity::run(&shared, &doubled).await;
@@ -5522,7 +5524,7 @@ CREATE POLICY notes_all ON notes FOR ALL
     USING (owner_id = current_setting('app.user_id', true));
 ",
         &[
-            "INSERT INTO notes(id, owner_id, body) VALUES ('n1', 'alice', 'x')",
+            "INSERT INTO notes(id, owner_id, body) VALUES ('n1', 'alice', 'x'), ('n2', 'bob', 'y')",
             "CREATE ROLE alice LOGIN; GRANT SELECT, INSERT, UPDATE, DELETE ON notes TO alice",
         ],
         vec![Principal::with_setting(
@@ -5532,7 +5534,7 @@ CREATE POLICY notes_all ON notes FOR ALL
             "alice",
         )],
     )
-    .writing("public.notes", neutral());
+    .updating("public.notes", "body = body");
     let run = support::parity::run(&cluster, &qualified).await;
     support::parity::assert_postgres(
         &qualified,
@@ -5583,10 +5585,10 @@ CREATE POLICY refused_insert ON refused FOR INSERT
                 name,
                 SCHEMA,
                 &[
-                    "INSERT INTO plain(id, owner_id) VALUES ('p1', 'alice');
+                    "INSERT INTO plain(id, owner_id) VALUES ('p1', 'alice'), ('p2', 'bob');
                      INSERT INTO refused(id, owner_id, archived) VALUES
                          ('r1', 'alice', FALSE), ('r2', 'alice', TRUE),
-                         ('r3', 'bob', TRUE)",
+                         ('r3', 'bob', TRUE), ('r4', 'bob', FALSE)",
                     "CREATE ROLE alice LOGIN;
                      GRANT SELECT, INSERT, DELETE ON plain, refused TO alice",
                 ],
@@ -5596,14 +5598,6 @@ CREATE POLICY refused_insert ON refused FOR INSERT
                     "app.user_id",
                     "alice",
                 )],
-            )
-            // So the insert probe is compared: the policies read the owner, never the key.
-            .writing(
-                "refused",
-                Mutations {
-                    update_set: None,
-                    check_neutral: true,
-                },
             );
             let outcome = tokio::spawn(async move {
                 let run = support::parity::run_with(
@@ -5619,6 +5613,11 @@ CREATE POLICY refused_insert ON refused FOR INSERT
             assert!(
                 outcome.is_err(),
                 "{name}: the note about the refused clause has to leave this unlicensed"
+            );
+            let message = panic_message(outcome.expect_err("the planted mismatch must fail"));
+            assert!(
+                message.contains("no note puts a divergence here, or it goes the other way"),
+                "{name}: unexpected failure {message}"
             );
         }
     };
@@ -5801,7 +5800,15 @@ async fn distinct_team_membership_tables_do_not_share_access(cluster: Arc<Cluste
                 "INSERT INTO owner_grants_b (grantee_owner_id, granted_owner_id, role_id) \
                  VALUES ('{TEAM}', '{OWNER_B}', 2)"
             ),
-            &format!("INSERT INTO docs_a (id, owner_id) VALUES ('{OWNER_A}', '{OWNER_A}')"),
+            &format!(
+                "INSERT INTO docs_a (id, owner_id) VALUES
+                     ('{OWNER_A}', '{OWNER_A}'), ('{ALICE}', '{ALICE}')"
+            ),
+            // Alice reads her own document through function A's grant table.
+            &format!(
+                "INSERT INTO owner_grants_a (grantee_owner_id, granted_owner_id, role_id) \
+                 VALUES ('{ALICE}', '{ALICE}', 2)"
+            ),
             &format!("INSERT INTO docs_b (id, owner_id) VALUES ('{OWNER_B}', '{OWNER_B}')"),
             "CREATE ROLE app_reader LOGIN; \
              GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_reader",
@@ -5862,9 +5869,10 @@ CREATE POLICY docs_delete ON docs FOR DELETE USING (
         AND m.user_id = current_setting('app.user_id', true) AND m.expires_at > now()));
 ",
         &[
-            "INSERT INTO docs (id) VALUES (1);
+            "INSERT INTO docs (id) VALUES (1), (2), (3);
              INSERT INTO members (doc_id, user_id, expires_at) VALUES
-                 (1, 'expired_member', now() - interval '1 day')",
+                 (1, 'expired_member', now() - interval '1 day'),
+                 (2, 'expired_member', now() + interval '1 year')",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT, DELETE ON docs TO app_reader;
              GRANT SELECT ON members TO app_reader",
@@ -5919,12 +5927,20 @@ REVOKE UPDATE ON notes FROM app_owner;
     .after(&["CREATE ROLE app_owner NOLOGIN;
          CREATE ROLE reader LOGIN;
          GRANT app_owner TO reader"])
-    .writing(
+    .updating("notes", "body = body")
+    .unobservable(
         "notes",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
+        "notes_all",
+        ClauseKind::Using,
+        Side::Grants,
+        "All table privileges belong to the owner role, whose members bypass RLS.",
+    )
+    .unobservable(
+        "notes",
+        "notes_all",
+        ClauseKind::Check,
+        Side::Grants,
+        "All table privileges belong to the owner role, whose members bypass RLS.",
     );
 
     let run = support::parity::run(&cluster, &case).await;
@@ -5959,12 +5975,13 @@ GRANT SELECT ON notes TO "public";
         ],
     )
     .after(&["CREATE ROLE reader LOGIN; CREATE ROLE auditor LOGIN"])
-    .writing(
+    .updating("notes", "body = body")
+    .unobservable(
         "notes",
-        Mutations {
-            update_set: Some("body = body".to_string()),
-            check_neutral: true,
-        },
+        "notes_all",
+        ClauseKind::Check,
+        Side::Grants,
+        "The schema grants only SELECT, so no caller reaches a write check.",
     );
 
     let run = support::parity::run(&cluster, &case).await;

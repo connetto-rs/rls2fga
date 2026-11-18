@@ -8,7 +8,7 @@ use rls2fga::types::ActionStatement;
 
 use crate::support;
 use crate::support::parity::{
-    assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
+    assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
 };
 
 /// Resources their owner reads and changes, placed under parents by two edge tables,
@@ -85,7 +85,8 @@ fn frozen_below_case(major: &str, loading_from_rows: bool) -> ParityCase {
                ('leaf', 'alice', NULL, 'l'), ('project', 'alice', now(), 'p'),
                ('item', 'alice', NULL, 'i'), ('item_mid', 'alice', NULL, 'i'),
                ('other', 'alice', NULL, 'o'), ('item_other', 'alice', NULL, 'i'),
-               ('cycle_a', 'alice', now(), 'a'), ('cycle_b', 'alice', NULL, 'b');
+               ('cycle_a', 'alice', now(), 'a'), ('cycle_b', 'alice', NULL, 'b'),
+               ('change_owner', 'alice', NULL, 'c');
              INSERT INTO resource_parents VALUES
                ('mid', 'root'), ('leaf', 'mid'), ('cycle_a', 'cycle_b'), ('cycle_b', 'cycle_a');
              INSERT INTO ownables VALUES
@@ -94,7 +95,7 @@ fn frozen_below_case(major: &str, loading_from_rows: bool) -> ParityCase {
                ('m_root', 'root'), ('m_mid', 'mid'), ('m_leaf', 'leaf'), ('m_item', 'item'),
                ('m_other', 'other')",
             "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT, UPDATE (label) ON resources TO app_reader;
+             GRANT SELECT, UPDATE (label, owner_id) ON resources TO app_reader;
              GRANT SELECT ON marks TO app_reader;
              GRANT USAGE ON SCHEMA authz TO app_reader;
              REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
@@ -107,12 +108,32 @@ fn frozen_below_case(major: &str, loading_from_rows: bool) -> ParityCase {
         ],
     )
     .with_settings([support::deployment::caller("app.user_id")])
-    .writing(
+    .updating(
         "resources",
-        Mutations {
-            update_set: Some("label = 'changed'".into()),
-            check_neutral: true,
-        },
+        "label = 'changed', \
+         owner_id = CASE WHEN id = 'change_owner' THEN 'bob' ELSE owner_id END",
+    )
+    .unobservable(
+        "resources",
+        "resources_update",
+        ClauseKind::Using,
+        Side::Denies,
+        "The SELECT policy hides every row whose owner the UPDATE policy rejects",
+    )
+    .unobservable(
+        "resources",
+        "resources_update",
+        ClauseKind::UsingAsCheck,
+        Side::Denies,
+        "repeats the SELECT policy's USING, which PostgreSQL also checks on the new row of an \
+         UPDATE naming its rows",
+    )
+    .unobservable(
+        "resources",
+        "resources_frozen_below",
+        ClauseKind::UsingAsCheck,
+        Side::Denies,
+        "A frozen new id belongs to another resource, which the primary key refuses",
     );
     case.loading_from_rows = loading_from_rows;
     case
@@ -145,6 +166,12 @@ async fn a_flag_one_edge_up_either_edge_table_agrees_with_postgres_17_and_18() {
             );
             // A row with neither the flag nor a flagged ancestor stays open.
             expect("alice", "resources:other", ActionStatement::Update, true);
+            expect(
+                "alice",
+                "resources:change_owner",
+                ActionStatement::Update,
+                false,
+            );
             expect(
                 "alice",
                 "resources:item_other",

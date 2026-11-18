@@ -735,7 +735,7 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (true);
             let refused = case(
                 "row-side-integer",
                 "owner::integer = current_setting('app.user_id', true)::integer",
-                &["1"],
+                &["1", "2"],
                 Some(("app.user_id", "integer")),
             );
             let run_refused = run_disclosing(&cluster, &refused).await;

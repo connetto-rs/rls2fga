@@ -24,7 +24,7 @@ use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::row_cap_tests::{INSTALLATION_CAPS, POLICY_CAPS};
 use crate::support;
 use crate::support::parity::{
-    assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
+    assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
 };
 
 const HELPERS: &str = r#"{
@@ -57,9 +57,11 @@ fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
         &[
             "INSERT INTO teams VALUES ('T1'), ('T2');
              INSERT INTO projects VALUES ('P1', 'T1'), ('P2', 'T1'), ('P3', 'T2');
-             INSERT INTO orders VALUES ('o1', 'P1', NULL), ('o2', 'P2', NULL), ('o3', 'P3', NULL);
+             INSERT INTO orders VALUES ('o1', 'P1', NULL), ('o2', 'P2', NULL), ('o3', 'P3', NULL),
+               ('o_move', 'P1', NULL);
              INSERT INTO team_grants VALUES
-               ('T1', 'bob', 'write'), ('T2', 'dave', 'read'), ('T1', 'hank', 'admin');
+               ('T1', 'bob', 'write'), ('T2', 'dave', 'read'), ('T1', 'hank', 'admin'),
+               ('T2', 'hank', 'read');
              INSERT INTO project_grants VALUES ('P2', 'carol', 'read'), ('P3', 'frank', 'admin');
              INSERT INTO installations VALUES ('i1', 'T1'), ('i2', 'P3'), ('i3', 'elsewhere');
              INSERT INTO installation_tables VALUES ('t1', 'i1', 'a'), ('t2', 'i2', 'b'), ('t3', 'i3', 'c')",
@@ -82,12 +84,9 @@ fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
     )
     .with_settings([support::deployment::caller("app.user_id")])
     .with_registry(HELPERS)
-    .writing(
+    .updating(
         "orders",
-        Mutations {
-            update_set: Some("title = 'changed'".into()),
-            check_neutral: true,
-        },
+        "title = 'changed', project_id = CASE WHEN id = 'o_move' THEN 'P3' ELSE project_id END",
     );
     case.loading_from_rows = loading_from_rows;
     case
@@ -107,6 +106,10 @@ async fn declared_helpers_agree_with_postgres_17_and_18() {
             // A team writer reads and changes every order under the team.
             expect("bob", "orders:o1", ActionStatement::Select, true);
             expect("bob", "orders:o2", ActionStatement::Update, true);
+            expect("bob", "orders:o_move", ActionStatement::Update, false);
+            // Reading the destination project leaves the check to refuse the move.
+            expect("hank", "orders:o_move", ActionStatement::Update, false);
+            expect("hank", "orders:o3", ActionStatement::Select, true);
             expect("bob", "orders:o3", ActionStatement::Select, false);
             expect("bob", "teams:T1", ActionStatement::Select, true);
             // A project reader reads that project's orders and changes none.
@@ -185,9 +188,11 @@ fn groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
              UPDATE groups SET parent_id = 'loop_b' WHERE id = 'loop_a';
              INSERT INTO docs VALUES ('d_org', 'org', NULL), ('d_team', 'team', NULL),
                ('d_side', 'side', NULL), ('d_squad', 'squad', NULL), ('d_other', 'other', NULL),
-               ('d_loop_a', 'loop_a', NULL), ('d_loop_b', 'loop_b', NULL);
+               ('d_loop_a', 'loop_a', NULL), ('d_loop_b', 'loop_b', NULL),
+               ('d_move', 'org', NULL);
              INSERT INTO group_grants VALUES
-               ('team', 'alice', 'read'), ('org', 'bob', 'write'), ('loop_a', 'dave', 'read')",
+               ('team', 'alice', 'read'), ('org', 'bob', 'write'), ('loop_a', 'dave', 'read'),
+               ('org', 'gina', 'write'), ('other', 'gina', 'read')",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON docs, groups TO app_reader;
              GRANT UPDATE ON docs TO app_reader;
@@ -200,17 +205,15 @@ fn groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
             caller("bob"),
             caller("dave"),
             caller("erin"),
+            caller("gina"),
             Principal::as_role("anonymous", "app_reader"),
         ],
     )
     .with_settings([support::deployment::caller("app.user_id")])
     .with_registry(GROUP_HELPERS)
-    .writing(
+    .updating(
         "docs",
-        Mutations {
-            update_set: Some("title = 'changed'".into()),
-            check_neutral: true,
-        },
+        "title = 'changed', group_id = CASE WHEN id = 'd_move' THEN 'other' ELSE group_id END",
     );
     case.loading_from_rows = loading_from_rows;
     case
@@ -240,6 +243,10 @@ async fn a_walk_down_the_group_tree_agrees_with_postgres_17_and_18() {
             expect("bob", "docs:d_org", ActionStatement::Select, true);
             expect("bob", "docs:d_squad", ActionStatement::Update, true);
             expect("bob", "docs:d_side", ActionStatement::Update, true);
+            expect("bob", "docs:d_move", ActionStatement::Update, false);
+            // Reading the destination group leaves the check to refuse the move.
+            expect("gina", "docs:d_move", ActionStatement::Update, false);
+            expect("gina", "docs:d_other", ActionStatement::Select, true);
             expect("bob", "docs:d_other", ActionStatement::Select, false);
             // A grant on a cycle reaches every group on it, and a walk never reaching a
             // grant ends.
@@ -272,7 +279,7 @@ fn reselected_groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
                ('org', NULL, 'folder'), ('team', 'org', 'team'), ('squad', 'team', 'project'),
                ('other', NULL, 'folder');
              INSERT INTO docs VALUES ('d_org', 'org', NULL), ('d_team', 'team', NULL),
-               ('d_squad', 'squad', NULL), ('d_other', 'other', NULL);
+               ('d_squad', 'squad', NULL), ('d_other', 'other', NULL), ('d_move', 'org', NULL);
              INSERT INTO group_grants VALUES ('team', 'alice', 'read'), ('org', 'bob', 'write')",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON docs, groups TO app_reader;
@@ -290,12 +297,9 @@ fn reselected_groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
     )
     .with_settings([support::deployment::caller("app.user_id")])
     .with_registry(GROUP_HELPERS)
-    .writing(
+    .updating(
         "docs",
-        Mutations {
-            update_set: Some("title = 'changed'".into()),
-            check_neutral: true,
-        },
+        "title = 'changed', group_id = CASE WHEN id = 'd_move' THEN 'team' ELSE group_id END",
     );
     case.loading_from_rows = loading_from_rows;
     case
@@ -321,6 +325,7 @@ async fn a_walk_reselecting_the_groups_it_reached_agrees_with_postgres_17_and_18
             expect("bob", "docs:d_org", ActionStatement::Update, true);
             expect("bob", "docs:d_squad", ActionStatement::Update, true);
             expect("bob", "docs:d_team", ActionStatement::Update, false);
+            expect("bob", "docs:d_move", ActionStatement::Update, false);
             expect("bob", "docs:d_other", ActionStatement::Update, false);
             expect("alice", "docs:d_squad", ActionStatement::Update, false);
             expect("erin", "docs:d_org", ActionStatement::Select, false);
@@ -454,12 +459,13 @@ fn resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
     )
     .with_settings([support::deployment::caller("app.user_id")])
     .with_registry(RESOURCE_HELPERS)
-    .writing(
+    .updating("resources", "title = 'changed'")
+    .unobservable(
         "resources",
-        Mutations {
-            update_set: Some("title = 'changed'".into()),
-            check_neutral: true,
-        },
+        "resources_update",
+        ClauseKind::Check,
+        Side::Denies,
+        "Changing an admitted id breaks the foreign keys of the grants or edges reaching it",
     );
     case.loading_from_rows = loading_from_rows;
     case
@@ -523,7 +529,7 @@ fn blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
              INSERT INTO organization_blocks VALUES ('O1', 'alice'), ('O2', 'carol')",
             "CREATE ROLE app_reader LOGIN;
              GRANT SELECT ON projects, docs TO app_reader;
-             GRANT UPDATE ON projects TO app_reader;
+             GRANT INSERT, UPDATE ON projects TO app_reader;
              GRANT USAGE ON SCHEMA authz TO app_reader;
              REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
@@ -538,12 +544,13 @@ fn blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
     )
     .with_settings([support::deployment::caller("app.user_id")])
     .with_registry(BLOCK_HELPERS)
-    .writing(
+    .updating("projects", "label = 'changed'")
+    .unobservable(
         "projects",
-        Mutations {
-            update_set: Some("label = 'changed'".into()),
-            check_neutral: true,
-        },
+        "projects_unblocked",
+        ClauseKind::Check,
+        Side::Denies,
+        "A blocked new id belongs to another project, which the primary key refuses",
     );
     case.loading_from_rows = loading_from_rows;
     case
@@ -597,9 +604,12 @@ fn blocked_units_case(major: &str, loading_from_rows: bool) -> ParityCase {
             "INSERT INTO units VALUES ('root', NULL, 'alice', 'organization'),
                ('mid', 'root', 'bob', 'team'), ('leaf', 'mid', 'alice', 'project'),
                ('other', NULL, 'alice', 'team');
-             INSERT INTO unit_blocks VALUES ('leaf', 'alice'), ('mid', 'bob')",
+             INSERT INTO unit_blocks VALUES ('leaf', 'alice'), ('mid', 'bob');
+             INSERT INTO organizations VALUES ('O1');
+             INSERT INTO projects VALUES ('P1', 'O1', 'alice', NULL), ('P2', 'O1', 'bob', NULL)",
             "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT ON units TO app_reader;
+             GRANT SELECT ON units, projects TO app_reader;
+             GRANT INSERT ON projects TO app_reader;
              GRANT USAGE ON SCHEMA authz TO app_reader;
              REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
@@ -642,6 +652,8 @@ async fn a_blocklist_reselecting_the_units_a_walk_up_reached_agrees_with_postgre
             expect("bob", "units:mid", false);
             expect("erin", "units:other", false);
             expect("anonymous", "units:other", false);
+            expect("alice", "projects:P1", true);
+            expect("bob", "projects:P1", false);
             assert_agrees(&case, &run);
         }
     }
