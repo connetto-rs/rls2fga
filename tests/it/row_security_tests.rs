@@ -365,9 +365,25 @@ CREATE POLICY anon_barrier ON docs AS RESTRICTIVE FOR SELECT TO anon USING (stat
                        ('d1', 'alice', 'published'), ('d2', 'bob', 'draft'),
                        ('d3', 'carol', 'published'), ('d4', 'visitor', 'draft'),
                        ('d-public', NULL, 'published')",
-                    "GRANT SELECT ON docs TO anon, authenticated",
+                    "GRANT SELECT ON docs TO anon, authenticated, support_staff, reviewers",
                 ],
-                callers(),
+                callers()
+                    .into_iter()
+                    .chain([
+                        Principal::with_setting(
+                            "staff_reader",
+                            "support_staff",
+                            "app.user_id",
+                            "staff_reader",
+                        ),
+                        Principal::with_setting(
+                            "review_reader",
+                            "reviewers",
+                            "app.user_id",
+                            "review_reader",
+                        ),
+                    ])
+                    .collect(),
             );
             if from_rows {
                 case = case.loading_from_rows();
@@ -449,13 +465,14 @@ CREATE POLICY anon_barrier ON docs AS RESTRICTIVE FOR SELECT TO anon USING (stat
                      ALTER TABLE docs OWNER TO app_owner;
                      {force}"
                 ),
-                &["INSERT INTO docs VALUES ('d1', 'alice'), ('d2', 'bob')"],
-                vec![Principal::with_setting(
-                    "alice",
-                    "app_owner",
-                    "app.user_id",
-                    "alice",
-                )],
+                &[
+                    "INSERT INTO docs VALUES ('d1', 'alice'), ('d2', 'bob')",
+                    "CREATE ROLE app_reader; GRANT SELECT ON docs TO app_reader",
+                ],
+                vec![
+                    Principal::with_setting("alice", "app_owner", "app.user_id", "alice"),
+                    Principal::with_setting("bob", "app_reader", "app.user_id", "bob"),
+                ],
             );
             let run = support::parity::run(&cluster, &case).await;
             assert_postgres(

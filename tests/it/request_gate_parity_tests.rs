@@ -17,8 +17,8 @@ use crate::support;
 use crate::support::deployment;
 use crate::support::footgun::{gated_tables, OPEN_PLUS_CAP_BOT_LIST_GATES};
 use crate::support::parity::{
-    assert_agrees, assert_postgres, request_predicate_holds, settings_map, Cluster, Mutations,
-    ParityCase, Principal,
+    assert_agrees, assert_postgres, request_predicate_holds, settings_map, ClauseKind, Cluster,
+    ParityCase, Principal, Side,
 };
 use crate::support::JsonRowValues;
 
@@ -40,6 +40,8 @@ fn caller(subject: &str, entries: Option<&[&str]>) -> Principal {
 }
 
 fn callers() -> Vec<Principal> {
+    let read_entries: Vec<String> = (0..TABLES).map(|index| format!("t{index}:read")).collect();
+    let read_entries: Vec<&str> = read_entries.iter().map(String::as_str).collect();
     vec![
         caller(
             "entry",
@@ -48,6 +50,7 @@ fn callers() -> Vec<Principal> {
         caller("star", Some(&["*"])),
         caller("neither", Some(&["t1:read", "t0:reads"])),
         caller("unset", None),
+        caller("reader", Some(&read_entries)),
     ]
 }
 
@@ -57,7 +60,7 @@ fn case(name: &str) -> ParityCase {
         let _ = writeln!(
             rows,
             "INSERT INTO {table} VALUES ('entry', 'entry'), ('star', 'star'), \
-             ('neither', 'neither'), ('unset', 'unset');"
+             ('neither', 'neither'), ('unset', 'unset'), ('reader', 'reader');"
         );
         rows
     });
@@ -75,13 +78,13 @@ fn case(name: &str) -> ParityCase {
         callers(),
     )
     .with_settings([deployment::delimited_set("app.bot_list", ",")]);
-    for table in ["t0", "t1"] {
-        case = case.writing(
+    for table in &tables {
+        case = case.updating(table, "owner = owner").unobservable(
             table,
-            Mutations {
-                update_set: Some("owner = owner".to_string()),
-                check_neutral: true,
-            },
+            &format!("{table}_cap_update"),
+            ClauseKind::Check,
+            Side::Denies,
+            "The identical request-only `USING` gate rejects every row before `WITH CHECK`.",
         );
     }
     case
@@ -202,7 +205,7 @@ async fn request_gate_parity() {
         let sources = DeclaredSources::of(&gate_deployment());
         for principal in callers() {
             let context = with_settings_map(&sources, &principal);
-            for owner in ["entry", "star", "neither", "unset"] {
+            for owner in ["entry", "star", "neither", "unset", "reader"] {
                 let row = serde_json::json!({ "id": owner, "owner": owner });
                 assert_postgres(
                     &case,

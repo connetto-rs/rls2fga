@@ -10,8 +10,12 @@ use rls2fga::types::ActionStatement;
 
 use crate::support;
 use crate::support::parity::{
-    assert_agrees, assert_postgres, Cluster, Mutations, ParityCase, Principal,
+    assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
 };
+
+/// The reason an `UPDATE` policy's `USING` that repeats the `SELECT` policy's can never be
+/// the clause denying a compared answer.
+const REPEATS_SELECT: &str = "repeats the SELECT policy's USING, which every UPDATE applies";
 
 /// Teams whose members add members and move notes between teams, both checked through a
 /// helper reading the membership table.
@@ -98,12 +102,21 @@ fn teams_case(major: &str) -> ParityCase {
     )
     .with_settings([support::deployment::caller("app.user_id")])
     .inserting_values("team_members", &[("user_id", "dave")])
-    .writing(
+    .updating("notes", "team_id = 't2'")
+    .unobservable(
         "notes",
-        Mutations {
-            update_set: Some("team_id = 't2'".into()),
-            check_neutral: false,
-        },
+        "notes_update",
+        ClauseKind::Using,
+        Side::Denies,
+        REPEATS_SELECT,
+    )
+    .unobservable(
+        "notes",
+        "notes_update",
+        ClauseKind::Check,
+        Side::Denies,
+        "repeats the SELECT policy's USING, which PostgreSQL also checks on the new row of an \
+         UPDATE naming its rows",
     )
 }
 
@@ -120,12 +133,13 @@ fn archive_case(major: &str) -> ParityCase {
         vec![caller("alice"), caller("bob")],
     )
     .with_settings([support::deployment::caller("app.user_id")])
-    .writing(
+    .updating("resources", "archived_at = NULL")
+    .unobservable(
         "resources",
-        Mutations {
-            update_set: Some("archived_at = NULL".into()),
-            check_neutral: false,
-        },
+        "resources_update",
+        ClauseKind::Using,
+        Side::Denies,
+        REPEATS_SELECT,
     )
 }
 
@@ -207,12 +221,13 @@ CREATE POLICY t_update ON t FOR UPDATE
             vec![caller("alice"), caller("bob")],
         )
         .with_settings([support::deployment::caller("app.user_id")])
-        .writing(
+        .updating("t", "locked = false")
+        .unobservable(
             "t",
-            Mutations {
-                update_set: Some("locked = false".into()),
-                check_neutral: false,
-            },
+            "t_update",
+            ClauseKind::Using,
+            Side::Denies,
+            REPEATS_SELECT,
         );
         let run = support::parity::run(&cluster, &case).await;
         // The new row states the flag, and a fresh key has no stored row to read it from.
@@ -274,54 +289,58 @@ async fn an_unreadable_written_fact_denies_updates_on_postgres_17_and_18() {
 
     for major in ["17", "18"] {
         let cluster = Cluster::start_on(major).await;
-        for (label, assignment, allowed) in [
-            ("cleared", "metadata = NULL", false),
-            ("retained", "metadata = '{}'::jsonb", true),
-        ] {
-            let case = ParityCase::reading(
-                &format!("resulting-row-metadata-{label}-pg{major}"),
-                UNREADABLE_METADATA,
-                &[
-                    "INSERT INTO docs VALUES ('owned', 'alice', '{}'::jsonb)",
-                    "CREATE ROLE app_reader LOGIN; GRANT SELECT, UPDATE ON docs TO app_reader",
-                ],
-                vec![caller("alice"), caller("bob")],
-            )
-            .with_settings([support::deployment::caller("app.user_id")])
-            .writing(
-                "docs",
-                Mutations {
-                    update_set: Some(assignment.into()),
-                    check_neutral: false,
-                },
-            );
-            let run = support::parity::run_disclosing(&cluster, &case).await;
+        // One update clears the document of `cleared` and keeps the one of `kept`, so the
+        // check both refuses and admits a written row.
+        let case = ParityCase::reading(
+            &format!("resulting-row-metadata-pg{major}"),
+            UNREADABLE_METADATA,
+            &[
+                "INSERT INTO docs VALUES ('kept', 'alice', '{}'::jsonb),
+                   ('cleared', 'alice', '{}'::jsonb)",
+                "CREATE ROLE app_reader LOGIN; GRANT SELECT, UPDATE ON docs TO app_reader",
+            ],
+            vec![caller("alice"), caller("bob")],
+        )
+        .with_settings([support::deployment::caller("app.user_id")])
+        .updating(
+            "docs",
+            "metadata = CASE WHEN id = 'cleared' THEN NULL ELSE metadata END",
+        )
+        .unobservable(
+            "docs",
+            "docs_update",
+            ClauseKind::Using,
+            Side::Denies,
+            REPEATS_SELECT,
+        );
+        let run = support::parity::run_disclosing(&cluster, &case).await;
+        for (object, allowed) in [("docs:kept", true), ("docs:cleared", false)] {
             assert_postgres(
                 &case,
                 &run,
                 "alice",
-                "docs:owned",
+                object,
                 ActionStatement::Update,
                 allowed,
             );
-            let updates: Vec<_> = run
-                .observations
-                .iter()
-                .filter(|observation| observation.statement == ActionStatement::Update)
-                .collect();
-            assert!(!updates.is_empty(), "{}: no update was compared", case.name);
-            assert!(updates.iter().all(|observation| !observation.openfga));
-            assert!(!run.disclosures.is_empty());
-            assert!(run.disclosures.iter().all(|disclosure| matches!(
-                &disclosure.licence,
-                Licence::Located {
-                    table,
-                    direction: Direction::Narrower,
-                    ..
-                } if table == &resulting.table.sql_name()
-            )));
-            assert_disclosed_where_noted(&case, &run);
         }
+        let updates: Vec<_> = run
+            .observations
+            .iter()
+            .filter(|observation| observation.statement == ActionStatement::Update)
+            .collect();
+        assert!(!updates.is_empty(), "{}: no update was compared", case.name);
+        assert!(updates.iter().all(|observation| !observation.openfga));
+        assert!(!run.disclosures.is_empty());
+        assert!(run.disclosures.iter().all(|disclosure| matches!(
+            &disclosure.licence,
+            Licence::Located {
+                table,
+                direction: Direction::Narrower,
+                ..
+            } if table == &resulting.table.sql_name()
+        )));
+        assert_disclosed_where_noted(&case, &run);
     }
 }
 

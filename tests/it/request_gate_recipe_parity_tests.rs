@@ -16,8 +16,8 @@ use crate::support;
 
 use crate::support::deployment;
 use crate::support::parity::{
-    assert_agrees, assert_postgres, request_predicate_holds, settings_map, Cluster, ParityCase,
-    Principal,
+    assert_agrees, assert_postgres, request_predicate_holds, settings_map, ClauseKind, Cluster,
+    ParityCase, Principal, Side,
 };
 use crate::support::JsonRowValues;
 
@@ -83,6 +83,7 @@ fn rows() -> BTreeMap<String, serde_json::Value> {
         (3, Some("neither")),
         (4, Some("unset")),
         (5, None),
+        (6, Some("reader")),
     ] {
         rows.insert(
             format!("notes:{id}"),
@@ -96,7 +97,7 @@ const SEED: &str = "
 INSERT INTO orders VALUES (1, 10), (2, 20);
 INSERT INTO capped VALUES (1), (2);
 INSERT INTO flagged VALUES (1, true), (2, false);
-INSERT INTO notes VALUES (1, 'entry'), (2, 'wild'), (3, 'neither'), (4, 'unset'), (5, NULL);
+INSERT INTO notes VALUES (1, 'entry'), (2, 'wild'), (3, 'neither'), (4, 'unset'), (5, NULL), (6, 'reader');
 ";
 
 fn callers() -> Vec<Principal> {
@@ -115,6 +116,10 @@ fn callers() -> Vec<Principal> {
         Principal::with_bot_list("wild", Some(&["*"])),
         Principal::with_bot_list("neither", Some(&["orders:insert", "notes:update"])),
         Principal::with_bot_list("unset", None),
+        Principal::with_bot_list(
+            "reader",
+            Some(&["orders:read", "capped:read", "notes:read", "flagged:read"]),
+        ),
     ]
 }
 
@@ -213,16 +218,49 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
         &[
             SEED,
             "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT, DELETE ON orders, capped, notes, flagged TO app_reader",
+             GRANT SELECT, INSERT, UPDATE, DELETE ON orders, capped, notes, flagged TO app_reader",
         ],
         callers(),
     )
-    .with_settings([deployment::delimited_set("app.bot_list", ",")]);
+    .with_settings([deployment::delimited_set("app.bot_list", ",")])
+    .updating("orders", "quantity = quantity")
+    .updating("notes", "owner = owner");
+    for table in ["capped", "flagged"] {
+        for (command, clause) in [
+            ("read", ClauseKind::Using),
+            ("insert", ClauseKind::Check),
+            ("update", ClauseKind::Using),
+            ("update", ClauseKind::Check),
+            ("delete", ClauseKind::Using),
+        ] {
+            if table == "flagged" && command == "read" {
+                continue;
+            }
+            for side in [Side::Grants, Side::Denies] {
+                case = case.unobservable(
+                    table,
+                    &format!("{table}_cap_{command}"),
+                    clause,
+                    side,
+                    "No permissive policy admits this command, regardless of the restrictive gate.",
+                );
+            }
+        }
+    }
+    for table in ["orders", "notes"] {
+        case = case.unobservable(
+            table,
+            &format!("{table}_cap_update"),
+            ClauseKind::Check,
+            Side::Denies,
+            "The identical request-only `USING` gate rejects every row before `WITH CHECK`.",
+        );
+    }
 
     // The deployment acts as the caller's login role, whose role and grants the seed declares.
     let sql = format!(
         "CREATE ROLE app_reader LOGIN;\n{schema}\n\
-         GRANT SELECT, DELETE ON orders, capped, notes, flagged TO app_reader;"
+         GRANT SELECT, INSERT, UPDATE, DELETE ON orders, capped, notes, flagged TO app_reader;"
     );
     let deployment = deployment::caller_deployment_acting_as(
         &["app_reader"],

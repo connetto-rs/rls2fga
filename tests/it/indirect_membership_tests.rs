@@ -1070,12 +1070,10 @@ async fn indirect_membership_quoted_owner_column_live_parity() {
                  INSERT INTO memberships VALUES ('ancestor','reader','read');
                  CREATE ROLE app_reader LOGIN;
                  GRANT SELECT ON ALL TABLES IN SCHEMA public TO app_reader;"],
-            vec![Principal::with_setting(
-                "reader",
-                "app_reader",
-                "app.user_id",
-                "reader",
-            )],
+            vec![
+                Principal::with_setting("reader", "app_reader", "app.user_id", "reader"),
+                Principal::with_setting("outsider", "app_reader", "app.user_id", "outsider"),
+            ],
         );
         case.loading_from_rows = from_rows;
         let run =
