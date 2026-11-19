@@ -10,7 +10,7 @@ const FIXTURE_ROLES: [(&str, Option<&str>); 5] = [
     ("auditor", Some("schema_objects")),
     ("contractor", None),
     ("editors", None),
-    ("app", None),
+    ("app", Some("core_schema")),
     ("editor", Some("pg_role_gate")),
 ];
 

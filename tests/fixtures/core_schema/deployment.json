@@ -1,0 +1,6 @@
+[
+  {"setting": "app.user_id", "caller": "uuid", "may_be_unset": true},
+  {"setting": "app.installation_id", "scalar": "uuid", "may_be_unset": true},
+  {"setting": "app.link_ids", "set": "uuid", "delimiter": ",", "may_be_unset": true},
+  {"setting": "app.verified_email", "scalar": "text", "may_be_unset": true}
+]

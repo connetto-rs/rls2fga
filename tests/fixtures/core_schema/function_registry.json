@@ -1,0 +1,15 @@
+{
+  "authz.caller_grantees": { "kind": "declared_helper" },
+  "authz.capped_kinds": { "kind": "declared_helper" },
+  "authz.resources_with": { "kind": "declared_helper" },
+  "authz.sharable_grants": { "kind": "declared_helper" },
+  "authz.member_organizations": { "kind": "declared_helper" },
+  "authz.co_member_users": { "kind": "declared_helper" },
+  "authz.administered_teams": { "kind": "declared_helper" },
+  "authz.team_admin_organizations": { "kind": "declared_helper" },
+  "authz.organizations_reaching": { "kind": "declared_helper" },
+  "authz.organizations_with": { "kind": "declared_helper" },
+  "authz.founded_organizations": { "kind": "declared_helper" },
+  "authz.pending_invitations": { "kind": "declared_helper" },
+  "authz.blocking_organizations": { "kind": "declared_helper" }
+}

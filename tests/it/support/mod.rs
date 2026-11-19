@@ -368,11 +368,26 @@ pub(crate) fn classify_db_declaring(
     monetary_locale: Option<&str>,
     deployment: &Deployment,
 ) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
+    classify_db_confirming(db, registry_json, monetary_locale, &[], deployment)
+}
+
+/// [`classify_db_declaring`] confirming `attribute_columns` as the access attributes the
+/// schema compares, beside what the registry's `JSON` declares.
+pub(crate) fn classify_db_confirming(
+    db: ParserDB,
+    registry_json: Option<&str>,
+    monetary_locale: Option<&str>,
+    attribute_columns: &[(String, String)],
+    deployment: &Deployment,
+) -> (Vec<ClassifiedPolicy>, ParserDB, FunctionRegistry) {
     let mut registry = FunctionRegistry::new();
     if let Some(json) = registry_json {
         registry
             .load_from_json(json)
             .expect("registry json should parse");
+    }
+    for (table, column) in attribute_columns {
+        registry.register_attribute_column(table, column);
     }
     if let Some(locale) = monetary_locale {
         registry.declare_monetary_locale(locale);

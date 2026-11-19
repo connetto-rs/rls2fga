@@ -20,6 +20,7 @@ mod common_patterns_tests;
 mod composite_key_membership_tests;
 mod confidence_filtering_tests;
 mod container_startup_tests;
+mod core_schema_parity_tests;
 mod cross_type_temporal_tests;
 mod declared_helper_blocklist_tests;
 mod declared_helper_containment_tests;

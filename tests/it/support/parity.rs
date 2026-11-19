@@ -43,8 +43,11 @@ diesel::define_sql_function! {
 /// Nothing in the translation says which database role a subject is, which session values
 /// it sets, or which roles it holds, so a case says.
 pub(crate) struct Principal {
-    /// Subject key, asked about as `user:<subject>`.
+    /// Subject key, naming the caller in every answer and unique within a case.
     pub(crate) subject: String,
+    /// The user the caller acts for, asked about as `user:<user>`, its subject unless one
+    /// user acts as two callers.
+    pub(crate) user: String,
     /// Role the reading transaction switches to.
     pub(crate) login_role: String,
     /// `set_config` values the policies read, applied local to the transaction.
@@ -72,6 +75,7 @@ impl Principal {
     pub(crate) fn with_setting(subject: &str, login_role: &str, key: &str, value: &str) -> Self {
         Self {
             subject: subject.to_string(),
+            user: subject.to_string(),
             login_role: login_role.to_string(),
             session: vec![(key.to_string(), value.to_string())],
             context: serde_json::json!({}),
@@ -98,6 +102,7 @@ impl Principal {
     pub(crate) fn as_role(subject: &str, login_role: &str) -> Self {
         Self {
             subject: subject.to_string(),
+            user: subject.to_string(),
             login_role: login_role.to_string(),
             session: Vec::new(),
             context: serde_json::json!({}),
@@ -113,6 +118,13 @@ impl Principal {
     /// deployment declared.
     pub(crate) fn with_context(mut self, context: serde_json::Value) -> Self {
         self.context = context;
+        self
+    }
+
+    /// The same caller, asked about as `user:<user>`, for one user acting as two callers
+    /// such as directly and through an installation.
+    pub(crate) fn acting_for(mut self, user: &str) -> Self {
+        self.user = user.to_string();
         self
     }
 
@@ -236,6 +248,12 @@ pub(crate) struct ParityCase {
     /// Settings the deployment declares beside the suite's callers, as a fixture's
     /// `deployment.json` holds them.
     pub(crate) settings: Vec<SessionSetting>,
+    /// The access attributes the policies compare, confirmed as `(table, column)` pairs.
+    ///
+    /// A literal check on an unconfirmed column grades below `A`, so the case confirms the
+    /// columns the schema's own registry confirms, and the translation holds to its
+    /// declared class with them confirmed the way the schema declares them.
+    pub(crate) attribute_columns: Vec<(String, String)>,
     /// Tables whose rows are not read through the table itself.
     ///
     /// A partition with row-level security off is unfiltered when it is queried directly,
@@ -295,6 +313,7 @@ impl ParityCase {
             unobservable: Vec::new(),
             registry_json: None,
             settings: Vec::new(),
+            attribute_columns: Vec::new(),
             not_read_directly: Vec::new(),
             loading_from_rows: false,
             future: None,
@@ -372,6 +391,15 @@ impl ParityCase {
         self
     }
 
+    /// The same case, confirming `columns` as the access attributes its policies compare.
+    pub(crate) fn with_attribute_columns(mut self, columns: &[(&str, &str)]) -> Self {
+        self.attribute_columns = columns
+            .iter()
+            .map(|(table, column)| (table.to_string(), column.to_string()))
+            .collect();
+        self
+    }
+
     /// The roles the deployment acts as, each role a caller runs as, in the order the
     /// callers are listed.
     pub(crate) fn acting_roles(&self) -> Vec<&str> {
@@ -433,13 +461,24 @@ impl ParityCase {
         });
         self
     }
+
+    /// The same case, whose `INSERT` probes on `table` name only `columns`, the ones its
+    /// column privileges let a caller insert, and leave the rest to their defaults.
+    pub(crate) fn inserting_columns(mut self, table: &str, columns: &[&str]) -> Self {
+        self.inserting.entry(table.to_string()).or_default().columns =
+            Some(columns.iter().map(|column| (*column).to_string()).collect());
+        self
+    }
 }
 
-/// Values a case's `INSERT` probes substitute for the copied or minted ones.
+/// What a case's `INSERT` probes on one table write beyond the row they copy.
 #[derive(Clone, Default)]
 pub(crate) struct Inserting {
     /// Values written in place of the copied or minted ones, as `(column, text)` pairs.
     pub(crate) values: Vec<(String, String)>,
+    /// The columns the statement names, every column the table does not generate where
+    /// `None`.
+    pub(crate) columns: Option<Vec<String>>,
 }
 
 /// Which clause of a policy.
@@ -521,8 +560,8 @@ impl Mismatch {
 struct ProbeResult {
     /// What the probe measured.
     postgres: bool,
-    /// The row the write produces, absent where the database assigns a key the probe
-    /// cannot know or the statement keeps the seed row.
+    /// The row the write produces, absent where the table's own integrity refuses that row
+    /// even to its owner.
     produced: Option<serde_json::Value>,
 }
 
@@ -533,6 +572,8 @@ pub(crate) struct Run {
     pub(crate) observations: Vec<Mismatch>,
     /// What the translation said diverges, each with what it licenses.
     pub(crate) disclosures: Vec<Disclosure>,
+    /// The clause sides the case left undecided.
+    coverage: Coverage,
 }
 
 /// Which way a divergence may go, since a gap is not symmetric.
@@ -647,6 +688,12 @@ struct Counted {
 }
 
 #[derive(QueryableByName)]
+struct Column {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    name: String,
+}
+
+#[derive(QueryableByName)]
 struct ConstraintHit {
     #[diesel(sql_type = diesel::sql_types::Integer)]
     one: i32,
@@ -662,6 +709,12 @@ struct Object {
     row: serde_json::Value,
     /// The columns its key is spelled from.
     keys: Vec<String>,
+    /// The table's columns a statement may assign, in the table's own order.
+    ///
+    /// A generated or always-identity column the database computes cannot be named by a
+    /// probe's column list or `SET` clause, which would fail before row-level security
+    /// decides.
+    non_generated: Vec<String>,
     /// One permission object shared by every row.
     singleton: bool,
     /// What the case's `INSERT` probes on the table write beyond this row.
@@ -735,6 +788,19 @@ fn objects(
         let inserting = inserting.get(&table).map(|declared| (*declared).clone());
         let declared_set = update_sets.get(&table).map(|set| (*set).clone());
         let limit = if singleton { " LIMIT 1" } else { "" };
+        // Case tables and columns are defined at runtime, and the probe may assign only
+        // the columns `PostgreSQL` does not compute itself.
+        let non_generated: Vec<String> = diesel::sql_query(format!(
+            "SELECT attname AS name FROM pg_attribute
+             WHERE attrelid = '{table}'::regclass AND attnum > 0 AND NOT attisdropped
+               AND attgenerated = '' AND attidentity <> 'a'
+             ORDER BY attnum"
+        ))
+        .load::<Column>(conn)
+        .unwrap_or_else(|error| panic!("reading the columns of {table}: {error}"))
+        .into_iter()
+        .map(|Column { name }| name)
+        .collect();
         // Case tables and columns are defined at runtime.
         let rows: Vec<JsonRow> =
             diesel::sql_query(format!("SELECT to_jsonb(t) AS row FROM {table} t{limit}"))
@@ -749,13 +815,14 @@ fn objects(
                 .render(&super::JsonRowValues(&row))
                 .expect("the fixed object name is valid")
                 .expect("a literal key names the permission object");
-            let update_set = declared_set.or_else(|| no_op_set(&row, &[]));
+            let update_set = declared_set.or_else(|| no_op_set(&non_generated, &[]));
             out.push(Object {
                 name,
                 table,
                 predicate: "TRUE".to_string(),
                 row,
                 keys: Vec::new(),
+                non_generated: non_generated.clone(),
                 singleton,
                 inserting: None,
                 update_set,
@@ -773,13 +840,16 @@ fn objects(
             };
 
             let predicate = key_predicate(&row, &columns);
-            let update_set = declared_set.clone().or_else(|| no_op_set(&row, &columns));
+            let update_set = declared_set
+                .clone()
+                .or_else(|| no_op_set(&non_generated, &columns));
             out.push(Object {
                 name,
                 table: table.clone(),
                 predicate,
                 row,
                 keys: columns.iter().map(|column| (*column).to_string()).collect(),
+                non_generated: non_generated.clone(),
                 singleton,
                 inserting: inserting.clone(),
                 update_set,
@@ -792,9 +862,24 @@ fn objects(
 /// An assignment of a column to itself, which changes no value, so an `UPDATE` probe
 /// without a declared change still asks the `USING` clauses and the check about the row
 /// as it stands.
-fn no_op_set(row: &serde_json::Value, keys: &[&str]) -> Option<String> {
-    let column = assignable_column(row, keys)?;
+fn no_op_set(columns: &[String], keys: &[&str]) -> Option<String> {
+    let column = assignable_column(columns, keys)?;
     Some(format!("\"{column}\" = \"{column}\""))
+}
+
+/// The columns the probe for `statement` on `object` names, those the case declares for
+/// its inserts, or else every column the database does not compute itself.
+fn listed_columns(object: &Object, statement: ActionStatement) -> &[String] {
+    match (&object.inserting, statement) {
+        (
+            Some(Inserting {
+                columns: Some(columns),
+                ..
+            }),
+            ActionStatement::Insert | ActionStatement::InsertReturning,
+        ) => columns,
+        _ => &object.non_generated,
+    }
 }
 
 /// Switch to the caller's role and apply its session values, local to the transaction.
@@ -903,7 +988,7 @@ fn postgres_allows(
         // A write the policy admits meets the table's own declared integrity when the
         // statement itself breaks one, and the probe reads that as allowed.
         Err(error) if is_constraint_violation(&error) => {
-            if declared_constraint_block(conn, &error, table) {
+            if declared_constraint_block(conn, &error, table, statement) {
                 true
             } else {
                 panic!(
@@ -995,14 +1080,18 @@ fn is_constraint_violation(error: &diesel::result::Error) -> bool {
 ///
 /// The `PostgreSQL` fields the check matches are the error's own: the constraint it names
 /// must be a real constraint on the table the error names, in the probed table's schema,
-/// attached to the probed table on either side of the foreign key. A trigger that `RAISE`s
-/// the same SQLSTATE names no constraint and stays a loud failure. The catalog query is a
-/// raw `sql_query`, since the probed table is runtime data no `table!` can type, and the
-/// `regclass` casts keep every name resolved in the case's own search path.
+/// attached to the probed table on either side of the foreign key. A `DELETE` fires its
+/// triggers only for rows its policy admitted, so for one the constraint may sit on any
+/// table a trigger's writes reach. An `INSERT` or `UPDATE` fires its `BEFORE` triggers
+/// before its `WITH CHECK`, so there the attachment stays required. A trigger that
+/// `RAISE`s the same SQLSTATE names no constraint and stays a loud failure. The catalog
+/// query is a raw `sql_query`, since the probed table is runtime data no `table!` can
+/// type, and the `regclass` casts keep every name resolved in the case's own search path.
 fn declared_constraint_block(
     conn: &mut PgConnection,
     error: &diesel::result::Error,
     probed_table: &str,
+    statement: ActionStatement,
 ) -> bool {
     let diesel::result::Error::DatabaseError(_, info) = error else {
         return false;
@@ -1030,13 +1119,14 @@ fn declared_constraint_block(
          WHERE conname = $1
            AND conrelid = $2::regclass
            AND contype = $3
-           AND (conrelid = $4::regclass OR confrelid = $4::regclass)
+           AND ($5 OR conrelid = $4::regclass OR confrelid = $4::regclass)
            AND connamespace = (SELECT relnamespace FROM pg_class WHERE oid = $4::regclass)",
     )
     .bind::<diesel::sql_types::Text, _>(constraint)
     .bind::<diesel::sql_types::Text, _>(error_table)
     .bind::<diesel::sql_types::Text, _>(contype)
     .bind::<diesel::sql_types::Text, _>(probed_table)
+    .bind::<diesel::sql_types::Bool, _>(statement == ActionStatement::Delete)
     .get_result::<ConstraintHit>(conn)
     .is_ok_and(|ConstraintHit { one }| one == 1)
 }
@@ -1111,7 +1201,7 @@ async fn openfga_allows(
                 case.name
             )
         });
-    let user = format!("user:{}", principal.subject);
+    let user = format!("user:{}", principal.user);
     let rows = match &entry.answer {
         ActionAnswer::ByColumn(answer) => {
             let touched = touched_columns(object, statement).unwrap_or_else(|| {
@@ -1248,12 +1338,9 @@ impl Touched {
 /// cannot be written on the table.
 fn touched_columns(object: &Object, statement: ActionStatement) -> Option<Touched> {
     let keys = || object.keys.iter().map(ColumnName::from_stored);
-    let row = || {
-        object
-            .row
-            .as_object()
-            .into_iter()
-            .flat_map(serde_json::Map::keys)
+    let listed = || {
+        listed_columns(object, statement)
+            .iter()
             .map(ColumnName::from_stored)
     };
     let mut touched = Touched::default();
@@ -1265,24 +1352,24 @@ fn touched_columns(object: &Object, statement: ActionStatement) -> Option<Touche
             (touched.update, touched.select) = set_columns(object.update_set.as_deref()?);
             touched.select.extend(keys());
         }
-        ActionStatement::Insert => touched.insert.extend(row()),
+        ActionStatement::Insert => touched.insert.extend(listed()),
         ActionStatement::InsertReturning => {
             // Both spellings read the whole key, the arbiter as much as `RETURNING`.
             if object.keys.is_empty() {
                 touched
                     .select
                     .insert(ColumnName::from_stored(assignable_column(
-                        &object.row,
+                        &object.non_generated,
                         &object.keys,
                     )?));
             } else {
                 touched.select.extend(keys());
             }
-            touched.insert.extend(row());
+            touched.insert.extend(listed());
         }
         ActionStatement::InsertOnConflictUpdate => {
-            let settable = assignable_column(&object.row, &object.keys)?;
-            touched.insert.extend(row());
+            let settable = assignable_column(&object.non_generated, &object.keys)?;
+            touched.insert.extend(listed());
             touched.update.insert(ColumnName::from_stored(settable));
             // The arbiter and the `excluded` column the update assigns are both read.
             touched.select.extend(keys());
@@ -1293,17 +1380,17 @@ fn touched_columns(object: &Object, statement: ActionStatement) -> Option<Touche
     Some(touched)
 }
 
-/// The column a probe assigns or returns, the first one outside the key the probe
-/// replaces, or the first key column where every column is in the key.
-fn assignable_column<'row>(
-    row: &'row serde_json::Value,
+/// The column a probe assigns or returns among `columns`, the first one outside the key the
+/// probe replaces, or the first key column where every column is in the key.
+fn assignable_column<'column>(
+    columns: &'column [String],
     keys: &[impl AsRef<str>],
-) -> Option<&'row str> {
-    let mut columns = row.as_object()?.keys().map(String::as_str);
-    let first = columns.clone().next()?;
+) -> Option<&'column str> {
+    let first = columns.first()?;
     Some(
         columns
-            .find(|column| !keys.iter().any(|key| key.as_ref() == *column))
+            .iter()
+            .find(|column| !keys.iter().any(|key| key.as_ref() == column.as_str()))
             .unwrap_or(first),
     )
 }
@@ -1495,7 +1582,20 @@ impl Drop for Cleanup<'_> {
     }
 }
 
+/// Apply the case and compare every pair, failing unless every clause side was decided.
 pub(crate) async fn run_with(
+    cluster: &Cluster,
+    case: &ParityCase,
+    expectation: Class,
+    doctor: impl FnOnce(Vec<ActionRelations>) -> Vec<ActionRelations>,
+) -> Run {
+    let run = run_unjudged(cluster, case, expectation, doctor).await;
+    run.coverage.assert_complete(&case.name);
+    run
+}
+
+/// Apply the case and compare every pair, leaving its clause coverage to the caller.
+async fn run_unjudged(
     cluster: &Cluster,
     case: &ParityCase,
     expectation: Class,
@@ -1561,12 +1661,13 @@ async fn run_in(
         settings: &settings,
     };
     let mut observations = compare_every_pair(cluster, database, &model, &objects, &clock).await;
-    assert_every_clause_decides(cluster, database, case, &objects, &observations);
+    let coverage = clause_coverage(cluster, database, case, &objects, &observations);
     observations
         .extend(compare_at_future_instant(conn, case, &model, &objects, &observations).await);
     Run {
         observations,
         disclosures: disclosed,
+        coverage,
     }
 }
 
@@ -1622,10 +1723,11 @@ fn plan_case(
         &case.acting_roles(),
         case.settings.iter().cloned(),
     );
-    let (classified, db, registry) = super::classify_db_declaring(
+    let (classified, db, registry) = super::classify_db_confirming(
         db,
         case.registry_json.as_deref(),
         case.monetary_locale.as_deref(),
+        &case.attribute_columns,
         &deployment,
     );
     let planned = super::plan_at(classified, &db, &registry, ConfidenceLevel::B);
@@ -1913,8 +2015,8 @@ fn clauses(conn: &mut PgConnection, case: &ParityCase) -> Vec<Clause> {
     clauses
 }
 
-/// Fail unless each clause of each policy both grants and denies some compared answer on
-/// its table.
+/// The sides of the case's policy clauses it left undecided, a side being decided where it
+/// grants or denies some compared answer on its table.
 ///
 /// A clause's translation can be wrong two ways. The model granting where the clause is
 /// false shows only on a pair the clause's being false denied, and the model denying where
@@ -1922,13 +2024,13 @@ fn clauses(conn: &mut PgConnection, case: &ParityCase) -> Vec<Clause> {
 /// found by fixing the clause to the other value, alone, inside a transaction the probes
 /// run in and that is rolled back, and asking only the database again. Counting per table
 /// and statement would miss a clause another permissive one shadows.
-fn assert_every_clause_decides(
+fn clause_coverage(
     cluster: &Cluster,
     database: &str,
     case: &ParityCase,
     objects: &[Object],
     observations: &[Mismatch],
-) {
+) -> Coverage {
     let mut owner = caller_connection(cluster, database, case);
     let clauses = clauses(&mut owner, case);
     let mut relation_oids: BTreeMap<&str, i64> = BTreeMap::new();
@@ -1948,8 +2050,7 @@ fn assert_every_clause_decides(
         .iter()
         .map(|_| caller_connection(cluster, database, case))
         .collect();
-    let mut untested = Vec::new();
-    let mut stale = Vec::new();
+    let mut coverage = Coverage::default();
     let mut matched = vec![false; case.unobservable.len()];
     for clause in &clauses {
         let on_table: Vec<&Object> = objects
@@ -1986,31 +2087,21 @@ fn assert_every_clause_decides(
                 matched[at] = true;
             }
             match (changes_an_answer(ablation), waiver) {
-                (false, None) => untested.push(clause.label(side)),
-                (true, Some(at)) => stale.push(format!(
-                    "{}, waived as \"{}\"",
-                    clause.label(side),
-                    case.unobservable[at].reason
-                )),
+                (false, None) => {
+                    coverage.untested.insert(clause.label(side));
+                }
+                (true, Some(at)) => {
+                    coverage.stale.insert(format!(
+                        "{}, waived as \"{}\"",
+                        clause.label(side),
+                        case.unobservable[at].reason
+                    ));
+                }
                 _ => {}
             }
         }
     }
-    assert!(
-        untested.is_empty(),
-        "{}: fixing each of these clauses to the other value changed no compared answer on \
-         its table, so the seed never tests that side of it\n  {}",
-        case.name,
-        untested.join("\n  ")
-    );
-    assert!(
-        stale.is_empty(),
-        "{}: these sides are declared unobservable, and fixing the clause changed a compared \
-         answer, so the waiver is wrong\n  {}",
-        case.name,
-        stale.join("\n  ")
-    );
-    let unmatched: Vec<String> = case
+    coverage.unmatched = case
         .unobservable
         .iter()
         .zip(matched)
@@ -2022,12 +2113,72 @@ fn assert_every_clause_decides(
             )
         })
         .collect();
-    assert!(
-        unmatched.is_empty(),
-        "{}: these waivers name no clause side the case has\n  {}",
-        case.name,
-        unmatched.join("\n  ")
-    );
+    coverage
+}
+
+/// The clause sides a case, or a set of variants of one schema, left undecided.
+#[derive(Debug, Default)]
+pub(crate) struct Coverage {
+    /// Sides whose fixing changed no compared answer, and no waiver names.
+    untested: BTreeSet<String>,
+    /// Waived sides whose fixing changed a compared answer, each with its reason.
+    stale: BTreeSet<String>,
+    /// Waivers naming no clause side.
+    unmatched: BTreeSet<String>,
+}
+
+impl Coverage {
+    /// The coverage of variants of one schema taken together. A side is untested only where
+    /// every variant left it so, a waiver is wrong where any variant decides its side, and a
+    /// waiver names nothing only where it names nothing in every variant.
+    fn together<'run>(mut runs: impl Iterator<Item = &'run Coverage>) -> Self {
+        let Some(first) = runs.next() else {
+            return Self::default();
+        };
+        let mut together = Self {
+            untested: first.untested.clone(),
+            stale: first.stale.clone(),
+            unmatched: first.unmatched.clone(),
+        };
+        for coverage in runs {
+            together
+                .untested
+                .retain(|side| coverage.untested.contains(side));
+            together.stale.extend(coverage.stale.iter().cloned());
+            together
+                .unmatched
+                .retain(|waiver| coverage.unmatched.contains(waiver));
+        }
+        together
+    }
+
+    /// Fail unless every side was decided or rightly waived.
+    fn assert_complete(&self, name: &str) {
+        let list = |sides: &BTreeSet<String>| {
+            sides
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        };
+        assert!(
+            self.untested.is_empty(),
+            "{name}: fixing each of these clauses to the other value changed no compared \
+             answer on its table, so the seed never tests that side of it\n  {}",
+            list(&self.untested)
+        );
+        assert!(
+            self.stale.is_empty(),
+            "{name}: these sides are declared unobservable, and fixing the clause changed a \
+             compared answer, so the waiver is wrong\n  {}",
+            list(&self.stale)
+        );
+        assert!(
+            self.unmatched.is_empty(),
+            "{name}: these waivers name no clause side the case has\n  {}",
+            list(&self.unmatched)
+        );
+    }
 }
 
 /// Whether some compared pair of `principal` on `on_table` gets another answer from the
@@ -2148,7 +2299,12 @@ fn settings_maps(
                     serde_json::Value::String(value),
                 );
         }
-        maps.insert(principal.subject.clone(), map);
+        assert!(
+            maps.insert(principal.subject.clone(), map).is_none(),
+            "{}: two principals share the subject {}",
+            case.name,
+            principal.subject
+        );
     }
     maps
 }
@@ -2193,6 +2349,31 @@ pub(crate) async fn run_before(cluster: &Cluster, case: &ParityCase, deadline: D
     tokio::time::timeout(deadline, run(cluster, case))
         .await
         .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name))
+}
+
+/// Run each of `variants`, states of one schema, under `deadline` each, failing unless
+/// every clause side was decided by one of them or rightly waived.
+///
+/// A state that exists to reach a few arms, such as an organization between its creation
+/// and its first admin, decides only those, and the other variants decide the rest.
+pub(crate) async fn run_variants_before(
+    cluster: &Cluster,
+    variants: &[ParityCase],
+    deadline: Duration,
+) -> Vec<Run> {
+    let mut runs = Vec::with_capacity(variants.len());
+    for case in variants {
+        let run = tokio::time::timeout(
+            deadline,
+            run_unjudged(cluster, case, Class::Exact, |answers| answers),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name));
+        runs.push(run);
+    }
+    let names: Vec<&str> = variants.iter().map(|case| case.name.as_str()).collect();
+    Coverage::together(runs.iter().map(|run| &run.coverage)).assert_complete(&names.join(", "));
+    runs
 }
 
 /// Apply a case the translation says it diverges on, and answer with what both sides said.
@@ -2558,120 +2739,249 @@ fn postgres_allows_write_probe(
         .map(|key| format!("\"{key}\""))
         .collect::<Vec<_>>()
         .join(", ");
-    let (payload, produced) =
-        if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
-            assert!(
-                !keys.is_empty() || object.inserting.is_none(),
-                "{}: {table} has no key for a declared insert to replace",
-                case.name
-            );
-            (object.row.to_string(), Some(object.row.clone()))
-        } else {
-            let declared: &[(String, String)] = object
-                .inserting
-                .as_ref()
-                .map_or(&[], |inserting| &inserting.values);
-            let mut probe = row.clone();
-            // One fresh column makes the whole key fresh, and the others keep the values a
-            // policy may read.
-            let undeclared: Vec<&String> = keys
+    let listed = listed_columns(object, statement);
+    let list = listed
+        .iter()
+        .map(|column| format!("\"{column}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    // A keyless table's probe and an upsert copy the seed row, and an insert onto a fresh
+    // key copies it with the key replaced.
+    let payload = if keys.is_empty() || statement == ActionStatement::InsertOnConflictUpdate {
+        assert!(
+            !keys.is_empty() || object.inserting.is_none(),
+            "{}: {table} has no key for a declared insert to replace",
+            case.name
+        );
+        object.row.clone()
+    } else {
+        let declared: &[(String, String)] = object
+            .inserting
+            .as_ref()
+            .map_or(&[], |inserting| &inserting.values);
+        let mut probe = row.clone();
+        // One fresh column makes the whole key fresh, and the others keep the values a
+        // policy may read. A key column the statement leaves out is the database's to
+        // assign, so it is fresh already. A case declaring a key column chooses the key
+        // itself, and a seeded row on the same key raises a unique violation, which fails
+        // the case.
+        let chooses_key = declared.iter().any(|(column, _)| keys.contains(column));
+        let mintable: Vec<&String> = keys.iter().filter(|key| listed.contains(key)).collect();
+        if !chooses_key && !mintable.is_empty() {
+            let (key, fresh) = mintable
                 .iter()
-                .filter(|key| !declared.iter().any(|(column, _)| column == *key))
-                .collect();
-            if !undeclared.is_empty() {
-                let (key, fresh) = undeclared
-                    .iter()
-                    .find_map(|key| {
-                        let current = row.get(*key).expect("a key column is a column of its row");
-                        fresh_key(conn, case, table, key, current).map(|fresh| (*key, fresh))
-                    })
-                    .unwrap_or_else(|| {
-                        panic!(
-                            "{}: no key column of {table} has a type the runner mints a fresh \
-                             value for, so its inserts would go uncompared",
-                            case.name
-                        )
-                    });
-                probe.insert(key.clone(), fresh);
-            }
-            for (column, value) in declared {
-                probe.insert(column.clone(), serde_json::Value::String(value.clone()));
-            }
-            let probe_row = serde_json::Value::Object(probe);
-            (probe_row.to_string(), Some(probe_row))
-        };
+                .find_map(|key| {
+                    let current = row.get(*key).expect("a key column is a column of its row");
+                    fresh_key(conn, case, table, key, current).map(|fresh| (*key, fresh))
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: no key column of {table} has a type the runner mints a fresh \
+                         value for, so its inserts would go uncompared",
+                        case.name
+                    )
+                });
+            probe.insert(key.clone(), fresh);
+        }
+        for (column, value) in declared {
+            probe.insert(column.clone(), serde_json::Value::String(value.clone()));
+        }
+        serde_json::Value::Object(probe)
+    };
+    // A column the statement leaves out takes a default, an identity or a generated value,
+    // which only the database computes, so the owner writes the same row first and the
+    // runner asks about the row it read back.
+    let rehearsed = row.keys().any(|column| !listed.contains(column));
+    if rehearsed {
+        assert_no_role_default(conn, case, table, listed);
+    }
+    let written = Written {
+        payload: payload.to_string(),
+        produced: (!rehearsed).then_some(payload),
+    };
     let source = format!(
-        "INSERT INTO {table} SELECT * FROM jsonb_populate_record(NULL::{table}, $1::jsonb)"
+        "INSERT INTO {table} AS written ({list}) SELECT {list} \
+         FROM jsonb_populate_record(NULL::{table}, $1::jsonb)"
     );
     if keys.is_empty() && statement == ActionStatement::InsertReturning {
         // An empty row has no column to return, so the readback cannot be written.
-        let returned = assignable_column(&object.row, keys)?;
+        let returned = assignable_column(&object.non_generated, keys)?;
         let sql =
-            format!("WITH written AS ({source} RETURNING \"{returned}\") SELECT 1 FROM written");
-        let postgres = attempt_write(conn, attempt, &sql, &payload, raised);
+            format!("WITH inserted AS ({source} RETURNING \"{returned}\") SELECT 1 FROM inserted");
+        let (postgres, produced) = attempt_write(conn, attempt, &sql, &source, &written, raised);
         return Some(ProbeResult { postgres, produced });
     }
     let spellings = match statement {
         ActionStatement::Insert => {
             let alternative = format!("{source} ON CONFLICT DO NOTHING");
-            [source, alternative]
+            [source.clone(), alternative]
         }
         ActionStatement::InsertReturning => [
-            format!("WITH written AS ({source} RETURNING {arbiter}) SELECT 1 FROM written"),
+            format!("WITH inserted AS ({source} RETURNING {arbiter}) SELECT 1 FROM inserted"),
             format!("{source} ON CONFLICT ({arbiter}) DO NOTHING"),
         ],
         ActionStatement::InsertOnConflictUpdate => {
-            let settable = assignable_column(&object.row, keys)?;
+            let settable = assignable_column(&object.non_generated, keys)?;
             let update = format!(
                 "{source} ON CONFLICT ({arbiter}) DO UPDATE SET \"{settable}\" = excluded.\"{settable}\""
             );
-            return Some(ProbeResult {
-                postgres: attempt_write(conn, attempt, &update, &payload, raised),
-                produced,
-            });
+            let (postgres, produced) =
+                attempt_write(conn, attempt, &update, &update, &written, raised);
+            return Some(ProbeResult { postgres, produced });
         }
         _ => unreachable!("{statement:?} is not a write probe"),
     };
 
-    let answers: Vec<bool> = spellings
+    let answers: Vec<(bool, Option<serde_json::Value>)> = spellings
         .iter()
-        .map(|sql| attempt_write(conn, attempt, sql, &payload, raised))
+        .map(|sql| attempt_write(conn, attempt, sql, &source, &written, raised))
         .collect();
     assert_eq!(
-        answers[0], answers[1],
+        answers[0].0, answers[1].0,
         "{}: two spellings of {statement:?} on {} answered differently, so one relation \
          cannot cover both",
         case.name, object.name
     );
-    Some(ProbeResult {
-        postgres: answers[0],
-        produced,
-    })
+    let [(postgres, produced), _] = <[_; 2]>::try_from(answers).expect("two spellings");
+    Some(ProbeResult { postgres, produced })
 }
 
-/// Run one write spelling as the caller and roll it back, reading a refusal as a denial.
+/// The row a write probe sends, and the row it produces where the probe alone knows it.
+struct Written {
+    /// The row as `JSON`, bound to every spelling.
+    payload: String,
+    /// The row the write produces, [`None`] where the statement leaves a column to the
+    /// database, so the owner writes the row first in the caller's transaction.
+    produced: Option<serde_json::Value>,
+}
+
+/// Refuse a probe leaving out a column whose default reads the role writing the row, since
+/// the owner's rehearsal writes as another role and would read back another row.
+fn assert_no_role_default(
+    conn: &mut PgConnection,
+    case: &ParityCase,
+    table: &str,
+    listed: &[String],
+) {
+    // A generated column is immutable, so only a default can read the role, and a quoted
+    // literal spelling `user` is no call.
+    let reading_the_role: Vec<String> = diesel::sql_query(format!(
+        "SELECT a.attname AS name FROM pg_attrdef d
+         JOIN pg_attribute a ON a.attrelid = d.adrelid AND a.attnum = d.adnum
+         WHERE d.adrelid = '{table}'::regclass AND a.attgenerated = ''
+           AND regexp_replace(pg_get_expr(d.adbin, d.adrelid), '''(?:[^'']|'''')*''', '', 'g')
+               ~* '\\m(current_user|session_user|current_role|user)\\M'"
+    ))
+    .load::<Column>(conn)
+    .unwrap_or_else(|error| panic!("{}: reading the defaults of {table}: {error}", case.name))
+    .into_iter()
+    .map(|Column { name }| name)
+    .filter(|name| !listed.contains(name))
+    .collect();
+    assert!(
+        reading_the_role.is_empty(),
+        "{}: {table} defaults {} to the role writing the row, which a rehearsal as the owner \
+         cannot reproduce",
+        case.name,
+        reading_the_role.join(", ")
+    );
+}
+
+/// The row `statement` writes from `payload`, written in a savepoint of the caller's
+/// transaction as the connection's own role, which no policy filters, and rolled back.
+///
+/// The caller's session values and clock hold inside it. Every sequence is put back after,
+/// so the caller's statement draws the values the rehearsal drew. [`None`] where the table's
+/// own integrity refuses the row.
+fn rehearse_as_owner(
+    conn: &mut PgConnection,
+    case: &ParityCase,
+    table: &str,
+    statement: &str,
+    payload: &str,
+) -> Option<serde_json::Value> {
+    let mut produced = None;
+    let outcome = conn.transaction::<(), diesel::result::Error, _>(|conn| {
+        conn.batch_execute("RESET ROLE")?;
+        let restores: Vec<Restore> = diesel::sql_query(
+            "SELECT format('SELECT setval(%L, %s, %L)', format('%I.%I', schemaname, sequencename),
+                           coalesce(last_value, start_value), last_value IS NOT NULL) AS statement
+             FROM pg_sequences",
+        )
+        .load(conn)?;
+        let written =
+            conn.transaction::<Option<serde_json::Value>, diesel::result::Error, _>(|conn| {
+                let rows: Vec<JsonRow> =
+                    diesel::sql_query(format!("{statement} RETURNING to_jsonb(written) AS row"))
+                        .bind::<diesel::sql_types::Text, _>(payload)
+                        .load(conn)?;
+                produced = rows.into_iter().next().map(|JsonRow { row }| row);
+                Err(diesel::result::Error::RollbackTransaction)
+            });
+        for Restore { statement } in restores {
+            diesel::sql_query(statement).execute(conn)?;
+        }
+        match written {
+            Err(diesel::result::Error::RollbackTransaction) => {}
+            Err(error) if is_constraint_violation(&error) => produced = None,
+            Err(error) => panic!(
+                "{}: rehearsing a write on {table} as its owner: {error}",
+                case.name
+            ),
+            Ok(_) => unreachable!("the rehearsal always rolls back"),
+        }
+        Err(diesel::result::Error::RollbackTransaction)
+    });
+    match outcome {
+        Err(diesel::result::Error::RollbackTransaction) => produced,
+        Err(error) => panic!(
+            "{}: rehearsing a write on {table} as its owner: {error}",
+            case.name
+        ),
+        Ok(()) => unreachable!("the transaction body always rolls back"),
+    }
+}
+
+/// A statement putting one sequence back where it stood.
+#[derive(QueryableByName)]
+struct Restore {
+    #[diesel(sql_type = diesel::sql_types::Text)]
+    statement: String,
+}
+
+/// Run one write spelling as the caller and roll it back, reading a refusal as a denial,
+/// with the row it produces.
+///
+/// Where the probe does not know that row, `rehearsal` writes it as the owner first, inside
+/// the same transaction.
 fn attempt_write(
     conn: &mut PgConnection,
     attempt: &Attempt,
     sql: &str,
-    payload: &str,
+    rehearsal: &str,
+    written: &Written,
     raised: &mut bool,
-) -> bool {
+) -> (bool, Option<serde_json::Value>) {
     let Attempt {
         case,
         principal,
         object,
         statement,
     } = *attempt;
+    let mut produced = written.produced.clone();
     let outcome = conn.transaction::<(), diesel::result::Error, _>(|conn| {
         become_principal(conn, principal)?;
+        if written.produced.is_none() {
+            produced = rehearse_as_owner(conn, case, &object.table, rehearsal, &written.payload);
+        }
         diesel::sql_query(sql)
-            .bind::<diesel::sql_types::Text, _>(payload)
+            .bind::<diesel::sql_types::Text, _>(&written.payload)
             .execute(conn)?;
         // The probe is never kept, so the comparison that follows sees the seeded rows.
         Err(diesel::result::Error::RollbackTransaction)
     });
-    match outcome {
+    let allowed = match outcome {
         Err(diesel::result::Error::RollbackTransaction) => true,
         // A caller that set nothing the policy reads raises rather than being filtered,
         // exactly as a read does, and the write does not happen either way.
@@ -2685,7 +2995,7 @@ fn attempt_write(
         // A write the policy admits meets the table's own declared integrity when the
         // copy itself breaks one, and the probe reads that as allowed.
         Err(error) if is_constraint_violation(&error) => {
-            if declared_constraint_block(conn, &error, &object.table) {
+            if declared_constraint_block(conn, &error, &object.table, statement) {
                 true
             } else {
                 panic!(
@@ -2707,7 +3017,8 @@ fn attempt_write(
             false
         }
         Ok(()) => unreachable!("the transaction body always rolls back"),
-    }
+    };
+    (allowed, produced)
 }
 
 /// A value no row of `table` carries in `column`, in the column's own type, and for text
