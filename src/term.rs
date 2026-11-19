@@ -477,7 +477,9 @@ fn rule_beyond_the_chain(
                 "this filter subtracts from what the chain reaches, and no record can carry a \
              subtraction"
             }
-            UsersetExpr::Computed(_) | UsersetExpr::TupleToUserset { .. } => {
+            UsersetExpr::Computed(_)
+            | UsersetExpr::StoredRow(_)
+            | UsersetExpr::TupleToUserset { .. } => {
                 "the rule this filter compiles to is not the chain of records beside it"
             }
         }

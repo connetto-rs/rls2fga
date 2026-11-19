@@ -703,6 +703,19 @@ fn sanitize_tuple_query(mut query: TupleQuery) -> TupleQuery {
     query
 }
 
+/// The records one [`TupleSource`] produces, described as structure, `None` where the
+/// source renders no query or its records cannot be described.
+pub(crate) fn describe_source<DB: DatabaseLike>(
+    source: &TupleSource,
+    owner_type: &TypeName,
+    only_own_rows: bool,
+    well_known: &WellKnownTypes,
+    names: NameContext<'_>,
+    db: &DB,
+) -> Option<RecordDescription> {
+    render_tuple_source(source, owner_type, only_own_rows, well_known, names, db)?.description
+}
+
 /// Render one [`TupleSource`].
 ///
 /// Variants emitting objects of their own table MUST use `owner_type`: re-deriving

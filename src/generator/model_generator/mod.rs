@@ -66,6 +66,8 @@ mod emit_requests;
 mod emit_roles;
 /// A gate that reads only the request, reduced to one normal form.
 mod request_formula;
+/// The type judging the row a write produces.
+mod resulting;
 /// Role-threshold resource-column inference and tuple-source population.
 mod role_threshold;
 /// Whole-plan passes that run once every table is translated.
@@ -280,6 +282,12 @@ fn subject_key(subjects: &[DirectSubject]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum UsersetExpr {
     Computed(RelationName),
+    /// A relation of the row's own object that a helper or subquery reads by looking the
+    /// row's own table up at the row's own key.
+    ///
+    /// The stored type renders it as [`Computed`](Self::Computed). The type judging a
+    /// written row reads it from the stored row, which the statement's snapshot holds.
+    StoredRow(RelationName),
     TupleToUserset {
         tupleset: RelationName,
         computed: RelationName,
@@ -297,6 +305,7 @@ pub(crate) enum UsersetExpr {
 fn userset_key(expr: &UsersetExpr) -> String {
     match expr {
         UsersetExpr::Computed(name) => format!("c:{name}"),
+        UsersetExpr::StoredRow(name) => format!("s:{name}"),
         UsersetExpr::TupleToUserset { tupleset, computed } => format!("t:{tupleset}:{computed}"),
         UsersetExpr::Union(children) => format!("u({})", child_keys(children)),
         UsersetExpr::Intersection(children) => format!("i({})", child_keys(children)),
@@ -351,6 +360,9 @@ pub(crate) struct TypePlan {
     /// Per command some acting role holds on some columns only, the relations on this
     /// table's gate object naming who holds it on each column.
     pub column_relations: Vec<ColumnRelations>,
+    /// The stored type whose written rows this type judges, absent for every type that
+    /// names stored rows.
+    pub resulting_of: Option<TypeName>,
     /// The note each declared helper's walk along this type's edges, or a flagged row's
     /// walk up them, carries, keyed by the relation resolved through it, the table holding
     /// the edges or the flags and the column read there, and read once pruning has settled
@@ -415,6 +427,7 @@ impl TypePlan {
             source_table: None,
             column_relations: Vec::new(),
             walk_notes: BTreeMap::new(),
+            resulting_of: None,
         }
     }
 
@@ -755,6 +768,9 @@ pub(crate) struct SchemaPlan {
     pub well_known: WellKnownTypes,
     /// Permission answers for modeled tables with a read gate, settled before pruning.
     pub action_relations: Vec<crate::types::ActionRelations>,
+    /// Per table a write judges, how a check names the written row and which facts it
+    /// carries.
+    pub resulting_rows: Vec<crate::types::ResultingRow>,
 }
 
 /// Why a translation cannot be planned.
@@ -1512,7 +1528,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     define_blanket_update_relations(&mut all_types);
     prune_plain_subjects_fed_only_by_gated_sources(&mut all_types, &settings.well_known);
     // Settled before pruning, which drops the relations only local answers read.
-    let answers = action_answers(
+    let mut answers = action_answers(
         all_types.values(),
         &settings.well_known.request_gate,
         registry.deployment(),
@@ -1541,6 +1557,14 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     // Every check whose request carries a principal states it, so the type it names is
     // declared whether or not a grant reads it.
     ensure_principal_types(&mut all_types, &principals, &settings.well_known);
+    // After pruning, so the stored relations a written row reads are the ones that remain.
+    let resulting_rows = resulting::add_resulting_types(
+        &mut all_types,
+        &mut answers.entries,
+        &mut notes,
+        bounds,
+        db,
+    );
 
     // After pruning, so a model with nothing to deny carries no such type, and only then,
     // since a denial that survives has to name a type the model declares.
@@ -1582,6 +1606,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         principals,
         well_known: settings.well_known.clone(),
         action_relations: answers.entries,
+        resulting_rows,
     };
     crate::generator::model_bounds::check(&crate::generator::json_model::json_model_from_plan(
         &plan,

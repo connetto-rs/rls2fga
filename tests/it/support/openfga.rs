@@ -53,6 +53,20 @@ pub(crate) async fn write_tuples(client: &OpenFgaClient<Channel>, mut tuples: Ve
     }
 }
 
+/// The tuple a check carries for one record the row states.
+pub(crate) fn record_tuple(record: &rls2fga::types::Record) -> TupleKey {
+    match &record.context {
+        Some(context) => make_conditional_tuple(
+            &record.object,
+            record.relation.as_str(),
+            &record.subject,
+            context.condition.as_str(),
+            serde_json::to_value(&context.values).expect("row values serialize"),
+        ),
+        None => make_tuple(&record.object, record.relation.as_str(), &record.subject),
+    }
+}
+
 /// Check as a request acting as the suite's acting role.
 pub(crate) async fn check_allowed(
     client: &OpenFgaClient<Channel>,
@@ -161,6 +175,7 @@ pub(crate) async fn check_allowed_with_context(
         relation,
         object,
         context,
+        Vec::new(),
     )
     .await
 }
@@ -190,7 +205,12 @@ fn acting_for(
 
 /// Check with a request context as a request acting as the role `kind` and for each of
 /// `principals` the context carries. Only a subject of the caller type states a kind or a
-/// principal, since `pg_role#usage` and a principal's relation admit no other.
+/// principal, since `pg_role#usage` and a principal's relation admit no other. `carried`
+/// are the facts the check states beside those, which a row no store holds needs.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each argument is one part of the OpenFGA check request"
+)]
 pub(crate) async fn check_as(
     client: &OpenFgaClient<Channel>,
     kind: &str,
@@ -199,17 +219,15 @@ pub(crate) async fn check_as(
     relation: &str,
     object: &str,
     context: serde_json::Value,
+    mut carried: Vec<TupleKey>,
 ) -> bool {
     let is_caller = user
         .split_once(':')
         .is_some_and(|(type_name, _)| type_name == rls2fga::generator::well_known::USER_TYPE);
-    let contextual = if is_caller {
-        let mut contextual = acting_for(user, principals, &context);
-        contextual.push(acting_kind(user, kind));
-        contextual
-    } else {
-        Vec::new()
-    };
+    if is_caller {
+        carried.extend(acting_for(user, principals, &context));
+        carried.push(acting_kind(user, kind));
+    }
     client
         .check(
             TupleKeyWithoutCondition {
@@ -217,7 +235,7 @@ pub(crate) async fn check_as(
                 relation: relation.to_string(),
                 object: object.to_string(),
             },
-            contextual,
+            carried,
             to_struct(context),
             false,
         )

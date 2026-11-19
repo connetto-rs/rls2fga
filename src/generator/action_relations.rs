@@ -179,7 +179,11 @@ fn answer(
             .into_iter()
             .flatten()
             .map(|(relation, version)| {
-                ActionJudgement::new(RelationName::canonicalized(relation), version)
+                ActionJudgement::new(
+                    RelationName::canonicalized(relation),
+                    version,
+                    plan.type_name.clone(),
+                )
             })
             .collect(),
     )

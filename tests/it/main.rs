@@ -81,6 +81,8 @@ mod request_gate_parity_tests;
 mod request_gate_recipe_parity_tests;
 mod request_gate_tests;
 mod request_principal_tests;
+mod resulting_row_parity_tests;
+mod resulting_type_tests;
 mod role_accessor_tests;
 mod role_keyword_tests;
 mod row_cap_tests;

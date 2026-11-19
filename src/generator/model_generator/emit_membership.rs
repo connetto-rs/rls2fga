@@ -1514,7 +1514,7 @@ fn reach_level_relation<DB: DatabaseLike>(
     if level == source_table
         && single_identity_column(source_table, ctx.db).as_ref() == Some(column)
     {
-        return UsersetExpr::Computed(relation);
+        return UsersetExpr::StoredRow(relation);
     }
     let level_type = ctx.table_types.resolve(level);
     let columns = core::slice::from_ref(column);
