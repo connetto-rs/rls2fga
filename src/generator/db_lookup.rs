@@ -2,7 +2,7 @@
 use crate::no_std_prelude::*;
 use crate::parser::names::lookup_table_id;
 use crate::parser::sql_parser::{
-    ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableLike,
+    ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableIndexLike, TableLike,
 };
 use crate::types::ColumnKind;
 use crate::types::{ColumnName, TableId};
