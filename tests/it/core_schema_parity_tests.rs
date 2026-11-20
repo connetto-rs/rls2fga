@@ -498,20 +498,30 @@ END $$"
 
 /// The three states together decide every clause side, the founding state reaching the
 /// founding arms the others never can.
-#[tokio::test]
+///
+/// The runner's probes block the thread they run on, so each major gets a worker of its own.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
 async fn the_core_schema_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let variants = [
-            committed(major),
-            accepting_an_invitation(major),
-            before_founding(major),
-        ];
-        let runs = run_variants_before(&cluster, &variants, DEADLINE).await;
-        for (case, run) in variants.iter().zip(&runs) {
-            assert_agrees(case, run);
-            assert_two_sided(case, run);
+    let majors = ["17", "18"].map(|major| tokio::spawn(agrees_on(major)));
+    for major in majors {
+        if let Err(joined) = major.await {
+            std::panic::resume_unwind(joined.into_panic());
         }
+    }
+}
+
+/// The core schema's three states on `PostgreSQL` `major`.
+async fn agrees_on(major: &'static str) {
+    let cluster = Cluster::start_on(major).await;
+    let variants = [
+        committed(major),
+        accepting_an_invitation(major),
+        before_founding(major),
+    ];
+    let runs = run_variants_before(&cluster, &variants, DEADLINE).await;
+    for (case, run) in variants.iter().zip(&runs) {
+        assert_agrees(case, run);
+        assert_two_sided(case, run);
     }
 }

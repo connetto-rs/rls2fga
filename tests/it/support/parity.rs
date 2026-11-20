@@ -1589,15 +1589,18 @@ pub(crate) async fn run_with(
     expectation: Class,
     doctor: impl FnOnce(Vec<ActionRelations>) -> Vec<ActionRelations>,
 ) -> Run {
-    let run = run_unjudged(cluster, case, expectation, doctor).await;
+    let run = run_unjudged(cluster, case, &BTreeSet::new(), expectation, doctor).await;
     run.coverage.assert_complete(&case.name);
     run
 }
 
 /// Apply the case and compare every pair, leaving its clause coverage to the caller.
+///
+/// `decided` holds the clause sides earlier variants of the same schema decided.
 async fn run_unjudged(
     cluster: &Cluster,
     case: &ParityCase,
+    decided: &BTreeSet<String>,
     expectation: Class,
     doctor: impl FnOnce(Vec<ActionRelations>) -> Vec<ActionRelations>,
 ) -> Run {
@@ -1608,7 +1611,16 @@ async fn run_unjudged(
         cleaned: false,
     };
     let mut conn = cluster.fresh_database(&database);
-    let outcome = run_in(&mut conn, cluster, &database, case, expectation, doctor).await;
+    let outcome = run_in(
+        &mut conn,
+        cluster,
+        &database,
+        case,
+        decided,
+        expectation,
+        doctor,
+    )
+    .await;
     drop(conn);
     cleanup.finish();
     outcome
@@ -1623,6 +1635,7 @@ async fn run_in(
     cluster: &Cluster,
     database: &str,
     case: &ParityCase,
+    decided: &BTreeSet<String>,
     expectation: Class,
     doctor: impl FnOnce(Vec<ActionRelations>) -> Vec<ActionRelations>,
 ) -> Run {
@@ -1661,7 +1674,7 @@ async fn run_in(
         settings: &settings,
     };
     let mut observations = compare_every_pair(cluster, database, &model, &objects, &clock).await;
-    let coverage = clause_coverage(cluster, database, case, &objects, &observations);
+    let coverage = clause_coverage(cluster, database, case, &objects, &observations, decided);
     observations
         .extend(compare_at_future_instant(conn, case, &model, &objects, &observations).await);
     Run {
@@ -2024,12 +2037,17 @@ fn clauses(conn: &mut PgConnection, case: &ParityCase) -> Vec<Clause> {
 /// found by fixing the clause to the other value, alone, inside a transaction the probes
 /// run in and that is rolled back, and asking only the database again. Counting per table
 /// and statement would miss a clause another permissive one shadows.
+///
+/// A side in `decided`, which an earlier variant of the same schema already decided, counts
+/// as decided without being fixed again, so variants together reach the verdict each would
+/// reach alone.
 fn clause_coverage(
     cluster: &Cluster,
     database: &str,
     case: &ParityCase,
     objects: &[Object],
     observations: &[Mismatch],
+    decided: &BTreeSet<String>,
 ) -> Coverage {
     let mut owner = caller_connection(cluster, database, case);
     let clauses = clauses(&mut owner, case);
@@ -2086,18 +2104,23 @@ fn clause_coverage(
             if let Some(at) = waiver {
                 matched[at] = true;
             }
-            match (changes_an_answer(ablation), waiver) {
+            let label = clause.label(side);
+            let changed = decided.contains(&label) || changes_an_answer(ablation);
+            match (changed, waiver) {
                 (false, None) => {
-                    coverage.untested.insert(clause.label(side));
+                    coverage.untested.insert(label);
                 }
                 (true, Some(at)) => {
                     coverage.stale.insert(format!(
-                        "{}, waived as \"{}\"",
-                        clause.label(side),
+                        "{label}, waived as \"{}\"",
                         case.unobservable[at].reason
                     ));
+                    coverage.decided.insert(label);
                 }
-                _ => {}
+                (true, None) => {
+                    coverage.decided.insert(label);
+                }
+                (false, Some(_)) => {}
             }
         }
     }
@@ -2125,6 +2148,8 @@ pub(crate) struct Coverage {
     stale: BTreeSet<String>,
     /// Waivers naming no clause side.
     unmatched: BTreeSet<String>,
+    /// Sides whose fixing changed a compared answer, waived or not.
+    decided: BTreeSet<String>,
 }
 
 impl Coverage {
@@ -2139,6 +2164,7 @@ impl Coverage {
             untested: first.untested.clone(),
             stale: first.stale.clone(),
             unmatched: first.unmatched.clone(),
+            decided: first.decided.clone(),
         };
         for coverage in runs {
             together
@@ -2148,6 +2174,7 @@ impl Coverage {
             together
                 .unmatched
                 .retain(|waiver| coverage.unmatched.contains(waiver));
+            together.decided.extend(coverage.decided.iter().cloned());
         }
         together
     }
@@ -2361,14 +2388,16 @@ pub(crate) async fn run_variants_before(
     variants: &[ParityCase],
     deadline: Duration,
 ) -> Vec<Run> {
-    let mut runs = Vec::with_capacity(variants.len());
+    let mut runs: Vec<Run> = Vec::with_capacity(variants.len());
+    let mut decided = BTreeSet::new();
     for case in variants {
         let run = tokio::time::timeout(
             deadline,
-            run_unjudged(cluster, case, Class::Exact, |answers| answers),
+            run_unjudged(cluster, case, &decided, Class::Exact, |answers| answers),
         )
         .await
         .unwrap_or_else(|_| panic!("{} exceeded its parity deadline", case.name));
+        decided.extend(run.coverage.decided.iter().cloned());
         runs.push(run);
     }
     let names: Vec<&str> = variants.iter().map(|case| case.name.as_str()).collect();
