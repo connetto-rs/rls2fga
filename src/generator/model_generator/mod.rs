@@ -1254,7 +1254,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         // `parse_schema` refuses such a schema (`TableNotFoundForPolicy`), for an absent
         // name and an ambiguous unqualified one alike, so this answers a consumer's own
         // `DatabaseLike` rather than anything parsed here.
-        let Some(source_table) = resolve_table_id(db, &source_table_name) else {
+        let Some(table) = lookup_table(db, &source_table_name) else {
             let bearers = types_bearing_name(db, &source_table_name, &table_types);
             for cp in &table_policies {
                 notes.push(TranslationNote::UnresolvedPolicyTable {
@@ -1271,6 +1271,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
             }
             continue;
         };
+        let source_table = table_identity(table);
         let Some(canonical_table_name) = table_types.get(&source_table) else {
             continue;
         };
@@ -1349,9 +1350,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     }
                 }
 
-                let catalog_table = catalog_policies
-                    .then(|| lookup_table_id(db, &source_table))
-                    .flatten();
+                let catalog_table = catalog_policies.then_some(table);
                 let mut per_target: BTreeMap<ActionTarget, Vec<UsersetExpr>> = BTreeMap::new();
                 let mut column_holdings: BTreeMap<ColumnCommand, BTreeMap<String, ColumnHolding>> =
                     BTreeMap::new();
@@ -1493,7 +1492,8 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 set_action_relations(table_plan, composed);
                 plant_column_relations(table_plan, other_types, &column_holdings);
 
-                if let Some(declared_permissive) = &declared_permissive {
+                if let (Some(declared_permissive), Some(reached)) = (&declared_permissive, &reached)
+                {
                     // Undefined policy actions must deny rather than leave access to the consumer.
                     let declared_here: &[&DB::Policy] = declared_permissive
                         .get(&source_table_name)
@@ -1503,7 +1503,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                         &mut notes,
                         &source_table,
                         declared_here,
-                        reached.as_ref(),
+                        reached,
                         &SettledCommands {
                             blocked: &blocked_commands,
                             barrier_denied: &barrier_denied_commands,
@@ -1831,8 +1831,8 @@ struct SettledCommands<'a> {
 /// A command denied because every policy covering it fell below the bar gets a different line
 /// from one no policy covers at all: the first says the model came out narrower than the database,
 /// the second says the database denies it too. The schema is asked, since the filtered set cannot
-/// tell them apart, and where `reached` holds, per target, the policies reaching an acting role
-/// that holds the target's command, a policy covers nothing outside it.
+/// tell them apart, and `reached` holds, per target, the policies reaching an acting role that
+/// holds the target's command, so a policy covers nothing outside it.
 ///
 /// Coverage is read off which commands grant, not off which relations exist. A barrier with
 /// nothing permissive to narrow leaves the relation defined and granting nobody, which the
@@ -1842,7 +1842,7 @@ fn fill_and_report_coverage<DB: DatabaseLike>(
     notes: &mut Vec<TranslationNote>,
     source_table: &TableId,
     declared_here: &[&DB::Policy],
-    reached: Option<&BTreeMap<ActionTarget, BTreeSet<&str>>>,
+    reached: &BTreeMap<ActionTarget, BTreeSet<&str>>,
     settled: &SettledCommands<'_>,
     db: &DB,
 ) {
