@@ -814,6 +814,41 @@ GRANT DELETE ON docs TO support_staff;
     assert!(can_delete.contains("no_access"), "{model}");
 }
 
+/// A policy reaching only the role without a command's privilege covers that command for no
+/// acting role, so the command is one no policy covers rather than one the threshold dropped.
+#[test]
+fn a_policy_reaching_only_the_role_lacking_the_command_leaves_it_unpolicied() {
+    let planned = translate(
+        vec![user_id_setting()],
+        &["gen_r0", "gen_r1"],
+        "
+CREATE ROLE gen_r0 NOLOGIN;
+CREATE ROLE gen_r1 NOLOGIN;
+CREATE TABLE t0 (id INTEGER PRIMARY KEY, owner TEXT NOT NULL);
+ALTER TABLE t0 ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON t0 TO gen_r0;
+GRANT SELECT, UPDATE, DELETE ON t0 TO gen_r1;
+CREATE POLICY p ON t0 FOR ALL TO gen_r1 USING (owner = current_setting('app.user_id', true));
+",
+    );
+    assert!(
+        denies(&planned, "t0", ActionStatement::Insert),
+        "gen_r0 reaches no policy and gen_r1 holds no INSERT"
+    );
+    let notes = planned.notes().to_vec();
+    assert!(
+        notes.contains(&TranslationNote::NoPermissivePolicy {
+            table: table("t0"),
+            commands: vec!["INSERT".to_string()],
+        }),
+        "{notes:?}"
+    );
+    assert!(
+        planned.outputs().is_ok(),
+        "PostgreSQL denies INSERT to both roles as the model does: {notes:?}"
+    );
+}
+
 #[test]
 fn a_keyless_table_without_privileges_needs_no_row_identity() {
     let planned = acting(

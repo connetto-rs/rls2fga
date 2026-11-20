@@ -276,7 +276,8 @@ fn fill_bucket<P: PolicyLike>(
     }
 }
 
-/// Answer row-security targets and record the permissive policies reaching this role.
+/// Answer row-security targets and record, per target, the permissive policies reaching
+/// this role.
 pub(super) fn answer_targets<'db, DB: DatabaseLike>(
     table: &'db DB::Table,
     source_table: &TableId,
@@ -284,7 +285,7 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
     parts: &mut BTreeMap<String, BTreeMap<ActionTarget, PolicyPart>>,
     db: &'db DB,
     notes: &mut Vec<TranslationNote>,
-    reached: &mut BTreeSet<&'db str>,
+    reached: &mut BTreeMap<ActionTarget, BTreeSet<&'db str>>,
 ) -> BTreeMap<ActionTarget, TargetAnswer> {
     let mut answers = BTreeMap::new();
     let mut exempt = None;
@@ -303,8 +304,11 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
                 // A statement's gates feed only its own targets, so none is answered yet.
                 let mut buckets: BTreeMap<ActionTarget, ModeBuckets> = BTreeMap::new();
                 for gate in &gates {
-                    reached.extend(gate.permissive().iter().map(|term| term.policy().name()));
                     let target = asked.target(gate.row());
+                    reached
+                        .entry(target)
+                        .or_default()
+                        .extend(gate.permissive().iter().map(|term| term.policy().name()));
                     let bucket = buckets.entry(target).or_default();
                     fill_bucket(bucket, target, gate.permissive(), gate.restrictive(), parts);
                 }
