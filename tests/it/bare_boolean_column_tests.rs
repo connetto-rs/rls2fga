@@ -1,26 +1,35 @@
 //! A bare boolean column of the guarded row is the test `column = TRUE` spells, and `NOT column`
 //! the test `column = FALSE` spells, which `PostgreSQL` evaluates alike on every row.
 
-use rls2fga::translator::Outputs;
+use rls2fga::translator::{DivergentTranslation, Outputs};
 use rls2fga::types::ConfidenceLevel;
 
 use crate::support::footgun::{db_of, translator};
 
 const CALLER_OWNS: &str = "owner = current_setting('app.user_id', true)";
 
-/// The outputs for `t0` guarded by `clause` for every command, refusing any clause below `B`
-/// as a deployment does.
-fn outputs_for(clause: &str) -> Outputs {
-    let schema = format!(
-        "CREATE TABLE t0 (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, team TEXT NOT NULL, \
-         flag BOOLEAN NOT NULL);\n\
+/// `t0` guarded by `clause` for every command. `confirmed` is a boolean through a domain.
+fn schema_guarded_by(clause: &str) -> String {
+    format!(
+        "CREATE DOMAIN yes_no AS BOOLEAN;\n\
+         CREATE TABLE t0 (id INTEGER PRIMARY KEY, owner TEXT NOT NULL, team TEXT NOT NULL, \
+         flag BOOLEAN NOT NULL, confirmed yes_no NOT NULL);\n\
          ALTER TABLE t0 ENABLE ROW LEVEL SECURITY;\n\
          CREATE POLICY p ON t0 USING ({clause});\n"
-    );
+    )
+}
+
+/// The outputs for `t0` guarded by `clause`, or the notes refusing it, below `B` as a
+/// deployment refuses.
+fn translated(clause: &str) -> Result<Outputs, DivergentTranslation> {
     translator(ConfidenceLevel::B)
-        .translate(&db_of(&schema))
+        .translate(&db_of(&schema_guarded_by(clause)))
         .expect("translation should plan")
         .outputs()
+}
+
+fn outputs_for(clause: &str) -> Outputs {
+    translated(clause)
         .unwrap_or_else(|divergent| panic!("`{clause}` must translate in full: {divergent:?}"))
 }
 
@@ -59,6 +68,45 @@ fn a_bare_boolean_column_translates_as_its_comparison() {
             translation(&bare_outputs),
             translation(&compared_outputs),
             "`{bare}` against `{compared}`"
+        );
+    }
+}
+
+/// A domain over `boolean` tests as `boolean` does, so its bare column reads as its comparison,
+/// gaps that comparison leaves included.
+#[test]
+fn a_bare_domain_over_boolean_column_translates_as_its_comparison() {
+    let outcome = |clause| match translated(clause) {
+        Ok(outputs) => format!("{:?}", translation(&outputs)),
+        Err(divergent) => format!("{:?}", divergent.notes()),
+    };
+    for (bare, compared) in [
+        ("confirmed", "confirmed = true"),
+        ("NOT confirmed", "confirmed = false"),
+    ] {
+        assert_eq!(
+            outcome(bare),
+            outcome(compared),
+            "`{bare}` against `{compared}`"
+        );
+    }
+}
+
+/// A bare column of another type is no boolean test, so the classifier never reads it as
+/// `column = TRUE`.
+#[test]
+fn a_bare_text_column_stays_unclassified() {
+    for clause in ["team", "NOT team"] {
+        let classified =
+            translator(ConfidenceLevel::B).classify(&db_of(&schema_guarded_by(clause)));
+        let using = classified[0]
+            .using_classification()
+            .expect("the policy carries a USING clause");
+        assert_eq!(
+            using.confidence,
+            ConfidenceLevel::D,
+            "`{clause}`: {:?}",
+            using.pattern
         );
     }
 }
