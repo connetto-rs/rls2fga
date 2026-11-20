@@ -206,6 +206,7 @@ async fn table_privileges_agree_on_postgres_17_and_18() {
         a_composite_key_read_back_needs_every_key_column(&cluster, major).await;
         a_whole_table_grant_on_rls_off_answers_unrestricted(&cluster, major).await;
         a_role_lacking_the_command_keeps_the_answer_judged(&cluster, major).await;
+        a_policy_reaching_only_the_role_lacking_the_command_denies_it(&cluster, major).await;
         a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(&cluster, major).await;
         an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(&cluster, major).await;
     }
@@ -936,6 +937,50 @@ GRANT SELECT ON vault TO vault_keeper;
         // The grant never reached the other role, so it reads nothing the policy admits.
         ("outsider", "vault:v1", ActionStatement::Select, false),
         ("outsider", "vault:v2", ActionStatement::Select, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// A policy reaching only the role without `INSERT` leaves `INSERT` denied to both roles, one
+/// for want of a policy and the other for want of the privilege.
+async fn a_policy_reaching_only_the_role_lacking_the_command_denies_it(
+    cluster: &Cluster,
+    major: &str,
+) {
+    let case = ParityCase::reading(
+        &format!("privileges-policy-on-unprivileged-{major}"),
+        "
+CREATE TABLE t0 (id INTEGER PRIMARY KEY, owner TEXT NOT NULL);
+ALTER TABLE t0 ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, INSERT, UPDATE, DELETE ON t0 TO gen_r0;
+GRANT SELECT, UPDATE, DELETE ON t0 TO gen_r1;
+CREATE POLICY p ON t0 FOR ALL TO gen_r1 USING (owner = current_setting('app.user_id', true));
+",
+        &["INSERT INTO t0(id, owner) VALUES (1, 'alice'), (2, 'bob')"],
+        vec![
+            Principal::with_setting("alice", "gen_r0", "app.user_id", "alice"),
+            Principal::with_setting("bob", "gen_r1", "app.user_id", "bob"),
+        ],
+    )
+    .after(&["CREATE ROLE gen_r0 LOGIN; CREATE ROLE gen_r1 LOGIN"])
+    .updating("t0", "owner = owner")
+    .unobservable(
+        "t0",
+        "p",
+        ClauseKind::UsingAsCheck,
+        Side::Denies,
+        "PostgreSQL checks the same USING on the new row of an UPDATE naming its rows, and the \
+         one role p reaches holds no INSERT.",
+    );
+    let run = support::parity::run(cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        ("alice", "t0:1", ActionStatement::Insert, false),
+        ("bob", "t0:2", ActionStatement::Insert, false),
+        ("alice", "t0:1", ActionStatement::Select, false),
+        ("bob", "t0:2", ActionStatement::Select, true),
+        ("bob", "t0:2", ActionStatement::Update, true),
     ] {
         support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
     }

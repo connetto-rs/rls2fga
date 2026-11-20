@@ -1358,8 +1358,9 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 let mut barrier_denied: BTreeSet<ActionTarget> = BTreeSet::new();
                 let mut refused_everywhere: BTreeMap<ActionTarget, bool> = BTreeMap::new();
                 // Only a catalog table is answered per role, so only there can a policy
-                // reach no acting role.
-                let mut reached: Option<BTreeSet<&str>> = catalog_table.map(|_| BTreeSet::new());
+                // reach no acting role, or reach a target only through roles refused it.
+                let mut reached: Option<BTreeMap<ActionTarget, BTreeSet<&str>>> =
+                    catalog_table.map(|_| BTreeMap::new());
                 for branch in &mut branches {
                     let mut parts: BTreeMap<String, BTreeMap<ActionTarget, PolicyPart>> =
                         BTreeMap::new();
@@ -1389,6 +1390,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     }
                     let answers = match (catalog_table, reached.as_mut()) {
                         (Some(table), Some(reached)) => {
+                            let mut reaching = BTreeMap::new();
                             let mut answers = answer_targets(
                                 table,
                                 &source_table,
@@ -1396,9 +1398,16 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                                 &mut parts,
                                 db,
                                 &mut notes,
-                                reached,
+                                &mut reaching,
                             );
                             let held = gate_on_privileges(&mut answers, table, branch, db);
+                            // A role refused a target builds no branch for it, so no policy
+                            // reaches the role there.
+                            for (target, policies) in reaching {
+                                if !matches!(answers.get(&target), Some(TargetAnswer::Refused)) {
+                                    reached.entry(target).or_default().extend(policies);
+                                }
+                            }
                             if let Some((name, _)) = branch.role {
                                 for (command, holding) in held {
                                     column_holdings
@@ -1822,8 +1831,8 @@ struct SettledCommands<'a> {
 /// A command denied because every policy covering it fell below the bar gets a different line
 /// from one no policy covers at all: the first says the model came out narrower than the database,
 /// the second says the database denies it too. The schema is asked, since the filtered set cannot
-/// tell them apart, and where `reached` holds the policies some acting role is subject to, a
-/// policy outside it covers nothing.
+/// tell them apart, and where `reached` holds, per target, the policies reaching an acting role
+/// that holds the target's command, a policy covers nothing outside it.
 ///
 /// Coverage is read off which commands grant, not off which relations exist. A barrier with
 /// nothing permissive to narrow leaves the relation defined and granting nobody, which the
@@ -1833,7 +1842,7 @@ fn fill_and_report_coverage<DB: DatabaseLike>(
     notes: &mut Vec<TranslationNote>,
     source_table: &TableId,
     declared_here: &[&DB::Policy],
-    reached: Option<&BTreeSet<&str>>,
+    reached: Option<&BTreeMap<ActionTarget, BTreeSet<&str>>>,
     settled: &SettledCommands<'_>,
     db: &DB,
 ) {
@@ -1845,12 +1854,7 @@ fn fill_and_report_coverage<DB: DatabaseLike>(
         .filter(|command| !settled.blocked.contains(command))
         .collect();
     if !uncovered.is_empty() {
-        let reaching: Vec<&DB::Policy> = declared_here
-            .iter()
-            .copied()
-            .filter(|policy| reached.is_none_or(|reached| reached.contains(policy.name())))
-            .collect();
-        let covered_by_schema = commands_a_permissive_policy_covers(&reaching, db);
+        let covered_by_schema = commands_a_permissive_policy_covers(declared_here, reached, db);
         let (dropped, unpolicied): (Vec<&str>, Vec<&str>) = uncovered
             .into_iter()
             .partition(|command| covered_by_schema.contains(command));

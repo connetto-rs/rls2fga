@@ -275,17 +275,29 @@ pub(crate) fn policy_clause_targets<P: PolicyLike>(
 /// Commands the schema's permissive policies on one table cover, whatever their
 /// confidence. The filtered policy set cannot answer this, and the answer decides
 /// whether a denied command is a coverage gap in `PostgreSQL` or in the translation.
+///
+/// Where `reached` names, per target, the policies reaching an acting role that holds the
+/// target's command, a policy covers only through those targets. A policy reaching only a
+/// role denied the command for want of its privilege covers it for nobody.
 pub(crate) fn commands_a_permissive_policy_covers<P: PolicyLike>(
     declared: &[&P],
+    reached: Option<&BTreeMap<ActionTarget, BTreeSet<&str>>>,
     db: &P::DB,
 ) -> BTreeSet<&'static str> {
     let mut commands = BTreeSet::new();
     for policy in declared {
-        let reached = policy_clause_targets(*policy, db);
+        let mut targets = policy_clause_targets(*policy, db);
+        if let Some(reached) = reached {
+            targets.retain(|target| {
+                reached
+                    .get(target)
+                    .is_some_and(|policies| policies.contains(policy.name()))
+            });
+        }
         commands.extend(
             action_relation_commands()
                 .into_iter()
-                .filter(|(_, _, needed)| needed.iter().all(|target| reached.contains(target)))
+                .filter(|(_, _, needed)| needed.iter().all(|target| targets.contains(target)))
                 .map(|(_, command, _)| command),
         );
     }
