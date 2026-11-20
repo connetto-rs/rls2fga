@@ -932,6 +932,13 @@ fn classify_expr_inner<DB: DatabaseLike>(
         return classify_expr_depth(inner, db, registry, table, command, depth + 1, state);
     }
 
+    // `flag` reads as `flag = TRUE` and `NOT flag` as `flag = FALSE`.
+    if let Some(compared) = lookup_table(db, table)
+        .and_then(|guarded| recognizers::boolean_column_comparison(expr, guarded, db))
+    {
+        return classify_expr_depth(&compared, db, registry, table, command, depth + 1, state);
+    }
+
     // A date or time literal is judged against its column's type before its cast is.
     let temporal = temporal_columns(db, table);
     if let Some(comparisons) = recognizers::temporal_literal_comparisons(expr, &temporal) {

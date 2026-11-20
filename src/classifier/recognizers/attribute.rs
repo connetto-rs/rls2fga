@@ -1166,6 +1166,40 @@ pub(crate) fn column_comparison<DB: DatabaseLike>(
     }))
 }
 
+/// The comparison a boolean column of `table` tested bare spells, `column = TRUE`, or
+/// `column = FALSE` under `NOT`, which `PostgreSQL` evaluates alike on every row, a `NULL` one
+/// included. `None` for anything else, a column of another type included.
+pub(crate) fn boolean_column_comparison<DB: DatabaseLike>(
+    expr: &Expr,
+    table: &DB::Table,
+    db: &DB,
+) -> Option<Expr> {
+    let (tested, value) = match unparenthesize(expr) {
+        Expr::UnaryOp {
+            op: UnaryOperator::Not,
+            expr: operand,
+        } => (operand.as_ref(), false),
+        tested => (tested, true),
+    };
+    let column = bare_column(tested)?;
+    let declared = table
+        .columns(db)
+        .into_iter()
+        .flatten()
+        .find(|candidate| candidate.stored_column_name() == column.as_str())?;
+    if !matches!(
+        declared.data_type(db).scalar_family(db),
+        Some(ScalarFamily::Bool)
+    ) {
+        return None;
+    }
+    Some(Expr::BinaryOp {
+        left: Box::new(unparenthesize(tested).clone()),
+        op: BinaryOperator::Eq,
+        right: Box::new(Expr::Value(Value::Boolean(value).into())),
+    })
+}
+
 /// The type and printed value of a quoted literal cast once to `date`, `timestamp` or
 /// `timestamptz`, a precision applied as `PostgreSQL` applies it. `None` for any other
 /// literal, and for one the cast has no value for, which every other reading refuses.
