@@ -1168,7 +1168,8 @@ pub(crate) fn column_comparison<DB: DatabaseLike>(
 
 /// The comparison a boolean column of `table` tested bare spells, `column = TRUE`, or
 /// `column = FALSE` under `NOT`, which `PostgreSQL` evaluates alike on every row, a `NULL` one
-/// included. `None` for anything else, a column of another type included.
+/// included. A domain over `boolean` is boolean. `None` for anything else, a column of another
+/// type included.
 pub(crate) fn boolean_column_comparison<DB: DatabaseLike>(
     expr: &Expr,
     table: &DB::Table,
@@ -1187,10 +1188,9 @@ pub(crate) fn boolean_column_comparison<DB: DatabaseLike>(
         .into_iter()
         .flatten()
         .find(|candidate| candidate.stored_column_name() == column.as_str())?;
-    if !matches!(
-        declared.data_type(db).scalar_family(db),
-        Some(ScalarFamily::Bool)
-    ) {
+    let declared_type = declared.data_type(db);
+    let stored = declared_type.base_type(db).unwrap_or(declared_type);
+    if !matches!(stored.scalar_family(db), Some(ScalarFamily::Bool)) {
         return None;
     }
     Some(Expr::BinaryOp {
