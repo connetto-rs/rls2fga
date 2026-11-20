@@ -1317,7 +1317,8 @@ async fn one_user_acting_as_two_callers_is_asked_as_that_user(cluster: Arc<Clust
 }
 
 /// Two states of one schema, the owner alone and a stranger alone, each decide one side of
-/// the same clause, so either alone fails and together they pass.
+/// the same clause, so either alone fails and together they pass. The owner twice still
+/// leaves the deny side undecided, however the second run counts what the first decided.
 async fn variants_decide_together_what_neither_decides_alone(cluster: Arc<Cluster>) {
     let variant = |name: &str, subject: &str| {
         ParityCase::reading(
@@ -1348,6 +1349,21 @@ CREATE POLICY notes_select ON notes FOR SELECT
     let message = panic_message(handle.await.unwrap_err());
     assert!(
         message.contains("notes_select on public.notes, USING, deny side"),
+        "{message}"
+    );
+    let twice = [
+        variant("runner-variants-owner", "alice"),
+        variant("runner-variants-owner-again", "alice"),
+    ];
+    let repeated = Arc::clone(&cluster);
+    let handle = tokio::spawn(async move {
+        support::parity::run_variants_before(&repeated, &twice, core::time::Duration::from_mins(5))
+            .await;
+    });
+    let message = panic_message(handle.await.unwrap_err());
+    assert!(
+        message.contains("notes_select on public.notes, USING, deny side")
+            && !message.contains("grant side"),
         "{message}"
     );
     let variants = [
