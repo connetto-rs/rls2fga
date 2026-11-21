@@ -22,6 +22,9 @@ std = ["rls2fga-types/std", "sqlparser/std", "sqlparser/recursive-protection", "
 # built. Off by default: everything else here needs no server, no async runtime and
 # no gRPC stack.
 client = ["std", "dep:openfga-client", "dep:prost"]
+# Replays `sql-traits`' recorded row-level security cases on the model, reading their
+# rows from a running PostgreSQL and checking against a running `OpenFGA`.
+parity = ["client", "std", "sql-traits/parity-fixtures", "dep:diesel", "dep:url"]
 
 [dependencies]
 rls2fga-types = { path = "types", default-features = false }
@@ -33,14 +36,17 @@ serde_json = { version = "1", default-features = false, features = ["alloc", "ar
 openfga-client = { version = "0.6.1", optional = true }
 # Measures the encoded model the way the server does, behind `client`.
 prost = { version = "0.14", optional = true, default-features = false }
+# Loads a parity case's rows from PostgreSQL, behind `parity`.
+diesel = { version = "2", optional = true, default-features = false, features = ["postgres", "serde_json"] }
+# Points a parity case's connection at the database it creates, behind `parity`.
+url = { version = "2", optional = true }
 thiserror = { version = "2", default-features = false }
 # Policy literals and request zones name IANA zones, which PostgreSQL reads from its tz database.
 sql-values = { version = "0.6", default-features = false, features = ["tzdb"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
-# The Postgres suites talk to a container, so the driver is test-only. No library code
-# calls it, and a feature enabling it would claim otherwise.
+# The Postgres suites talk to a container whatever the features.
 diesel = { version = "2", features = ["postgres", "serde_json"] }
 insta = { version = "1", features = ["json"] }
 serde_json = "1"

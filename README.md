@@ -129,7 +129,7 @@ A model `OpenFGA` would refuse to store is a translation error. `translate` retu
 
 ## Cargo features
 
-`std` is on by default and carries the file output surface (`Outputs::write`). Without it the crate builds on `no_std` plus `alloc`, verified against `thumbv7em-none-eabi`, with the whole pipeline intact. `client` adds the model writer and implies `std`.
+`std` is on by default and carries the file output surface (`Outputs::write`). Without it the crate builds on `no_std` plus `alloc`, verified against `thumbv7em-none-eabi`, with the whole pipeline intact. `client` adds the model writer and implies `std`. `parity` adds `parity::replay`, which answers `sql-traits`' recorded row-level security cases on the model from a running PostgreSQL 18 and `OpenFGA`, and implies `client`.
 
 ## Supported patterns
 

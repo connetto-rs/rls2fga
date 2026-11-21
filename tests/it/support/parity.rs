@@ -24,6 +24,7 @@ use sqlparser::parser::Parser;
 use testcontainers::{ContainerAsync, GenericImage};
 
 use rls2fga::classifier::function_registry::{DeclaredSource, DeclaredSources};
+use rls2fga::json_row;
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ColumnCommand, ColumnName,
@@ -812,7 +813,7 @@ fn objects(
                 .next()
                 .map_or_else(|| serde_json::json!({}), |value| value.row);
             let name = entry
-                .render(&super::JsonRowValues(&row))
+                .render(&json_row::JsonRow(&row))
                 .expect("the fixed object name is valid")
                 .expect("a literal key names the permission object");
             let update_set = declared_set.or_else(|| no_op_set(&non_generated, &[]));
@@ -833,7 +834,7 @@ fn objects(
             // A name the renderer refuses is the row-naming divergence this suite exists to
             // find, so it fails here rather than removing the row and passing on the rest.
             // `Ok(None)` is the deliberate one: no column names that row.
-            let name = match entry.render(&super::JsonRowValues(&row)) {
+            let name = match entry.render(&json_row::JsonRow(&row)) {
                 Ok(Some(name)) => name,
                 Ok(None) => continue,
                 Err(error) => panic!("naming a row of {table}: {error}"),
@@ -1258,7 +1259,7 @@ async fn openfga_allows(
                             case.name, judgement.type_name
                         )
                     };
-                    let values = super::JsonRowValues(row);
+                    let values = json_row::JsonRow(row);
                     let name = match resulting.object(&values) {
                         Ok(Some(name)) => name,
                         Ok(None) => panic!(
@@ -1485,7 +1486,13 @@ impl Cluster {
         }
     }
 
-    fn url(&self, database: &str) -> String {
+    /// The gRPC endpoint of the cluster's `OpenFGA`.
+    pub(crate) fn openfga_url(&self) -> String {
+        format!("http://127.0.0.1:{}", self.grpc_port)
+    }
+
+    /// The URL of `database` on the cluster's `PostgreSQL`, as the superuser.
+    pub(crate) fn url(&self, database: &str) -> String {
         format!(
             "postgres://{}:{}@127.0.0.1:{}/{database}",
             super::containers::PG_USER,
@@ -2688,7 +2695,7 @@ fn tuples_replaying_pure_queries(
         });
         for JsonRow { row } in rows {
             let records =
-                records_from_row(description, &super::JsonRowValues(row)).unwrap_or_else(|error| {
+                records_from_row(description, &json_row::JsonRow(row)).unwrap_or_else(|error| {
                     panic!("{}: evaluating a row of {table}: {error:?}", case.name)
                 });
             for record in records {

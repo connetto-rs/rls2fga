@@ -19,7 +19,7 @@ use crate::support::parity::{
     assert_agrees, assert_postgres, request_predicate_holds, settings_map, ClauseKind, Cluster,
     ParityCase, Principal, Side,
 };
-use crate::support::JsonRowValues;
+use rls2fga::json_row::JsonRow;
 
 /// The four gates connetto puts on every synced table, one per command.
 fn gates(table: &str) -> String {
@@ -138,7 +138,7 @@ fn grants(
         shapes
             .iter()
             .flat_map(|shape| {
-                records_from_row(shape, &JsonRowValues(row)).expect("every seeded row is named")
+                records_from_row(shape, &JsonRow(row)).expect("every seeded row is named")
             })
             .collect()
     };
