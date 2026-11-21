@@ -48,19 +48,6 @@ pub(crate) fn relation_shapes<'plan, DB: DatabaseLike>(
         let mut names: BTreeSet<&RelationName> = BTreeSet::new();
         names.extend(type_plan.direct_relations.keys());
         names.extend(type_plan.computed_relations.keys());
-        // Each check about a written row carries that row's facts, so no record fills a
-        // relation of the type judging it.
-        if type_plan.resulting_of.is_some() {
-            out.extend(names.into_iter().map(|relation| RelationShapes {
-                type_name: type_plan.type_name.clone(),
-                relation: relation.clone(),
-                from_one_row: false,
-                shapes: Vec::new(),
-                decision: None,
-                grants_nobody: false,
-            }));
-            continue;
-        }
         for relation in names {
             let mut visiting = BTreeSet::new();
             let decision = relation_decision(
@@ -157,6 +144,48 @@ fn find_type<'plan>(plan: &'plan SchemaPlan, type_name: &TypeName) -> Option<&'p
         .find(|candidate| candidate.type_name == *type_name)
 }
 
+/// The type whose sources state `type_plan`'s direct facts. A type judging written rows
+/// states the stored type's facts about the new row under its own name.
+fn facts_type(type_plan: &TypePlan) -> &TypeName {
+    type_plan
+        .resulting_of
+        .as_ref()
+        .unwrap_or(&type_plan.type_name)
+}
+
+/// `shapes` as records of `type_plan`, renamed from the stored type for a written row.
+fn owned_shapes(
+    type_plan: &TypePlan,
+    mut shapes: Vec<RecordDescription>,
+) -> Vec<RecordDescription> {
+    if type_plan.resulting_of.is_some() {
+        for shape in &mut shapes {
+            if let RecordDerivation::FromRow { template, .. } = &mut shape.derivation {
+                template.object_type = type_plan.type_name.clone();
+            }
+        }
+    }
+    shapes
+}
+
+/// Whether a clause the database evaluates was lost from `relation`, here or on the stored
+/// type a written-row type copies it from.
+fn narrowed(plan: &SchemaPlan, type_plan: &TypePlan, relation: &RelationName) -> bool {
+    let stored = type_plan
+        .resulting_of
+        .as_ref()
+        .and_then(|stored| find_type(plan, stored));
+    [Some(type_plan), stored]
+        .into_iter()
+        .flatten()
+        .any(|candidate| candidate.narrowed_relations.contains(relation))
+}
+
+/// [`facts_type`] of `type_name`, or `type_name` itself where the plan has no such type.
+fn facts_of<'a>(plan: &'a SchemaPlan, type_name: &'a TypeName) -> &'a TypeName {
+    find_type(plan, type_name).map_or(type_name, facts_type)
+}
+
 fn relation_decision<DB: DatabaseLike>(
     type_name: &TypeName,
     relation: &RelationName,
@@ -173,12 +202,12 @@ fn relation_decision<DB: DatabaseLike>(
         None => None,
         // A clause the database evaluates was lost here, so the emitted rule and the
         // database disagree and no row can settle the difference.
-        Some(type_plan) if type_plan.narrowed_relations.contains(relation) => None,
+        Some(type_plan) if narrowed(plan, type_plan, relation) => None,
         Some(type_plan) => match type_plan.computed_relations.get(relation) {
             Some(expr) => expr_decision(type_name, expr, plan, sources, db, visiting),
             // A relation with direct subjects is answered by the tuples loaded into
             // it, so the sources feeding it decide.
-            None => leaf_decision(type_name, relation, sources, &plan.well_known, db),
+            None => leaf_decision(type_plan, relation, sources, &plan.well_known, db),
         },
     };
     visiting.remove(&(type_name.to_string(), relation.clone()));
@@ -211,11 +240,15 @@ fn expr_decision<DB: DatabaseLike>(
         // the request alone, so the caller's context decides it for every row that yields
         // its link.
         UsersetExpr::TupleToUserset { tupleset, computed }
-            if links_to_request_gates(type_name, tupleset, plan, sources) =>
+            if links_to_request_gates(facts_of(plan, type_name), tupleset, plan, sources) =>
         {
             let predicate =
                 request_predicate(&plan.well_known.request_gate, computed, plan, sources)?;
-            let shapes = shapes_filling(type_name, tupleset, sources);
+            let type_plan = find_type(plan, type_name)?;
+            let shapes = owned_shapes(
+                type_plan,
+                shapes_filling(facts_type(type_plan), tupleset, sources),
+            );
             if shapes.is_empty() {
                 return None;
             }
@@ -330,14 +363,15 @@ fn child_decisions<DB: DatabaseLike>(
 
 /// Every source feeding `relation` must key its object on this row's identity and
 /// name a user the row itself supplies. The shapes that pass are the ones
-/// [`shapes_filling`] reports for it, deduplicated the same way.
+/// [`shapes_filling`] reports for it, deduplicated the same way, named for `type_plan`.
 fn leaf_decision<DB: DatabaseLike>(
-    type_name: &TypeName,
+    type_plan: &TypePlan,
     relation: &RelationName,
     sources: &SourceIndex<'_, '_>,
     well_known: &WellKnownTypes,
     db: &DB,
 ) -> Option<RowDecision> {
+    let type_name = facts_type(type_plan);
     let distinct: Vec<_> = feeding_once(type_name, relation, sources)
         .copied()
         .collect();
@@ -363,7 +397,7 @@ fn leaf_decision<DB: DatabaseLike>(
         let description = indexed.description?.clone();
         return Some(RowDecision::RequestGated {
             relation: relation.clone(),
-            shapes: vec![description],
+            shapes: owned_shapes(type_plan, vec![description]),
             context_key: row_parameter.clone(),
             request_parameter: request_parameter.clone(),
             comparison: *comparison,
@@ -393,7 +427,7 @@ fn leaf_decision<DB: DatabaseLike>(
         let description = indexed.description?.clone();
         return Some(RowDecision::RequestGated {
             relation: relation.clone(),
-            shapes: vec![description],
+            shapes: owned_shapes(type_plan, vec![description]),
             context_key: row_parameter.clone(),
             request_parameter: request_parameter.clone(),
             comparison: *comparison,
@@ -412,6 +446,7 @@ fn leaf_decision<DB: DatabaseLike>(
         shapes.push(description.clone());
     }
     let relation = relation.clone();
+    let shapes = owned_shapes(type_plan, shapes);
     Some(match kind? {
         RowSubject::Named => RowDecision::Leaf { relation, shapes },
         RowSubject::Everyone => RowDecision::Everyone { relation, shapes },

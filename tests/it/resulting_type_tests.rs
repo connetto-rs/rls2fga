@@ -2,7 +2,10 @@
 
 use rls2fga::json_row::JsonRow;
 use rls2fga::translator::Translation;
-use rls2fga::types::{ActionAnswer, ActionJudgement, ConfidenceLevel, RowVersion, TranslationNote};
+use rls2fga::types::{
+    records_from_row, ActionAnswer, ActionJudgement, ActionStatement, ConfidenceLevel, Record,
+    RecordDescription, RequestPredicate, RowDecision, RowVersion, TranslationNote,
+};
 
 use crate::support;
 use crate::support::footgun::{declared_userset, relation_definition, relation_denies, targets_of};
@@ -207,4 +210,159 @@ fn a_composite_key_names_both_ends_of_the_stored_row_link() {
         ),
         vec!["pairs".to_string()],
     );
+}
+
+/// Notes their author reads, writes and moves, every check reading the row's own columns.
+const AUTHORED: &str = "
+CREATE TABLE notes (id TEXT PRIMARY KEY, author_id TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_select ON notes FOR SELECT
+  USING (author_id = current_setting('app.user_id', true));
+CREATE POLICY notes_insert ON notes FOR INSERT
+  WITH CHECK (author_id = current_setting('app.user_id', true));
+CREATE POLICY notes_update ON notes FOR UPDATE
+  USING (author_id = current_setting('app.user_id', true));
+";
+
+/// [`AUTHORED`] beside a second `INSERT` policy the threshold drops, so the emitted
+/// `INSERT` rule is narrower than the database's.
+const AUTHORED_WITH_OPAQUE_INSERT: &str = "
+CREATE TABLE notes (id TEXT PRIMARY KEY, author_id TEXT);
+CREATE FUNCTION opaque_gate(TEXT) RETURNS BOOLEAN LANGUAGE plpgsql STABLE
+  AS $$ BEGIN RETURN NULL; END $$;
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_select ON notes FOR SELECT
+  USING (author_id = current_setting('app.user_id', true));
+CREATE POLICY notes_insert ON notes FOR INSERT
+  WITH CHECK (author_id = current_setting('app.user_id', true));
+CREATE POLICY notes_insert_opaque ON notes FOR INSERT WITH CHECK (opaque_gate(id));
+";
+
+/// Whether a caller acting as the suite's role satisfies `predicate`.
+fn acting_role_holds(predicate: &RequestPredicate) -> bool {
+    match predicate {
+        RequestPredicate::ActsAs { role } => role == support::deployment::ACTING_ROLE,
+        RequestPredicate::Any(children) => children.iter().any(acting_role_holds),
+        RequestPredicate::All(children) => children.iter().all(acting_role_holds),
+        other => panic!("a predicate this suite does not supply: {other:?}"),
+    }
+}
+
+/// Every record `decision`'s leaves derive from `row`.
+fn decision_records(decision: &RowDecision, row: &serde_json::Value) -> Vec<Record> {
+    let from = |shapes: &[RecordDescription]| -> Vec<Record> {
+        shapes
+            .iter()
+            .flat_map(|shape| records_from_row(shape, &JsonRow(row)).unwrap())
+            .collect()
+    };
+    match decision {
+        RowDecision::Leaf { shapes, .. }
+        | RowDecision::Everyone { shapes, .. }
+        | RowDecision::RequestGated { shapes, .. }
+        | RowDecision::Request { shapes, .. } => from(shapes),
+        RowDecision::Any(children) | RowDecision::All(children) => children
+            .iter()
+            .flat_map(|child| decision_records(child, row))
+            .collect(),
+    }
+}
+
+/// Whether `decision` grants `user` on `row`, read the way a consumer answering locally
+/// reads it.
+fn decision_grants(decision: &RowDecision, row: &serde_json::Value, user: &str) -> bool {
+    match decision {
+        RowDecision::Leaf { .. } => decision_records(decision, row)
+            .iter()
+            .any(|record| record.subject == format!("user:{user}")),
+        RowDecision::Everyone { .. } => !decision_records(decision, row).is_empty(),
+        RowDecision::Request { predicate, .. } => {
+            !decision_records(decision, row).is_empty() && acting_role_holds(predicate)
+        }
+        RowDecision::Any(children) => children
+            .iter()
+            .any(|child| decision_grants(child, row, user)),
+        RowDecision::All(children) => children
+            .iter()
+            .all(|child| decision_grants(child, row, user)),
+        other @ RowDecision::RequestGated { .. } => {
+            panic!("a decision this suite does not build: {other:?}")
+        }
+    }
+}
+
+/// Each written-row judgement `statements` ask on `translation`, with the decision the
+/// translation reports for it.
+fn written_row_decisions<'a>(
+    translation: &'a Translation,
+    statements: &[ActionStatement],
+) -> Vec<(&'a ActionJudgement, Option<&'a RowDecision>)> {
+    translation
+        .action_relations()
+        .iter()
+        .filter(|entry| statements.contains(&entry.statement))
+        .flat_map(|entry| judgements(&entry.answer))
+        .filter(|judgement| judgement.version == RowVersion::Resulting)
+        .map(|judgement| {
+            let reported = translation
+                .relations()
+                .iter()
+                .find(|entry| {
+                    entry.type_name == judgement.type_name && entry.relation == judgement.relation
+                })
+                .unwrap_or_else(|| panic!("{judgement:?} is not reported"));
+            assert_eq!(reported.from_one_row, reported.decision.is_some());
+            (judgement, reported.decision.as_ref())
+        })
+        .collect()
+}
+
+/// A check on a written row that reads only that row's columns is decided by the row the
+/// write produces, from the same facts a check about it carries.
+#[test]
+fn a_written_row_reading_only_its_own_columns_is_decided_by_that_row() {
+    let outputs = translate(AUTHORED).outputs().unwrap();
+    let translation = outputs.translation();
+    let resulting = translation.resulting_rows().first().unwrap();
+    let written = serde_json::json!({"id": "n1", "author_id": "alice"});
+    let carried = resulting.records(&JsonRow(&written)).unwrap();
+    let decisions = written_row_decisions(
+        translation,
+        &[
+            ActionStatement::Insert,
+            ActionStatement::InsertReturning,
+            ActionStatement::Update,
+        ],
+    );
+    assert!(decisions.len() >= 3, "{decisions:#?}");
+    for (judgement, decision) in decisions {
+        let decision = decision.unwrap_or_else(|| panic!("{judgement:?} costs a round trip"));
+        assert!(
+            decision_grants(decision, &written, "alice"),
+            "{decision:#?}"
+        );
+        assert!(!decision_grants(decision, &written, "bob"), "{decision:#?}");
+        for record in decision_records(decision, &written) {
+            assert!(
+                carried.contains(&record),
+                "{record:?} is not a fact the check carries: {carried:#?}"
+            );
+        }
+    }
+}
+
+/// A written-row check the threshold narrowed answers less than the database, so the row
+/// cannot decide it.
+#[test]
+fn a_narrowed_written_row_check_is_not_decided_by_the_row() {
+    let translation = translate(AUTHORED_WITH_OPAQUE_INSERT);
+    let decisions = written_row_decisions(&translation, &[ActionStatement::Insert]);
+    assert_ne!(decisions.len(), 0);
+    for (judgement, decision) in decisions {
+        assert!(decision.is_none(), "{judgement:?} decided as {decision:#?}");
+    }
+    let control = translate(AUTHORED);
+    assert!(written_row_decisions(&control, &[ActionStatement::Insert])
+        .iter()
+        .all(|(_, decision)| decision.is_some()));
 }
