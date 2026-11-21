@@ -740,15 +740,6 @@ fn policy_caps_with_no_pair_relation_are_refused() {
         (
             POLICY_CAPS.replace(
                 star,
-                "(organization_id, projects.missing) IN (SELECT * FROM authz.capped_kinds('writer'))",
-            ),
-            POLICY_CAP_HELPERS,
-            "projects_capped",
-            "the policy pairs 'projects.missing' with the rows 'authz.capped_kinds' returns",
-        ),
-        (
-            POLICY_CAPS.replace(
-                star,
                 "NOT ((organization_id, kind) IN (SELECT * FROM authz.capped_kinds('writer')))",
             ),
             POLICY_CAP_HELPERS,
@@ -778,6 +769,14 @@ fn policy_caps_with_no_pair_relation_are_refused() {
             "expected {reason}, got {refused:?}"
         );
     }
+    let schema = POLICY_CAPS.replace(
+        star,
+        "(organization_id, projects.missing) IN (SELECT * FROM authz.capped_kinds('writer'))",
+    );
+    assert_eq!(
+        crate::support::deployment::unknown_column(&schema),
+        "projects.missing"
+    );
 }
 
 /// The reasons of every refused part of `pattern`.

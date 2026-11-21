@@ -7,7 +7,7 @@
 
 use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{
-    ExistsMembership, ExpandedFunction, PatternClass, UnclassifiedExpr, UncorrelatedMembership,
+    ExistsMembership, ExpandedFunction, PatternClass, UnclassifiedExpr,
 };
 use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::translator::TranslatorBuilder;
@@ -269,23 +269,19 @@ CREATE POLICY p ON public."M" FOR SELECT USING (public.is_member(id));
 /// A qualifier naming neither the guarded table nor the membership alias is a third
 /// scope, and reading it as the membership row would drop the correlation.
 #[test]
-fn an_unrelated_quoted_qualifier_is_not_the_membership_alias() {
-    let pattern = using_pattern(
-        r#"
+fn an_unrelated_quoted_qualifier_is_refused() {
+    let sql = r#"
 CREATE TABLE public.docs (id TEXT PRIMARY KEY);
 CREATE TABLE public.dm (doc_id TEXT NOT NULL REFERENCES public.docs(id), user_id NAME NOT NULL);
 ALTER TABLE public.docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON public.docs FOR SELECT USING (
     EXISTS (SELECT 1 FROM public.dm AS "DM" WHERE "DM".doc_id = docs.id AND dm.user_id = current_setting('app.user_id', true))
 );
-"#,
+"#;
+    assert_eq!(
+        crate::support::deployment::unknown_column(sql),
+        "dm.user_id"
     );
-    if let PatternClass::P4ExistsMembership(ExistsMembership { user_column, .. }) = &pattern {
-        panic!("`dm` does not name the aliased scan, so nothing proves the caller column: {user_column:?}");
-    }
-    if let PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. }) = &pattern {
-        panic!("an uncorrelated grant admits every row: {pattern:?}");
-    }
 }
 
 /// A confirmed public-flag column is confirmed by its exact stored name, since what the

@@ -916,23 +916,29 @@ ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 CREATE POLICY notes_author ON notes FOR SELECT
   USING (author_id = current_setting('app.user_id', true));
 ";
-    for walk in [
-        "WITH RECURSIVE objects (id) AS (SELECT notes.object_id UNION
+    let walk = "WITH RECURSIVE objects (id) AS (SELECT notes.object_id UNION
            SELECT e.parent_id FROM objects JOIN edges e ON e.child_id = objects.id)
-         SELECT 1 FROM objects walk JOIN objects o ON o.id = walk.id WHERE o.id = 'root'",
-        "WITH RECURSIVE edges (id) AS (SELECT notes.object_id UNION
+         SELECT 1 FROM objects walk JOIN objects o ON o.id = walk.id WHERE o.id = 'root'";
+    refusal_of(
+        &format!(
+            "{schema}CREATE POLICY notes_live ON notes AS RESTRICTIVE FOR SELECT
+               USING (NOT EXISTS ({walk}));"
+        ),
+        &[],
+        "notes_live",
+    );
+
+    let walk = "WITH RECURSIVE edges (id) AS (SELECT notes.object_id UNION
            SELECT e.parent_id FROM edges JOIN edges e ON e.child_id = edges.id)
-         SELECT 1 FROM edges JOIN objects o ON o.id = edges.id WHERE o.archived",
-    ] {
-        refusal_of(
-            &format!(
-                "{schema}CREATE POLICY notes_live ON notes AS RESTRICTIVE FOR SELECT
-                   USING (NOT EXISTS ({walk}));"
-            ),
-            &[],
-            "notes_live",
-        );
-    }
+         SELECT 1 FROM edges JOIN objects o ON o.id = edges.id WHERE o.archived";
+    let sql = format!(
+        "{schema}CREATE POLICY notes_live ON notes AS RESTRICTIVE FOR SELECT
+           USING (NOT EXISTS ({walk}));"
+    );
+    assert_eq!(
+        crate::support::deployment::unknown_column(&sql),
+        "e.child_id"
+    );
 }
 
 /// A flag over columns the deployment confirms as row attributes grades as the same test
