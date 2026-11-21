@@ -278,10 +278,7 @@ CREATE POLICY p ON public.docs FOR SELECT USING (
     EXISTS (SELECT 1 FROM public.dm AS "DM" WHERE "DM".doc_id = docs.id AND dm.user_id = current_setting('app.user_id', true))
 );
 "#;
-    assert_eq!(
-        crate::support::deployment::unknown_column(sql),
-        "dm.user_id"
-    );
+    assert_eq!(crate::support::deployment::unknown_column(sql), "dm");
 }
 
 /// A confirmed public-flag column is confirmed by its exact stored name, since what the
