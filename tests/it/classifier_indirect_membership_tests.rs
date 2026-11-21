@@ -591,7 +591,7 @@ fn unknown_alias_in_a_correlation_is_refused() {
             AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read')";
     let sql =
         format!("{SCHEMA}CREATE POLICY orders_read ON orders FOR SELECT USING ({predicate});");
-    assert_eq!(deployment::unknown_column(&sql), "ghost.id");
+    assert_eq!(deployment::unknown_column(&sql), "ghost");
 }
 
 #[test]

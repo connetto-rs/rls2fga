@@ -491,7 +491,8 @@ fn a_host_list_naming_an_undeclared_column_fails_closed() {
             the_named_key(&db).host_columns(&db),
             Err(LookupError::ColumnNotFound {
                 table_name,
-                column_name
+                column_name,
+                ..
             }) if table_name == "ownable_ancestors" && column_name == "owner_fk"
         ),
         "the fixture must carry the dangling host list"
@@ -534,7 +535,8 @@ fn a_key_naming_an_absent_target_column_fails_closed() {
             the_named_key(&db).referenced_columns(&db),
             Err(LookupError::ColumnNotFound {
                 table_name,
-                column_name
+                column_name,
+                ..
             }) if table_name == "owners" && column_name == "owner_missing"
         ),
         "the fixture must carry the absent target column"

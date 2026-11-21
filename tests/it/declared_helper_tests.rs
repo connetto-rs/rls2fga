@@ -215,10 +215,7 @@ fn a_call_in_from_projecting_or_filtering_its_rows_is_not_the_declared_set() {
          CREATE POLICY orders_read ON orders FOR SELECT USING (
            project_id IN (SELECT public.p.id FROM authz.projects_with('read') p(id)));"
     );
-    assert_eq!(
-        crate::support::deployment::unknown_column(&sql),
-        "public.p.id"
-    );
+    assert_eq!(crate::support::deployment::unknown_column(&sql), "p");
 }
 
 #[test]

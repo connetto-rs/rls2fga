@@ -92,12 +92,13 @@ pub(crate) fn db(sql: &str) -> ParserDB {
     sql_parser::parse_schema(&format!("{ROLES}{sql}")).expect("schema should parse")
 }
 
-/// Return the unresolved column reference that makes `sql` invalid.
+/// Return the unresolved column, or the relation its qualifier names, that makes `sql`
+/// invalid.
 pub(crate) fn unknown_column(sql: &str) -> String {
     match sql_parser::parse_schema(&format!("{ROLES}{sql}")) {
         Err(sql_parser::SchemaError::Schema(sql_traits::errors::Error::UnknownColumn {
             reference,
-        })) => reference,
+        })) => reference.to_string(),
         Err(error) => panic!("expected an unknown column error, got {error:?}"),
         Ok(_) => panic!("expected an unknown column error, but the schema parsed"),
     }
