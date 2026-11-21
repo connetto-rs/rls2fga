@@ -24,9 +24,6 @@ use rls2fga::classifier::policy_classifier;
 use rls2fga::parser::sql_parser::{Deployment, ParserDB, SessionSetting};
 use rls2fga::types::{ColumnKind, RowCell, RowList, RowValues};
 
-/// `serde_json` view of one row, adapting it to the crate's row interface.
-pub(crate) struct JsonRowValues<'a>(pub(crate) &'a serde_json::Value);
-
 /// The accessor registry the classification tests declare.
 pub(crate) const ACCESSOR_REGISTRY: &str =
     r#"{"auth_current_user_id": {"kind": "current_user_accessor", "returns": "uuid"}}"#;
@@ -184,100 +181,6 @@ pub(crate) fn scalar_text(value: &serde_json::Value) -> Option<Cow<'_, str>> {
         // A JSON null has no text, and neither does an object or an array, which
         // `||` would refuse anyway.
         _ => None,
-    }
-}
-
-fn parse_bytea(text: &str) -> Option<Vec<u8>> {
-    let hex = text.strip_prefix("\\x")?;
-    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
-    let mut out = Vec::with_capacity(pairs.len());
-    for [high, low] in pairs {
-        out.push((hex_nibble(*high)? << 4) | hex_nibble(*low)?);
-    }
-    remainder.is_empty().then_some(out)
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-fn scalar_cell(value: &serde_json::Value, kind: ColumnKind) -> RowCell<'_> {
-    match (value, kind) {
-        (serde_json::Value::Null, _) => RowCell::Null,
-        (serde_json::Value::String(text), ColumnKind::Text | ColumnKind::Bpchar) => {
-            RowCell::Text(Cow::Borrowed(text.as_str()))
-        }
-        (serde_json::Value::String(text), ColumnKind::Uuid) => {
-            RowCell::Uuid(Cow::Borrowed(text.as_str()))
-        }
-        (serde_json::Value::String(text), ColumnKind::Date) => {
-            RowCell::Date(Cow::Borrowed(text.as_str()))
-        }
-        (serde_json::Value::String(text), ColumnKind::Time) => {
-            RowCell::Time(Cow::Borrowed(text.as_str()))
-        }
-        (serde_json::Value::String(text), ColumnKind::Timestamp) => {
-            RowCell::Timestamp(Cow::Borrowed(text.as_str()))
-        }
-        (serde_json::Value::String(text), ColumnKind::TimestampTz) => {
-            RowCell::TimestampTz(Cow::Borrowed(text.as_str()))
-        }
-        (serde_json::Value::String(text), ColumnKind::Bytea) => parse_bytea(text)
-            .map_or(RowCell::Undecodable, |bytes| {
-                RowCell::Bytea(Cow::Owned(bytes))
-            }),
-        (serde_json::Value::Number(number), ColumnKind::Integer) => {
-            RowCell::Integer(Cow::Owned(number.to_string()))
-        }
-        (serde_json::Value::Number(number), ColumnKind::Decimal) => {
-            RowCell::Decimal(Cow::Owned(number.to_string()))
-        }
-        (serde_json::Value::Bool(flag), ColumnKind::Bool) => RowCell::Bool(*flag),
-        _ => RowCell::Undecodable,
-    }
-}
-
-impl RowValues for JsonRowValues<'_> {
-    fn cell(&self, column: &str, kind: ColumnKind) -> RowCell<'_> {
-        self.0
-            .get(column)
-            .map_or(RowCell::Absent, |value| scalar_cell(value, kind))
-    }
-
-    fn list(&self, column: &str, kind: ColumnKind) -> RowList<'_> {
-        match self.0.get(column) {
-            Some(serde_json::Value::Null) => RowList::Null,
-            Some(serde_json::Value::Array(values)) => RowList::Values(
-                values
-                    .iter()
-                    .map(|value| scalar_cell(value, kind))
-                    .collect(),
-            ),
-            Some(_) => RowList::Undecodable,
-            None => RowList::Absent,
-        }
-    }
-
-    fn json_text(&self, column: &str, path: &[String]) -> RowCell<'_> {
-        let Some(mut current) = self.0.get(column) else {
-            return RowCell::Absent;
-        };
-        for step in path {
-            let Some(next) = current.get(step) else {
-                return RowCell::Null;
-            };
-            current = next;
-        }
-        match scalar_text(current) {
-            Some(text) => RowCell::Text(text),
-            None if current.is_null() => RowCell::Null,
-            None => RowCell::Undecodable,
-        }
     }
 }
 

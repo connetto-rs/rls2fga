@@ -1,5 +1,6 @@
 //! Consumer contracts for types judging written rows.
 
+use rls2fga::json_row::JsonRow;
 use rls2fga::translator::Translation;
 use rls2fga::types::{ActionAnswer, ActionJudgement, ConfidenceLevel, RowVersion, TranslationNote};
 
@@ -112,7 +113,7 @@ fn a_stored_relation_does_not_capture_the_stored_row_link() {
     );
     let resulting = outputs.translation().resulting_rows().first().unwrap();
     let values = serde_json::json!({"id": "new", "stored": "alice"});
-    let values = support::JsonRowValues(&values);
+    let values = JsonRow(&values);
     let object = resulting.object(&values).unwrap().unwrap();
     let records = resulting.records(&values).unwrap();
     let owner = records
@@ -189,7 +190,7 @@ fn a_composite_key_names_both_ends_of_the_stored_row_link() {
     .unwrap();
     let resulting = outputs.translation().resulting_rows().first().unwrap();
     let values = serde_json::json!({"a": "first", "b": "second", "owner_id": "alice"});
-    let values = support::JsonRowValues(&values);
+    let values = JsonRow(&values);
     let object = resulting.object(&values).unwrap().unwrap();
     assert_eq!(object, format!("{}:first|second", resulting.type_name));
     let records = resulting.records(&values).unwrap();

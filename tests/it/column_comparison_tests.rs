@@ -10,7 +10,7 @@ use sqlparser::ast::DataType;
 
 use crate::support::deployment::{deployment, typed_caller};
 use crate::support::footgun::{db_of, relation_definition, translator};
-use crate::support::JsonRowValues;
+use rls2fga::json_row::JsonRow;
 
 /// Grants on resources whose root is the organization, as connetto's core schema writes
 /// them. An organization's founder grants a role on the organization itself, which is the
@@ -230,7 +230,7 @@ fn gate_records(clause: &str, row: &serde_json::Value) -> Option<usize> {
         return None;
     }
     let records =
-        records_from_row(description, &JsonRowValues(row)).expect("the row decides its records");
+        records_from_row(description, &JsonRow(row)).expect("the row decides its records");
     Some(records.len())
 }
 

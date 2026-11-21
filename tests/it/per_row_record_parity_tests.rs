@@ -32,7 +32,8 @@ use crate::support;
 
 use crate::support::containers::{PG_DB, PG_PASSWORD, PG_USER};
 
-use crate::support::{scalar_text, JsonRowValues};
+use crate::support::scalar_text;
+use rls2fga::json_row;
 
 /// One `(object, relation, subject)` triple as the generated SQL returns it.
 ///
@@ -316,7 +317,7 @@ fn records_from_descriptions(
     rows_of(conn, table)
         .iter()
         .flat_map(|row| {
-            records_from_row(description, &JsonRowValues(row))
+            records_from_row(description, &json_row::JsonRow(row))
                 .expect("a pure description evaluates without a database")
         })
         .collect()
@@ -1786,7 +1787,7 @@ fn recipe_subjects(decision: &RowDecision, row: &serde_json::Value, object: &str
             shapes
                 .iter()
                 .flat_map(|shape| {
-                    records_from_row(shape, &JsonRowValues(row))
+                    records_from_row(shape, &json_row::JsonRow(row))
                         .expect("a leaf shape resolves without a database")
                 })
                 .map(|record| {
@@ -1813,7 +1814,7 @@ fn recipe_subjects(decision: &RowDecision, row: &serde_json::Value, object: &str
             let linked = shapes
                 .iter()
                 .flat_map(|shape| {
-                    records_from_row(shape, &JsonRowValues(row))
+                    records_from_row(shape, &json_row::JsonRow(row))
                         .expect("the gate link resolves without a database")
                 })
                 .any(|record| record.object == object && &record.relation == relation);
@@ -2182,9 +2183,11 @@ async fn a_row_naming_entry_spells_the_object_its_own_sql_writes() {
         let rendered: BTreeSet<String> = rows_of(&mut conn, &entry.table)
             .iter()
             .filter_map(|row| {
-                entry.render(&JsonRowValues(row)).unwrap_or_else(|error| {
-                    panic!("a row of {} cannot be named: {error:?}", entry.table)
-                })
+                entry
+                    .render(&json_row::JsonRow(row))
+                    .unwrap_or_else(|error| {
+                        panic!("a row of {} cannot be named: {error:?}", entry.table)
+                    })
             })
             .collect();
         let prefix = format!("{}:", entry.type_name);
@@ -2302,9 +2305,11 @@ async fn a_partition_is_named_by_the_object_its_root_s_sql_writes() {
         let rendered: BTreeSet<String> = rows_of(&mut conn, &entry.table)
             .iter()
             .filter_map(|row| {
-                entry.render(&JsonRowValues(row)).unwrap_or_else(|error| {
-                    panic!("a row of {} cannot be named: {error:?}", entry.table)
-                })
+                entry
+                    .render(&json_row::JsonRow(row))
+                    .unwrap_or_else(|error| {
+                        panic!("a row of {} cannot be named: {error:?}", entry.table)
+                    })
             })
             .collect();
         assert_eq!(

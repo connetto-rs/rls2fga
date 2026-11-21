@@ -20,7 +20,7 @@ use crate::support::parity::{
     assert_agrees, assert_postgres, request_predicate_holds, settings_map, ClauseKind, Cluster,
     ParityCase, Principal, Side,
 };
-use crate::support::JsonRowValues;
+use rls2fga::json_row::JsonRow;
 
 /// Gated tables in the model. Over the 25 conditions `OpenFGA` accepts, had each gate
 /// declared its own.
@@ -101,7 +101,7 @@ fn recipe_allows(
 ) -> bool {
     match decision {
         RowDecision::Leaf { shapes, .. } => shapes.iter().any(|shape| {
-            records_from_row(shape, &JsonRowValues(row))
+            records_from_row(shape, &JsonRow(row))
                 .expect("a leaf resolves from the row")
                 .iter()
                 .any(|record| record.subject == format!("user:{subject}"))
@@ -120,7 +120,7 @@ fn recipe_allows(
         } => {
             subject_type.as_str() == "user"
                 && shapes.iter().any(|shape| {
-                    !records_from_row(shape, &JsonRowValues(row))
+                    !records_from_row(shape, &JsonRow(row))
                         .expect("the link resolves from the row")
                         .is_empty()
                 })

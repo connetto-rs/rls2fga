@@ -5,7 +5,7 @@ use rls2fga::types::{records_from_row, ConfidenceLevel, RecordDerivation};
 use serde_json::json;
 
 use crate::support::footgun::{db_of, relation_definition, translator};
-use crate::support::JsonRowValues;
+use rls2fga::json_row::JsonRow;
 
 const PHOTO_ID: &str = "11111111-1111-1111-1111-111111111111";
 const CALLER_OWNS: &str = "owner_id = current_setting('app.user_id', true)";
@@ -123,8 +123,8 @@ fn the_gate_record_admits_rows_by_nullness_alone() {
             "the row alone decides `{guard}`"
         );
         let row = json!({ "id": PHOTO_ID, "team_id": team });
-        let records = records_from_row(description, &JsonRowValues(&row))
-            .expect("the row decides its records");
+        let records =
+            records_from_row(description, &JsonRow(&row)).expect("the row decides its records");
         assert_eq!(records.len(), expected, "`{guard}` on {team}: {records:?}");
     }
 }

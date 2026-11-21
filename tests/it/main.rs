@@ -68,6 +68,8 @@ mod openfga_integration_tests;
 mod openfga_semantic_tests;
 mod output_formatter_tests;
 mod owner_expression_tests;
+#[cfg(feature = "parity")]
+mod parity_fixture_tests;
 #[cfg(feature = "client")]
 mod parity_runner_tests;
 mod parser_tests;

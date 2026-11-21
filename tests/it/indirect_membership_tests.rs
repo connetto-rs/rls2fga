@@ -1,3 +1,4 @@
+use rls2fga::json_row::JsonRow;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{
     records_from_row, ConfidenceLevel, Record, RecordDerivation, ReplayScope, TranslationNote,
@@ -41,9 +42,7 @@ fn row_records(outputs: &Outputs, table_name: &str, row: &serde_json::Value) -> 
             matches!(&description.derivation,
                 RecordDerivation::FromRow { table, .. } if table.name() == table_name)
         })
-        .flat_map(|description| {
-            records_from_row(description, &support::JsonRowValues(row)).unwrap()
-        })
+        .flat_map(|description| records_from_row(description, &JsonRow(row)).unwrap())
         .filter(|record| record.object.split(':').next() != Some(table_name))
         .collect()
 }

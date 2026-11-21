@@ -75,8 +75,14 @@ pub mod client;
 pub mod clock;
 /// `OpenFGA` model generation from classified policies (DSL, JSON, and tuple SQL).
 pub mod generator;
+/// A row as `PostgreSQL`'s `to_jsonb` prints it, read through the row interface.
+pub mod json_row;
 /// File output and markdown report generation.
 pub mod output;
+/// Replaying `sql-traits`' recorded row-level security cases on the model. Needs the
+/// `parity` feature.
+#[cfg(feature = "parity")]
+pub mod parity;
 /// SQL schema parsing and function body analysis.
 pub mod parser;
 /// Compiling one subscription filter, rather than a whole schema's policies.
