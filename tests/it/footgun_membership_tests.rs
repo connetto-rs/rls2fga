@@ -321,8 +321,8 @@ CREATE POLICY docs_member ON docs FOR SELECT USING (
     );
 }
 
-/// Which membership rows a user sees is up to the join table's own policies, which
-/// no relation can carry, so the translation says so.
+/// Which membership rows a user sees is up to the join table's own policies where the
+/// check does not imply them, which no relation can carry, so the translation says so.
 #[test]
 fn membership_through_a_guarded_join_table_is_disclosed() {
     let db = db_of(
@@ -330,7 +330,7 @@ fn membership_through_a_guarded_join_table_is_disclosed() {
 CREATE TABLE docs(id UUID PRIMARY KEY, title TEXT);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID REFERENCES docs(id), user_id TEXT);
 ALTER TABLE doc_members ENABLE ROW LEVEL SECURITY;
-CREATE POLICY dm_self ON doc_members FOR SELECT USING (user_id = current_setting('app.user_id', true));
+CREATE POLICY dm_unbanned ON doc_members FOR SELECT USING (user_id <> 'banned');
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY docs_member ON docs FOR SELECT USING (
   EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id AND m.user_id = current_setting('app.user_id', true)));
@@ -958,16 +958,16 @@ fn a_request_gate_that_names_no_row_keeps_the_membership_translated() {
     )));
 }
 
-/// A membership read that the caller's own row decides cannot be precomputed from
-/// request values alone, so the translation says the join table guards it.
+/// A membership read rule the check does not imply hides rows no relation can hide, so
+/// the translation says the join table guards it.
 #[test]
 fn unsupported_membership_read_rules_stay_guarded() {
     for policies in [
-        "CREATE POLICY p ON team_members FOR SELECT USING (user_id = current_setting('app.user_id', true));".to_string(),
+        "CREATE POLICY p ON team_members FOR SELECT USING (team > 1);".to_string(),
         format!(
             "{TEAM_MEMBERS_OPEN}
                  CREATE POLICY p ON team_members AS RESTRICTIVE FOR SELECT
-                     USING (user_id = current_setting('app.user_id', true));"
+                     USING (user_id = current_setting('app.user_id', true) AND team > 1);"
         ),
         format!(
             "{TEAM_MEMBERS_OPEN}

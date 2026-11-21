@@ -208,10 +208,12 @@ impl ResidualPredicates {
     /// requests takes the guards without a second fallible pass.
     #[must_use]
     pub fn row_guards(&self) -> Vec<ResidualGuard> {
-        self.0
-            .iter()
-            .filter_map(|conjunct| conjunct.guard.clone())
-            .collect()
+        self.row_guard_refs().cloned().collect()
+    }
+
+    /// [`Self::row_guards`], borrowed.
+    pub(crate) fn row_guard_refs(&self) -> impl Iterator<Item = &ResidualGuard> {
+        self.0.iter().filter_map(|conjunct| conjunct.guard.as_ref())
     }
 
     /// The residual as the SQL filter with the request-completed conjuncts dropped,

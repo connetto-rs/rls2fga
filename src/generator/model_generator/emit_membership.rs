@@ -173,7 +173,12 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
     let table_types = ctx.table_types;
     // Reading the member table is still reading it as the caller, so its own
     // RLS decides which membership rows count, exactly as for P4.
-    let Some(read_scope) = noted_membership_read_scope(member_table, ctx, readability, notes)
+    let check = MembershipRead {
+        caller_column: Some(user_column),
+        residual: extra_predicates,
+    };
+    let Some(read_scope) =
+        noted_membership_read_scope(member_table, check, ctx, readability, notes)
     else {
         return deny_expr(table_plan);
     };
@@ -309,7 +314,7 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
             },
             member_table,
             extra_predicates,
-            read_scope,
+            &read_scope,
             ctx,
             table_plan,
             all_types,
@@ -372,7 +377,7 @@ pub(crate) fn emit_uncorrelated_membership<DB: DatabaseLike>(
         },
         member_table,
         extra_predicates,
-        read_scope,
+        &read_scope,
         ctx,
         table_plan,
         all_types,
@@ -417,7 +422,7 @@ pub(super) fn apply_membership_read_scope<DB: DatabaseLike>(
             .collect()
     };
     match scope {
-        TableReadability::Open | TableReadability::Guarded => {}
+        TableReadability::Open | TableReadability::Guarded { .. } => {}
         TableReadability::Unreadable => return deny_expr(table_plan),
         TableReadability::RequestGated { gates: own } => gates.extend(own.iter().cloned()),
     }
@@ -646,7 +651,6 @@ fn emit_membership<DB: DatabaseLike>(
     let table_types = ctx.table_types;
     // The subquery reads `join_table` as the user, so its own RLS decides which
     // membership rows count.
-    let open_scope = TableReadability::Open;
     let read_scope = if polarity == MembershipPolarity::Block {
         let readable = lookup_table_id(db, join_table).is_some_and(|table| {
             crate::generator::unrestricted::restricts_nothing_by_any_route(table, db)
@@ -660,9 +664,15 @@ fn emit_membership<DB: DatabaseLike>(
             });
             return deny_expr(table_plan);
         }
-        &open_scope
+        Cow::Owned(TableReadability::Open)
     } else {
-        let Some(scope) = noted_membership_read_scope(join_table, ctx, readability, notes) else {
+        let Some(scope) = noted_membership_read_scope(
+            join_table,
+            MembershipRead::of_caller(exists_membership),
+            ctx,
+            readability,
+            notes,
+        ) else {
             return deny_expr(table_plan);
         };
         scope
@@ -883,7 +893,7 @@ fn emit_membership<DB: DatabaseLike>(
         membership,
         join_table,
         extra_predicates,
-        read_scope,
+        &read_scope,
         ctx,
         table_plan,
         all_types,
@@ -891,32 +901,29 @@ fn emit_membership<DB: DatabaseLike>(
     )
 }
 
-/// The read scope a two-hop hop may rest on; guarded hop tables are refused.
-fn indirect_read_scope<'a, DB: DatabaseLike>(
+/// Whether `check` may rest a two-hop hop on `table`; a hop the table guards is refused.
+fn indirect_hop_readable<DB: DatabaseLike>(
     table: &TableId,
+    check: MembershipRead<'_>,
     ctx: &PatternCtx<'_, DB>,
-    memo: &'a mut BTreeMap<TableId, TableReadability>,
+    memo: &mut BTreeMap<TableId, TableReadability>,
     notes: &mut Vec<TranslationNote>,
-) -> Option<&'a TableReadability> {
-    if ctx.membership_reads_bypass_rls {
-        return Some(&TableReadability::Open);
-    }
-    let scope = join_table_readability(table, ctx.db, ctx.registry, memo);
-    match scope {
-        TableReadability::Open | TableReadability::RequestGated { .. } => Some(scope),
-        TableReadability::Guarded => {
+) -> bool {
+    match membership_read_scope(table, check, ctx, memo).as_ref() {
+        TableReadability::Open | TableReadability::RequestGated { .. } => true,
+        TableReadability::Guarded { .. } => {
             notes.push(TranslationNote::MembershipTableGuarded {
                 policy: ctx.policy_name.to_string(),
                 join_table: table.clone(),
             });
-            None
+            false
         }
         TableReadability::Unreadable => {
             notes.push(TranslationNote::MembershipTableGrantsNoReads {
                 policy: ctx.policy_name.to_string(),
                 join_table: table.clone(),
             });
-            None
+            false
         }
     }
 }
@@ -949,7 +956,12 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
         });
         return deny_expr(table_plan);
     }
-    if indirect_read_scope(link_table, ctx, readability, notes).is_none() {
+    // The closure row is read for its owner, never compared with the caller.
+    let link_check = MembershipRead {
+        caller_column: None,
+        residual: extra_predicates,
+    };
+    if !indirect_hop_readable(link_table, link_check, ctx, readability, notes) {
         return deny_expr(table_plan);
     }
     let owner_type = table_types.resolve(owner_table);
@@ -1059,10 +1071,15 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
     });
     let mut arms: Vec<UsersetExpr> = Vec::new();
     for membership in memberships {
-        let Some(_scope) = indirect_read_scope(&membership.join_table, ctx, readability, notes)
-        else {
+        if !indirect_hop_readable(
+            &membership.join_table,
+            MembershipRead::of_caller(membership),
+            ctx,
+            readability,
+            notes,
+        ) {
             return deny_expr(table_plan);
-        };
+        }
         let hosts: Vec<_> = membership
             .pairs
             .iter()
@@ -1112,16 +1129,12 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
     } else {
         combine_union(arms).unwrap_or_else(|| deny_expr(table_plan))
     };
-    let link_scope = if ctx.membership_reads_bypass_rls {
-        &TableReadability::Open
-    } else {
-        join_table_readability(link_table, db, ctx.registry, readability)
-    };
+    let link_scope = membership_read_scope(link_table, link_check, ctx, readability);
     apply_membership_read_scope(
         membership,
         link_table,
         extra_predicates,
-        link_scope,
+        &link_scope,
         ctx,
         table_plan,
         all_types,

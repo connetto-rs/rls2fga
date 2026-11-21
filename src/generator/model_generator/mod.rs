@@ -1,12 +1,15 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
+use alloc::borrow::Cow;
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt::Write;
 
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
-use crate::classifier::readability::{table_readability, ReadGate, TableReadability};
+use crate::classifier::readability::{
+    table_readability, MembershipRead, ReadGate, TableReadability,
+};
 use crate::clock::{cel_duration, ClockParameter, ClockReading, ClockThreshold};
 use crate::generator::action_relations::action_answers;
 use crate::generator::db_lookup::{
@@ -2333,29 +2336,35 @@ fn types_bearing_name<DB: DatabaseLike>(
         .collect()
 }
 
-/// Readability of one membership table, computed once per plan per table.
-fn join_table_readability<'a, DB: DatabaseLike>(
+/// What `check` reads of its membership table, the table's readability computed once per
+/// plan and resolved for the check.
+fn membership_read_scope<'a, DB: DatabaseLike>(
     join_table: &TableId,
-    db: &DB,
-    registry: &FunctionRegistry,
+    check: MembershipRead<'_>,
+    ctx: &PatternCtx<'_, DB>,
     memo: &'a mut BTreeMap<TableId, TableReadability>,
-) -> &'a TableReadability {
+) -> Cow<'a, TableReadability> {
+    if ctx.membership_reads_bypass_rls {
+        return Cow::Owned(TableReadability::Open);
+    }
     memo.entry(join_table.clone())
-        .or_insert_with(|| table_readability(join_table, db, registry, &ExpansionState::new()))
+        .or_insert_with(|| {
+            table_readability(join_table, ctx.db, ctx.registry, &ExpansionState::new())
+        })
+        .read_by(check)
 }
 
-/// Returns the membership read constraints, or `None` when no row is visible.
+/// Returns the read constraints `check` reads its membership table under, or `None` when
+/// no row is visible.
 fn noted_membership_read_scope<'a, DB: DatabaseLike>(
     join_table: &TableId,
+    check: MembershipRead<'_>,
     ctx: &PatternCtx<'_, DB>,
     memo: &'a mut BTreeMap<TableId, TableReadability>,
     notes: &mut Vec<TranslationNote>,
-) -> Option<&'a TableReadability> {
-    if ctx.membership_reads_bypass_rls {
-        return Some(&TableReadability::Open);
-    }
-    let scope = join_table_readability(join_table, ctx.db, ctx.registry, memo);
-    match scope {
+) -> Option<Cow<'a, TableReadability>> {
+    let scope = membership_read_scope(join_table, check, ctx, memo);
+    match scope.as_ref() {
         TableReadability::Unreadable => {
             notes.push(TranslationNote::MembershipTableGrantsNoReads {
                 policy: ctx.policy_name.to_string(),
@@ -2363,7 +2372,7 @@ fn noted_membership_read_scope<'a, DB: DatabaseLike>(
             });
             None
         }
-        TableReadability::Guarded => {
+        TableReadability::Guarded { .. } => {
             notes.push(TranslationNote::MembershipTableGuarded {
                 policy: ctx.policy_name.to_string(),
                 join_table: join_table.clone(),

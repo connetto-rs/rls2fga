@@ -184,8 +184,11 @@ fn a_restrictive_clause_the_callers_threshold_dropped_refuses() {
     );
 }
 
+/// A membership read through `members` under `read_rule`, whose check requires `check`
+/// beside the caller comparison.
 fn membership_translation(
     read_rule: &str,
+    check: &str,
     extra_policy: &str,
     min_confidence: ConfidenceLevel,
 ) -> Translation {
@@ -196,6 +199,7 @@ fn membership_translation(
              project_id TEXT NOT NULL REFERENCES projects(id),
              member_id TEXT NOT NULL,
              enabled BOOLEAN NOT NULL,
+             seat TEXT,
              PRIMARY KEY (project_id, member_id));
          ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
          ALTER TABLE members ENABLE ROW LEVEL SECURITY;
@@ -203,7 +207,7 @@ fn membership_translation(
          CREATE POLICY docs_read ON docs FOR SELECT USING (
              EXISTS (SELECT 1 FROM members m
                      WHERE m.project_id = docs.project_id
-                       AND m.member_id = current_setting('app.user_id', true)));
+                       AND m.member_id = current_setting('app.user_id', true) {check}));
          {extra_policy}"
     ));
     TranslatorBuilder::new(deployment::deployment([deployment::caller("app.user_id")]))
@@ -213,22 +217,59 @@ fn membership_translation(
         .expect("membership schema should plan")
 }
 
+/// A guard admitting every row the membership check can match hides nothing from it.
 #[test]
-fn guarded_membership_refuses_even_when_the_guard_is_redundant() {
-    for rule in [
-        "member_id = current_setting('app.user_id', true)",
-        "member_id = current_setting('app.user_id', true) AND enabled",
+fn a_guard_the_membership_check_implies_is_no_gap() {
+    for (rule, check) in [
+        ("member_id = current_setting('app.user_id', true)", ""),
+        (
+            "enabled AND member_id = current_setting('app.user_id', true)",
+            "AND m.enabled",
+        ),
+        (
+            "seat = 'owner' AND seat IS NOT NULL",
+            "AND m.seat IS NOT NULL AND m.seat = 'owner'",
+        ),
+        ("enabled OR seat = 'guest'", "AND m.enabled"),
     ] {
-        let translation = membership_translation(rule, "", ConfidenceLevel::B);
+        let translation = membership_translation(rule, check, "", ConfidenceLevel::B);
+        let accepted = translation.clone().outputs_accepting_gaps();
+        let checked = translation
+            .outputs()
+            .unwrap_or_else(|error| panic!("{rule} / {check}: {:#?}", error.notes()));
+        assert_eq!(checked.model(), accepted.model());
+        assert!(
+            checked.model().contains(" from projects"),
+            "{rule} / {check}"
+        );
+    }
+}
+
+/// A guard hiding a row the check can match keeps the membership refused.
+#[test]
+fn a_guard_the_membership_check_does_not_imply_refuses() {
+    for (rule, check) in [
+        (
+            "member_id = current_setting('app.user_id', true) AND enabled",
+            "",
+        ),
+        ("seat = 'owner'", "AND m.seat = 'guest'"),
+        ("seat IS NOT NULL", "AND m.enabled"),
+        ("project_id = current_setting('app.user_id', true)", ""),
+    ] {
+        let translation = membership_translation(rule, check, "", ConfidenceLevel::B);
         let error = translation
             .clone()
             .outputs()
             .expect_err("guarded membership diverges");
-        assert!(error.notes().iter().any(|note| matches!(
-            note,
-            TranslationNote::MembershipTableGuarded { policy, join_table }
-                if policy == "docs_read" && join_table.name() == "members"
-        )));
+        assert!(
+            error.notes().iter().any(|note| matches!(
+                note,
+                TranslationNote::MembershipTableGuarded { policy, join_table }
+                    if policy == "docs_read" && join_table.name() == "members"
+            )),
+            "{rule} / {check}"
+        );
         let accepted = translation.outputs_accepting_gaps();
         assert!(accepted.model().contains(" from projects"));
         assert!(accepted
@@ -240,7 +281,7 @@ fn guarded_membership_refuses_even_when_the_guard_is_redundant() {
 
 #[test]
 fn unguarded_membership_passes_the_checked_entry_point() {
-    let translation = membership_translation("true", "", ConfidenceLevel::B);
+    let translation = membership_translation("true", "", "", ConfidenceLevel::B);
     let accepted = translation.clone().outputs_accepting_gaps();
     let checked = translation.outputs().expect("open membership has no gap");
     assert_eq!(checked.model(), accepted.model());
@@ -276,6 +317,7 @@ fn an_attribute_left_to_runtime_enforcement_refuses() {
 fn refusal_reports_all_diverging_notes_without_operator_requirements() {
     let translation = membership_translation(
         "member_id = current_setting('app.user_id', true) AND enabled",
+        "",
         "CREATE POLICY unsupported ON docs FOR SELECT USING ((bits & 2) = 2);",
         ConfidenceLevel::D,
     );
