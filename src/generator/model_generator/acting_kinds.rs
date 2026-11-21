@@ -9,9 +9,7 @@
 
 use super::*;
 use crate::generator::unrestricted::row_level_security_is_off;
-use crate::types::{ColumnCommand, ColumnRelations};
-
-use super::branches::ColumnHolding;
+use crate::types::{ActingPrivileges, ColumnCommand, ColumnRelations, Holding};
 
 /// The relation on the request-gate object holding the requests acting as `role`.
 ///
@@ -155,13 +153,21 @@ fn plant_gate_relation<'a>(
 pub(crate) fn plant_column_relations(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
-    holdings: &BTreeMap<ColumnCommand, BTreeMap<String, ColumnHolding>>,
+    privileges: &[ActingPrivileges],
 ) {
-    for (command, by_role) in holdings {
+    for command in [
+        ColumnCommand::Select,
+        ColumnCommand::Insert,
+        ColumnCommand::Update,
+    ] {
+        let by_role: BTreeMap<&str, &Holding> = privileges
+            .iter()
+            .map(|held| (held.role.as_str(), held.holding(command)))
+            .collect();
         let named: BTreeSet<&ColumnName> = by_role
             .values()
             .filter_map(|holding| match holding {
-                ColumnHolding::Columns(columns) => Some(columns),
+                Holding::Columns(columns) => Some(columns),
                 _ => None,
             })
             .flatten()
@@ -169,21 +175,21 @@ pub(crate) fn plant_column_relations(
         if named.is_empty() {
             continue;
         }
-        let on_table = column_relation_name(*command, None);
-        plant_gate_relation(table_plan, all_types, &on_table, holders(by_role, None));
+        let on_table = column_relation_name(command, None);
+        plant_gate_relation(table_plan, all_types, &on_table, holders(&by_role, None));
         let mut columns = BTreeMap::new();
         for column in named {
-            let relation = column_relation_name(*command, Some(column));
+            let relation = column_relation_name(command, Some(column));
             plant_gate_relation(
                 table_plan,
                 all_types,
                 &relation,
-                holders(by_role, Some(column)),
+                holders(&by_role, Some(column)),
             );
             columns.insert(column.clone(), relation);
         }
         table_plan.column_relations.push(ColumnRelations {
-            command: *command,
+            command,
             columns,
             on_table,
         });
@@ -192,17 +198,15 @@ pub(crate) fn plant_column_relations(
 
 /// The acting roles holding a command on `column`, or on the whole table where `None`.
 fn holders<'a>(
-    by_role: &'a BTreeMap<String, ColumnHolding>,
+    by_role: &'a BTreeMap<&'a str, &'a Holding>,
     column: Option<&'a ColumnName>,
 ) -> impl Iterator<Item = &'a str> {
     by_role
         .iter()
         .filter(move |(_, holding)| match holding {
-            ColumnHolding::Table => true,
-            ColumnHolding::Columns(columns) => {
-                column.is_some_and(|column| columns.contains(column))
-            }
-            ColumnHolding::Absent => false,
+            Holding::Table => true,
+            Holding::Columns(columns) => column.is_some_and(|column| columns.contains(column)),
+            Holding::Absent => false,
         })
-        .map(|(role, _)| role.as_str())
+        .map(|(role, _)| *role)
 }

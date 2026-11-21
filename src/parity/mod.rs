@@ -7,10 +7,13 @@
 //! `OpenFGA`, and answers each probe the way `sql_traits::parity::Fixture::judge`
 //! compares with PostgreSQL's recorded answer.
 //!
-//! A write's verdict is split the way PostgreSQL acts on a row. A row whose stored row
-//! fails a judgement is denied alone, as a `USING` clause skips it. A row whose stored row
-//! passes while the row it would produce, or a column privilege, fails aborts the whole
-//! statement, so every row of that statement is denied.
+//! A statement the caller's acting role lacks a privilege for fails before any row, as
+//! [`Translation::acting_privileges`](crate::translator::Translation::acting_privileges)
+//! answers, a read with `PostgreSQL`'s `permission denied for table <t>` and a write with
+//! SQLSTATE 42501. Otherwise a write's verdict is split the way PostgreSQL acts on a row.
+//! A row whose stored row fails a judgement is denied alone, as a `USING` clause skips it.
+//! A row whose stored row passes while the row it would produce, or a column relation,
+//! fails aborts the whole statement, so every row of that statement is denied.
 
 mod database;
 mod model;
@@ -41,7 +44,7 @@ use crate::generator::model_generator::PlanningError;
 use crate::generator::tuple_generator::TupleRowError;
 use crate::parser::sql_parser::{parse_schema, SchemaError};
 use crate::translator::TranslatorBuilder;
-use crate::types::{ActionStatement, ColumnCommand, ConfidenceLevel, RecordError};
+use crate::types::{ActionStatement, ColumnCommand, ColumnName, ConfidenceLevel, RecordError};
 
 /// One row a caller's statement reaches, to be answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -166,6 +169,8 @@ enum ProbeError {
     UnreachedRow(String),
     #[error("the translation has no row naming for {0}")]
     NoRowNaming(String),
+    #[error("the translation reports no privileges of acting role {0} on the table")]
+    NoPrivileges(String),
     #[error("the row has no OpenFGA object name")]
     Unnamed,
     #[error("the translation has no {0:?} answer")]
@@ -276,7 +281,7 @@ struct Statement<'a> {
     table: &'a Table,
     action: ActionStatement,
     writes: bool,
-    columns: BTreeMap<ColumnCommand, Vec<String>>,
+    columns: BTreeMap<ColumnCommand, Vec<ColumnName>>,
     rows: Vec<TargetRow<'a>>,
 }
 
@@ -438,14 +443,38 @@ async fn answer(
     answers
 }
 
-/// The model's answer for every row `statement` reaches when `caller` runs it. A row
-/// whose stored row passes while the row it would produce fails aborts the statement,
+/// The model's answer for every row `statement` reaches when `caller` runs it.
+///
+/// A caller whose acting role lacks a privilege the statement needs fails it before any
+/// row, as `PostgreSQL` does, a read with its error and a write with its SQLSTATE. Else a
+/// row whose stored row passes while the row it would produce fails aborts the statement,
 /// which denies every row of it.
 async fn statement_answers<'a>(
     model: &Model,
     caller: &Caller,
     statement: &'a Statement<'_>,
 ) -> Vec<(&'a str, Answer)> {
+    let refused = match model.privileged(
+        &statement.table.name,
+        caller,
+        statement.action,
+        &statement.columns,
+    ) {
+        Ok(true) => None,
+        Ok(false) if statement.writes => Some(Answer::Rejected(INSUFFICIENT_PRIVILEGE.into())),
+        Ok(false) => Some(Answer::Error(format!(
+            "permission denied for table {}",
+            statement.table.name
+        ))),
+        Err(error) => Some(failed(&error)),
+    };
+    if let Some(answer) = refused {
+        return statement
+            .rows
+            .iter()
+            .map(|target| (target.row.as_str(), answer.clone()))
+            .collect();
+    }
     let mut verdicts = Vec::with_capacity(statement.rows.len());
     for target in &statement.rows {
         let probe = RowProbe {
@@ -478,6 +507,8 @@ async fn statement_answers<'a>(
         })
         .collect()
 }
+
+const INSUFFICIENT_PRIVILEGE: &str = "42501";
 
 /// An error answer carrying `error` and every cause beneath it.
 fn failed(error: &dyn core::error::Error) -> Answer {
@@ -516,7 +547,7 @@ fn action(shape: Shape) -> ActionStatement {
 /// The columns a statement touches, under the model's column commands.
 fn column_commands(
     columns: BTreeMap<sql_traits::parity::ColumnCommand, Vec<String>>,
-) -> BTreeMap<ColumnCommand, Vec<String>> {
+) -> BTreeMap<ColumnCommand, Vec<ColumnName>> {
     columns
         .into_iter()
         .map(|(command, columns)| {
@@ -525,7 +556,10 @@ fn column_commands(
                 sql_traits::parity::ColumnCommand::Insert => ColumnCommand::Insert,
                 sql_traits::parity::ColumnCommand::Update => ColumnCommand::Update,
             };
-            (command, columns)
+            (
+                command,
+                columns.into_iter().map(ColumnName::from_stored).collect(),
+            )
         })
         .collect()
 }

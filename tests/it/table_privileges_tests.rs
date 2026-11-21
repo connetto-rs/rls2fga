@@ -6,13 +6,13 @@
     reason = "Tests use panics to reject invalid fixtures."
 )]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use rls2fga::parser::sql_parser::{parse_schema, Deployment, SessionSetting, SettingValue};
 use rls2fga::translator::{Outputs, Translation, TranslatorBuilder};
 use rls2fga::types::{
-    ActionAnswer, ActionStatement, ColumnAnswer, ColumnCommand, ColumnName, ColumnRelations,
-    RelationName, TableId, TranslationNote,
+    ActingPrivileges, ActionAnswer, ActionStatement, ColumnAnswer, ColumnCommand, ColumnName,
+    ColumnRelations, Holding, RelationName, TableId, TranslationNote, TypeName,
 };
 use sqlparser::ast::DataType;
 
@@ -305,6 +305,57 @@ GRANT SELECT ON docs TO PUBLIC;
             "no acting role holds {statement:?}"
         );
     }
+}
+
+/// A `USING (false)` policy and a missing `SELECT` both deny the read, and only the
+/// report of each acting role's privileges says which caller `PostgreSQL` raises on.
+#[test]
+fn acting_privileges_tell_a_missing_privilege_from_a_policy_refusal() {
+    let planned = acting(
+        &["reader", "writer"],
+        "
+CREATE ROLE reader NOLOGIN;
+CREATE ROLE writer NOLOGIN;
+CREATE TABLE docs (id TEXT PRIMARY KEY, owner TEXT, body TEXT);
+ALTER TABLE docs OWNER TO keeper;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY docs_read ON docs FOR SELECT USING (false);
+GRANT SELECT ON docs TO reader;
+GRANT SELECT (id, owner), INSERT, DELETE ON docs TO writer;
+",
+    );
+    assert!(denies(&planned, "docs", ActionStatement::Select));
+    let columns = |names: &[&str]| -> BTreeSet<ColumnName> {
+        names
+            .iter()
+            .map(|name| ColumnName::from_stored(*name))
+            .collect()
+    };
+    let reader = ActingPrivileges {
+        type_name: TypeName::canonicalized("docs"),
+        role: "reader".into(),
+        select: Holding::Table,
+        insert: Holding::Absent,
+        update: Holding::Absent,
+        delete: false,
+    };
+    let writer = ActingPrivileges {
+        type_name: TypeName::canonicalized("docs"),
+        role: "writer".into(),
+        select: Holding::Columns(columns(&["id", "owner"])),
+        insert: Holding::Table,
+        update: Holding::Absent,
+        delete: true,
+    };
+    let expected = [reader, writer];
+    assert_eq!(planned.acting_privileges(), expected);
+    let [reader, writer] = &expected;
+    let reading = |names: &[&str]| {
+        BTreeMap::from([(ColumnCommand::Select, columns(names).into_iter().collect())])
+    };
+    assert!(reader.permits(ActionStatement::Select, &reading(&["id", "body"])));
+    assert!(writer.permits(ActionStatement::Select, &reading(&["id", "owner"])));
+    assert!(!writer.permits(ActionStatement::Select, &reading(&["id", "body"])));
 }
 
 /// A role holding `UPDATE` on one column gets its branch, and the column it may set is asked

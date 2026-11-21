@@ -21,7 +21,7 @@ use super::*;
 
 use alloc::borrow::Cow;
 
-use crate::types::ColumnCommand;
+use crate::types::{ActingPrivileges, Holding};
 use sql_traits::errors::DeploymentError;
 use sql_traits::structs::{
     ActingRole, ColumnPrivilege, GateTerm, RowSecurity, RowSecurityExemption, RowStatement,
@@ -129,13 +129,8 @@ enum Asked {
     Delete,
 }
 
-/// The statements whose gates name every target once, beside the column command each needs.
-const ASKED: [(Asked, Option<ColumnCommand>); 4] = [
-    (Asked::Select, Some(ColumnCommand::Select)),
-    (Asked::Insert, Some(ColumnCommand::Insert)),
-    (Asked::Update, Some(ColumnCommand::Update)),
-    (Asked::Delete, None),
-];
+/// Each target is fed by the gates of exactly one of these statements.
+const ASKED: [Asked; 4] = [Asked::Select, Asked::Insert, Asked::Update, Asked::Delete];
 
 impl Asked {
     /// The statement as `row_security` takes it.
@@ -149,13 +144,13 @@ impl Asked {
     }
 
     /// Where this command is held.
-    fn holding<C: ColumnLike>(self, privileges: &TablePrivileges<'_, C>) -> ColumnHolding {
+    fn holding<C: ColumnLike>(self, privileges: &TablePrivileges<'_, C>) -> Holding {
         match self {
             Self::Select => column_holding(&privileges.select),
             Self::Insert => column_holding(&privileges.insert),
             Self::Update => column_holding(&privileges.update),
-            Self::Delete if privileges.delete => ColumnHolding::Table,
-            Self::Delete => ColumnHolding::Absent,
+            Self::Delete if privileges.delete => Holding::Table,
+            Self::Delete => Holding::Absent,
         }
     }
 
@@ -186,57 +181,49 @@ fn commands_of(targets: &BTreeSet<ActionTarget>) -> Vec<String> {
     commands_fed_by(&targets.iter().copied().collect::<Vec<_>>())
 }
 
-/// Where a role holds one command on the table, as its privileges answer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ColumnHolding {
-    /// On the table, and so on every column.
-    Table,
-    /// On these columns only, never on the table.
-    Columns(BTreeSet<ColumnName>),
-    /// Nowhere.
-    Absent,
-}
-
 /// One column privilege's holding.
-fn column_holding<C: ColumnLike>(privilege: &ColumnPrivilege<'_, C>) -> ColumnHolding {
+fn column_holding<C: ColumnLike>(privilege: &ColumnPrivilege<'_, C>) -> Holding {
     match privilege {
-        ColumnPrivilege::Table => ColumnHolding::Table,
-        ColumnPrivilege::Columns(columns) if !columns.is_empty() => ColumnHolding::Columns(
+        ColumnPrivilege::Table => Holding::Table,
+        ColumnPrivilege::Columns(columns) if !columns.is_empty() => Holding::Columns(
             columns
                 .iter()
                 .map(|column| ColumnName::from_stored(column.stored_column_name()))
                 .collect(),
         ),
-        ColumnPrivilege::Columns(_) => ColumnHolding::Absent,
+        ColumnPrivilege::Columns(_) => Holding::Absent,
     }
 }
 
-/// Refuse the commands the role holds on no column, and return where it holds the ones
-/// `PostgreSQL` grants on single columns.
+/// Refuse the commands the role holds on no column, and return where the branch's acting
+/// role, if it has one, holds each command on the table `type_name` names.
 pub(super) fn gate_on_privileges<DB: DatabaseLike>(
     answers: &mut BTreeMap<ActionTarget, TargetAnswer>,
     table: &DB::Table,
     branch: &ActingBranch<'_, DB>,
+    type_name: &TypeName,
     db: &DB,
-) -> BTreeMap<ColumnCommand, ColumnHolding> {
+) -> Option<ActingPrivileges> {
     let privileges = table.privileges(branch.acting_role(), db).ok();
-    let mut held = BTreeMap::new();
-    for (asked, command) in ASKED {
+    let [select, insert, update, delete] = ASKED.map(|asked| {
         let holding = privileges
             .as_ref()
-            .map_or(ColumnHolding::Absent, |privileges| {
-                asked.holding(privileges)
-            });
-        if holding == ColumnHolding::Absent {
+            .map_or(Holding::Absent, |privileges| asked.holding(privileges));
+        if holding == Holding::Absent {
             for target in asked.targets() {
                 answers.insert(*target, TargetAnswer::Refused);
             }
         }
-        if let Some(command) = command {
-            held.insert(command, holding);
-        }
-    }
-    held
+        holding
+    });
+    branch.role.map(|(role, _)| ActingPrivileges {
+        type_name: type_name.clone(),
+        role: role.to_string(),
+        select,
+        insert,
+        update,
+        delete: delete == Holding::Table,
+    })
 }
 
 /// Place one policy's part for one target in the bucket its mode makes it.
@@ -291,7 +278,7 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
     let mut exempt = None;
     let mut recursion: BTreeMap<String, BTreeSet<ActionTarget>> = BTreeMap::new();
     let mut refused: BTreeMap<String, BTreeSet<ActionTarget>> = BTreeMap::new();
-    for (asked, _) in ASKED {
+    for asked in ASKED {
         let targets = asked.targets();
         match table.row_security(asked.statement(), branch.acting_role(), db) {
             Ok(RowSecurity::Exempt(exemption)) => {

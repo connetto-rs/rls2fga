@@ -723,6 +723,7 @@ mod tests {
             principals: Vec::new(),
             well_known,
             action_relations: Vec::new(),
+            acting_privileges: Vec::new(),
             resulting_rows: Vec::new(),
         }
     }

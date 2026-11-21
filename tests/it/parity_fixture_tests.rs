@@ -100,7 +100,8 @@ fn error_text(answer: &Answer) -> &str {
     }
 }
 
-/// A column grant hides the rows of a read projecting an ungranted column, a probe naming
+/// A read projecting a column the caller's role holds no `SELECT` on fails as `PostgreSQL`
+/// fails it, while one projecting only granted columns answers its rows, a probe naming
 /// nothing the case runs is an error, a schema the parser rejects is refused for every
 /// probe, and a table without a row key cannot name the row a check asks about.
 #[tokio::test]
@@ -132,7 +133,13 @@ async fn probes_outside_the_case() {
         .iter()
         .map(|answer| &answer.answer)
         .collect();
-    assert_eq!(answers[..2], [&Answer::Hidden, &Answer::Hidden]);
+    assert_eq!(
+        answers[..2],
+        [
+            &Answer::Error("permission denied for table docs".into()),
+            &Answer::Error("permission denied for table docs".into()),
+        ]
+    );
     assert!(error_text(answers[2]).contains("no caller carol"));
     assert!(error_text(answers[3]).contains("`SELECT 1`"));
     assert!(error_text(answers[4]).contains("no row docs:9"));

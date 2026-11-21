@@ -43,7 +43,7 @@ use crate::parser::sql_parser::{
     ColumnLike, DatabaseLike, ForeignKeyLike, IdentifierCase, PolicyLike, TableLike,
 };
 use crate::types::{
-    stable_hex_suffix, ColumnCommand, ColumnKind, ColumnName, ColumnRelations, ConditionName,
+    stable_hex_suffix, ColumnKind, ColumnName, ColumnRelations, ConditionName,
     ConditionParameterName, ContextWitness, FallbackStep, RelationName, RequestComparison,
     RequestNormalization, RequestPrincipal, TableId, TranslationNote, TypeName,
 };
@@ -85,7 +85,7 @@ use actions::{
 pub(crate) use actions::{action_relations, derived_action_relations};
 use branches::{
     answer_supplied_policies, answer_targets, branch_expr, gate_on_privileges, ActingBranch,
-    ColumnHolding, PolicyPart, TargetAnswer,
+    PolicyPart, TargetAnswer,
 };
 use dsl::render_dsl;
 use emit_membership::{
@@ -768,6 +768,9 @@ pub(crate) struct SchemaPlan {
     pub well_known: WellKnownTypes,
     /// Permission answers for modeled tables with a read gate, settled before pruning.
     pub action_relations: Vec<crate::types::ActionRelations>,
+    /// Where each acting role holds each command, per table answered per acting role,
+    /// ordered by type and role.
+    pub acting_privileges: Vec<crate::types::ActingPrivileges>,
     /// Per table a write judges, how a check names the written row and which facts it
     /// carries.
     pub resulting_rows: Vec<crate::types::ResultingRow>,
@@ -1247,6 +1250,8 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     // Types a policy may have narrowed that no name resolved to. Applied after the
     // loop, since a bearer may be built after the group that named it.
     let mut unresolved_losses: BTreeMap<TypeName, BTreeSet<RelationName>> = BTreeMap::new();
+    // Where each acting role holds each command, per table answered per role.
+    let mut acting_privileges: Vec<crate::types::ActingPrivileges> = Vec::new();
 
     for (source_table_name, table_policies) in by_table {
         // A name the catalog cannot resolve carries its policies nowhere.
@@ -1352,8 +1357,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
 
                 let catalog_table = catalog_policies.then_some(table);
                 let mut per_target: BTreeMap<ActionTarget, Vec<UsersetExpr>> = BTreeMap::new();
-                let mut column_holdings: BTreeMap<ColumnCommand, BTreeMap<String, ColumnHolding>> =
-                    BTreeMap::new();
+                let mut held_here: Vec<crate::types::ActingPrivileges> = Vec::new();
                 let mut barrier_denied: BTreeSet<ActionTarget> = BTreeSet::new();
                 let mut refused_everywhere: BTreeMap<ActionTarget, bool> = BTreeMap::new();
                 // Only a catalog table is answered per role, so only there can a policy
@@ -1399,7 +1403,13 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                                 &mut notes,
                                 &mut reaching,
                             );
-                            let held = gate_on_privileges(&mut answers, table, branch, db);
+                            let held = gate_on_privileges(
+                                &mut answers,
+                                table,
+                                branch,
+                                &table_plan.type_name,
+                                db,
+                            );
                             // A role refused a target builds no branch for it, so no policy
                             // reaches the role there.
                             for (target, policies) in reaching {
@@ -1407,14 +1417,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                                     reached.entry(target).or_default().extend(policies);
                                 }
                             }
-                            if let Some((name, _)) = branch.role {
-                                for (command, holding) in held {
-                                    column_holdings
-                                        .entry(command)
-                                        .or_default()
-                                        .insert(name.to_string(), holding);
-                                }
-                            }
+                            held_here.extend(held);
                             answers
                         }
                         _ => answer_supplied_policies(&table_policies, branch, parts),
@@ -1490,7 +1493,8 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 );
                 note_request_contracts(table_plan, &mut notes);
                 set_action_relations(table_plan, composed);
-                plant_column_relations(table_plan, other_types, &column_holdings);
+                plant_column_relations(table_plan, other_types, &held_here);
+                acting_privileges.append(&mut held_here);
 
                 if let (Some(declared_permissive), Some(reached)) = (&declared_permissive, &reached)
                 {
@@ -1606,6 +1610,12 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
             }),
     );
 
+    acting_privileges.sort_by(|left, right| {
+        left.type_name
+            .as_str()
+            .cmp(right.type_name.as_str())
+            .then_with(|| left.role.cmp(&right.role))
+    });
     let plan = SchemaPlan {
         types,
         notes,
@@ -1615,6 +1625,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         principals,
         well_known: settings.well_known.clone(),
         action_relations: answers.entries,
+        acting_privileges,
         resulting_rows,
     };
     crate::generator::model_bounds::check(&crate::generator::json_model::json_model_from_plan(
