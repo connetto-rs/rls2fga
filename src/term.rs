@@ -31,8 +31,8 @@ use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::{
     filter_policies_for_output, AbacAnd, ClassifiedExpr, ClassifiedPolicy, Composite,
     ConfidenceLevel, ExcludedSet, ExpandedFunction, MembershipExclusion, MembershipInCallerSet,
-    ParentInheritance, PatternClass, PolicyCommand, PolicyMode, RowValueInCallerSet, StoredClause,
-    UnclassifiedExpr,
+    ParentInheritance, PatternClass, PolicyCommand, PolicyMode, ReferringRows, RowValueInCallerSet,
+    StoredClause, UnclassifiedExpr,
 };
 use crate::classifier::policy_classifier::classify_expr;
 use crate::classifier::readability::{table_readability, TableReadability};
@@ -360,6 +360,7 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P26OwnerExpression(_)
             | PatternClass::P13UncorrelatedMembership(_) => TermCaller::Identity,
             PatternClass::P5ParentInheritance(ParentInheritance { inner_pattern, .. })
+            | PatternClass::P31ReferringRows(ReferringRows { inner_pattern, .. })
             | PatternClass::ExpandedFunction(ExpandedFunction {
                 inner: inner_pattern,
                 ..

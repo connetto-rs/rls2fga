@@ -10,7 +10,7 @@ use crate::classifier::patterns::{
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, FlaggedRow, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
+    ReferringRows, RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
     RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
@@ -260,6 +260,11 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         }
         PatternClass::P5ParentInheritance(ParentInheritance { parent_table, .. }) => {
             format!("P5 (inherits from {parent_table})")
+        }
+        PatternClass::P31ReferringRows(ReferringRows {
+            referring_table, ..
+        }) => {
+            format!("P31 (named by readable rows of {referring_table})")
         }
         PatternClass::ExpandedFunction(ExpandedFunction {
             function, inner, ..

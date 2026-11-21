@@ -1247,111 +1247,26 @@ pub(crate) fn emit_parent_inheritance<DB: DatabaseLike>(
         fk_columns,
         inner_pattern,
     } = parent_inheritance;
-    let policy_name = ctx.policy_name;
-    let db = ctx.db;
     let source_table = ctx.source_table;
-    let table_types = ctx.table_types;
-
-    let parent_type = table_types.resolve(parent_table);
+    let parent_type = ctx.table_types.resolve(parent_table);
 
     let parent_relation =
         parent_bridge_relation(table_plan, source_table, fk_columns, &parent_type);
-    // The inner rule has to land on the parent's plan. When the parent is the
-    // table being built, that plan is `table_plan`, held here rather than in
-    // `all_types`, so writing it there would be dropped by the re-insert at
-    // the end of the table loop.
-    let inherits_from_self = parent_type == table_plan.type_name.as_str();
-    // A bare delegation adds nothing to the parent's own read rule, so the gate
-    // below is the whole rule. Translating the constant would mint a
-    // `public_viewer` relation on the parent and ask an operator for a tuple per
-    // parent row that no rule reads.
-    let bare_delegation = matches!(
-        &inner_pattern.pattern,
-        PatternClass::P10ConstantBool(ConstantBool { value: true })
-    );
-    let inner_expr = if bare_delegation {
-        UsersetExpr::Computed(can_select_relation())
-    } else if inherits_from_self {
-        translate_pattern(
-            &inner_pattern.pattern,
-            &ctx.for_table(parent_table),
-            table_plan,
-            all_types,
-            notes,
-            readability,
-        )
-    } else {
-        let parent_plan = all_types.entry(parent_type.clone()).or_insert_with(|| {
-            TypePlan::new_with_well_known(parent_type.clone(), &table_plan.well_known)
-        });
-        let mut parent_plan_owned = core::mem::replace(
-            parent_plan,
-            TypePlan::new_with_well_known(parent_type.clone(), &table_plan.well_known),
-        );
-        let expr = translate_pattern(
-            &inner_pattern.pattern,
-            &ctx.for_table(parent_table),
-            &mut parent_plan_owned,
-            all_types,
-            notes,
-            readability,
-        );
-        *all_types
-            .entry(parent_type.clone())
-            .or_insert_with(|| TypePlan::new(parent_type.clone())) = parent_plan_owned;
-        bind_row_source(all_types, &parent_type, parent_table, db);
-        expr
+    let related = RelatedRows {
+        table: parent_table,
+        type_name: &parent_type,
+        rule: inner_pattern,
     };
-
-    // The policy requires this specific parent-side rule. Pointing at the
-    // parent's `can_select` instead would import every other permissive
-    // policy the parent has.
-    let rule_is_denial =
-        matches!(&inner_expr, UsersetExpr::Computed(name) if *name == deny_relation());
-    // A row the parent hides cannot satisfy the rule, self references included.
-    // Gating narrows the rule, so an unreadable RLS state gates.
-    let gate_on_parent = !rule_is_denial
-        && !bare_delegation
-        && lookup_table_id(db, parent_table)
-            .is_some_and(|table| table.has_row_level_security(db) != Ok(false));
-    let rule_expr = if gate_on_parent {
-        UsersetExpr::Intersection(vec![
-            inner_expr,
-            UsersetExpr::Computed(can_select_relation()),
-        ])
-    } else {
-        inner_expr
-    };
-    let inherited = match rule_expr {
-        UsersetExpr::Computed(name) => name,
-        expr => {
-            // Named after the rule, so children share it and a policy rename
-            // leaves the parent alone.
-            let name = clamp_relation_name(format!(
-                "{INHERITED_RELATION_PREFIX}{}",
-                stable_hex_suffix(userset_key(&expr).as_str())
-            ));
-            if inherits_from_self {
-                table_plan.ensure_computed(name, expr)
-            } else {
-                all_types
-                    .entry(parent_type.clone())
-                    .or_insert_with(|| {
-                        TypePlan::new_with_well_known(parent_type.clone(), &table_plan.well_known)
-                    })
-                    .ensure_computed(name, expr)
-            }
-        }
-    };
-
+    let (inherited, rule_is_denial) =
+        related.gated_rule(ctx, table_plan, all_types, notes, readability);
     if rule_is_denial {
         notes.push(TranslationNote::ParentRuleUntranslated {
-            policy: policy_name.to_string(),
+            policy: ctx.policy_name.to_string(),
             parent_table: parent_table.clone(),
         });
     }
 
-    if !bridge_is_buildable(table_plan, source_table, fk_columns, &parent_type, db) {
+    if !bridge_is_buildable(table_plan, source_table, fk_columns, &parent_type, ctx.db) {
         return deny_expr(table_plan);
     }
     table_plan.add_source(TupleSource::ParentBridge {
@@ -1364,6 +1279,186 @@ pub(crate) fn emit_parent_inheritance<DB: DatabaseLike>(
     UsersetExpr::TupleToUserset {
         tupleset: parent_relation,
         computed: inherited,
+    }
+}
+
+/// The guarded row reached from each row of another table naming it, which admits the
+/// caller where the caller can read that row and the row passes its rule.
+///
+/// Every referring row is its own object linked to the guarded row it names, so its read
+/// and its rule meet on that one object before the link is crossed.
+pub(crate) fn emit_referring_rows<DB: DatabaseLike>(
+    referring_rows: &ReferringRows,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+    notes: &mut Vec<TranslationNote>,
+    readability: &mut BTreeMap<TableId, TableReadability>,
+) -> UsersetExpr {
+    let ReferringRows {
+        referring_table,
+        referring_columns,
+        inner_pattern,
+    } = referring_rows;
+    if ctx.membership_reads_bypass_rls {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: ctx.policy_name.to_string(),
+            reason: format!(
+                "the rows of '{referring_table}' are read past their row security, so the \
+                 caller's read of them does not decide which ones count"
+            ),
+        });
+        return deny_expr(table_plan);
+    }
+    let Some(identity_cols) = resolve_row_identity(referring_table, ctx.db) else {
+        skip_source_without_row_identity(
+            table_plan,
+            referring_table,
+            "referring row links",
+            ctx.db,
+        );
+        return deny_expr(table_plan);
+    };
+    let referring_type = ctx.table_types.resolve(referring_table);
+    let related = RelatedRows {
+        table: referring_table,
+        type_name: &referring_type,
+        rule: inner_pattern,
+    };
+    let (admitting, rule_is_denial) =
+        related.gated_rule(ctx, table_plan, all_types, notes, readability);
+    if rule_is_denial {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: ctx.policy_name.to_string(),
+            reason: format!(
+                "the rule the rows of '{referring_table}' naming the row have to pass does not \
+                 translate"
+            ),
+        });
+        return deny_expr(table_plan);
+    }
+    let link = link_share_rows(
+        table_plan,
+        &ShareRows {
+            join_table: referring_table,
+            identity_cols: &identity_cols,
+            fk_cols: referring_columns,
+            share_type: &referring_type,
+        },
+    );
+    UsersetExpr::TupleToUserset {
+        tupleset: link,
+        computed: admitting,
+    }
+}
+
+/// Rows of another table whose rule a pattern reaches through a link.
+struct RelatedRows<'a> {
+    table: &'a TableId,
+    type_name: &'a TypeName,
+    rule: &'a ClassifiedExpr,
+}
+
+impl RelatedRows<'_> {
+    /// The relation on the related type holding its rule, gated by its own read where its
+    /// row security may hide a row, and whether the rule translated to a denial.
+    fn gated_rule<DB: DatabaseLike>(
+        &self,
+        ctx: &PatternCtx<'_, DB>,
+        table_plan: &mut TypePlan,
+        all_types: &mut BTreeMap<TypeName, TypePlan>,
+        notes: &mut Vec<TranslationNote>,
+        readability: &mut BTreeMap<TableId, TableReadability>,
+    ) -> (RelationName, bool) {
+        let related_type = self.type_name;
+        // The rule has to land on the related plan. When that is the table being built,
+        // the plan is `table_plan`, held here rather than in `all_types`, so writing it
+        // there would be dropped by the re-insert at the end of the table loop.
+        let on_self = related_type == table_plan.type_name.as_str();
+        // A bare delegation adds nothing to the related table's own read rule, so the gate
+        // is the whole rule. Translating the constant would mint a `public_viewer`
+        // relation there and ask an operator for a tuple per row that no rule reads.
+        let bare_delegation = matches!(
+            &self.rule.pattern,
+            PatternClass::P10ConstantBool(ConstantBool { value: true })
+        );
+        let rule_expr = if bare_delegation {
+            UsersetExpr::Computed(can_select_relation())
+        } else if on_self {
+            translate_pattern(
+                &self.rule.pattern,
+                &ctx.for_table(self.table),
+                table_plan,
+                all_types,
+                notes,
+                readability,
+            )
+        } else {
+            let related_plan = all_types.entry(related_type.clone()).or_insert_with(|| {
+                TypePlan::new_with_well_known(related_type.clone(), &table_plan.well_known)
+            });
+            let mut related_plan_owned = core::mem::replace(
+                related_plan,
+                TypePlan::new_with_well_known(related_type.clone(), &table_plan.well_known),
+            );
+            let expr = translate_pattern(
+                &self.rule.pattern,
+                &ctx.for_table(self.table),
+                &mut related_plan_owned,
+                all_types,
+                notes,
+                readability,
+            );
+            *all_types
+                .entry(related_type.clone())
+                .or_insert_with(|| TypePlan::new(related_type.clone())) = related_plan_owned;
+            bind_row_source(all_types, related_type, self.table, ctx.db);
+            expr
+        };
+
+        // The policy requires this specific rule. Pointing at the related `can_select`
+        // instead would import every other permissive policy the related table has.
+        let rule_is_denial =
+            matches!(&rule_expr, UsersetExpr::Computed(name) if *name == deny_relation());
+        // A row the related table hides cannot satisfy the rule, self references
+        // included. Gating narrows the rule, so an unreadable RLS state gates.
+        let gated = !rule_is_denial
+            && !bare_delegation
+            && lookup_table_id(ctx.db, self.table)
+                .is_some_and(|table| table.has_row_level_security(ctx.db) != Ok(false));
+        let rule_expr = if gated {
+            UsersetExpr::Intersection(vec![
+                rule_expr,
+                UsersetExpr::Computed(can_select_relation()),
+            ])
+        } else {
+            rule_expr
+        };
+        let relation = match rule_expr {
+            UsersetExpr::Computed(name) => name,
+            expr => {
+                // Named after the rule, so every pattern reaching it shares it and a policy
+                // rename leaves the related type alone.
+                let name = clamp_relation_name(format!(
+                    "{INHERITED_RELATION_PREFIX}{}",
+                    stable_hex_suffix(userset_key(&expr).as_str())
+                ));
+                if on_self {
+                    table_plan.ensure_computed(name, expr)
+                } else {
+                    all_types
+                        .entry(related_type.clone())
+                        .or_insert_with(|| {
+                            TypePlan::new_with_well_known(
+                                related_type.clone(),
+                                &table_plan.well_known,
+                            )
+                        })
+                        .ensure_computed(name, expr)
+                }
+            }
+        };
+        (relation, rule_is_denial)
     }
 }
 

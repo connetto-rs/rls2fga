@@ -13,8 +13,11 @@ use sqlparser::ast::{
 };
 
 mod indirect;
+mod referring;
 pub(crate) use indirect::owner_key_of;
 pub use indirect::recognize_p19_indirect_membership;
+pub(crate) use referring::diagnose_p31_referring_rows;
+pub use referring::recognize_p31_referring_rows;
 
 /// Immutable visitor that gates `handle` on expressions outside nested subqueries.
 struct TopLevelOnly<F> {
@@ -2001,8 +2004,8 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
     Some(analysis)
 }
 
-/// The `(outer, parent)` pairs ordered by `key`, when their parent columns are exactly
-/// `key` and no outer column fills two of them.
+/// The pairs ordered by `key`, when their second columns are exactly `key` and no first
+/// column fills two of them.
 fn pairs_in_key_order(
     mut pairs: Vec<(ColumnName, ColumnName)>,
     key: &[ColumnName],

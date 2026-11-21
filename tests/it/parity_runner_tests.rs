@@ -85,6 +85,7 @@ async fn every_parity_case_agrees() {
             an_uncorrelated_membership_admits_every_row,
             a_parent_key_subquery_inherits_the_parents_rule,
             membership_in_readable_rows_inherits_their_read,
+            rows_naming_the_guarded_row_admit_it_through_their_own_read,
             a_correlated_column_membership_compares_the_named_columns,
             a_read_and_a_write_are_judged_separately,
             an_aliased_quoted_guard_falls_closed,
@@ -2559,6 +2560,151 @@ CREATE POLICY grants_insert ON grants FOR INSERT
         support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
     }
     assert_agrees(&case, &run);
+}
+
+/// A row the caller reads through the rows of another table naming it, each one of those
+/// readable under its own policies and passing the filter on its own, spelled as
+/// `= ANY (ARRAY(...))`, as `IN` and as `EXISTS`.
+///
+/// One organization has a readable invitation that expired beside a live one Ann cannot
+/// read, so a model pooling the readability of one witness with the clock of another
+/// admits it. Another has an expired and a live invitation both Ann's, so one witness
+/// suffices. A revoked invitation hides under a restrictive policy, an orphan names no
+/// organization, and a missing deadline admits nobody. The second instant expires the
+/// invitation due in six months, which only a clock read per check catches.
+async fn rows_naming_the_guarded_row_admit_it_through_their_own_read(cluster: Arc<Cluster>) {
+    let callers = [
+        ("ann", Some("ann@example.com")),
+        ("bob", Some("bob@example.com")),
+        ("unset", None),
+    ];
+    for loading_from_rows in [false, true] {
+        let principals = callers
+            .iter()
+            .map(|(subject, email)| {
+                let mut principal = Principal::as_role(subject, "app_reader").with_clock();
+                if let Some(email) = email {
+                    principal
+                        .session
+                        .push(("app.verified_email".into(), (*email).into()));
+                }
+                principal
+            })
+            .collect();
+        let mut case = ParityCase::reading(
+            if loading_from_rows {
+                "runner-referring-rows-from-rows"
+            } else {
+                "runner-referring-rows"
+            },
+            "
+CREATE TABLE organizations (id TEXT PRIMARY KEY);
+CREATE TABLE workspaces (id TEXT PRIMARY KEY);
+CREATE TABLE teams (id TEXT PRIMARY KEY);
+CREATE TABLE invitations (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT REFERENCES organizations(id),
+    workspace_id TEXT REFERENCES workspaces(id),
+    team_id TEXT REFERENCES teams(id),
+    email TEXT NOT NULL,
+    accepted_by_id TEXT,
+    revoked_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ
+);
+ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE workspaces ENABLE ROW LEVEL SECURITY;
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY invitations_select ON invitations FOR SELECT
+    USING (email = NULLIF(current_setting('app.verified_email', true), ''));
+CREATE POLICY invitations_unrevoked ON invitations AS RESTRICTIVE FOR SELECT
+    USING (revoked_at IS NULL);
+CREATE POLICY organizations_select ON organizations FOR SELECT
+    USING (id = ANY (ARRAY(SELECT invitation.organization_id FROM invitations invitation
+        WHERE invitation.accepted_by_id IS NULL AND invitation.expires_at > now())));
+CREATE POLICY workspaces_select ON workspaces FOR SELECT
+    USING (id IN (SELECT invitation.workspace_id FROM invitations invitation));
+CREATE POLICY teams_select ON teams FOR SELECT
+    USING (EXISTS (SELECT 1 FROM invitations invitation
+        WHERE invitation.team_id = teams.id AND invitation.expires_at > now()));
+",
+            &[
+                "INSERT INTO organizations(id) VALUES ('o-live'), ('o-accepted'), ('o-expired'),
+                     ('o-undated'), ('o-revoked'), ('o-split'), ('o-either'), ('o-soon'), ('o-none');
+                 INSERT INTO workspaces(id) VALUES ('w-ann'), ('w-bob'), ('w-revoked'), ('w-none');
+                 INSERT INTO teams(id) VALUES ('t-live'), ('t-expired');
+                 INSERT INTO invitations
+                     (id, organization_id, workspace_id, team_id, email, accepted_by_id, revoked_at, expires_at)
+                 VALUES
+                     ('i-live', 'o-live', 'w-ann', 't-live', 'ann@example.com', NULL, NULL, now() + interval '2 years'),
+                     ('i-accepted', 'o-accepted', NULL, NULL, 'ann@example.com', 'ann', NULL, now() + interval '2 years'),
+                     ('i-expired', 'o-expired', NULL, 't-expired', 'ann@example.com', NULL, NULL, now() - interval '1 day'),
+                     ('i-undated', 'o-undated', NULL, NULL, 'ann@example.com', NULL, NULL, NULL),
+                     ('i-revoked', 'o-revoked', 'w-revoked', NULL, 'ann@example.com', NULL, now(), now() + interval '2 years'),
+                     ('i-split-ann', 'o-split', NULL, NULL, 'ann@example.com', NULL, NULL, now() - interval '1 day'),
+                     ('i-split-bob', 'o-split', 'w-bob', NULL, 'bob@example.com', NULL, NULL, now() + interval '2 years'),
+                     ('i-either-old', 'o-either', NULL, NULL, 'ann@example.com', NULL, NULL, now() - interval '1 day'),
+                     ('i-either-new', 'o-either', NULL, NULL, 'ann@example.com', NULL, NULL, now() + interval '2 years'),
+                     ('i-soon', 'o-soon', NULL, NULL, 'ann@example.com', NULL, NULL, now() + interval '6 months'),
+                     ('i-orphan', NULL, NULL, NULL, 'ann@example.com', NULL, NULL, now() + interval '2 years')",
+                "CREATE ROLE app_reader LOGIN;
+                 GRANT SELECT ON organizations, workspaces, teams, invitations TO app_reader",
+            ],
+            principals,
+        )
+        .with_settings([support::deployment::scalar("app.verified_email").may_be_unset()])
+        .also_at(
+            "1 year",
+            "WITH callers (subject, email) AS (
+                 VALUES ('ann', 'ann@example.com'), ('bob', 'bob@example.com'), ('unset', NULL::text)),
+             readable AS (
+                 SELECT c.subject, i.*
+                 FROM callers c JOIN invitations i ON i.email = c.email AND i.revoked_at IS NULL)
+             SELECT subject, 'invitations:' || id AS object FROM readable
+             UNION
+             SELECT subject, 'organizations:' || organization_id FROM readable
+             WHERE organization_id IS NOT NULL AND accepted_by_id IS NULL
+                 AND expires_at > $1::timestamptz
+             UNION
+             SELECT subject, 'workspaces:' || workspace_id FROM readable
+             WHERE workspace_id IS NOT NULL
+             UNION
+             SELECT subject, 'teams:' || team_id FROM readable
+             WHERE team_id IS NOT NULL AND expires_at > $1::timestamptz",
+        );
+        case.loading_from_rows = loading_from_rows;
+        let run = support::parity::run(&cluster, &case).await;
+        for (subject, object, visible) in [
+            ("ann", "organizations:o-live", true),
+            ("ann", "organizations:o-accepted", false),
+            ("ann", "organizations:o-expired", false),
+            ("ann", "organizations:o-undated", false),
+            ("ann", "organizations:o-revoked", false),
+            ("ann", "organizations:o-split", false),
+            ("bob", "organizations:o-split", true),
+            ("ann", "organizations:o-either", true),
+            ("ann", "organizations:o-soon", true),
+            ("ann", "organizations:o-none", false),
+            ("unset", "organizations:o-live", false),
+            ("ann", "workspaces:w-ann", true),
+            ("ann", "workspaces:w-bob", false),
+            ("ann", "workspaces:w-revoked", false),
+            ("bob", "workspaces:w-bob", true),
+            ("unset", "workspaces:w-ann", false),
+            ("ann", "teams:t-live", true),
+            ("ann", "teams:t-expired", false),
+        ] {
+            support::parity::assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                visible,
+            );
+        }
+        assert_agrees(&case, &run);
+    }
 }
 
 /// Ported from `correlated_column_membership_parity_postgres18_and_openfga`.

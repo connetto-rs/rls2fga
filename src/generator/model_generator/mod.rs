@@ -94,7 +94,8 @@ use dsl::render_dsl;
 use emit_membership::{
     emit_abac_and, emit_blocked_set, emit_composite, emit_declared_helper, emit_exists_membership,
     emit_flagged_row, emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
-    emit_request_value_in_helper_set, emit_row_in_helper_pairs, emit_uncorrelated_membership,
+    emit_referring_rows, emit_request_value_in_helper_set, emit_row_in_helper_pairs,
+    emit_uncorrelated_membership,
 };
 use emit_ownership::{
     attribute_gate_key, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
@@ -2842,6 +2843,14 @@ fn translate_pattern<DB: DatabaseLike>(
         }
         PatternClass::P5ParentInheritance(parent_inheritance) => emit_parent_inheritance(
             parent_inheritance,
+            ctx,
+            table_plan,
+            all_types,
+            notes,
+            readability,
+        ),
+        PatternClass::P31ReferringRows(referring_rows) => emit_referring_rows(
+            referring_rows,
             ctx,
             table_plan,
             all_types,

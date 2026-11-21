@@ -74,9 +74,12 @@ pub(crate) use subquery::projected_select;
 pub use subquery::recognize_p19_indirect_membership;
 pub(crate) use subquery::session_zoned_columns;
 pub(crate) use subquery::{
-    diagnose_p4_membership_ambiguity, diagnose_p5_parent_inheritance_ambiguity,
+    diagnose_p31_referring_rows, diagnose_p4_membership_ambiguity,
+    diagnose_p5_parent_inheritance_ambiguity,
 };
-pub use subquery::{recognize_p4, recognize_p4_in_subquery, recognize_p5};
+pub use subquery::{
+    recognize_p31_referring_rows, recognize_p4, recognize_p4_in_subquery, recognize_p5,
+};
 pub(crate) use subquery::{resolve_membership_pairing, MembershipPairing};
 pub(crate) use unset::{empty_readings, fallback_empty_readings};
 
