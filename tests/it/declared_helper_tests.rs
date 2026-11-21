@@ -196,7 +196,6 @@ fn a_call_in_from_projecting_or_filtering_its_rows_is_not_the_declared_set() {
         "SELECT p.id FROM authz.projects_with('read') WITH ORDINALITY p(id, n) WHERE p.n = 1",
         "SELECT p, p FROM authz.projects_with('read') p",
         "SELECT p.id FROM authz.projects_with('read') p(id, n)",
-        "SELECT public.p.id FROM authz.projects_with('read') p(id)",
     ] {
         let sql = format!(
             "{LEVELS}{OWNER_READS}
@@ -210,6 +209,16 @@ fn a_call_in_from_projecting_or_filtering_its_rows_is_not_the_declared_set() {
             "{subquery}: {classified:?}"
         );
     }
+    let sql = format!(
+        "{LEVELS}{OWNER_READS}
+         ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY orders_read ON orders FOR SELECT USING (
+           project_id IN (SELECT public.p.id FROM authz.projects_with('read') p(id)));"
+    );
+    assert_eq!(
+        crate::support::deployment::unknown_column(&sql),
+        "public.p.id"
+    );
 }
 
 #[test]
@@ -508,7 +517,7 @@ fn the_report_names_the_helper_call() {
 /// where the helper is the reason.
 #[test]
 fn every_unproven_call_is_refused() {
-    let policy = |using: &str| {
+    let policy = |table: &str, using: &str| {
         format!(
             "{LEVELS}{OWNER_READS}
              CREATE FUNCTION authz.misparented(min_role TEXT) RETURNS SETOF TEXT
@@ -523,10 +532,8 @@ fn every_unproven_call_is_refused() {
              $$;
              ALTER FUNCTION authz.misparented(TEXT) OWNER TO authz_owner;
              ALTER FUNCTION authz.mixed() OWNER TO authz_owner;
-             ALTER TABLE orders ENABLE ROW LEVEL SECURITY;
-             ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
-             CREATE POLICY orders_read ON orders FOR SELECT USING ({using});
-             CREATE POLICY projects_read ON projects FOR SELECT USING ({using});"
+             ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY {table}_read ON {table} FOR SELECT USING ({using});"
         )
     };
     let helpers = [
@@ -537,28 +544,28 @@ fn every_unproven_call_is_refused() {
     ];
     let named = [
         (
-            "orders_read",
+            "orders",
             "project_id = ANY (ARRAY(SELECT authz.projects_with(current_setting('app.tenant', true))))",
             "which is not a literal",
         ),
         (
-            "orders_read",
+            "orders",
             "title = ANY (ARRAY(SELECT authz.mixed()))",
             "names no row",
         ),
         (
-            "projects_read",
+            "projects",
             "team_id = ANY (ARRAY(SELECT authz.misparented('read')))",
             "column 'team_id' names rows of 'public.teams'",
         ),
         (
-            "orders_read",
+            "orders",
             "project_id = ANY (ARRAY(SELECT authz.projects_with(min_role => 'read')))",
             "which is not a literal",
         ),
     ];
-    for (target, using, reason) in named {
-        let refused = refusal_of(&policy(using), &helpers, target);
+    for (table, using, reason) in named {
+        let refused = refusal_of(&policy(table, using), &helpers, &format!("{table}_read"));
         assert!(refused.contains(reason), "`{using}`: {refused}");
     }
 
@@ -566,7 +573,10 @@ fn every_unproven_call_is_refused() {
         "{}
          CREATE FUNCTION authz.projects_with(min_role INT) RETURNS SETOF TEXT
          LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$ SELECT NULL::text $$;",
-        policy("project_id = ANY (ARRAY(SELECT authz.projects_with('read')))")
+        policy(
+            "orders",
+            "project_id = ANY (ARRAY(SELECT authz.projects_with('read')))"
+        )
     );
     let refused = refusal_of(&overloaded, &helpers, "orders_read");
     assert!(refused.contains("more than one declaration"), "{refused}");
@@ -578,7 +588,7 @@ fn every_unproven_call_is_refused() {
         "project_id IN (SELECT 'P1')",
         "project_id = ANY (ARRAY(SELECT current_date))",
     ] {
-        refusal_of(&policy(using), &helpers, "orders_read");
+        refusal_of(&policy("orders", using), &helpers, "orders_read");
     }
 
     // A column whose foreign keys name two tables, or a non-key, names no one row.
@@ -589,7 +599,10 @@ fn every_unproven_call_is_refused() {
     ] {
         let sql = format!(
             "{}{keys}",
-            policy("project_id = ANY (ARRAY(SELECT authz.projects_with('read')))")
+            policy(
+                "orders",
+                "project_id = ANY (ARRAY(SELECT authz.projects_with('read')))"
+            )
         );
         let refused = refusal_of(&sql, &helpers, "orders_read");
         assert!(refused.contains("names no row"), "{keys}: {refused}");

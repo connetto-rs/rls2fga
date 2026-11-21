@@ -585,13 +585,13 @@ fn foreign_key_link_pairs_to_another_parent_are_refused() {
 
 #[test]
 fn unknown_alias_in_a_correlation_is_refused() {
-    not_p19(
-        SCHEMA,
+    let predicate =
         "EXISTS (SELECT 1 FROM ownable_ancestors a JOIN memberships m ON m.owner_id = a.owner
             WHERE a.ownable = orders.id AND m.member_id = ghost.id
-            AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read')",
-        "a conjunct that reads an alias no scan admits",
-    );
+            AND m.member_id = current_setting('app.user_id', true) AND m.role = 'read')";
+    let sql =
+        format!("{SCHEMA}CREATE POLICY orders_read ON orders FOR SELECT USING ({predicate});");
+    assert_eq!(deployment::unknown_column(&sql), "ghost.id");
 }
 
 #[test]
@@ -683,11 +683,10 @@ fn one_table_under_one_alias_is_not_two_hops() {
 
 #[test]
 fn far_correlation_to_a_missing_closure_column_is_refused() {
-    not_p19(
-        SCHEMA,
-        &NESTED_ROLE.replace("m.owner_id = a.owner", "m.owner_id = a.missing"),
-        "a correlation to a missing closure column",
-    );
+    let predicate = NESTED_ROLE.replace("m.owner_id = a.owner", "m.owner_id = a.missing");
+    let sql =
+        format!("{SCHEMA}CREATE POLICY orders_read ON orders FOR SELECT USING ({predicate});");
+    assert_eq!(deployment::unknown_column(&sql), "a.missing");
 }
 
 #[test]
@@ -885,14 +884,16 @@ fn colliding_scan_alias_keeps_the_two_hop_payload() {
 
 #[test]
 fn a_scan_name_repeated_across_two_scans_is_refused() {
-    not_p19(
-        SCHEMA,
-        "EXISTS (SELECT 1 FROM ownable_ancestors JOIN memberships ownable_ancestors
+    let predicate = "EXISTS (SELECT 1 FROM ownable_ancestors JOIN memberships ownable_ancestors
             ON ownable_ancestors.owner_id = ownable_ancestors.owner
             WHERE ownable_ancestors.ownable = orders.id
             AND ownable_ancestors.member_id = current_setting('app.user_id', true)
-            AND ownable_ancestors.role = 'read')",
-        "one name answering for two scans",
+            AND ownable_ancestors.role = 'read')";
+    let sql =
+        format!("{SCHEMA}CREATE POLICY orders_read ON orders FOR SELECT USING ({predicate});");
+    assert_eq!(
+        deployment::unknown_column(&sql),
+        "ownable_ancestors.owner_id"
     );
 }
 

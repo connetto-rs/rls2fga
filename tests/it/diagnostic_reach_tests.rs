@@ -165,28 +165,18 @@ CREATE POLICY p ON docs FOR SELECT USING (owner_id = current_setting('app.user_i
     assert_reports("inheritance parent", &notes, "archived_docs");
 }
 
-/// A membership correlated against a column the guarded table does not have names no row,
-/// so the bridge is refused rather than keyed on a guess.
+/// A membership correlated against an absent column makes the schema invalid.
 #[test]
-fn a_bridge_on_an_absent_column_is_reported_and_skipped() {
-    let (notes, skips) = reported(
-        "CREATE TABLE users(id TEXT PRIMARY KEY);
+fn a_bridge_on_an_absent_column_is_refused() {
+    let sql = "CREATE TABLE users(id TEXT PRIMARY KEY);
 CREATE TABLE projects(id TEXT PRIMARY KEY, owner_id TEXT);
 CREATE TABLE members(project_id TEXT REFERENCES projects(id), user_id TEXT);
 CREATE TABLE docs(id TEXT PRIMARY KEY, body TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY dp ON docs FOR SELECT
     USING (EXISTS (SELECT 1 FROM members WHERE members.project_id = docs.missing_col
-        AND members.user_id = current_setting('app.user_id')));",
-        None,
-        ConfidenceLevel::B,
-    );
-    assert_reports("absent bridge column", &notes, "missing_col");
-    assert_reports(
-        "absent bridge column",
-        &skips,
-        "missing column 'missing_col'",
-    );
+        AND members.user_id = current_setting('app.user_id')));";
+    assert_eq!(support::deployment::unknown_column(sql), "docs.missing_col");
 }
 
 /// Ownership on a table nothing can name a row of emits no tuple, and says which column

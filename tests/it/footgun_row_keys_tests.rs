@@ -508,37 +508,19 @@ CREATE POLICY b_read ON b FOR SELECT USING (EXISTS (SELECT 1 FROM a WHERE a.k = 
     );
 }
 
-/// A bridge the schema cannot write leaves the grant above it satisfiable by nobody.
-/// The renderer can only say so in a comment, so the loss is settled while the plan is
-/// built and reaches `notes`.
+/// A bridge naming an absent column makes the schema invalid.
 #[test]
-fn a_bridge_the_schema_cannot_write_is_reported() {
-    let db = db_of(
+fn a_bridge_the_schema_cannot_write_is_refused() {
+    let sql =
         "CREATE TABLE docs(id UUID PRIMARY KEY);
 CREATE TABLE doc_members(id UUID PRIMARY KEY, doc_id UUID, user_id TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON docs FOR SELECT USING (EXISTS (
   SELECT 1 FROM doc_members dm WHERE dm.doc_id = nonexistent AND dm.user_id = current_setting('app.user_id')));
-",
-    );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-
-    let reported = outputs.notes().iter().any(|note| {
-        matches!(note, TranslationNote::BridgeColumnMissing { table, column, .. }
-            if table.name() == "docs" && column == "nonexistent")
-    });
-    assert!(
-        reported,
-        "the missing bridge column has to be a note: {:?}",
-        outputs.notes()
-    );
-    assert!(
-        relation_denies(&outputs.model(), "docs", "can_select"),
-        "a grant whose bridge nobody writes has to fall closed:\n{}",
-        outputs.model()
+";
+    assert_eq!(
+        crate::support::deployment::unknown_column(sql),
+        "nonexistent"
     );
 }
 
@@ -577,36 +559,18 @@ CREATE POLICY p ON paper_shares FOR SELECT USING (
     );
 }
 
-/// A correlated column the schema does not have is a missing column whatever it is
-/// called. Naming it after the guarded table used to buy a self-reference bridge, so
-/// the one spelling `projects.project_id` granted where every other spelling refused.
+/// A correlated column named after its table must still exist.
 #[test]
 fn a_bridge_column_named_after_its_table_is_still_missing() {
-    let db = db_of(
-        "CREATE TABLE projects(id TEXT PRIMARY KEY);
+    let sql = "CREATE TABLE projects(id TEXT PRIMARY KEY);
 CREATE TABLE project_members(project_id TEXT, user_id TEXT);
 ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
 CREATE POLICY p ON projects FOR SELECT USING (EXISTS (
   SELECT 1 FROM project_members m WHERE m.project_id = projects.project_id
     AND m.user_id = current_setting('app.user_id')));
-",
-    );
-    let outputs = translator(ConfidenceLevel::B)
-        .translate(&db)
-        .expect("translation should plan")
-        .outputs_accepting_gaps();
-
-    assert!(
-        outputs.notes().iter().any(|note| {
-            matches!(note, TranslationNote::BridgeColumnMissing { table, column, .. }
-                if table.name() == "projects" && column == "project_id")
-        }),
-        "the missing bridge column has to be a note: {:?}",
-        outputs.notes()
-    );
-    assert!(
-        relation_denies(&outputs.model(), "projects", "can_select"),
-        "a grant whose bridge nobody writes has to fall closed:\n{}",
-        outputs.model()
+";
+    assert_eq!(
+        crate::support::deployment::unknown_column(sql),
+        "projects.project_id"
     );
 }

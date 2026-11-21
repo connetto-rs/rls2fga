@@ -371,6 +371,11 @@ fn columns_compared_through_a_conversion_are_refused() {
             assert!(reason.contains(name), "`{clause}` names {name}: {reason}");
         }
     }
-    let reason = refusal("amount INTEGER", "amount = missing");
-    assert!(reason.contains("missing"), "{reason}");
+    let schema = "CREATE TABLE public.items(id UUID PRIMARY KEY, amount INTEGER);
+        ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+        CREATE POLICY items_p ON items FOR SELECT USING (amount = missing);";
+    assert_eq!(
+        crate::support::deployment::unknown_column(schema),
+        "missing"
+    );
 }

@@ -19,10 +19,11 @@ pub enum SchemaError {
 /// # Errors
 ///
 /// Returns [`SchemaError::Schema`] when the schema does not parse, and when it
-/// describes something `PostgreSQL` would refuse: a foreign key whose target
-/// table, target column or unique constraint is absent, or a policy on a table
-/// the search path does not reach. Those refusals are what keeps the rest of the
-/// pipeline total, since it resolves references eagerly.
+/// describes something `PostgreSQL` would refuse, such as a foreign key whose
+/// target table, target column or unique constraint is absent, a policy on a
+/// table the search path does not reach, or a policy, view, index or check
+/// naming a column that resolves to nothing. Those refusals are what keeps the
+/// rest of the pipeline total, since it resolves references eagerly.
 pub fn parse_schema(sql: &str) -> Result<ParserDB, SchemaError> {
     Ok(schema_options().parse::<PostgreSqlDialect>(sql)?)
 }

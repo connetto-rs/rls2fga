@@ -23,30 +23,6 @@ const CALLER: &str = "current_setting('app.user_id', true)";
 const DOCS: &str = "CREATE TABLE docs (
     id TEXT PRIMARY KEY, owner TEXT, tags TEXT[], data JSONB, flag BOOLEAN, status TEXT);";
 
-/// The model, the tuple SQL, and the report, which is where a clause dropped below the
-/// threshold is disclosed.
-fn outputs_for(schema: &str, using: &str) -> (String, String, String) {
-    let sql = format!(
-        "{schema}\nALTER TABLE docs ENABLE ROW LEVEL SECURITY;\n\
-         CREATE POLICY p ON docs FOR SELECT USING ({using});"
-    );
-    let db = support::deployment::db(&sql);
-    let outputs = TranslatorBuilder::new(support::deployment::deployment([
-        support::deployment::caller("app.user_id"),
-        support::deployment::caller("app.subjects"),
-    ]))
-    .with_min_confidence(ConfidenceLevel::B)
-    .build()
-    .translate(&db)
-    .expect("translation should plan")
-    .outputs_accepting_gaps();
-    (
-        outputs.model(),
-        format_tuples(outputs.tuple_queries()),
-        outputs.report(),
-    )
-}
-
 /// Every shape a recogniser reads a single column through. Each names `ghost`, which
 /// `docs` does not have.
 #[test]
@@ -54,8 +30,7 @@ fn a_clause_naming_a_column_the_table_does_not_have_is_refused() {
     for using in [
         // P3, ownership.
         &format!("ghost = {CALLER}") as &str,
-        // P6, the boolean flag. The bare `ghost` spelling was already refused, this one
-        // was not, and one spelling of a shape must not translate while the other does.
+        // P6, the boolean flag.
         "ghost = TRUE",
         // P9, an attribute guard the row decides.
         "ghost = 'published'",
@@ -64,19 +39,11 @@ fn a_clause_naming_a_column_the_table_does_not_have_is_refused() {
         // P12, the caller named by a jsonb field.
         &format!("ghost ->> 'owner' = {CALLER}"),
     ] {
-        let (model, tuples, report) = outputs_for(DOCS, using);
-        assert!(
-            !tuples.contains("ghost"),
-            "no query may read docs.ghost, which does not exist: {using}\n{tuples}"
+        let sql = format!(
+            "{DOCS}ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY p ON docs FOR SELECT USING ({using});"
         );
-        assert!(
-            model.contains("define can_select: no_access"),
-            "a refused clause grants nothing: {using}\n{model}"
-        );
-        assert!(
-            report.contains("ghost"),
-            "the report has to name the column it refused, got:\n{report}"
-        );
+        assert_eq!(support::deployment::unknown_column(&sql), "ghost");
     }
 }
 
@@ -125,24 +92,14 @@ fn a_membership_term_never_compiles_against_an_absent_inner_column() {
 /// subquery selects a parent by its key.
 #[test]
 fn an_inherited_parent_rule_naming_an_absent_column_is_refused() {
-    let (model, tuples, report) = outputs_for(
+    let sql = format!(
         "CREATE TABLE projects (id TEXT PRIMARY KEY, owner TEXT);
-         CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id));",
-        &format!("project_id IN (SELECT id FROM projects WHERE nonexistent = {CALLER})"),
+         CREATE TABLE docs (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects(id));
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY p ON docs FOR SELECT USING (
+           project_id IN (SELECT id FROM projects WHERE nonexistent = {CALLER}));"
     );
-
-    assert!(
-        !tuples.contains("nonexistent"),
-        "no query may read projects.nonexistent:\n{tuples}"
-    );
-    assert!(
-        !model.contains("nonexistent"),
-        "the model may not name a relation after a column that does not exist:\n{model}"
-    );
-    assert!(
-        report.contains("nonexistent"),
-        "the report has to name the column it refused, got:\n{report}"
-    );
+    assert_eq!(support::deployment::unknown_column(&sql), "nonexistent");
 }
 
 /// The wrong allow: the qualifier names the joined relation, and dropping it resolves
