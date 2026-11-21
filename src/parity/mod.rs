@@ -1,10 +1,11 @@
 //! Replaying `sql-traits`' recorded row-level security cases on the model.
 //!
 //! A case's `schema.sql` and `seed.sql` load into a fresh PostgreSQL database, a
-//! [`Database`], which stays the source of the model's tuples and of each probe's rows.
-//! [`replay`] translates the schema, loads the model and the seeded rows' records into a
-//! store of their own on a running `OpenFGA`, and answers each probe the way
-//! `sql_traits::parity::Fixture::judge` compares with PostgreSQL's recorded answer.
+//! [`Database`](crate::parity::Database), which stays the source of the model's tuples
+//! and of each probe's rows. [`replay`](crate::parity::replay) translates the schema,
+//! loads the model and the seeded rows' records into a store of their own on a running
+//! `OpenFGA`, and answers each probe the way `sql_traits::parity::Fixture::judge`
+//! compares with PostgreSQL's recorded answer.
 //!
 //! A write's verdict is split the way PostgreSQL acts on a row. A row whose stored row
 //! fails a judgement is denied alone, as a `USING` clause skips it. A row whose stored row
