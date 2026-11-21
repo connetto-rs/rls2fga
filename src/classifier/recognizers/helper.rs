@@ -14,6 +14,7 @@ use sqlparser::ast::{
     WildcardAdditionalOptions,
 };
 
+use crate::classifier::exclusion::{nullable_projection, NullableExclusion};
 use crate::classifier::expansion::call_matches_declared;
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
@@ -466,6 +467,32 @@ pub(crate) enum HelperRefusal {
         /// The table whose rows block the arm's.
         blocking: String,
     },
+    /// A grant arm read where no row link reaches it keeps only the rows outside the set
+    /// another helper returns.
+    #[error(
+        "declared helper '{function}' keeps the rows of '{table}' only outside the set \
+         '{excluded}' returns, which neither a request-value gate nor a cap's pairs carry"
+    )]
+    Excluding {
+        /// The helper.
+        function: String,
+        /// The table the arm reads.
+        table: String,
+        /// The helper whose set the arm's rows stay outside.
+        excluded: String,
+    },
+    /// A grant arm keeps the rows outside the set another helper returns, compared where
+    /// one side may hold `NULL`.
+    #[error("declared helper '{function}' excludes the set '{excluded}' returns, and {source}")]
+    NullableExclusion {
+        /// The helper.
+        function: String,
+        /// The helper whose set the arm's rows stay outside.
+        excluded: String,
+        /// The column that may hold `NULL`.
+        #[source]
+        source: Box<NullableExclusion>,
+    },
     /// A grant arm joins or anti-joins the rows of a table through columns other than
     /// that table's key, so no one row is named by the arm's row.
     #[error(
@@ -491,10 +518,12 @@ pub(crate) enum HelperRefusal {
         /// The joined or blocking table.
         other: String,
     },
-    /// A grant arm joining or anti-joining rows reads a table no key names one row of.
+    /// A grant arm whose rows are held each as its own object, for the rows it joins or
+    /// anti-joins or for a set a column of it stays outside, reads a table no key names
+    /// one row of.
     #[error(
-        "declared helper '{function}' joins the rows of '{table}', which no key names one \
-         row of"
+        "declared helper '{function}' holds each row of '{table}' as its own object, which \
+         no key names one row of"
     )]
     JoinedTableUnkeyed {
         /// The helper.
@@ -1426,15 +1455,7 @@ fn declared_helper<DB: DatabaseLike>(
     registry: &FunctionRegistry,
 ) -> Result<DeclaredHelper, HelperRefusal> {
     let (values, set) = answered_call(function, arguments, db, registry)?;
-    // A column with no foreign key, and not its table's key, names the rows of the one
-    // table the set covers, as membership in a set of that table's keys types it.
-    let named = match rows_named_by(guarded, guarded_column, db)? {
-        Some(named) => named,
-        None => set
-            .covered_table()
-            .map(table_identity)
-            .ok_or_else(|| names_no_rows(guarded, guarded_column))?,
-    };
+    let named = compared_rows(guarded, guarded_column, &set, db)?;
     let selection = Selection {
         key,
         labels: Vec::new(),
@@ -1448,6 +1469,25 @@ fn declared_helper<DB: DatabaseLike>(
         registry,
     )?;
     Ok(DeclaredHelper { column, call })
+}
+
+/// The table whose rows `column` of `table` names, compared with the keys `set` returns.
+///
+/// A column with no foreign key, and not its table's key, names the rows of the one table
+/// the set covers, as membership in a set of that table's keys types it.
+fn compared_rows<DB: DatabaseLike>(
+    table: &DB::Table,
+    column: &DB::Column,
+    set: &HelperSet<'_, DB>,
+    db: &DB,
+) -> Result<TableId, HelperRefusal> {
+    match rows_named_by(table, column, db)? {
+        Some(named) => Ok(named),
+        None => set
+            .covered_table()
+            .map(table_identity)
+            .ok_or_else(|| names_no_rows(table, column)),
+    }
 }
 
 /// The pattern for one call of `function` the request's value `source` is compared with.
@@ -1532,7 +1572,7 @@ fn answered_call<'db, DB: DatabaseLike>(
             function: name.clone(),
         })?;
     let set = function
-        .helper_set(&values, deployment, db)
+        .helper_set_with_exclusions(&values, deployment, db)
         .map_err(|source| HelperRefusal::Unanswered {
             function: name,
             source,
@@ -1972,7 +2012,8 @@ fn helper_grant<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperGrant, HelperRefusal> {
-    let held = arm_joins(function, grant, db)?;
+    let (outside, held_outside) = outside_sets(function, grant, objects, level, db, registry)?;
+    let held = arm_joins(function, grant, held_outside, db)?;
     let table = grant.table();
     let grantee = match grant.granted_to() {
         GrantedTo::Request(compared) => {
@@ -2009,15 +2050,7 @@ fn helper_grant<DB: DatabaseLike>(
                 });
             }
             let grantee_column = ColumnName::from_stored(set.column().stored_column_name());
-            // Without a foreign key the grantees are rows of the table the set covers.
-            let named = match rows_named_by(table, set.column(), db)? {
-                Some(named) => named,
-                None => set
-                    .set()
-                    .covered_table()
-                    .map(table_identity)
-                    .ok_or_else(|| names_no_rows(table, set.column()))?,
-            };
+            let named = compared_rows(table, set.column(), set.set(), db)?;
             let call = helper_call(
                 (called, set.arguments(), set.set()),
                 &Selection::default(),
@@ -2072,6 +2105,7 @@ fn helper_grant<DB: DatabaseLike>(
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
         caps,
         within,
+        outside,
         held,
     };
     if grant.time_bounds.len() > 1 && !row_uniquely_keys(&grant.table, &grant.tuple_key(), db) {
@@ -2098,6 +2132,79 @@ fn helper_grant<DB: DatabaseLike>(
         });
     }
     Ok(grant)
+}
+
+/// The sets `grant`'s rows stay outside, those read on the level's row, where the
+/// compared column is the arm's object, which names that row, or the arm's row is the
+/// level's row, apart from those read on each held row of the arm.
+///
+/// A set a helper not declared returns, or one a `NULL` on either side of the comparison
+/// would let a row past, is refused, so no row the body leaves out is kept.
+fn outside_sets<DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'_, DB>,
+    objects: &[&DB::Column],
+    level: Option<&TableId>,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<(Vec<DeclaredHelper>, Vec<DeclaredHelper>), HelperRefusal> {
+    let table = grant.table();
+    let object = match objects {
+        [object] => level.map(|level| (*object, level)),
+        _ => None,
+    };
+    let level_row = object
+        .is_some_and(|(object, level)| keyed_table(table, object, db).as_ref() == Some(level));
+    let mut on_level = Vec::new();
+    let mut on_row = Vec::new();
+    for excluded in grant.exclusions() {
+        let called = excluded.function();
+        if !registry.declares_helper(called) {
+            return Err(HelperRefusal::UndeclaredCallee {
+                function: function.to_string(),
+                called: called.target_name().to_string(),
+            });
+        }
+        let column = excluded.column();
+        let compared = ColumnName::from_stored(column.stored_column_name());
+        let nullable = |source| HelperRefusal::NullableExclusion {
+            function: function.to_string(),
+            excluded: registry.resolved_target_name(&called.target_name()),
+            source: Box::new(source),
+        };
+        if column.is_nullable(db) != Ok(false) {
+            return Err(nullable(NullableExclusion::Compared {
+                table: table_identity(table).to_string(),
+                column: compared,
+            }));
+        }
+        let on_object = object.filter(|(object, _)| same_column::<DB>(object, column));
+        let named = match on_object {
+            Some((_, level)) => level.clone(),
+            None => compared_rows(table, column, excluded.set(), db)?,
+        };
+        let call = helper_call(
+            (called, excluded.arguments(), excluded.set()),
+            &Selection::default(),
+            &compared,
+            &named,
+            db,
+            registry,
+        )?;
+        if let Some(source) = nullable_projection(&call, db) {
+            return Err(nullable(source));
+        }
+        let helper = DeclaredHelper {
+            column: compared,
+            call,
+        };
+        if on_object.is_some() || level_row {
+            on_level.push(helper);
+        } else {
+            on_row.push(helper);
+        }
+    }
+    Ok((on_level, on_row))
 }
 
 /// The declared scalar a grant arm compares a column with, or the value of its own its
@@ -2556,9 +2663,9 @@ fn uncapped<DB: DatabaseLike>(
     }
 }
 
-/// Refuses an arm keeping only the rows that name a joined row meeting the join, or that
-/// no row of another table blocks, read where no link from the arm's own row reaches the
-/// other table's row.
+/// Refuses an arm keeping only the rows that name a joined row meeting the join, that no
+/// row of another table blocks, or that stay outside another helper's set, read where no
+/// link from the arm's own row reaches the other table's row or the set.
 fn unjoined<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
@@ -2571,25 +2678,34 @@ fn unjoined<DB: DatabaseLike>(
             joined: table_identity(joined.table()).to_string(),
         });
     }
-    match grant.anti_joins().first() {
-        None => Ok(()),
-        Some(anti_join) => Err(HelperRefusal::AntiJoined {
+    if let Some(anti_join) = grant.anti_joins().first() {
+        return Err(HelperRefusal::AntiJoined {
             function: function.to_string(),
             table: table(),
             blocking: table_identity(anti_join.table()).to_string(),
+        });
+    }
+    match grant.exclusions().first() {
+        None => Ok(()),
+        Some(excluded) => Err(HelperRefusal::Excluding {
+            function: function.to_string(),
+            table: table(),
+            excluded: excluded.function().target_name().to_string(),
         }),
     }
 }
 
-/// The rows of `grant`'s table held by their key, with the rows each joins and the rows
-/// that block it, each named by columns of the arm's own row, `None` where it names none,
-/// and refused unless a key names one row of the arm's table and of each other table.
+/// The rows of `grant`'s table held by their key, with the rows each joins, the rows that
+/// block it and the sets in `outside` a column of it stays outside, each named by columns
+/// of the arm's own row, `None` where it names none, and refused unless a key names one
+/// row of the arm's table and of each other table.
 fn arm_joins<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
+    outside: Vec<DeclaredHelper>,
     db: &DB,
 ) -> Result<Option<HeldRows>, HelperRefusal> {
-    if grant.joined_rows().is_empty() && grant.anti_joins().is_empty() {
+    if grant.joined_rows().is_empty() && grant.anti_joins().is_empty() && outside.is_empty() {
         return Ok(None);
     }
     let table = table_identity(grant.table());
@@ -2651,6 +2767,7 @@ fn arm_joins<DB: DatabaseLike>(
         identity,
         joined,
         blocked,
+        outside,
     }))
 }
 
@@ -2904,6 +3021,7 @@ fn place_caps<DB: DatabaseLike>(
             identity,
             joined: Vec::new(),
             blocked: Vec::new(),
+            outside: Vec::new(),
         }),
     ))
 }

@@ -1469,7 +1469,15 @@ pub(crate) fn emit_declared_helper<DB: DatabaseLike>(
     let Some(returned) = helper_call_relation(call, ctx, table_plan, all_types) else {
         return deny_expr(table_plan);
     };
-    reach_level_relation(&call.level, column, returned, ctx, table_plan)
+    reach_level_relation(
+        &call.level,
+        ctx.source_table,
+        table_plan,
+        column,
+        returned,
+        ctx,
+    )
+    .unwrap_or_else(|| deny_expr(table_plan))
 }
 
 /// The guarded rows whose columns name a pair a declared helper returns, each linked to
@@ -1514,37 +1522,36 @@ pub(crate) fn emit_row_in_helper_pairs<DB: DatabaseLike>(
     )
 }
 
-/// `relation` of the `level` row `column` names, as that relation itself where the column is
-/// the guarded row's own key, or through the column's bridge.
+/// `relation` of the `level` row `column` of a row of `source`, whose type `plan` plans,
+/// names, as that relation itself where the column is the source row's own key, or
+/// through the column's bridge, `None` where no bridge can be loaded.
 fn reach_level_relation<DB: DatabaseLike>(
     level: &TableId,
+    source: &TableId,
+    plan: &mut TypePlan,
     column: &ColumnName,
     relation: RelationName,
     ctx: &PatternCtx<'_, DB>,
-    table_plan: &mut TypePlan,
-) -> UsersetExpr {
-    let source_table = ctx.source_table;
-    if level == source_table
-        && single_identity_column(source_table, ctx.db).as_ref() == Some(column)
-    {
-        return UsersetExpr::StoredRow(relation);
+) -> Option<UsersetExpr> {
+    if level == source && single_identity_column(source, ctx.db).as_ref() == Some(column) {
+        return Some(UsersetExpr::StoredRow(relation));
     }
     let level_type = ctx.table_types.resolve(level);
     let columns = core::slice::from_ref(column);
-    if !bridge_is_buildable(table_plan, source_table, columns, &level_type, ctx.db) {
-        return deny_expr(table_plan);
+    if !bridge_is_buildable(plan, source, columns, &level_type, ctx.db) {
+        return None;
     }
-    let tupleset = parent_bridge_relation(table_plan, source_table, columns, &level_type);
-    table_plan.add_source(TupleSource::ParentBridge {
-        table: source_table.clone(),
+    let tupleset = parent_bridge_relation(plan, source, columns, &level_type);
+    plan.add_source(TupleSource::ParentBridge {
+        table: source.clone(),
         fk_cols: columns.to_vec(),
         parent_type: level_type,
         relation: tupleset.clone(),
     });
-    UsersetExpr::TupleToUserset {
+    Some(UsersetExpr::TupleToUserset {
         tupleset,
         computed: relation,
-    }
+    })
 }
 
 /// The rows `flag` flags, a relation on the flagged table's type reached from the guarded
@@ -1574,7 +1581,15 @@ pub(crate) fn emit_flagged_row<DB: DatabaseLike>(
             },
         );
     }
-    reach_level_relation(&flag.table, &flag.column, flagged, ctx, table_plan)
+    reach_level_relation(
+        &flag.table,
+        ctx.source_table,
+        table_plan,
+        &flag.column,
+        flagged,
+        ctx,
+    )
+    .unwrap_or_else(|| deny_expr(table_plan))
 }
 
 /// The relation holding every row of the flagged type `flag` flags, `None` where no rule
@@ -2111,7 +2126,8 @@ fn caller_gated_grant_parts<DB: DatabaseLike>(
 }
 
 /// The rows of the level a grant arm returns, as [`kept_grant_parts`] reads them, kept
-/// again by each call the arm's own key is read within.
+/// again by each call the arm's own key is read within, less those the level's row stays
+/// outside of.
 fn capped_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
     level: &TableId,
@@ -2121,7 +2137,7 @@ fn capped_grant_parts<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
     let parts = kept_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
-    if grant.within.is_empty() {
+    if grant.within.is_empty() && grant.outside.is_empty() {
         return parts;
     }
     let Some(granted) = combine_union(parts) else {
@@ -2138,10 +2154,65 @@ fn capped_grant_parts<DB: DatabaseLike>(
         name.push_str(within.as_str());
         kept.push(UsersetExpr::Computed(within));
     }
+    let mut outside = Vec::with_capacity(grant.outside.len());
+    for helper in &grant.outside {
+        // The object column holds the key of the level's row it names, and any other
+        // column is one of the level's row itself.
+        let identity;
+        let column = if grant.object_columns.as_slice() == core::slice::from_ref(&helper.column) {
+            let Some(key) = single_identity_column(level, ctx.db) else {
+                return Vec::new();
+            };
+            identity = key;
+            &identity
+        } else {
+            &helper.column
+        };
+        let Some(excluded) = outside_expr(
+            &helper.call,
+            column,
+            (level, level_type),
+            &mut name,
+            ctx,
+            table_plan,
+            all_types,
+        ) else {
+            return Vec::new();
+        };
+        outside.push(excluded);
+    }
+    let Some(mut rule) = combine_intersection(kept) else {
+        return Vec::new();
+    };
+    if let Some(subtract) = combine_union(outside) {
+        rule = UsersetExpr::Exclusion {
+            base: Box::new(rule),
+            subtract: Box::new(subtract),
+        };
+    }
     let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
-    vec![UsersetExpr::Computed(
-        plan.ensure_computed(name, UsersetExpr::Intersection(kept)),
-    )]
+    vec![UsersetExpr::Computed(plan.ensure_computed(name, rule))]
+}
+
+/// The users a row of `source`, of type `source_type`, is kept from by the set `call`
+/// returns holding its `column`, appending the relation holding the set to `name`.
+///
+/// `None` where the set or the link to it cannot be built, which the caller reads as
+/// keeping no row, since subtracting nothing would keep the rows the set holds.
+fn outside_expr<DB: DatabaseLike>(
+    call: &HelperCall,
+    column: &ColumnName,
+    (source, source_type): (&TableId, &TypeName),
+    name: &mut String,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<UsersetExpr> {
+    let relation = helper_call_relation(call, ctx, table_plan, all_types)?;
+    name.push_str("_outside_");
+    name.push_str(relation.as_str());
+    let plan = helper_level_plan(source_type, Some(source), table_plan, all_types);
+    reach_level_relation(&call.level, source, plan, column, relation, ctx)
 }
 
 /// The rows of the level a grant arm returns, as [`helper_grant_parts`] reads them, kept
@@ -2206,13 +2277,13 @@ fn kept_grant_parts<DB: DatabaseLike>(
 }
 
 /// The rows of the level a grant arm returns where each row it joins meets the join, no
-/// row blocking it does, and every cap on it keeps it.
+/// row blocking it does, no set it stays outside holds it, and every cap on it keeps it.
 ///
 /// Each row of the arm's table is an object of its type, holding the grant the row makes
-/// while every row it joins holds a gate, no row blocking it does, and the pairs its caps
-/// name hold the caller. The level's row reaches the arm's rows naming it, and every link
-/// and gate is read from one row of one table, so a change to a joined or blocking row
-/// moves only that row's own gate.
+/// while every row it joins holds a gate, no row blocking it does, no set it stays outside
+/// holds the caller, and the pairs its caps name hold the caller. The level's row reaches
+/// the arm's rows naming it, and every link and gate is read from one row of one table,
+/// so a change to a joined or blocking row moves only that row's own gate.
 fn held_grant_expr<DB: DatabaseLike>(
     grant: &HelperGrant,
     held: &HeldRows,
@@ -2253,6 +2324,17 @@ fn held_grant_expr<DB: DatabaseLike>(
         )?);
         name.push_str("_without_");
         name.push_str(&stored_relation_name(blocked.table.name()));
+    }
+    for helper in &held.outside {
+        blocking.push(outside_expr(
+            &helper.call,
+            &helper.column,
+            (&grant.table, &row_type),
+            &mut name,
+            ctx,
+            table_plan,
+            all_types,
+        )?);
     }
     for cap in &grant.caps {
         kept.push(held_cap_expr(
@@ -2866,6 +2948,8 @@ fn set_subjects<DB: DatabaseLike>(
             matches!(arm, HelperSetArm::Grant(named)
                 if named.caps.is_empty()
                     && named.within.is_empty()
+                    && named.outside.is_empty()
+                    && named.held.is_none()
                     && named.carried_caller.is_none()
                     && named.time_bounds.is_empty()
                     && (named.returns_the_caller() || named.grantee == HelperGrantee::Anyone))
