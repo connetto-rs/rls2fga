@@ -2,34 +2,46 @@
 
 use std::fmt::Write as _;
 
-use rls2fga::parity::{replay, Database, Probe, Replay};
-use sql_traits::parity::{fixtures, Answer, Case, Engine, Fixture};
+use rls2fga::parity::{replay, Database, ParityError, Probe, Replay};
+use sql_traits::parity::{fixtures, Answer, Case, Engine};
 
-use crate::support::containers::{connect_postgres_with_retry, PG_DB};
+use crate::support::containers::{
+    connect_postgres_with_retry, start_postgres_version, PG_DB, PG_PASSWORD, PG_USER,
+};
 use crate::support::parity::Cluster;
 
 /// Load `case` into a fresh database on `cluster`, replay `probes` on its own deployment,
-/// and drop the database and its roles.
-async fn replayed(cluster: &Cluster, case: &Case, probes: Vec<Probe>) -> Replay {
+/// and drop the database and its roles whether or not the replay succeeds.
+async fn replay_of(
+    cluster: &Cluster,
+    case: &Case,
+    probes: Vec<Probe>,
+) -> Result<Replay, ParityError> {
     let deployment = case
         .config
         .deployment()
         .unwrap_or_else(|error| panic!("{}: deployment {error}", case.name));
     let mut database = Database::create(&cluster.url(PG_DB), case)
         .unwrap_or_else(|error| panic!("{}: database {error:?}", case.name));
-    let replay = replay(
+    let replayed = replay(
         case,
         &deployment,
         probes,
         &mut database,
         &cluster.openfga_url(),
     )
-    .await
-    .unwrap_or_else(|error| panic!("{}: replay {error:?}", case.name));
+    .await;
     database
         .cleanup()
         .unwrap_or_else(|error| panic!("{}: cleanup {error}", case.name));
-    replay
+    replayed
+}
+
+/// [`replay_of`] for a case that replays.
+async fn replayed(cluster: &Cluster, case: &Case, probes: Vec<Probe>) -> Replay {
+    replay_of(cluster, case, probes)
+        .await
+        .unwrap_or_else(|error| panic!("{}: replay {error:?}", case.name))
 }
 
 /// A cluster whose PostgreSQL already accepts connections.
@@ -64,12 +76,13 @@ async fn every_fixture_agrees_with_postgres() {
     );
 }
 
-/// The case column grants and key edits are measured on.
-fn grant_without_update() -> Fixture {
+/// The embedded case named `name`.
+fn case_named(name: &str) -> Case {
     fixtures()
         .map(|fixture| fixture.expect("an embedded fixture reads"))
-        .find(|fixture| fixture.case.name == "grant_without_update")
+        .find(|fixture| fixture.case.name == name)
         .expect("the fixture is embedded")
+        .case
 }
 
 fn probe(caller: &str, row: &str, statement: &str) -> Probe {
@@ -94,7 +107,7 @@ fn error_text(answer: &Answer) -> &str {
 #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
 async fn probes_outside_the_case() {
     let cluster = cluster().await;
-    let mut case = grant_without_update().case;
+    let mut case = case_named("grant_without_update");
     case.schema = case
         .schema
         .replace("GRANT SELECT, INSERT", "GRANT SELECT (id), INSERT");
@@ -168,4 +181,79 @@ async fn probes_outside_the_case() {
     case.schema = case.schema.replace("PRIMARY KEY", "");
     let keyless = replayed(&cluster, &case, vec![probe("alice", "docs:1", id)]).await;
     assert!(error_text(&keyless.answers[0].answer).contains("row naming"));
+}
+
+/// A cluster other than PostgreSQL 18 records nothing the fixtures can be judged on.
+#[tokio::test]
+#[ignore = "requires Docker and a postgres:17 container"]
+async fn a_cluster_other_than_postgres_18_is_refused() {
+    let postgres = start_postgres_version("17").await;
+    let port = postgres
+        .get_host_port_ipv4(5432)
+        .await
+        .expect("the port is mapped");
+    let url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{port}/{PG_DB}");
+    connect_postgres_with_retry(&url);
+    let refused = Database::create(&url, &case_named("grant_without_update"))
+        .err()
+        .expect("PostgreSQL 17 is refused");
+    assert!(
+        matches!(&refused, ParityError::Version(version) if version.starts_with("17")),
+        "{refused:?}"
+    );
+}
+
+/// A case naming what its database does not hold is no replay, and a caller missing the
+/// identity setting answers an error rather than a verdict.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_case_its_database_contradicts_is_not_replayed() {
+    let cluster = cluster().await;
+    let case = case_named("grant_without_update");
+    let url = cluster.url(PG_DB);
+    let id = r#"SELECT "id" FROM "docs""#;
+
+    let mut first = Database::create(&url, &case).expect("the case's database loads");
+    let occupied = Database::create(&url, &case)
+        .err()
+        .expect("the roles are taken");
+    first.cleanup().expect("the case's database drops");
+    assert!(matches!(occupied, ParityError::RolesExist), "{occupied:?}");
+
+    let mut undeclared = case.clone();
+    undeclared.config.writes[0].table = "ghost".into();
+    let refused = replay_of(&cluster, &undeclared, Vec::new()).await.err();
+    assert!(
+        matches!(&refused, Some(ParityError::UndeclaredTable(table)) if table == "ghost"),
+        "{refused:?}"
+    );
+
+    let mut failing = case.clone();
+    failing.config.writes[0].set = [("ghost".into(), "edited".into())].into();
+    let refused = replay_of(&cluster, &failing, Vec::new()).await.err();
+    assert!(
+        matches!(&refused, Some(ParityError::Resulting { statement, .. }) if statement.contains("ghost")),
+        "{refused:?}"
+    );
+
+    let mut unseeded = case.clone();
+    unseeded.seed = "TRUNCATE docs".into();
+    let refused = replay_of(&cluster, &unseeded, Vec::new()).await.err();
+    assert!(
+        matches!(&refused, Some(ParityError::NoSeededRows(table)) if table == "docs"),
+        "{refused:?}"
+    );
+
+    let mut unkeyed = case.clone();
+    unkeyed.config.tables[0].key = vec!["ghost".into()];
+    let refused = replay_of(&cluster, &unkeyed, Vec::new()).await.err();
+    assert!(
+        matches!(&refused, Some(ParityError::MissingKeyColumn(_))),
+        "{refused:?}"
+    );
+
+    let mut anonymous = case;
+    anonymous.config.callers[0].settings.remove("app.user_id");
+    let answered = replayed(&cluster, &anonymous, vec![probe("alice", "docs:1", id)]).await;
+    assert!(error_text(&answered.answers[0].answer).contains("does not set app.user_id"));
 }

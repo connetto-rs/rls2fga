@@ -529,3 +529,24 @@ fn column_commands(
         })
         .collect()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A probe's error answer names the failure and every cause beneath it.
+    #[test]
+    fn an_error_answer_carries_every_cause() {
+        let error = ParityError::Resulting {
+            statement: "UPDATE docs SET body = 'edited'".into(),
+            source: DieselError::NotFound,
+        };
+        assert_eq!(
+            failed(&error),
+            Answer::Error(
+                "running `UPDATE docs SET body = 'edited'` as the table owner: Record not found"
+                    .into()
+            )
+        );
+    }
+}
