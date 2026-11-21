@@ -299,18 +299,22 @@ fn an_unreadable_membership_barrier_grants_nothing() {
     );
 }
 
-/// A row-dependent barrier keeps the membership guarded whatever request-only barrier
-/// stands beside it.
+/// The request barrier `b_cap` beside the row barrier `a_row` on the membership table.
+fn request_and_row_barriers(a_row: &str) -> String {
+    barred_membership(&format!(
+        "CREATE POLICY a_row ON members AS RESTRICTIVE FOR SELECT USING ({a_row});
+CREATE POLICY b_cap ON members AS RESTRICTIVE FOR SELECT
+  USING (current_setting('app.read_caps', true) = 'members:read');"
+    ))
+}
+
+/// A row-dependent barrier the membership check does not imply keeps the membership
+/// guarded whatever request-only barrier stands beside it.
 #[test]
 fn a_request_barrier_beside_a_row_barrier_stays_guarded() {
     let outputs = acting_as(
         &["authenticated"],
-        &barred_membership(
-            "CREATE POLICY a_mine ON members AS RESTRICTIVE FOR SELECT
-  USING (user_id = current_setting('app.user_id', true));
-CREATE POLICY b_cap ON members AS RESTRICTIVE FOR SELECT
-  USING (current_setting('app.read_caps', true) = 'members:read');",
-        ),
+        &request_and_row_barriers("since IS NOT NULL"),
     );
     assert!(
         outputs.notes().iter().any(|note| matches!(
@@ -319,6 +323,40 @@ CREATE POLICY b_cap ON members AS RESTRICTIVE FOR SELECT
         )),
         "{:#?}",
         outputs.notes()
+    );
+}
+
+/// A row barrier admitting every row the membership check reads leaves the request
+/// barrier beside it to gate the membership alone.
+#[test]
+fn a_row_barrier_the_check_implies_leaves_the_request_barrier() {
+    let outputs = acting_as(
+        &["authenticated"],
+        &request_and_row_barriers("user_id = current_setting('app.user_id', true)"),
+    );
+    assert!(
+        !outputs
+            .notes()
+            .iter()
+            .any(|note| note.severity().diverges_from_database()),
+        "{:#?}",
+        outputs.notes()
+    );
+    let capped_only = acting_as(&["authenticated"], &request_and_row_barriers("true"));
+    assert_eq!(
+        relation_definition(&outputs.model(), "docs", "can_select"),
+        relation_definition(&capped_only.model(), "docs", "can_select"),
+        "{}",
+        outputs.model()
+    );
+    assert_ne!(
+        relation_definition(&outputs.model(), "docs", "can_select"),
+        relation_definition(
+            &acting_as(&["authenticated"], &barred_membership("")).model(),
+            "docs",
+            "can_select"
+        ),
+        "the request barrier still gates the membership"
     );
 }
 

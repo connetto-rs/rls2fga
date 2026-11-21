@@ -653,8 +653,14 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
     let db = ctx.db;
     let source_table = ctx.source_table;
     // The subquery reads `join_table` as the caller, so its own RLS decides which
-    // membership rows count, exactly as it does for a membership naming a person.
-    let Some(read_scope) = noted_membership_read_scope(join_table, ctx, readability, notes) else {
+    // membership rows count, exactly as it does for a membership naming a person. Its
+    // member column holds a value of the caller's set, never the caller.
+    let check = MembershipRead {
+        caller_column: None,
+        residual: extra_predicates,
+    };
+    let Some(read_scope) = noted_membership_read_scope(join_table, check, ctx, readability, notes)
+    else {
         return deny_expr(table_plan);
     };
     let Some(parent) = MembershipParent::resolve(pairs, join_table, ctx, table_plan, notes) else {
@@ -804,7 +810,7 @@ pub(crate) fn emit_membership_in_caller_set<DB: DatabaseLike>(
         membership,
         join_table,
         extra_predicates,
-        read_scope,
+        &read_scope,
         ctx,
         table_plan,
         all_types,

@@ -5,6 +5,7 @@ use rls2fga::types::{
 };
 
 use crate::support;
+use crate::support::footgun::relation_definition;
 
 use crate::support::{
     INDIRECT_MEMBERSHIP_NESTED_ROLE as NESTED, INDIRECT_MEMBERSHIP_SCHEMA as SCHEMA,
@@ -184,6 +185,39 @@ fn a_guarded_hop_is_disclosed_and_never_grants() {
             }),
             "{}",
             outputs.model()
+        );
+    }
+}
+
+/// A hop whose own read rule admits every row its check can match reads as an open hop.
+#[test]
+fn a_hop_guard_the_check_implies_grants_as_an_open_hop() {
+    let orders_read = format!("CREATE POLICY orders_read ON orders FOR SELECT USING ({NESTED});");
+    let open = outputs(SCHEMA, &orders_read);
+    for rule in [
+        "member_id = current_setting('app.user_id', true)",
+        "role = 'read' AND member_id = current_setting('app.user_id', true)",
+    ] {
+        let guarded = outputs(
+            SCHEMA,
+            &format!(
+                "ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY own ON memberships FOR SELECT USING ({rule});
+             {orders_read}"
+            ),
+        );
+        assert!(
+            !guarded
+                .notes()
+                .iter()
+                .any(|note| matches!(note, TranslationNote::MembershipTableGuarded { .. })),
+            "{rule}\n{}",
+            guarded.report()
+        );
+        assert_eq!(
+            relation_definition(&guarded.model(), "orders", "can_select"),
+            relation_definition(&open.model(), "orders", "can_select"),
+            "{rule}"
         );
     }
 }
