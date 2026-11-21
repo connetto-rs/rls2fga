@@ -1,6 +1,6 @@
 use crate::prelude::*;
 use crate::{ColumnName, RelationName, TypeName};
-use alloc::collections::BTreeMap;
+use alloc::collections::{BTreeMap, BTreeSet};
 
 /// Which version of the row a relation judges.
 ///
@@ -115,6 +115,97 @@ pub struct ColumnAnswer {
     pub commands: Vec<ColumnRelations>,
 }
 
+/// Where an acting role holds one command on a table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Holding {
+    /// On the table, and so on every column.
+    Table,
+    /// On these columns only, never on the table.
+    Columns(BTreeSet<ColumnName>),
+    /// Nowhere.
+    Absent,
+}
+
+impl Holding {
+    /// Whether the command is held on every column of `columns`, which for no column
+    /// means held on some column, as `PostgreSQL` checks a statement naming none.
+    fn covers(&self, columns: &[ColumnName]) -> bool {
+        match self {
+            Self::Table => true,
+            Self::Columns(held) => columns.iter().all(|column| held.contains(column)),
+            Self::Absent => false,
+        }
+    }
+}
+
+/// The privileges one acting role holds on one table, which `PostgreSQL` checks before
+/// any policy. A statement the role lacks one for fails whatever its rows, with `permission
+/// denied for table <t>` (SQLSTATE 42501), where a policy refusal filters or skips rows.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ActingPrivileges {
+    /// Type of the table's rows, as [`ActionRelations`] names it.
+    pub type_name: TypeName,
+    /// The acting role, as the deployment names it.
+    pub role: String,
+    /// Where the role holds `SELECT`.
+    pub select: Holding,
+    /// Where the role holds `INSERT`.
+    pub insert: Holding,
+    /// Where the role holds `UPDATE`.
+    pub update: Holding,
+    /// Whether the role holds `DELETE`, which is granted on the table only.
+    pub delete: bool,
+}
+
+impl ActingPrivileges {
+    /// Whether the role holds every privilege `statement` needs where it touches `columns`
+    /// under each column command, as [`ActionStatement::column_commands`] lists them.
+    ///
+    /// The statement's own command is needed on every column it touches, or on some
+    /// column where it touches none. A command it only reads through, such as the
+    /// `SELECT` of the columns an `UPDATE` filters on, is needed only on the columns it
+    /// reads. A locking read needs `UPDATE` on some column, and a `DELETE` needs `DELETE`.
+    #[must_use]
+    pub fn permits(
+        &self,
+        statement: ActionStatement,
+        columns: &BTreeMap<ColumnCommand, Vec<ColumnName>>,
+    ) -> bool {
+        let own = match statement {
+            ActionStatement::Select | ActionStatement::SelectForUpdate => {
+                Some(ColumnCommand::Select)
+            }
+            ActionStatement::Insert
+            | ActionStatement::InsertReturning
+            | ActionStatement::InsertOnConflictUpdate => Some(ColumnCommand::Insert),
+            ActionStatement::Update | ActionStatement::UpdateWithoutWhere => {
+                Some(ColumnCommand::Update)
+            }
+            ActionStatement::Delete => None,
+        };
+        let columns_held = statement.column_commands().iter().all(|command| {
+            let touched = columns.get(command).map_or(&[][..], Vec::as_slice);
+            (touched.is_empty() && own != Some(*command)) || self.holding(*command).covers(touched)
+        });
+        columns_held
+            && match statement {
+                ActionStatement::Delete => self.delete,
+                ActionStatement::SelectForUpdate => self.update != Holding::Absent,
+                _ => true,
+            }
+    }
+
+    /// Where the role holds `command`.
+    #[must_use]
+    pub fn holding(&self, command: ColumnCommand) -> &Holding {
+        match command {
+            ColumnCommand::Select => &self.select,
+            ColumnCommand::Insert => &self.insert,
+            ColumnCommand::Update => &self.update,
+        }
+    }
+}
+
 /// A statement shape the model answers for.
 ///
 /// `#[non_exhaustive]` permits more statement shapes.
@@ -197,5 +288,115 @@ impl ActionRelations {
             statement,
             answer,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn columns(names: &[&str]) -> Vec<ColumnName> {
+        names
+            .iter()
+            .map(|name| ColumnName::from_stored(*name))
+            .collect()
+    }
+
+    fn held(names: &[&str]) -> Holding {
+        Holding::Columns(columns(names).into_iter().collect())
+    }
+
+    fn privileges(
+        select: Holding,
+        insert: Holding,
+        update: Holding,
+        delete: bool,
+    ) -> ActingPrivileges {
+        ActingPrivileges {
+            type_name: TypeName::canonicalized("docs"),
+            role: "app_reader".into(),
+            select,
+            insert,
+            update,
+            delete,
+        }
+    }
+
+    fn touching(touched: &[(ColumnCommand, &[&str])]) -> BTreeMap<ColumnCommand, Vec<ColumnName>> {
+        touched
+            .iter()
+            .map(|(command, names)| (*command, columns(names)))
+            .collect()
+    }
+
+    /// `GRANT INSERT` alone refuses every read, and `GRANT SELECT (id, owner)` refuses a
+    /// read projecting `body` while admitting one projecting `id` alone.
+    #[test]
+    fn a_read_needs_select_on_every_column_it_names() {
+        let insert_only = privileges(Holding::Absent, Holding::Table, Holding::Absent, false);
+        let id = touching(&[(ColumnCommand::Select, &["id"])]);
+        assert!(!insert_only.permits(ActionStatement::Select, &id));
+        assert!(insert_only.permits(
+            ActionStatement::Insert,
+            &touching(&[
+                (ColumnCommand::Select, &[]),
+                (ColumnCommand::Insert, &["id", "owner"])
+            ]),
+        ));
+
+        let column_grant = privileges(
+            held(&["id", "owner"]),
+            Holding::Absent,
+            Holding::Absent,
+            false,
+        );
+        assert!(column_grant.permits(ActionStatement::Select, &id));
+        assert!(!column_grant.permits(
+            ActionStatement::Select,
+            &touching(&[(ColumnCommand::Select, &["id", "body"])]),
+        ));
+    }
+
+    /// A statement naming no column still needs its own command on some column, while a
+    /// command it reads nothing through is not needed at all.
+    #[test]
+    fn a_statement_naming_no_column_needs_its_own_command_somewhere() {
+        let none = touching(&[]);
+        assert!(
+            !privileges(Holding::Absent, Holding::Absent, Holding::Absent, false)
+                .permits(ActionStatement::Select, &none)
+        );
+        assert!(
+            privileges(held(&["id"]), Holding::Absent, Holding::Absent, false)
+                .permits(ActionStatement::Select, &none)
+        );
+        let blind = privileges(Holding::Absent, Holding::Absent, Holding::Table, false);
+        assert!(blind.permits(
+            ActionStatement::UpdateWithoutWhere,
+            &touching(&[
+                (ColumnCommand::Select, &[]),
+                (ColumnCommand::Update, &["body"])
+            ]),
+        ));
+        assert!(!blind.permits(
+            ActionStatement::Update,
+            &touching(&[
+                (ColumnCommand::Select, &["id"]),
+                (ColumnCommand::Update, &["body"])
+            ]),
+        ));
+    }
+
+    /// `DELETE` is granted on the table only, and a locking read needs `UPDATE` beside
+    /// the `SELECT` of what it reads.
+    #[test]
+    fn delete_and_locking_reads_need_their_table_wide_privileges() {
+        let key = touching(&[(ColumnCommand::Select, &["id"])]);
+        let reader = privileges(Holding::Table, Holding::Absent, Holding::Absent, false);
+        assert!(!reader.permits(ActionStatement::Delete, &key));
+        assert!(!reader.permits(ActionStatement::SelectForUpdate, &key));
+        let editor = privileges(Holding::Table, Holding::Absent, held(&["body"]), true);
+        assert!(editor.permits(ActionStatement::Delete, &key));
+        assert!(editor.permits(ActionStatement::SelectForUpdate, &key));
     }
 }

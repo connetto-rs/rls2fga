@@ -43,8 +43,8 @@ mod resulting;
 mod row_naming;
 
 pub use action_relations::{
-    ActionAnswer, ActionJudgement, ActionRelations, ActionStatement, ColumnAnswer, ColumnCommand,
-    ColumnRelations, RowVersion,
+    ActingPrivileges, ActionAnswer, ActionJudgement, ActionRelations, ActionStatement,
+    ColumnAnswer, ColumnCommand, ColumnRelations, Holding, RowVersion,
 };
 pub use identifiers::{
     stable_hex_suffix, ColumnName, ConditionName, ConditionNameError, ConditionParameterName,

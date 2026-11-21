@@ -26,8 +26,8 @@ use crate::output::formatter::{write_output, WriteError};
 use crate::output::report::build_report;
 use crate::parser::sql_parser::{DatabaseLike, Deployment};
 use crate::types::{
-    ActionRelations, NoteSeverity, Record, RelationShapes, RequestPrincipal, RowNaming,
-    TranslationNote,
+    ActingPrivileges, ActionRelations, NoteSeverity, Record, RelationShapes, RequestPrincipal,
+    RowNaming, TranslationNote,
 };
 use crate::types::{ConditionParameterName, ConditionParameterNameError, PolicyReads};
 use sql_values::postgres::{PgTimeZone, PgTimestampTz};
@@ -336,6 +336,17 @@ impl Translation {
     #[must_use]
     pub fn action_relations(&self) -> &[ActionRelations] {
         &self.plan.action_relations
+    }
+
+    /// Where each acting role holds each command on each table, ordered by type and role.
+    ///
+    /// `PostgreSQL` checks these before any policy, so a statement
+    /// [`ActingPrivileges::permits`] refuses for the role a request acts as fails with
+    /// `permission denied for table <t>` (SQLSTATE 42501) whatever its rows, while one
+    /// only [`Translation::action_relations`] refuses reads no row or skips its rows.
+    #[must_use]
+    pub fn acting_privileges(&self) -> &[ActingPrivileges] {
+        &self.plan.acting_privileges
     }
 
     /// The principals other than the caller a request may act for, each with the object

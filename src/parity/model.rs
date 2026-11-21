@@ -28,7 +28,7 @@ use crate::json_row::JsonRow;
 use crate::translator::Outputs;
 use crate::types::{
     records_from_row, ActionAnswer, ActionStatement, ColumnCommand, ColumnName,
-    ConditionParameterName, Record, RowVersion,
+    ConditionParameterName, Record, RowNaming, RowVersion,
 };
 
 const MAX_TUPLES_PER_WRITE: usize = 100;
@@ -40,7 +40,7 @@ pub(super) struct RowProbe<'a> {
     /// The row the statement produces, absent for a read or a delete.
     pub(super) resulting: Option<&'a Value>,
     /// The columns the statement touches under each column command.
-    pub(super) columns: &'a BTreeMap<ColumnCommand, Vec<String>>,
+    pub(super) columns: &'a BTreeMap<ColumnCommand, Vec<ColumnName>>,
 }
 
 /// What `OpenFGA` answers for one row of a statement, split the way PostgreSQL acts on it.
@@ -52,7 +52,7 @@ pub(super) enum Verdict {
     /// as a `USING` clause filters it.
     Skipped,
     /// The stored row passes but a judgement about the row the statement produces, or a
-    /// column privilege, fails, so PostgreSQL aborts the whole statement.
+    /// column relation, fails, so PostgreSQL aborts the whole statement.
     Aborted,
 }
 
@@ -140,6 +140,36 @@ impl Model {
         delete_store(service, self.client.store_id().to_owned()).await
     }
 
+    /// Whether the role `caller` acts as holds every privilege `action` needs on `table`
+    /// where it touches `columns`, as `PostgreSQL` checks before any row.
+    pub(super) fn privileged(
+        &self,
+        table: &str,
+        caller: &Caller,
+        action: ActionStatement,
+        columns: &BTreeMap<ColumnCommand, Vec<ColumnName>>,
+    ) -> Result<bool, ProbeError> {
+        let naming = self.naming(table)?;
+        let privileges = self
+            .outputs
+            .translation()
+            .acting_privileges()
+            .iter()
+            .find(|held| held.type_name == naming.type_name && held.role == caller.role)
+            .ok_or_else(|| ProbeError::NoPrivileges(caller.role.clone()))?;
+        Ok(privileges.permits(action, columns))
+    }
+
+    /// How the translation names the rows of `table`.
+    fn naming(&self, table: &str) -> Result<&RowNaming, ProbeError> {
+        self.outputs
+            .translation()
+            .row_naming()
+            .iter()
+            .find(|naming| naming.table.name() == table)
+            .ok_or_else(|| ProbeError::NoRowNaming(table.to_owned()))
+    }
+
     /// Ask the emitted answer for `action` on `table` about the rows and columns `probe` names.
     pub(super) async fn permits(
         &self,
@@ -148,13 +178,7 @@ impl Model {
         action: ActionStatement,
         probe: &RowProbe<'_>,
     ) -> Result<Verdict, ProbeError> {
-        let naming = self
-            .outputs
-            .translation()
-            .row_naming()
-            .iter()
-            .find(|naming| naming.table.name() == table)
-            .ok_or_else(|| ProbeError::NoRowNaming(table.to_owned()))?;
+        let naming = self.naming(table)?;
         let existing = match probe.existing {
             Some(row) => Some(naming.render(&JsonRow(row))?.ok_or(ProbeError::Unnamed)?),
             None => None,
@@ -181,10 +205,9 @@ impl Model {
                         .get(&command.command)
                         .ok_or(ProbeError::NoColumns(command.command))?;
                     for column in touched {
-                        let column = ColumnName::from_stored(column.as_str());
                         if !self
                             .check(
-                                command.relation(&column).as_str(),
+                                command.relation(column).as_str(),
                                 &columns.gate,
                                 &caller,
                                 Vec::new(),
