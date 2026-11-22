@@ -417,7 +417,7 @@ fn pattern_to_expr_covers_abac_composite_constant_and_unknown_branches() {
     let p10_false = PatternClass::P10ConstantBool(ConstantBool { value: false });
     let p5 = PatternClass::P5ParentInheritance(ParentInheritance {
         parent_table: table_id("projects"),
-        fk_column: ColumnName::from_stored("project_id"),
+        fk_columns: vec![ColumnName::from_stored("project_id")],
         inner_pattern: Box::new(relationship),
     });
     let unknown = PatternClass::Unknown(UnclassifiedExpr {
@@ -1212,7 +1212,7 @@ fn pattern_to_expr_p5_with_unknown_inner_returns_no_access() {
     };
     let p5 = PatternClass::P5ParentInheritance(ParentInheritance {
         parent_table: table_id("projects"),
-        fk_column: ColumnName::from_stored("project_id"),
+        fk_columns: vec![ColumnName::from_stored("project_id")],
         inner_pattern: Box::new(unknown_inner),
     });
 
@@ -1888,7 +1888,7 @@ fn pattern_to_expr_p5_with_inner_no_access_emits_note() {
     };
     let p5 = PatternClass::P5ParentInheritance(ParentInheritance {
         parent_table: table_id("projects"),
-        fk_column: ColumnName::from_stored("project_id"),
+        fk_columns: vec![ColumnName::from_stored("project_id")],
         inner_pattern: Box::new(inner),
     });
 

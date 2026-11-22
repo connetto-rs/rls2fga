@@ -232,8 +232,11 @@ fn apply_guarded_column_check<DB: DatabaseLike>(
     db: &DB,
     table: &str,
 ) -> ClassifiedExpr {
-    match guarded_column(&classified.pattern) {
-        Some(column) if !table_has_column(db, table, column.as_str()) => unknown_d(
+    match guarded_columns(&classified.pattern)
+        .iter()
+        .find(|column| !table_has_column(db, table, column.as_str()))
+    {
+        Some(column) => unknown_d(
             expr,
             format!(
                 "'{table}' has no column '{column}', so this would name a relation \
@@ -305,13 +308,13 @@ pub(crate) fn classify_expr_depth<DB: DatabaseLike>(
     apply_monetary_check(classified, expr, registry)
 }
 
-/// The column of the table being classified that `pattern` reads, if it names one.
+/// The columns of the table being classified that `pattern` reads.
 ///
 /// Matched exhaustively on purpose: a pattern added later that reads a column must fail
 /// to compile here rather than emit a relation nobody can fill. A column belonging to
 /// another table, a membership table's own or a parent's, is checked where that table is
 /// resolved, which is why those arms yield nothing.
-fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
+fn guarded_columns(pattern: &PatternClass) -> &[ColumnName] {
     match pattern {
         PatternClass::P3DirectOwnership(DirectOwnership { column, .. })
         | PatternClass::P6BooleanFlag(BooleanFlag { column, .. })
@@ -324,8 +327,8 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
             column, ..
         })
         | PatternClass::P20DeclaredHelper(DeclaredHelper { column, .. })
-        | PatternClass::P29FlaggedRow(FlaggedRow { column, .. }) => Some(column),
-        PatternClass::P5ParentInheritance(ParentInheritance { fk_column, .. }) => Some(fk_column),
+        | PatternClass::P29FlaggedRow(FlaggedRow { column, .. }) => core::slice::from_ref(column),
+        PatternClass::P5ParentInheritance(ParentInheritance { fk_columns, .. }) => fk_columns,
         // Nothing these read belongs to the table being classified: a role function
         // takes the caller, a constant takes no row, a composite's parts and an
         // inheritance's inner rule are classified in their own right, and an
@@ -361,7 +364,7 @@ fn guarded_column(pattern: &PatternClass) -> Option<&ColumnName> {
         | PatternClass::P25FallbackScalarInConstantList(FallbackScalarInConstantList { .. })
         | PatternClass::P19IndirectMembership(IndirectMembership { .. })
         | PatternClass::MembershipExclusion(MembershipExclusion { .. })
-        | PatternClass::Unknown(UnclassifiedExpr { .. }) => None,
+        | PatternClass::Unknown(UnclassifiedExpr { .. }) => &[],
     }
 }
 
@@ -466,13 +469,16 @@ fn compared_key_refusal<DB: DatabaseLike>(
             .or_else(|| role_function_refusal(function_name, db, registry)),
         PatternClass::P5ParentInheritance(ParentInheritance {
             parent_table,
-            fk_column,
+            fk_columns,
             ..
-        }) => check(guarded, fk_column).or_else(|| {
-            resolve_row_identity(parent_table, db)?
-                .iter()
-                .find_map(|column| check(parent_table, column))
-        }),
+        }) => fk_columns
+            .iter()
+            .find_map(|column| check(guarded, column))
+            .or_else(|| {
+                resolve_row_identity(parent_table, db)?
+                    .iter()
+                    .find_map(|column| check(parent_table, column))
+            }),
         PatternClass::P4ExistsMembership(membership)
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { membership, .. }) => {
             membership_refusal(membership, guarded, db)
@@ -1414,7 +1420,8 @@ fn describe_unrecognized_function(func_name: &str, registry: &FunctionRegistry) 
 fn describe_set_constructor(name: &str) -> String {
     format!(
         "'{name}(subquery)' is SQL syntax rather than a function call, so no registry \
-         entry can name it, and a set built from a subquery has no translation"
+         entry can name it, and the set it builds translates only as membership in a \
+         table column or a declared helper's rows"
     )
 }
 
@@ -2699,7 +2706,7 @@ CREATE TABLE tasks(id uuid primary key, project_id uuid references projects(id),
         assert!(is_relationship_pattern_for_p7(
             &PatternClass::P5ParentInheritance(ParentInheritance {
                 parent_table: TableId::from_stored(None, "p".to_string()),
-                fk_column: ColumnName::from_stored("c"),
+                fk_columns: vec![ColumnName::from_stored("c")],
                 inner_pattern: Box::new(p3_expr.clone()),
             })
         ));

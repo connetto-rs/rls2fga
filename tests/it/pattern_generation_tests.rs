@@ -177,9 +177,10 @@ CREATE POLICY tasks_inherit_project ON tasks FOR SELECT TO PUBLIC USING (
             &using.pattern,
             rls2fga::classifier::patterns::PatternClass::P5ParentInheritance(ParentInheritance {
                 parent_table,
-                fk_column,
+                fk_columns,
                 ..
-            }) if parent_table.name() == "projects" && fk_column == "project_id"
+            }) if parent_table.name() == "projects"
+                && matches!(fk_columns.as_slice(), [column] if column == "project_id")
         ),
         "expected tasks policy to classify as P5, got: {:?}",
         using.pattern

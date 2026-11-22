@@ -3221,8 +3221,9 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(proj
     .expect("expected P5 classification");
     assert!(matches!(
         classified.pattern,
-        PatternClass::P5ParentInheritance(ParentInheritance { ref parent_table, ref fk_column, .. })
-            if parent_table.to_string() == "public.projects" && fk_column == "project_id"
+        PatternClass::P5ParentInheritance(ParentInheritance { ref parent_table, ref fk_columns, .. })
+            if parent_table.to_string() == "public.projects"
+                && matches!(fk_columns.as_slice(), [column] if column == "project_id")
     ));
 }
 
@@ -4030,8 +4031,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID);
 }
 
 #[test]
-fn diagnose_p5_returns_conflicting_join_message() {
-    // When the same parent source has two different FK columns from the outer table,
+fn diagnose_p5_names_a_parent_correlated_off_its_key() {
     let db = parse_schema(
             r"
 CREATE TABLE users(id UUID PRIMARY KEY);
@@ -4056,13 +4056,10 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id),
         PolicyCommand::Select,
         &ExpansionState::new(),
     );
+    let result = result.expect("a correlation beyond the key should produce a diagnostic");
     assert!(
-        result.is_some(),
-        "conflicting join columns should produce a diagnostic"
-    );
-    assert!(
-        result.unwrap().contains("conflicting"),
-        "diagnostic should mention conflicting"
+        result.contains("not exactly the key naming its rows"),
+        "got: {result}"
     );
 }
 
@@ -4118,9 +4115,9 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
     assert!(
         matches!(
             &classified.pattern,
-            PatternClass::P5ParentInheritance(ParentInheritance { parent_table, fk_column, inner_pattern })
+            PatternClass::P5ParentInheritance(ParentInheritance { parent_table, fk_columns, inner_pattern })
                 if parent_table.to_string() == "public.projects"
-                    && fk_column == "project_id"
+                    && matches!(fk_columns.as_slice(), [column] if column == "project_id")
                     && matches!(
                         inner_pattern.pattern,
                         PatternClass::P10ConstantBool(ConstantBool { value: true })
@@ -4196,6 +4193,163 @@ ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
         ),
         "the policy states the join, so it is the evidence"
     );
+}
+
+const READABLE_ROWS_SCHEMA: &str = r"
+CREATE TABLE people (id UUID PRIMARY KEY, owner_id UUID NOT NULL);
+ALTER TABLE people ENABLE ROW LEVEL SECURITY;
+CREATE TABLE objects (id UUID PRIMARY KEY REFERENCES people(id), person_id UUID);
+CREATE TABLE grantees (id UUID, kind TEXT, owner_id UUID NOT NULL, PRIMARY KEY (id, kind));
+ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;
+CREATE TABLE grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID NOT NULL,
+    grantee_kind TEXT NOT NULL,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind)
+);
+";
+
+/// The inheritance `clause` on `table` reads as, through the `IN` spellings' rewrite.
+fn inherited_through_in_subquery(clause: &str, table: &str) -> Option<ParentInheritance> {
+    let db = parse_schema(READABLE_ROWS_SCHEMA).unwrap();
+    let classified = recognize_p4_in_subquery(
+        &parse_expr(clause),
+        &db,
+        &FunctionRegistry::new(),
+        table,
+        PolicyCommand::Select,
+        &ExpansionState::new(),
+    )?;
+    let PatternClass::P5ParentInheritance(inheritance) = classified.pattern else {
+        return None;
+    };
+    assert_eq!(classified.confidence, ConfidenceLevel::A, "`{clause}`");
+    Some(inheritance)
+}
+
+/// `ARRAY(subquery)` holds the same values the subquery returns, so `= ANY` over it admits
+/// exactly the rows `IN` admits and both read as the referenced row's own read rule.
+#[test]
+fn the_array_spelling_of_a_readable_row_membership_inherits_like_in() {
+    let spellings = [
+        "id IN (SELECT person.id FROM people person)",
+        "id = ANY (ARRAY(SELECT person.id FROM people person))",
+    ]
+    .map(|clause| inherited_through_in_subquery(clause, "objects"));
+    let [Some(in_form), Some(array_form)] = spellings else {
+        panic!("both spellings inherit from people, got {spellings:?}");
+    };
+    assert_eq!(in_form, array_form);
+    assert_eq!(in_form.parent_table.to_string(), "public.people");
+    assert_eq!(in_form.fk_columns, [ColumnName::from_stored("id")]);
+    assert!(matches!(
+        in_form.inner_pattern.pattern,
+        PatternClass::P10ConstantBool(ConstantBool { value: true })
+    ));
+}
+
+/// A row value pairs every column of the referenced key, so it names one referenced row
+/// whichever order the policy spells the columns in.
+#[test]
+fn a_row_value_covering_a_composite_key_inherits_from_the_row_it_names() {
+    for clause in [
+        "(grantee_id, grantee_kind) IN (SELECT grantee.id, grantee.kind FROM grantees grantee)",
+        "(grantee_kind, grantee_id) IN (SELECT grantee.kind, grantee.id FROM grantees grantee)",
+    ] {
+        let Some(inheritance) = inherited_through_in_subquery(clause, "grants") else {
+            panic!("`{clause}` names one grantees row");
+        };
+        assert_eq!(inheritance.parent_table.to_string(), "public.grantees");
+        assert_eq!(
+            inheritance.fk_columns,
+            [
+                ColumnName::from_stored("grantee_id"),
+                ColumnName::from_stored("grantee_kind")
+            ],
+            "`{clause}` orders the bridge by the referenced key"
+        );
+    }
+}
+
+/// A correlation on columns other than the referenced table's key matches any number of
+/// its rows, while the bridge names the one row whose key holds the correlated value.
+#[test]
+fn a_correlation_off_the_referenced_key_does_not_inherit() {
+    for (clause, table) in [
+        (
+            "grantee_id IN (SELECT grantee.id FROM grantees grantee)",
+            "grants",
+        ),
+        (
+            "person_id IN (SELECT person.owner_id FROM people person)",
+            "objects",
+        ),
+        (
+            "(grantee_id, grantee_kind) IN \
+             (SELECT grantee.owner_id, grantee.kind FROM grantees grantee)",
+            "grants",
+        ),
+    ] {
+        assert_eq!(
+            inherited_through_in_subquery(clause, table),
+            None,
+            "`{clause}` names no single row"
+        );
+    }
+}
+
+/// `ARRAY(SELECT c ...)` over an array column `c` flattens every row's array into its
+/// elements, so `= ANY` tests element membership rather than one value per row.
+#[test]
+fn an_array_built_from_an_array_column_is_not_a_membership_set() {
+    let clause = |column: &str| {
+        format!(
+            "id = ANY (ARRAY(SELECT m.{column} FROM doc_members m \
+             WHERE m.user_id = auth_current_user_id()))"
+        )
+    };
+    let db = parse_schema(
+        r"
+CREATE TABLE docs (id UUID PRIMARY KEY);
+CREATE DOMAIN doc_list AS UUID[];
+CREATE TABLE doc_members (doc_id UUID, doc_ids UUID[], listed doc_list, user_id UUID);
+",
+    )
+    .unwrap();
+    let registry = registry_with_role_level();
+    let classify = |clause: &str| {
+        recognize_p4_in_subquery(
+            &parse_expr(clause),
+            &db,
+            &registry,
+            "docs",
+            PolicyCommand::Select,
+            &ExpansionState::new(),
+        )
+    };
+    assert!(
+        matches!(
+            classify(&clause("doc_id")).map(|classified| classified.pattern),
+            Some(PatternClass::P4ExistsMembership(_))
+        ),
+        "a scalar column is one value per row"
+    );
+    for column in ["doc_ids", "listed"] {
+        let clause = clause(column);
+        assert!(classify(&clause).is_none(), "`{clause}`");
+        let reason = diagnose_p4_membership_ambiguity(
+            &parse_expr(&clause),
+            &db,
+            &registry,
+            "docs",
+            &ExpansionState::new(),
+        )
+        .unwrap_or_default();
+        assert!(reason.contains("elements"), "`{clause}`: {reason}");
+    }
+    let union = "id = ANY (ARRAY(SELECT m.doc_ids FROM doc_members m \
+                 UNION SELECT m.doc_ids FROM doc_members m))";
+    assert!(classify(union).is_none(), "`{union}`");
 }
 
 /// Where the subquery carries a rule of its own, the declared key still decides: that

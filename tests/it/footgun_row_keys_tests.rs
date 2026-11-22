@@ -480,8 +480,10 @@ fn a_table_whose_reads_loop_does_not_scar_for_rows_it_cannot_name() {
 CREATE TABLE b(k UUID, viewer TEXT, PRIMARY KEY (k, viewer));
 ALTER TABLE a ENABLE ROW LEVEL SECURITY;
 ALTER TABLE b ENABLE ROW LEVEL SECURITY;
-CREATE POLICY a_read ON a FOR SELECT USING (EXISTS (SELECT 1 FROM b WHERE b.k = a.k));
-CREATE POLICY b_read ON b FOR SELECT USING (EXISTS (SELECT 1 FROM a WHERE a.k = b.k));
+CREATE POLICY a_read ON a FOR SELECT
+    USING (EXISTS (SELECT 1 FROM b WHERE b.k = a.k AND b.viewer = a.viewer));
+CREATE POLICY b_read ON b FOR SELECT
+    USING (EXISTS (SELECT 1 FROM a WHERE a.k = b.k AND a.viewer = b.viewer));
 ",
     );
     let outputs = translator(ConfidenceLevel::B)

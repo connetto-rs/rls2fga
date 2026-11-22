@@ -768,7 +768,7 @@ CREATE POLICY p ON docs FOR SELECT
     let c = classified[0].using_classification().unwrap();
     assert!(
         matches!(&c.pattern, PatternClass::Unknown(UnclassifiedExpr { reason, .. })
-            if reason.contains("conflicting outer FK join columns")),
+            if reason.contains("not exactly the key naming its rows")),
         "two outer correlations with no composite foreign key must be refused, got: {:?}",
         c.pattern
     );

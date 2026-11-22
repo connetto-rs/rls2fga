@@ -1,7 +1,7 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use sqlparser::ast::{
-    BinaryOperator, Expr, FunctionArguments, InTarget, Select, SelectItem, TableFactor,
+    BinaryOperator, Expr, FunctionArguments, InTarget, Query, Select, SelectItem, TableFactor,
     UnaryOperator, Value,
 };
 
@@ -19,7 +19,9 @@ use crate::parser::names::{
     is_public_flag_column_name, lookup_table, parse_target, stored_ident_name,
     stored_relation_name, RoleKeyword,
 };
-use crate::parser::sql_parser::{ColumnLike, DatabaseLike, ForeignKeyLike, RoleLike, TableLike};
+use crate::parser::sql_parser::{
+    ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, RoleLike, TableLike,
+};
 use crate::types::ColumnName;
 
 /// P7/P9 attribute-condition detection (non-user column comparisons, temporal guards).
@@ -762,6 +764,37 @@ pub(crate) fn subquery_set_constructors(expr: &Expr) -> Vec<String> {
 /// this never claims a user defined function that happens to be named `array`.
 fn takes_a_subquery(func: &sqlparser::ast::Function) -> bool {
     matches!(func.args, FunctionArguments::Subquery(_))
+}
+
+/// The query a quantified comparison reads its set from, `(SELECT ...)` or
+/// `ARRAY(SELECT ...)`.
+pub(crate) fn set_query(set: &Expr) -> Option<&Query> {
+    match set {
+        Expr::Subquery(query) => Some(query),
+        Expr::Function(constructor) => match &constructor.args {
+            FunctionArguments::Subquery(query) => Some(query),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Whether `column` of `table` holds arrays once its domains are read through, `None`
+/// where `table` has no such column.
+pub(crate) fn column_holds_arrays<DB: DatabaseLike>(
+    table: &DB::Table,
+    db: &DB,
+    column: &str,
+) -> Option<bool> {
+    let mut stored = table
+        .columns(db)
+        .ok()?
+        .find(|candidate| candidate.stored_column_name() == column)?
+        .data_type(db);
+    while let Some(base) = stored.base_type(db) {
+        stored = base;
+    }
+    Some(stored.array_dimensions(db).is_some())
 }
 
 /// Spellings of every operator in `expr` that no recognizer knows how to translate,
