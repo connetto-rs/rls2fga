@@ -13,6 +13,7 @@ use crate::declared_helper_blocklist_tests::{
     blocked_units, BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED, UNITS_RESELECTED,
 };
 use crate::declared_helper_containment_tests::FOLDERS;
+use crate::declared_helper_exclusion_tests::EXCLUDING;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, founded_through_kind, reselected_groups, GranteeArms,
     ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED, GRANTEES, GROUPS,
@@ -2625,6 +2626,130 @@ async fn grants_shared_by_label_agree_with_postgres_17_and_18() {
             expect("bob", "r3|alice", ActionStatement::Delete, true);
             expect("bob", "r2|alice", ActionStatement::Select, false);
             expect("carol", "r1|alice", ActionStatement::Select, false);
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const EXCLUDING_HELPERS: &str = r#"{
+    "authz.blocked_projects": { "kind": "declared_helper" },
+    "authz.blocking_organizations": { "kind": "declared_helper" },
+    "authz.blocked_docs": { "kind": "declared_helper" },
+    "authz.owned_unblocked": { "kind": "declared_helper" },
+    "authz.owned_outside_blocks": { "kind": "declared_helper" },
+    "authz.authored_unblocked": { "kind": "declared_helper" },
+    "authz.authored_unblocked_docs": { "kind": "declared_helper" }
+}"#;
+
+const EXCLUDING_READS: [(&str, &str); 4] = [
+    ("owned_notes", "authz.owned_unblocked"),
+    ("outside_notes", "authz.owned_outside_blocks"),
+    ("authored_notes", "authz.authored_unblocked"),
+    ("doc_notes", "authz.authored_unblocked_docs"),
+];
+
+/// `O1` blocks `alice` and `O2` blocks `carol`, who own projects or write documents in
+/// both organizations, and `d5` blocks `carol`. Each notes table holds one note per
+/// project, read through one excluding helper, and the projects themselves go unguarded.
+fn excluding_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut schema = format!(
+        "{BLOCKS}{EXCLUDING}
+         DROP POLICY projects_owner ON projects;
+         ALTER TABLE projects DISABLE ROW LEVEL SECURITY;"
+    );
+    let mut seed = String::from(
+        "INSERT INTO organizations VALUES ('O1'), ('O2');
+         INSERT INTO projects VALUES ('P1', 'O1', 'alice', NULL), ('P2', 'O2', 'alice', NULL),
+           ('P3', 'O1', 'bob', NULL), ('P4', 'O2', 'bob', NULL);
+         INSERT INTO docs VALUES ('d1', 'P1', 'alice', NULL), ('d2', 'P2', 'alice', NULL),
+           ('d3', 'P3', 'bob', NULL), ('d4', 'P4', 'carol', NULL), ('d5', 'P1', 'carol', NULL),
+           ('d6', 'P2', 'carol', NULL);
+         INSERT INTO organization_blocks VALUES ('O1', 'alice'), ('O2', 'carol');
+         INSERT INTO doc_blocks VALUES ('d5', 'carol');",
+    );
+    let mut tables = Vec::with_capacity(EXCLUDING_READS.len());
+    for (table, helper) in EXCLUDING_READS {
+        let _ = write!(
+            schema,
+            "CREATE TABLE {table} (id TEXT PRIMARY KEY,
+               project_id TEXT NOT NULL REFERENCES projects (id));
+             ALTER TABLE {table} ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY {table}_read ON {table} FOR SELECT
+               USING (project_id IN (SELECT {helper}()));"
+        );
+        let _ = write!(
+            seed,
+            "INSERT INTO {table} VALUES ('P1', 'P1'), ('P2', 'P2'), ('P3', 'P3'), ('P4', 'P4');"
+        );
+        tables.push(table);
+    }
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-exclusion-pg{major}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &schema,
+        &[
+            &seed,
+            &format!(
+                "CREATE ROLE app_reader LOGIN;
+                 GRANT SELECT ON {} TO app_reader;
+                 GRANT USAGE ON SCHEMA authz TO app_reader;
+                 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+                 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+                tables.join(", ")
+            ),
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("carol"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(EXCLUDING_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_helper_excluding_another_helpers_set_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = excluding_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            // A block on its organization hides an owned project, by its key or by the
+            // organization alike.
+            for table in ["owned_notes", "outside_notes"] {
+                expect("alice", &format!("{table}:P1"), false);
+                expect("alice", &format!("{table}:P2"), true);
+                expect("bob", &format!("{table}:P3"), true);
+                expect("carol", &format!("{table}:P4"), false);
+            }
+            // A blocked project is not returned for the documents written in it.
+            expect("alice", "authored_notes:P1", false);
+            expect("alice", "authored_notes:P2", true);
+            expect("carol", "authored_notes:P1", true);
+            expect("carol", "authored_notes:P2", false);
+            // A blocked document takes away only its own project's return through it.
+            expect("carol", "doc_notes:P1", false);
+            expect("carol", "doc_notes:P2", true);
+            expect("carol", "doc_notes:P4", true);
+            expect("alice", "doc_notes:P1", true);
+            expect("anonymous", "owned_notes:P2", false);
             assert_agrees(&case, &run);
         }
     }

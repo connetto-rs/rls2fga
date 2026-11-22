@@ -29,14 +29,8 @@ pub(crate) enum ExclusionError {
     UnsupportedMembership(String),
     #[error("the blocklist table '{0}' has row level security")]
     GuardedTable(TableId),
-    #[error("the blocklist projection '{table}.{column}' must be provably non-null")]
-    NullableProjection { table: TableId, column: ColumnName },
-    #[error(
-        "the column '{table}.{column}' compared with the blocklist must be provably \
-         non-null, since PostgreSQL hides a row holding NULL there from exactly the callers \
-         whose blocklist is not empty"
-    )]
-    NullableCompared { table: String, column: ColumnName },
+    #[error(transparent)]
+    Nullable(#[from] NullableExclusion),
     #[error(
         "the column '{table}.{column}' passed to a STRICT function must be provably \
          non-null, since the function returns NULL for a NULL argument, NOT keeps it NULL, \
@@ -47,6 +41,20 @@ pub(crate) enum ExclusionError {
     Helper(#[from] HelperRefusal),
     #[error(transparent)]
     Flag(#[from] FlagRefusal),
+}
+
+/// A column on either side of a blocklist without a proof it holds no `NULL`, which
+/// `PostgreSQL` compares to `NULL` and so hides the row, where no tuple names it.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum NullableExclusion {
+    #[error("the blocklist projection '{table}.{column}' must be provably non-null")]
+    Projection { table: TableId, column: ColumnName },
+    #[error(
+        "the column '{table}.{column}' compared with the blocklist must be provably \
+         non-null, since PostgreSQL hides a row holding NULL there from exactly the callers \
+         whose blocklist is not empty"
+    )]
+    Compared { table: String, column: ColumnName },
 }
 
 /// Split a clause into its positive grant and blocklists.
@@ -454,10 +462,11 @@ fn exclusion_conjunct<DB: DatabaseLike>(
                     membership.user_column.as_str(),
                 )
             {
-                return Err(ExclusionError::NullableProjection {
+                return Err(NullableExclusion::Projection {
                     table: membership.join_table,
                     column: membership.user_column,
-                });
+                }
+                .into());
             }
             Ok(Some(ExcludedSet::Membership(membership)))
         }
@@ -681,15 +690,8 @@ fn flag_union(flags: Vec<ClassifiedExpr>) -> ClassifiedExpr {
     }
 }
 
-/// `helper` as a set to subtract, refused where `PostgreSQL` would compare a `NULL`.
-///
-/// `NOT (x = ANY (s))` is `NULL`, which hides the row, both where `x` is `NULL` and
-/// where `s` holds one while not holding `x`. A row without a value in `x` has no tuple
-/// naming it, so it would stay visible to every caller, and a `NULL` the helper returns
-/// has no tuple either, so it would hide nothing. So every column an arm returns has to
-/// be proven `NOT NULL`, a grant arm's object column, the child column of the edges a
-/// parent arm or a walk down reads, and the parent column of the edges a walk up reads.
-/// A walk whose final query reselects its rows returns what the reselecting arms return.
+/// `helper` as a set to subtract, refused where `PostgreSQL` would compare a `NULL`, as
+/// [`nullable_projection`] says for the set and for the compared column alike.
 fn excluded_helper<DB: DatabaseLike>(
     helper: DeclaredHelper,
     db: &DB,
@@ -698,20 +700,33 @@ fn excluded_helper<DB: DatabaseLike>(
     if !lookup_table(db, table)
         .is_some_and(|guarded| declared_not_null(db, guarded, helper.column.as_str()))
     {
-        return Err(ExclusionError::NullableCompared {
+        return Err(NullableExclusion::Compared {
             table: table.to_string(),
             column: helper.column,
-        });
+        }
+        .into());
     }
     if let Some(refusal) = nullable_projection(&helper.call, db) {
-        return Err(refusal);
+        return Err(refusal.into());
     }
     Ok(helper)
 }
 
 /// The first column an arm of `call`, or of a call it reads, returns without a proof it
 /// holds no `NULL`.
-fn nullable_projection<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<ExclusionError> {
+///
+/// `NOT (x = ANY (s))` is `NULL`, which hides the row, both where `x` is `NULL` and
+/// where `s` holds one while not holding `x`. A row without a value in `x` has no tuple
+/// naming it, so it would stay visible to every caller, and a `NULL` the helper returns
+/// has no tuple either, so it would hide nothing. So `x` has to be declared `NOT NULL`,
+/// and every column an arm returns proven `NOT NULL`, a grant arm's object column, the
+/// child column of the edges a parent arm or a walk down reads, and the parent column of
+/// the edges a walk up reads. A walk whose final query reselects its rows returns what
+/// the reselecting arms return.
+pub(crate) fn nullable_projection<DB: DatabaseLike>(
+    call: &HelperCall,
+    db: &DB,
+) -> Option<NullableExclusion> {
     if let Some(reselected) = &call.selection {
         return reselected
             .iter()
@@ -745,11 +760,11 @@ fn unproven_projection<DB: DatabaseLike>(
     returned_from: &TableId,
     returned: &[ColumnName],
     db: &DB,
-) -> Option<ExclusionError> {
+) -> Option<NullableExclusion> {
     returned
         .iter()
         .find(|returned| !column_proven_not_null(db, returned_from, returned.as_str()))
-        .map(|returned| ExclusionError::NullableProjection {
+        .map(|returned| NullableExclusion::Projection {
             table: returned_from.clone(),
             column: returned.clone(),
         })

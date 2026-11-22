@@ -618,8 +618,8 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
         })
 }
 
-/// Why a column a grant arm names its object or its grantee by, or one its caps pair,
-/// cannot be compared in `OpenFGA`.
+/// Why a column a grant arm names its object or its grantee by, one compared with a set it
+/// stays outside, or one its caps pair, cannot be compared in `OpenFGA`.
 fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Option<String> {
     grant
         .object_columns
@@ -638,6 +638,17 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
                 .within
                 .iter()
                 .find_map(|call| helper_call_refusal(call, db))
+        })
+        .or_else(|| {
+            let held = grant.held.iter().flat_map(|held| &held.outside);
+            grant
+                .outside
+                .iter()
+                .chain(held)
+                .find_map(|DeclaredHelper { column, call }| {
+                    key_collation_refusal(&grant.table, column, db)
+                        .or_else(|| helper_call_refusal(call, db))
+                })
         })
         .or_else(|| {
             grant.caps.iter().find_map(|cap| {

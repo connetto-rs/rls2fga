@@ -3434,8 +3434,8 @@ fn a_join_no_row_link_reaches_is_refused() {
         ),
         (
             "id IN (SELECT authz.loose_teams())",
-            "declared helper 'authz.loose_teams' joins the rows of 'public.loose_members', which \
-             no key names one row of",
+            "declared helper 'authz.loose_teams' holds each row of 'public.loose_members' as \
+             its own object, which no key names one row of",
         ),
         (
             "id IN (SELECT authz.crossed_unblocked_teams())",

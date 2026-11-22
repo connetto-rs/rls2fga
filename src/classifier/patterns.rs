@@ -621,7 +621,7 @@ pub struct IndirectMembership {
 /// rows and hierarchy rows its body names, which the tuple queries load the same way.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DeclaredHelper {
-    /// Column of the guarded table the set has to hold, the table's own key or a foreign
+    /// Column of the rows compared the set has to hold, the table's own key or a foreign
     /// key to the rows the set names.
     pub column: ColumnName,
     /// The call and what it returns.
@@ -726,6 +726,11 @@ pub struct HelperGrant {
     /// The calls whose keys the level's row the arm returns has to be among, all of them,
     /// from `<key> IN (SELECT <function>(<arguments>))` on the arm's table's own key.
     pub within: Vec<HelperCall>,
+    /// The sets the level's row the arm returns has to stay outside, all of them, from
+    /// `NOT (<column> = ANY (ARRAY(SELECT <function>(<arguments>))))` on a column of the
+    /// arm's table, its object column, which names the level's row, or any column where
+    /// the arm's row is the level's row.
+    pub outside: Vec<DeclaredHelper>,
     /// Each row of the arm's table held as its own object, with the rows of other tables
     /// it names, `None` where the level's row holds the grant.
     pub held: Option<HeldRows>,
@@ -733,7 +738,8 @@ pub struct HelperGrant {
 
 /// The rows of a grant arm's table, each an object keyed by the table's own key, holding
 /// the grant it makes while it meets its joins and caps, as a row it joins, a row that
-/// blocks it, or a cap reading more of it than the level's row names requires.
+/// blocks it, a set a column other than the level's row names has to stay outside, or a
+/// cap reading more of it than the level's row names requires.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeldRows {
     /// The key of the arm's table.
@@ -743,6 +749,9 @@ pub struct HeldRows {
     /// The rows named through a correlated `NOT EXISTS`, any of which meeting its own
     /// predicates takes the row away.
     pub blocked: Vec<HelperJoin>,
+    /// The sets a column of the row has to stay outside, all of them, from `NOT (<column>
+    /// = ANY (ARRAY(SELECT <function>(<arguments>))))`.
+    pub outside: Vec<DeclaredHelper>,
 }
 
 /// The one row of `table` a grant arm's row names by its own columns, through a foreign
