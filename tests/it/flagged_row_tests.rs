@@ -223,6 +223,31 @@ fn a_negated_archive_walk_over_a_foreign_key_subtracts_through_the_named_row() {
     );
 }
 
+/// A guarded table whose rows no key names links no row to the flagged one, so the flag
+/// grants none of them.
+#[test]
+fn a_flag_on_rows_no_key_names_grants_none() {
+    let sql = format!(
+        "{}CREATE POLICY grants_archived ON grants FOR SELECT
+           USING (authz.is_archived(resource_id));",
+        RESOURCES.replace(
+            "CREATE TABLE grants (id TEXT PRIMARY KEY,",
+            "CREATE TABLE grants (id TEXT,",
+        )
+    );
+    let dsl = translator(ConfidenceLevel::B, &[])
+        .translate(&db_of(&sql))
+        .expect("the schema should plan")
+        .outputs_accepting_gaps()
+        .model()
+        .clone();
+    assert_eq!(
+        relation_definition(&dsl, "grants", "can_select").as_deref(),
+        Some("no_access"),
+        "{dsl}"
+    );
+}
+
 /// Each edge row links the child it names to its parent, so the parent's flag reaches the
 /// child and never the reverse.
 #[test]

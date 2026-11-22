@@ -142,6 +142,47 @@ fn a_set_excluding_another_column_of_the_arm_is_subtracted_from_each_held_row() 
     assert!(held.ends_with(" but not blocked_docs"), "{dsl}");
 }
 
+/// `NOT (x = ANY ('{}'))` holds for every `x`, so a call returning no row takes nothing
+/// away and the arm keeps what it keeps without the exclusion.
+#[test]
+fn a_set_returning_no_row_takes_nothing_away() {
+    let extra = "
+CREATE TABLE organization_marks (organization_id TEXT NOT NULL REFERENCES organizations (id),
+  principal_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('block', 'mute')),
+  PRIMARY KEY (organization_id, principal_id, kind));
+GRANT SELECT ON organization_marks TO authz_owner;
+CREATE FUNCTION authz.marking_organizations(k TEXT) RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT m.organization_id FROM public.organization_marks m
+  WHERE m.principal_id = current_setting('app.user_id', true) AND m.kind = k
+$$;
+CREATE FUNCTION authz.owned_unbanned() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT p.id FROM public.projects p
+  WHERE p.owner_id = current_setting('app.user_id', true)
+    AND NOT (p.organization_id = ANY (ARRAY(SELECT authz.marking_organizations('ban'))))
+$$;
+ALTER FUNCTION authz.marking_organizations(TEXT) OWNER TO authz_owner;
+ALTER FUNCTION authz.owned_unbanned() OWNER TO authz_owner;
+";
+    let mut helpers = HELPERS.to_vec();
+    helpers.extend(["authz.marking_organizations", "authz.owned_unbanned"]);
+    let unbanned = model(&reading(extra, "authz.owned_unbanned"), &helpers);
+    let owned = model(
+        &reading("", "authz.owned_unblocked").replace(
+            "AND NOT (p.id = ANY (ARRAY(SELECT authz.blocked_projects())))",
+            "",
+        ),
+        HELPERS,
+    );
+    assert_eq!(
+        relation_definition(&unbanned, "docs", "can_select"),
+        relation_definition(&owned, "docs", "can_select")
+            .map(|owned| owned.replace("owned_unblocked", "owned_unbanned")),
+        "{unbanned}"
+    );
+}
+
 const NULLABLE: &str = "
 CREATE TABLE tasks (id TEXT PRIMARY KEY, project_id TEXT REFERENCES projects (id),
   organization_id TEXT NOT NULL REFERENCES organizations (id),
@@ -252,6 +293,34 @@ fn a_request_value_set_excluding_another_set_is_refused() {
     let reason = refusal_of(&sql, &helpers, "docs_read");
     assert!(
         reason.contains("only outside the set 'authz.blocking_organizations' returns"),
+        "{reason}"
+    );
+}
+
+/// The same holds for a set keeping only the rows no row of another table blocks.
+#[test]
+fn a_request_value_set_blocked_by_another_tables_rows_is_refused() {
+    let sql = format!(
+        "{BLOCKS}
+         GRANT SELECT ON organizations TO authz_owner;
+         CREATE FUNCTION authz.open_organizations() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT o.id FROM public.organizations o
+           WHERE NOT EXISTS (SELECT 1 FROM public.organization_blocks b
+                             WHERE b.organization_id = o.id)
+         $$;
+         ALTER FUNCTION authz.open_organizations() OWNER TO authz_owner;
+         ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY docs_read ON docs FOR SELECT
+           USING (current_setting('app.tenant', true) IN (SELECT authz.open_organizations()));"
+    );
+    let reason = refusal_of(
+        &sql,
+        &["authz.blocking_organizations", "authz.open_organizations"],
+        "docs_read",
+    );
+    assert!(
+        reason.contains("only where no row of 'public.organization_blocks' blocks them"),
         "{reason}"
     );
 }

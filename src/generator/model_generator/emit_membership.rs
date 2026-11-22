@@ -2156,19 +2156,11 @@ fn capped_grant_parts<DB: DatabaseLike>(
     }
     let mut outside = Vec::with_capacity(grant.outside.len());
     for helper in &grant.outside {
-        // The object column holds the key of the level's row it names, and any other
-        // column is one of the level's row itself.
-        let identity;
-        let column = if grant.object_columns.as_slice() == core::slice::from_ref(&helper.column) {
-            let Some(key) = single_identity_column(level, ctx.db) else {
-                return Vec::new();
-            };
-            identity = key;
-            &identity
-        } else {
-            &helper.column
-        };
-        let Some(excluded) = outside_expr(
+        // The object column names the level's row the set holds, and any other column is
+        // one of the level's row itself.
+        let column = (grant.object_columns.as_slice() != core::slice::from_ref(&helper.column))
+            .then_some(&helper.column);
+        outside.extend(outside_expr(
             &helper.call,
             column,
             (level, level_type),
@@ -2176,13 +2168,14 @@ fn capped_grant_parts<DB: DatabaseLike>(
             ctx,
             table_plan,
             all_types,
-        ) else {
-            return Vec::new();
-        };
-        outside.push(excluded);
+        ));
     }
-    let Some(mut rule) = combine_intersection(kept) else {
-        return Vec::new();
+    if grant.within.is_empty() && outside.is_empty() {
+        return kept;
+    }
+    let mut rule = match <[_; 1]>::try_from(kept) {
+        Ok([granted]) => granted,
+        Err(kept) => UsersetExpr::Intersection(kept),
     };
     if let Some(subtract) = combine_union(outside) {
         rule = UsersetExpr::Exclusion {
@@ -2195,13 +2188,14 @@ fn capped_grant_parts<DB: DatabaseLike>(
 }
 
 /// The users a row of `source`, of type `source_type`, is kept from by the set `call`
-/// returns holding its `column`, appending the relation holding the set to `name`.
+/// returns holding its `column`, or holding the row itself where `column` is `None`,
+/// appending the relation holding the set to `name`.
 ///
-/// `None` where the set or the link to it cannot be built, which the caller reads as
-/// keeping no row, since subtracting nothing would keep the rows the set holds.
+/// `None` where the call returns no row, which takes nothing away. Every row an exclusion
+/// is read on has a key, so a link from it to the set exists.
 fn outside_expr<DB: DatabaseLike>(
     call: &HelperCall,
-    column: &ColumnName,
+    column: Option<&ColumnName>,
     (source, source_type): (&TableId, &TypeName),
     name: &mut String,
     ctx: &PatternCtx<'_, DB>,
@@ -2211,6 +2205,9 @@ fn outside_expr<DB: DatabaseLike>(
     let relation = helper_call_relation(call, ctx, table_plan, all_types)?;
     name.push_str("_outside_");
     name.push_str(relation.as_str());
+    let Some(column) = column else {
+        return Some(UsersetExpr::StoredRow(relation));
+    };
     let plan = helper_level_plan(source_type, Some(source), table_plan, all_types);
     reach_level_relation(&call.level, source, plan, column, relation, ctx)
 }
@@ -2326,15 +2323,15 @@ fn held_grant_expr<DB: DatabaseLike>(
         name.push_str(&stored_relation_name(blocked.table.name()));
     }
     for helper in &held.outside {
-        blocking.push(outside_expr(
+        blocking.extend(outside_expr(
             &helper.call,
-            &helper.column,
+            Some(&helper.column),
             (&grant.table, &row_type),
             &mut name,
             ctx,
             table_plan,
             all_types,
-        )?);
+        ));
     }
     for cap in &grant.caps {
         kept.push(held_cap_expr(
