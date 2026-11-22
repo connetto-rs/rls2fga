@@ -13,8 +13,8 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::types::{
-    RecordDerivation, RecordDescription, RelationName, RelationShapes, RequestPredicate,
-    RowDecision, TypeName, ValueSource,
+    Guard, RecordDerivation, RecordDescription, RecordTemplate, RelationName, RelationShapes,
+    RequestPredicate, RowDecision, TableId, TypeName, ValueSource,
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 
@@ -153,19 +153,47 @@ fn facts_type(type_plan: &TypePlan) -> &TypeName {
         .unwrap_or(&type_plan.type_name)
 }
 
-/// `shapes` as records of `type_plan`, renamed from the stored type for a written row.
-fn owned_shapes(
-    type_plan: &TypePlan,
-    mut shapes: Vec<RecordDescription>,
-) -> Vec<RecordDescription> {
+/// A record one row decides, borrowed from its description.
+struct RowShape<'a> {
+    tables: &'a [TableId],
+    table: &'a TableId,
+    template: &'a RecordTemplate,
+    guards: &'a [Guard],
+}
+
+/// `description` when one row decides its records, or `None` for a source reading more.
+fn row_shape(description: &RecordDescription) -> Option<RowShape<'_>> {
+    let RecordDerivation::FromRow {
+        table,
+        template,
+        guards,
+    } = &description.derivation
+    else {
+        // A joining source reads a second table, so the row does not decide.
+        return None;
+    };
+    Some(RowShape {
+        tables: &description.tables,
+        table,
+        template,
+        guards,
+    })
+}
+
+/// `shape` as a record of `type_plan`, renamed from the stored type for a written row.
+fn owned_shape(type_plan: &TypePlan, shape: &RowShape<'_>) -> RecordDescription {
+    let mut template = shape.template.clone();
     if type_plan.resulting_of.is_some() {
-        for shape in &mut shapes {
-            if let RecordDerivation::FromRow { template, .. } = &mut shape.derivation {
-                template.object_type = type_plan.type_name.clone();
-            }
-        }
+        template.object_type = type_plan.type_name.clone();
     }
-    shapes
+    RecordDescription {
+        tables: shape.tables.to_vec(),
+        derivation: RecordDerivation::FromRow {
+            table: shape.table.clone(),
+            template: Box::new(template),
+            guards: shape.guards.to_vec(),
+        },
+    }
 }
 
 /// Whether a clause the database evaluates was lost from `relation`, here or on the stored
@@ -245,10 +273,10 @@ fn expr_decision<DB: DatabaseLike>(
             let predicate =
                 request_predicate(&plan.well_known.request_gate, computed, plan, sources)?;
             let type_plan = find_type(plan, type_name)?;
-            let shapes = owned_shapes(
-                type_plan,
-                shapes_filling(facts_type(type_plan), tupleset, sources),
-            );
+            let shapes = feeding_once(facts_type(type_plan), tupleset, sources)
+                .filter_map(|indexed| indexed.description)
+                .map(|description| Some(owned_shape(type_plan, &row_shape(description)?)))
+                .collect::<Option<Vec<_>>>()?;
             if shapes.is_empty() {
                 return None;
             }
@@ -394,10 +422,10 @@ fn leaf_decision<DB: DatabaseLike>(
         else {
             return None;
         };
-        let description = indexed.description?.clone();
+        let shape = row_shape(indexed.description?)?;
         return Some(RowDecision::RequestGated {
             relation: relation.clone(),
-            shapes: owned_shapes(type_plan, vec![description]),
+            shapes: vec![owned_shape(type_plan, &shape)],
             context_key: row_parameter.clone(),
             request_parameter: request_parameter.clone(),
             comparison: *comparison,
@@ -424,10 +452,10 @@ fn leaf_decision<DB: DatabaseLike>(
         if !temporal_context.is_empty() {
             return None;
         }
-        let description = indexed.description?.clone();
+        let shape = row_shape(indexed.description?)?;
         return Some(RowDecision::RequestGated {
             relation: relation.clone(),
-            shapes: owned_shapes(type_plan, vec![description]),
+            shapes: vec![owned_shape(type_plan, &shape)],
             context_key: row_parameter.clone(),
             request_parameter: request_parameter.clone(),
             comparison: *comparison,
@@ -437,16 +465,15 @@ fn leaf_decision<DB: DatabaseLike>(
     let mut shapes = Vec::new();
     let mut kind = None;
     for indexed in distinct {
-        let description = indexed.description?;
-        let subject = row_subject(&description.derivation, type_name, &well_known.user, db)?;
+        let shape = row_shape(indexed.description?)?;
+        let subject = row_subject(&shape, type_name, &well_known.user, db)?;
         // One relation's shapes fill one kind of leaf, so a mix falls closed.
         if *kind.get_or_insert(subject) != subject {
             return None;
         }
-        shapes.push(description.clone());
+        shapes.push(owned_shape(type_plan, &shape));
     }
     let relation = relation.clone();
-    let shapes = owned_shapes(type_plan, shapes);
     Some(match kind? {
         RowSubject::Named => RowDecision::Leaf { relation, shapes },
         RowSubject::Everyone => RowDecision::Everyone { relation, shapes },
@@ -463,18 +490,14 @@ enum RowSubject {
 }
 
 fn row_subject<DB: DatabaseLike>(
-    derivation: &RecordDerivation,
+    shape: &RowShape<'_>,
     type_name: &TypeName,
     user_type: &TypeName,
     db: &DB,
 ) -> Option<RowSubject> {
-    let RecordDerivation::FromRow {
+    let RowShape {
         table, template, ..
-    } = derivation
-    else {
-        // A joining source reads a second table, so the row does not decide.
-        return None;
-    };
+    } = shape;
     // A conditional record grants only while its condition holds, which no row leaf says.
     if template.context.is_some() || template.object_type != *type_name {
         return None;
