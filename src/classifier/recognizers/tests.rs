@@ -4420,13 +4420,18 @@ fn the_spellings_of_rows_naming_the_guarded_row_read_alike() {
             "EXISTS (SELECT 1 FROM invitations i WHERE i.organization_id = organizations.id \
              AND {RULE})"
         ),
+        format!(
+            "EXISTS (SELECT 1 FROM invitations i WHERE i.organization_id = organizations.id \
+             AND organizations.id = i.organization_id AND {RULE})"
+        ),
     ]
     .map(|clause| referring_rows(&clause));
-    let [Some(array), Some(listed), Some(exists)] = spellings else {
+    let [Some(array), Some(listed), Some(exists), Some(restated)] = spellings else {
         panic!("every spelling reads the invitations, got {spellings:?}");
     };
     assert_eq!(array, listed);
     assert_eq!(array, exists);
+    assert_eq!(array, restated);
     let PatternClass::P31ReferringRows(rows) = array.pattern else {
         panic!("expected referring rows, got {:?}", array.pattern);
     };
@@ -4457,6 +4462,39 @@ fn rows_naming_the_guarded_row_are_read_only_through_their_own_read_and_key() {
         "parent_id IN (SELECT i.organization_id FROM invitations i)",
     ] {
         assert_eq!(referring_rows(clause), None, "`{clause}`");
+    }
+}
+
+/// A referring row's rule that does not translate is named as the reason, and a negated
+/// read of referring rows is refused.
+#[test]
+fn rows_naming_the_guarded_row_refuse_what_they_cannot_carry() {
+    let db = parse_schema(REFERRING_ROWS_SCHEMA).unwrap();
+    for (clause, reason) in [
+        (
+            "id IN (SELECT i.organization_id FROM invitations i WHERE mystery(i.accepted_by_id))",
+            "naming this row have to pass is not translatable",
+        ),
+        (
+            "NOT (id = ANY (ARRAY(SELECT i.organization_id FROM invitations i)))",
+            "NOT applied to referring-rows check",
+        ),
+    ] {
+        let classified = crate::classifier::policy_classifier::classify_expr(
+            &parse_expr(clause),
+            &db,
+            &FunctionRegistry::new(),
+            "organizations",
+            PolicyCommand::Select,
+        );
+        let PatternClass::Unknown(UnclassifiedExpr { reason: got, .. }) = &classified.pattern
+        else {
+            panic!("`{clause}` is refused, got {:?}", classified.pattern);
+        };
+        assert!(
+            got.contains(reason),
+            "`{clause}` names `{reason}`, got `{got}`"
+        );
     }
 }
 

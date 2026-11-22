@@ -1382,38 +1382,28 @@ impl RelatedRows<'_> {
             &self.rule.pattern,
             PatternClass::P10ConstantBool(ConstantBool { value: true })
         );
+        // Taken out of the map while the rule translates, so the translation can still
+        // mint other types there, and put back once the rule's relation is on it.
+        let mut related_plan = (!bare_delegation && !on_self).then(|| {
+            let placeholder =
+                TypePlan::new_with_well_known(related_type.clone(), &table_plan.well_known);
+            all_types
+                .insert(related_type.clone(), placeholder)
+                .unwrap_or_else(|| {
+                    TypePlan::new_with_well_known(related_type.clone(), &table_plan.well_known)
+                })
+        });
         let rule_expr = if bare_delegation {
             UsersetExpr::Computed(can_select_relation())
-        } else if on_self {
+        } else {
             translate_pattern(
                 &self.rule.pattern,
                 &ctx.for_table(self.table),
-                table_plan,
+                related_plan.as_mut().unwrap_or(&mut *table_plan),
                 all_types,
                 notes,
                 readability,
             )
-        } else {
-            let related_plan = all_types.entry(related_type.clone()).or_insert_with(|| {
-                TypePlan::new_with_well_known(related_type.clone(), &table_plan.well_known)
-            });
-            let mut related_plan_owned = core::mem::replace(
-                related_plan,
-                TypePlan::new_with_well_known(related_type.clone(), &table_plan.well_known),
-            );
-            let expr = translate_pattern(
-                &self.rule.pattern,
-                &ctx.for_table(self.table),
-                &mut related_plan_owned,
-                all_types,
-                notes,
-                readability,
-            );
-            *all_types
-                .entry(related_type.clone())
-                .or_insert_with(|| TypePlan::new(related_type.clone())) = related_plan_owned;
-            bind_row_source(all_types, related_type, self.table, ctx.db);
-            expr
         };
 
         // The policy requires this specific rule. Pointing at the related `can_select`
@@ -1443,21 +1433,16 @@ impl RelatedRows<'_> {
                     "{INHERITED_RELATION_PREFIX}{}",
                     stable_hex_suffix(userset_key(&expr).as_str())
                 ));
-                if on_self {
-                    table_plan.ensure_computed(name, expr)
-                } else {
-                    all_types
-                        .entry(related_type.clone())
-                        .or_insert_with(|| {
-                            TypePlan::new_with_well_known(
-                                related_type.clone(),
-                                &table_plan.well_known,
-                            )
-                        })
-                        .ensure_computed(name, expr)
-                }
+                related_plan
+                    .as_mut()
+                    .unwrap_or(&mut *table_plan)
+                    .ensure_computed(name, expr)
             }
         };
+        if let Some(plan) = related_plan {
+            all_types.insert(related_type.clone(), plan);
+            bind_row_source(all_types, related_type, self.table, ctx.db);
+        }
         (relation, rule_is_denial)
     }
 }

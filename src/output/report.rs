@@ -545,6 +545,23 @@ CREATE POLICY {name} ON docs USING (TRUE);
         assert_eq!(format_pattern(&pattern), "P1 (threshold > 5)");
     }
 
+    /// A referring-rows row names the table whose readable rows admit the guarded row.
+    #[test]
+    fn format_pattern_names_the_referring_table() {
+        let pattern = PatternClass::P31ReferringRows(ReferringRows {
+            referring_table: TableId::from_stored(None, "invitations".to_string()),
+            referring_columns: vec![ColumnName::from_stored("organization_id")],
+            inner_pattern: Box::new(ClassifiedExpr {
+                pattern: PatternClass::P10ConstantBool(ConstantBool { value: true }),
+                confidence: ConfidenceLevel::A,
+            }),
+        });
+        assert_eq!(
+            format_pattern(&pattern),
+            "P31 (named by readable rows of public.invitations)"
+        );
+    }
+
     /// The row names the value the fallback read hands over by the first source's
     /// parameter, the constants in the order the list names them, the `NOT IN` spelling
     /// among them.

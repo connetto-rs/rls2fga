@@ -411,6 +411,7 @@ fn generator_defines(relation: &RelationName) -> bool {
 }
 
 impl TypePlan {
+    #[cfg(test)]
     fn new(type_name: TypeName) -> Self {
         Self::new_with_well_known(type_name, &WellKnownTypes::default())
     }
