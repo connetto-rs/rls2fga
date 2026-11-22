@@ -1,10 +1,12 @@
+use serde::Serialize;
+
 use crate::prelude::*;
 use crate::{ObjectKey, RecordError, RowValues, TableId, TypeName};
 
 /// How rows of one table are named as objects of the emitted model.
 ///
 /// `#[non_exhaustive]`: a naming this learns to report adds a field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[non_exhaustive]
 pub struct RowNaming {
     /// Table whose query route this object naming describes.

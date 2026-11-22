@@ -3,6 +3,7 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::types::{ColumnName, TableId, TypeName};
+use serde::Serialize;
 
 /// Why a tuple query was not emitted, and the two comment lines that stand in its place in
 /// the loader's script.
@@ -10,7 +11,7 @@ use crate::types::{ColumnName, TableId, TypeName};
 /// Separate from [`TranslationNote`](crate::types::TranslationNote) because it answers a different reader: someone
 /// running the SQL, who needs to know what to do about the gap in their tuple set
 /// rather than what the model says.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum SkippedTuples {
     /// A hybrid policy's attribute half, which no tuple can express.
     AttributeRuntimeEnforcement {
