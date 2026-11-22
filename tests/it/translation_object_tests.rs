@@ -404,6 +404,34 @@ fn every_output_renders_from_one_plan() {
     );
 }
 
+/// The relations, row naming and tuple queries serialized together, which is what a
+/// consumer fingerprints to notice that a table's translation changed.
+fn serialized_share(schema: &str) -> String {
+    let db = db_of(schema);
+    let outputs = translator(ConfidenceLevel::D)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    let translation = outputs.translation();
+    serde_json::to_string(&(
+        translation.relations(),
+        translation.row_naming(),
+        outputs.tuple_queries(),
+    ))
+    .expect("the translation serializes")
+}
+
+/// Two translations of one schema serialize to the same text, and a schema whose policy
+/// reads another column does not.
+#[test]
+fn a_translation_serializes_to_the_same_text_every_time() {
+    for schema in [CLEAN, REFUSED, RESTRICTIVE_BELOW_THRESHOLD] {
+        assert_eq!(serialized_share(schema), serialized_share(schema));
+    }
+    let other_owner = CLEAN.replace("owner_id", "author_id");
+    assert_ne!(serialized_share(CLEAN), serialized_share(&other_owner));
+}
+
 #[test]
 fn translation_note_table_serializes_as_string() {
     use rls2fga::types::TableId;

@@ -23,6 +23,7 @@ use crate::types::{ColumnName, ConditionName, ContextWitness, RelationName, Tabl
 use crate::types::{Record, RecordContextValue, RecordDescription, RequestComparison};
 use alloc::collections::{BTreeMap, BTreeSet};
 use core::fmt::Write;
+use serde::Serialize;
 use sql_traits::utils::scalar_family::ScalarFamily;
 
 #[cfg(test)]
@@ -42,7 +43,7 @@ pub(crate) fn unbounded_columns_resolutions() -> usize {
 }
 
 /// A generated tuple query with its descriptive comment.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TupleQuery {
     /// Human-readable SQL comment describing what this query populates.
     pub comment: String,

@@ -4,7 +4,7 @@ use crate::prelude::*;
 use crate::{RecordDescription, RelationName, TypeName};
 
 /// What one model relation needs and whether one row can decide it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RelationShapes {
     /// `OpenFGA` type the relation is defined on.
     pub type_name: TypeName,
@@ -36,7 +36,7 @@ pub struct RelationShapes {
 ///
 /// Exhaustive on purpose, so a consumer that has not learned a new shape fails to compile
 /// rather than treating it as one it knows.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum RowDecision {
     /// The subjects are the records these shapes produce for this row.
     Leaf {
@@ -96,7 +96,7 @@ pub enum RowDecision {
 }
 
 /// How a request-gated relation compares the row's side against the caller's.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum RequestComparison {
     /// The caller's set has to hold the row's value.
     CallerSetHolds,
@@ -135,7 +135,7 @@ impl RequestNormalization {
 /// In canonical form children are sorted and distinct, an [`Self::Any`] never directly
 /// holds another [`Self::Any`] nor an [`Self::All`] another [`Self::All`], and either holds
 /// at least two children.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum RequestPredicate {
     /// One test of a request value against a constant the policy names.
     Holds(RequestAtom),
@@ -171,7 +171,7 @@ pub enum RequestPredicate {
 /// source wrapped in `NULLIF` skips on, and a `NULLIF` without the skip would not, so a
 /// source that stops the fallback on an unset setting may read more strictly than the
 /// database does.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct FallbackStep {
     /// Setting the source reads, as the deployment spells it.
     pub setting_key: String,
@@ -190,7 +190,7 @@ pub struct FallbackStep {
 }
 
 /// One test of a request value against a constant the policy names.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct RequestAtom {
     /// Parameter the caller supplies its value as, in every check context.
     pub request_parameter: String,
