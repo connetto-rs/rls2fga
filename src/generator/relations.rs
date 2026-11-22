@@ -13,8 +13,8 @@
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::types::{
-    Guard, RecordDerivation, RecordDescription, RecordTemplate, RelationName, RelationShapes,
-    RequestPredicate, RowDecision, TableId, TypeName, ValueSource,
+    CallerGate, Guard, RecordDerivation, RecordDescription, RecordTemplate, RelationName,
+    RelationShapes, RequestPredicate, RowDecision, TableId, TypeName, ValueSource,
 };
 use alloc::collections::{BTreeMap, BTreeSet};
 
@@ -65,6 +65,7 @@ pub(crate) fn relation_shapes<'plan, DB: DatabaseLike>(
                 shapes: shapes_filling(&type_plan.type_name, relation, &sources),
                 decision,
                 grants_nobody: relation_grants_nothing(type_plan, relation),
+                caller_gate: relation_caller_gate(type_plan, relation, &sources),
             });
         }
     }
@@ -406,59 +407,28 @@ fn leaf_decision<DB: DatabaseLike>(
     if distinct.is_empty() {
         return None;
     }
-    if distinct
-        .iter()
-        .any(|indexed| matches!(indexed.source, TupleSource::SessionAttributeGate { .. }))
-    {
+    if distinct.iter().any(|indexed| {
+        matches!(
+            indexed.source,
+            TupleSource::SessionAttributeGate { .. } | TupleSource::RequestShareGate { .. }
+        )
+    }) {
         let [indexed] = distinct.as_slice() else {
             return None;
         };
-        let TupleSource::SessionAttributeGate {
-            row_parameter,
-            request_parameter,
-            comparison,
-            ..
-        } = indexed.source
-        else {
-            return None;
-        };
-        let shape = row_shape(indexed.description?)?;
-        return Some(RowDecision::RequestGated {
-            relation: relation.clone(),
-            shapes: vec![owned_shape(type_plan, &shape)],
-            context_key: row_parameter.clone(),
-            request_parameter: request_parameter.clone(),
-            comparison: *comparison,
-        });
-    }
-
-    if distinct
-        .iter()
-        .any(|indexed| matches!(indexed.source, TupleSource::RequestShareGate { .. }))
-    {
-        let [indexed] = distinct.as_slice() else {
-            return None;
-        };
-        let TupleSource::RequestShareGate {
-            row_parameter,
-            request_parameter,
-            temporal_context,
-            comparison,
-            ..
-        } = indexed.source
-        else {
-            return None;
-        };
-        if !temporal_context.is_empty() {
+        // The clock beside the comparison is the request's, which no row settles.
+        if matches!(
+            indexed.source,
+            TupleSource::RequestShareGate { temporal_context, .. } if !temporal_context.is_empty()
+        ) {
             return None;
         }
+        let gate = caller_gate(indexed.source)?;
         let shape = row_shape(indexed.description?)?;
         return Some(RowDecision::RequestGated {
             relation: relation.clone(),
             shapes: vec![owned_shape(type_plan, &shape)],
-            context_key: row_parameter.clone(),
-            request_parameter: request_parameter.clone(),
-            comparison: *comparison,
+            gate,
         });
     }
 
@@ -477,6 +447,45 @@ fn leaf_decision<DB: DatabaseLike>(
     Some(match kind? {
         RowSubject::Named => RowDecision::Leaf { relation, shapes },
         RowSubject::Everyone => RowDecision::Everyone { relation, shapes },
+    })
+}
+
+/// The gate on the caller's own value of the one source filling `relation`, whatever
+/// decides its records.
+fn relation_caller_gate(
+    type_plan: &TypePlan,
+    relation: &RelationName,
+    sources: &SourceIndex<'_, '_>,
+) -> Option<CallerGate> {
+    let mut feeding = feeding_once(facts_type(type_plan), relation, sources);
+    let only = feeding.next()?;
+    if feeding.next().is_some() {
+        return None;
+    }
+    caller_gate(only.source)
+}
+
+/// The comparison with the caller's own value `source` gates its records on.
+fn caller_gate(source: &TupleSource) -> Option<CallerGate> {
+    let (TupleSource::SessionAttributeGate {
+        row_parameter,
+        request_parameter,
+        comparison,
+        ..
+    }
+    | TupleSource::RequestShareGate {
+        row_parameter,
+        request_parameter,
+        comparison,
+        ..
+    }) = source
+    else {
+        return None;
+    };
+    Some(CallerGate {
+        context_key: row_parameter.clone(),
+        request_parameter: request_parameter.clone(),
+        comparison: *comparison,
     })
 }
 

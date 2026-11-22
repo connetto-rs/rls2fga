@@ -1197,30 +1197,25 @@ pub(crate) fn decision_grants(
             .iter()
             .any(|record| record.subject == format!("user:{user}")),
         RowDecision::Everyone { shapes, .. } => !records(shapes)?.is_empty(),
-        RowDecision::RequestGated {
-            shapes,
-            context_key,
-            request_parameter,
-            comparison,
-            ..
-        } => records(shapes)?.iter().any(|record| {
+        RowDecision::RequestGated { shapes, gate, .. } => records(shapes)?.iter().any(|record| {
             let row_side = &record
                 .context
                 .as_ref()
                 .expect("a gated record carries its context")
-                .values[context_key];
+                .values[&gate.context_key];
+            let request_parameter = gate.request_parameter.as_str();
             // A set keeps its own list parameter the row tests membership in, and a
             // single value travels in the `settings` map under its parameter name.
-            match comparison {
-                RequestComparison::CallerSetHolds => context[request_parameter.as_str()]
+            match gate.comparison {
+                RequestComparison::CallerSetHolds => context[request_parameter]
                     .as_array()
                     .is_some_and(|held| held.iter().any(|value| value == row_side.as_str())),
                 RequestComparison::CallerValueEquals => {
-                    context["settings"][request_parameter.as_str()] == row_side.as_str()
+                    context["settings"][request_parameter] == row_side.as_str()
                 }
                 // The absent key reads as `NULL`, which is no inequality either.
                 RequestComparison::CallerValueUnequals => context["settings"]
-                    .get(request_parameter.as_str())
+                    .get(request_parameter)
                     .is_some_and(|caller_side| caller_side != row_side.as_str()),
             }
         }),

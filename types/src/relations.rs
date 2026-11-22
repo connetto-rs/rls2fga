@@ -25,6 +25,22 @@ pub struct RelationShapes {
     /// no round trip is needed to be told no. False for a direct relation, which grants
     /// whatever is written into it.
     pub grants_nobody: bool,
+    /// The comparison with the caller's own value gating every record of this relation,
+    /// whether or not one row decides them. `None` unless one gate source fills it.
+    pub caller_gate: Option<CallerGate>,
+}
+
+/// A comparison between a value each record carries and one the caller supplies in every
+/// check context, which a grant needs though the record's condition may also read the
+/// request clock.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CallerGate {
+    /// Context key each record carries the row's side under.
+    pub context_key: String,
+    /// Parameter the caller supplies its own value as, in every check context.
+    pub request_parameter: String,
+    /// How the two sides are compared.
+    pub comparison: RequestComparison,
 }
 
 /// How the subjects a relation grants compose from one row's records.
@@ -70,12 +86,9 @@ pub enum RowDecision {
         relation: RelationName,
         /// The shapes filling it, identical to that relation's own entry. Never empty.
         shapes: Vec<RecordDescription>,
-        /// Context key each record carries the row's side under.
-        context_key: String,
-        /// Parameter the caller supplies its own value as, in every check context.
-        request_parameter: String,
-        /// How the two sides are compared.
-        comparison: RequestComparison,
+        /// The comparison the caller's value completes, identical to that relation's own
+        /// [`RelationShapes::caller_gate`]. The records' condition reads nothing else.
+        gate: CallerGate,
     },
     /// Every subject of `subject_type` on a row that yields its link, while the caller's
     /// request satisfies the predicate. The predicate reads no column,
