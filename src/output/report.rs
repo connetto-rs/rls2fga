@@ -10,7 +10,7 @@ use crate::classifier::patterns::{
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, FlaggedRow, JsonbFieldOwnership, MembershipExclusion,
     MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
+    ReferringRows, RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
     RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
@@ -260,6 +260,11 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         }
         PatternClass::P5ParentInheritance(ParentInheritance { parent_table, .. }) => {
             format!("P5 (inherits from {parent_table})")
+        }
+        PatternClass::P31ReferringRows(ReferringRows {
+            referring_table, ..
+        }) => {
+            format!("P31 (named by readable rows of {referring_table})")
         }
         PatternClass::ExpandedFunction(ExpandedFunction {
             function, inner, ..
@@ -538,6 +543,23 @@ CREATE POLICY {name} ON docs USING (TRUE);
             command: PolicyCommand::Delete,
         });
         assert_eq!(format_pattern(&pattern), "P1 (threshold > 5)");
+    }
+
+    /// A referring-rows row names the table whose readable rows admit the guarded row.
+    #[test]
+    fn format_pattern_names_the_referring_table() {
+        let pattern = PatternClass::P31ReferringRows(ReferringRows {
+            referring_table: TableId::from_stored(None, "invitations".to_string()),
+            referring_columns: vec![ColumnName::from_stored("organization_id")],
+            inner_pattern: Box::new(ClassifiedExpr {
+                pattern: PatternClass::P10ConstantBool(ConstantBool { value: true }),
+                confidence: ConfidenceLevel::A,
+            }),
+        });
+        assert_eq!(
+            format_pattern(&pattern),
+            "P31 (named by readable rows of public.invitations)"
+        );
     }
 
     /// The row names the value the fallback read hands over by the first source's

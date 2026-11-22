@@ -342,6 +342,23 @@ pub struct ParentInheritance {
     pub inner_pattern: Box<ClassifiedExpr>,
 }
 
+/// P31: The guarded row is named by some row of another table the caller can read, which
+/// also satisfies a rule of its own.
+///
+/// Each referring row is its own witness. Its readability and its rule are both decided
+/// on that one row, so neither pools with another row naming the same guarded row.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReferringRows {
+    /// Table whose rows name the guarded row.
+    pub referring_table: TableId,
+    /// Columns of `referring_table` naming one guarded row, in the order of the guarded
+    /// table's key.
+    pub referring_columns: Vec<ColumnName>,
+    /// The rule a referring row has to satisfy besides being readable, a constant `TRUE`
+    /// where the policy states none.
+    pub inner_pattern: Box<ClassifiedExpr>,
+}
+
 /// A call to a declared function, replaced by that function's body with the
 /// call-site arguments substituted. The classification is the body's.
 #[derive(Debug, Clone, PartialEq)]
@@ -1202,6 +1219,10 @@ pub enum PatternClass {
     /// `SECURITY DEFINER` helper returning `TABLE (...)` returns:
     /// `(organization_id, kind) IN (SELECT * FROM authz.capped_kinds('reader'))`.
     P30RowInHelperPairs(RowInHelperPairs),
+    /// P31: Some row of another table the caller can read names the guarded row by its
+    /// key and passes a rule of its own:
+    /// `id IN (SELECT i.organization_id FROM invitations i WHERE i.expires_at > now())`.
+    P31ReferringRows(ReferringRows),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced

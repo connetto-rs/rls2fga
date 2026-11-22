@@ -1267,3 +1267,74 @@ GRANT SELECT ON orgs, docs TO app_user;
     );
     assert_model_is_internally_consistent(&outputs.json_model());
 }
+
+/// Referring rows a definer reads past their row security, rows without an identity to
+/// link, and a rule that translates to nothing each leave the guarded row denied with a
+/// note naming why.
+#[test]
+fn referring_rows_deny_what_their_own_read_cannot_decide() {
+    const TABLES: &str = r"
+CREATE TABLE organizations (id UUID PRIMARY KEY);
+ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON organizations TO app_user;
+";
+    const INVITATIONS: &str = r"
+CREATE TABLE invitations (id UUID PRIMARY KEY, organization_id UUID REFERENCES organizations(id), email TEXT);
+";
+    const READ: &str = r"
+ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON invitations TO app_user;
+CREATE POLICY invitations_select ON invitations FOR SELECT
+  USING (email = current_setting('app.user_id', true));
+";
+    let cases = [
+        (
+            format!(
+                "{TABLES}{INVITATIONS}{READ}
+CREATE FUNCTION invited(org UUID) RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER
+  SET search_path = public
+  AS $$ SELECT org IN (SELECT i.organization_id FROM public.invitations i) $$;
+CREATE POLICY organizations_select ON organizations FOR SELECT USING (invited(id));"
+            ),
+            "read past their row security",
+        ),
+        (
+            format!(
+                "{TABLES}
+CREATE TABLE invitations (organization_id UUID REFERENCES organizations(id), email TEXT);
+{READ}
+CREATE POLICY organizations_select ON organizations FOR SELECT
+  USING (id IN (SELECT i.organization_id FROM invitations i));"
+            ),
+            "referring row links",
+        ),
+        (
+            format!(
+                "{TABLES}{INVITATIONS}{READ}
+CREATE POLICY organizations_select ON organizations FOR SELECT
+  USING (id IN (SELECT i.organization_id FROM invitations i WHERE false));"
+            ),
+            "naming the row have to pass does not translate",
+        ),
+    ];
+    for (sql, reason) in cases {
+        let db = db_of(&sql);
+        let translation = translator(ConfidenceLevel::B)
+            .translate(&db)
+            .expect("translation should plan");
+        let notes: Vec<String> = translation
+            .notes()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let dsl = translation.outputs_accepting_gaps().model();
+        assert!(
+            support::footgun::relation_denies(&dsl, "organizations", "can_select"),
+            "organizations stay hidden:\n{sql}\n{dsl}"
+        );
+        assert!(
+            notes.iter().any(|note| note.contains(reason)),
+            "a note names `{reason}`, got {notes:#?}\n{sql}"
+        );
+    }
+}

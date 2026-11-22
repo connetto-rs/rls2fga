@@ -348,7 +348,9 @@ fn p19_table<DB: DatabaseLike>(db: &DB, source: &RelationSource) -> Option<P19Ta
     })
 }
 
-fn plain_relation_sources(select: &Select) -> Option<Vec<(&TableFactor, RelationSource)>> {
+pub(super) fn plain_relation_sources(
+    select: &Select,
+) -> Option<Vec<(&TableFactor, RelationSource)>> {
     let mut sources = Vec::new();
     for from in &select.from {
         sources.push((&from.relation, plain_relation_factor(&from.relation)?));

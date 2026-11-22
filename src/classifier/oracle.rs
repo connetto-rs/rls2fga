@@ -72,8 +72,8 @@ use crate::classifier::patterns::{
     ConstantInCallerSet, DirectOwnership, ExistsMembership, ExpandedFunction,
     FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
     JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
-    OwnerExpression, ParentInheritance, PatternClass, RoleNameInList, RowValueEqualsCallerScalar,
-    RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    OwnerExpression, ParentInheritance, PatternClass, ReferringRows, RoleNameInList,
+    RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 
 /// Which clause of a policy an expression came from.
@@ -278,7 +278,8 @@ where
     // compiler-checked while letting a new one silently hold the grade its refused part
     // dragged it to.
     let regraded = match &mut expr.pattern {
-        PatternClass::P5ParentInheritance(ParentInheritance { inner_pattern, .. }) => {
+        PatternClass::P5ParentInheritance(ParentInheritance { inner_pattern, .. })
+        | PatternClass::P31ReferringRows(ReferringRows { inner_pattern, .. }) => {
             consult_expr(inner_pattern, policy_name, clause, oracle, answered)
                 .then_some(inner_pattern.confidence)
         }

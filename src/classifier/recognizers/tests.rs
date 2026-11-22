@@ -4383,6 +4383,140 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID);
     );
 }
 
+const REFERRING_ROWS_SCHEMA: &str = r"
+CREATE TABLE organizations (id UUID PRIMARY KEY, parent_id UUID, name TEXT);
+CREATE TABLE invitations (
+    id UUID PRIMARY KEY,
+    organization_id UUID REFERENCES organizations(id),
+    accepted_by_id UUID,
+    expires_at TIMESTAMPTZ
+);
+ALTER TABLE invitations ENABLE ROW LEVEL SECURITY;
+CREATE TABLE open_invitations (id UUID PRIMARY KEY, organization_id UUID REFERENCES organizations(id));
+";
+
+/// The rows naming an organization `clause` reads, if it reads them.
+fn referring_rows(clause: &str) -> Option<ClassifiedExpr> {
+    let db = parse_schema(REFERRING_ROWS_SCHEMA).unwrap();
+    recognize_p31_referring_rows(
+        &parse_expr(clause),
+        &db,
+        &FunctionRegistry::new(),
+        "organizations",
+        PolicyCommand::Select,
+        &ExpansionState::new(),
+    )
+}
+
+/// The array, `IN` and `EXISTS` spellings name one referring table, the column of it naming
+/// the guarded key, and one rule each of its rows has to pass.
+#[test]
+fn the_spellings_of_rows_naming_the_guarded_row_read_alike() {
+    const RULE: &str = "i.accepted_by_id IS NULL AND i.expires_at > now()";
+    let spellings = [
+        format!("id = ANY (ARRAY(SELECT i.organization_id FROM invitations i WHERE {RULE}))"),
+        format!("id IN (SELECT i.organization_id FROM invitations i WHERE {RULE})"),
+        format!(
+            "EXISTS (SELECT 1 FROM invitations i WHERE i.organization_id = organizations.id \
+             AND {RULE})"
+        ),
+        format!(
+            "EXISTS (SELECT 1 FROM invitations i WHERE i.organization_id = organizations.id \
+             AND organizations.id = i.organization_id AND {RULE})"
+        ),
+    ]
+    .map(|clause| referring_rows(&clause));
+    let [Some(array), Some(listed), Some(exists), Some(restated)] = spellings else {
+        panic!("every spelling reads the invitations, got {spellings:?}");
+    };
+    assert_eq!(array, listed);
+    assert_eq!(array, exists);
+    assert_eq!(array, restated);
+    let PatternClass::P31ReferringRows(rows) = array.pattern else {
+        panic!("expected referring rows, got {:?}", array.pattern);
+    };
+    assert_eq!(rows.referring_table.to_string(), "public.invitations");
+    assert_eq!(
+        rows.referring_columns,
+        [ColumnName::from_stored("organization_id")]
+    );
+    assert!(
+        matches!(
+            &rows.inner_pattern.pattern,
+            PatternClass::P8Composite(Composite { op: BoolOp::And, parts }) if parts.len() == 2
+        ),
+        "both filters stay on the invitation, got {:?}",
+        rows.inner_pattern.pattern
+    );
+}
+
+/// A referring table without row security leaves no read to inherit, a rule reading the
+/// guarded row is no rule one referring row can carry, and a correlation off the guarded
+/// key names no single guarded row.
+#[test]
+fn rows_naming_the_guarded_row_are_read_only_through_their_own_read_and_key() {
+    for clause in [
+        "id IN (SELECT i.organization_id FROM open_invitations i)",
+        "EXISTS (SELECT 1 FROM invitations i WHERE i.organization_id = organizations.id \
+         AND organizations.name = 'acme')",
+        "parent_id IN (SELECT i.organization_id FROM invitations i)",
+    ] {
+        assert_eq!(referring_rows(clause), None, "`{clause}`");
+    }
+}
+
+/// A referring row's rule that does not translate is named as the reason, and a negated
+/// read of referring rows is refused.
+#[test]
+fn rows_naming_the_guarded_row_refuse_what_they_cannot_carry() {
+    let db = parse_schema(REFERRING_ROWS_SCHEMA).unwrap();
+    for (clause, reason) in [
+        (
+            "id IN (SELECT i.organization_id FROM invitations i WHERE mystery(i.accepted_by_id))",
+            "naming this row have to pass is not translatable",
+        ),
+        (
+            "NOT (id = ANY (ARRAY(SELECT i.organization_id FROM invitations i)))",
+            "NOT applied to referring-rows check",
+        ),
+    ] {
+        let classified = crate::classifier::policy_classifier::classify_expr(
+            &parse_expr(clause),
+            &db,
+            &FunctionRegistry::new(),
+            "organizations",
+            PolicyCommand::Select,
+        );
+        let PatternClass::Unknown(UnclassifiedExpr { reason: got, .. }) = &classified.pattern
+        else {
+            panic!("`{clause}` is refused, got {:?}", classified.pattern);
+        };
+        assert!(
+            got.contains(reason),
+            "`{clause}` names `{reason}`, got `{got}`"
+        );
+    }
+}
+
+/// The diagnosis refuses only the rule the recognizer could not read, never a readable one.
+#[test]
+fn rows_naming_the_guarded_row_are_never_diagnosed_when_their_rule_reads() {
+    let db = parse_schema(REFERRING_ROWS_SCHEMA).unwrap();
+    let clause =
+        "id IN (SELECT i.organization_id FROM invitations i WHERE i.accepted_by_id IS NULL)";
+    assert_eq!(
+        diagnose_p31_referring_rows(
+            &parse_expr(clause),
+            &db,
+            &FunctionRegistry::new(),
+            "organizations",
+            PolicyCommand::Select,
+            &ExpansionState::new(),
+        ),
+        None
+    );
+}
+
 // 12. function_has_current_user_arg: non-List args
 #[test]
 fn function_has_current_user_arg_returns_false_for_function_with_no_arg_list() {

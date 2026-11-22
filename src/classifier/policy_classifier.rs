@@ -331,8 +331,9 @@ fn guarded_columns(pattern: &PatternClass) -> &[ColumnName] {
         PatternClass::P5ParentInheritance(ParentInheritance { fk_columns, .. }) => fk_columns,
         // Nothing these read belongs to the table being classified: a role function
         // takes the caller, a constant takes no row, a composite's parts and an
-        // inheritance's inner rule are classified in their own right, and an
-        // uncorrelated membership reads only the member table.
+        // inheritance's inner rule are classified in their own right, an uncorrelated
+        // membership reads only the member table, and referring rows name
+        // the guarded row through the key its row identity resolves.
         //
         // A membership's `outer_column` is the guarded table's, and it is deliberately
         // absent from the list above: `resolve_bridge_columns` already refuses it with
@@ -343,6 +344,7 @@ fn guarded_columns(pattern: &PatternClass) -> &[ColumnName] {
         // column a pair names was found on the guarded table when the pair was read.
         PatternClass::ExpandedFunction(ExpandedFunction { .. })
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
+        | PatternClass::P31ReferringRows(ReferringRows { .. })
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { .. })
         | PatternClass::P1NumericThreshold(NumericThreshold { .. })
         | PatternClass::P2RoleNameInList(RoleNameInList { .. })
@@ -478,6 +480,18 @@ fn compared_key_refusal<DB: DatabaseLike>(
                 resolve_row_identity(parent_table, db)?
                     .iter()
                     .find_map(|column| check(parent_table, column))
+            }),
+        PatternClass::P31ReferringRows(ReferringRows {
+            referring_table,
+            referring_columns,
+            ..
+        }) => referring_columns
+            .iter()
+            .find_map(|column| check(referring_table, column))
+            .or_else(|| {
+                resolve_row_identity(guarded, db)?
+                    .iter()
+                    .find_map(|column| check(guarded, column))
             }),
         PatternClass::P4ExistsMembership(membership)
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { membership, .. }) => {
@@ -1270,6 +1284,14 @@ fn recognize_leaf<DB: DatabaseLike>(
         return Some(classified);
     }
 
+    // Try P31: rows of another table naming this one, each through its own read. After
+    // every membership spelling, since a caller column on those rows makes them members.
+    if let Some(classified) =
+        recognizers::recognize_p31_referring_rows(expr, db, registry, table, command, state)
+    {
+        return Some(classified);
+    }
+
     // Try P29: a row its own columns flag. After every membership spelling, since a
     // membership reads the caller and a flag never does.
     if let Some(flagged) = recognizers::recognize_flagged_row(expr, db, table, state) {
@@ -1286,6 +1308,12 @@ fn recognize_leaf<DB: DatabaseLike>(
     if let Some(reason) = recognizers::diagnose_p5_parent_inheritance_ambiguity(
         expr, db, registry, table, command, state,
     ) {
+        return Some(unknown_d(expr, reason));
+    }
+
+    if let Some(reason) =
+        recognizers::diagnose_p31_referring_rows(expr, db, registry, table, command, state)
+    {
         return Some(unknown_d(expr, reason));
     }
 
@@ -1463,6 +1491,7 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
             "membership row naming a value the caller's declared set holds"
         }
         PatternClass::P5ParentInheritance(ParentInheritance { .. }) => "parent-inheritance check",
+        PatternClass::P31ReferringRows(ReferringRows { .. }) => "referring-rows check",
         PatternClass::P6BooleanFlag(BooleanFlag { .. }) => "boolean-flag check",
         PatternClass::P7AbacAnd(AbacAnd { .. }) => "ABAC-and-relationship check",
         PatternClass::P8Composite(Composite { .. }) => "composite check",
@@ -1545,7 +1574,8 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         // Membership of the holder is still a user-resource relationship, even though
         // the holder stands for the whole table.
         | PatternClass::P13UncorrelatedMembership(UncorrelatedMembership { .. })
-        | PatternClass::P5ParentInheritance(ParentInheritance { .. }) => true,
+        | PatternClass::P5ParentInheritance(ParentInheritance { .. })
+        | PatternClass::P31ReferringRows(ReferringRows { .. }) => true,
         // P6 (boolean public flag) is a resource-attribute check, not a user-resource
         // relationship. Including it here would misclassify e.g.
         // `is_public = TRUE AND status = 'published'` as P7 (ABAC+relationship)
