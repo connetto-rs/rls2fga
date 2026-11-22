@@ -1734,7 +1734,7 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
             }) = &classified.pattern
             {
                 if cp.mode() == PolicyMode::Restrictive {
-                    if let Some(set) = emit_blocked_set(
+                    if let Some(sets) = emit_blocked_set(
                         subtract,
                         &ctx,
                         self.plan,
@@ -1742,7 +1742,10 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                         self.notes,
                         self.readability,
                     ) {
-                        parts.insert(target, PolicyPart::Subtract(set));
+                        // A barrier taking nothing away keeps every row, so it adds no part.
+                        if let Some(set) = combine_union(sets) {
+                            parts.insert(target, PolicyPart::Subtract(set));
+                        }
                         return;
                     }
                 }
