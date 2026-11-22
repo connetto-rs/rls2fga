@@ -75,14 +75,16 @@ fn a_membership_term_never_compiles_against_an_absent_inner_column() {
             let RecordDerivation::FromRow { template, .. } = &shape.derivation else {
                 continue;
             };
-            if let ValueSource::Column(subject) = template.subject_key.part() {
-                assert_ne!(
-                    subject.to_string(),
-                    "nonexistent",
-                    "'projects' has no column 'nonexistent', so no shape may read one, \
-                     notes were {:?}",
-                    shapes.notes
-                );
+            for part in template.subject_key.parts() {
+                if let ValueSource::Column(subject) = part {
+                    assert_ne!(
+                        subject.to_string(),
+                        "nonexistent",
+                        "'projects' has no column 'nonexistent', so no shape may read one, \
+                         notes were {:?}",
+                        shapes.notes
+                    );
+                }
             }
         }
     }
