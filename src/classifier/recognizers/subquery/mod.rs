@@ -1,6 +1,7 @@
 use super::*;
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::DeclaredSource;
+use crate::generator::db_lookup::resolve_row_identity;
 use crate::parser::names::{lookup_table_id, resolve_table_id, table_identity};
 use crate::parser::sql_parser::DataTypeLike;
 use crate::types::{ColumnName, TableId};
@@ -127,7 +128,7 @@ pub fn recognize_p5<DB: DatabaseLike>(
         let P5InheritanceCandidate {
             parent_table,
             parent_alias,
-            fk_column,
+            fk_columns,
             inner_predicates,
         } = candidate;
         // A join the rule never mentions still decides which rows the subquery returns,
@@ -193,7 +194,7 @@ pub fn recognize_p5<DB: DatabaseLike>(
             confidence: inner_classified.confidence,
             pattern: PatternClass::P5ParentInheritance(ParentInheritance {
                 parent_table: parent_id,
-                fk_column,
+                fk_columns,
                 inner_pattern: Box::new(inner_classified),
             }),
         });
@@ -750,6 +751,9 @@ pub(super) enum SubqueryRefusal {
     /// A `FOR UPDATE` or `FOR SHARE` clause locks the rows it reads, which `PostgreSQL`
     /// also filters by the locked table's `UPDATE` policies.
     LocksItsRows,
+    /// `ARRAY(subquery)` over an array column holds every row's elements rather than one
+    /// value per row.
+    FlattensArrays,
 }
 
 impl SubqueryRefusal {
@@ -774,6 +778,11 @@ impl SubqueryRefusal {
                 "Subquery takes a row lock, so PostgreSQL filters it by the locked table's \
                  UPDATE policies as well and it finds fewer rows than a membership relation \
                  would grant, drop the lock from the policy",
+            ),
+            Self::FlattensArrays => String::from(
+                "ARRAY(subquery) over an array column builds one array of every row's \
+                 elements, so = ANY tests each element rather than one value per row, which \
+                 no membership relation carries",
             ),
         }
     }
@@ -835,45 +844,87 @@ fn readable_exists_select(expr: &Expr) -> Option<&Select> {
     refusal.is_none().then_some(select)
 }
 
-/// The `(tested value, subquery)` of `x IN (SELECT ...)` or `x = ANY (SELECT ...)`, paired
-/// with the reason the set of tested values cannot be read plainly, if any.
+/// The `(tested value, subquery)` of `x IN (SELECT ...)`, `x = ANY (SELECT ...)` or
+/// `x = ANY (ARRAY(SELECT ...))`, paired with the reason the set of tested values cannot be
+/// read plainly, if any.
 ///
 /// Any row limit shapes that set here, `LIMIT 1` included: membership then tests one
 /// arbitrary slice of the result rather than the whole of it, so reading it as full
 /// membership grants rows the policy refuses. Ordering alone is irrelevant to a set
 /// membership test.
-fn membership_subquery_operands(expr: &Expr) -> Option<(&Expr, &Query, Option<SubqueryRefusal>)> {
-    let (lhs, query) = match expr {
+fn membership_subquery_operands<'e, DB: DatabaseLike>(
+    expr: &'e Expr,
+    db: &DB,
+) -> Option<(&'e Expr, &'e Query, Option<SubqueryRefusal>)> {
+    let (lhs, query, constructed) = match expr {
         Expr::In {
             expr: lhs,
             target: InTarget::Subquery(subquery),
             negated: false,
             global: false,
-        } => (lhs.as_ref(), subquery.as_ref()),
+        } => (lhs.as_ref(), subquery.as_ref(), false),
         Expr::AnyOp {
             left,
             compare_op: BinaryOperator::Eq,
             right,
             ..
-        } => match right.as_ref() {
-            Expr::Subquery(subquery) => (left.as_ref(), subquery.as_ref()),
-            _ => return None,
-        },
+        } => (
+            left.as_ref(),
+            set_query(right)?,
+            matches!(right.as_ref(), Expr::Function(_)),
+        ),
         _ => return None,
     };
 
     if let Some(refusal) = query_level_refusal(query) {
         return Some((lhs, query, Some(refusal)));
     }
-    let shaping = set_limiting_clause(query)
+    let refusal = set_limiting_clause(query)
         .or_else(|| select_result_shaping_clause(query_select(query)?))
-        .map(SubqueryRefusal::Shaped);
-    Some((lhs, query, shaping))
+        .map(SubqueryRefusal::Shaped)
+        .or_else(|| {
+            (constructed && constructs_from_array_column(query, db))
+                .then_some(SubqueryRefusal::FlattensArrays)
+        });
+    Some((lhs, query, refusal))
+}
+
+/// Whether `ARRAY(query)` projects an array column, whose arrays the constructor
+/// flattens into one array of their elements.
+fn constructs_from_array_column<DB: DatabaseLike>(query: &Query, db: &DB) -> bool {
+    let Some(select) = query_select(query) else {
+        return false;
+    };
+    let Some(projected) = projected_columns(select) else {
+        return false;
+    };
+    let sources = relation_sources(select);
+    projected
+        .into_iter()
+        .filter_map(extract_qualified_column)
+        .any(|(qualifier, column)| {
+            sources
+                .iter()
+                .filter(|source| {
+                    qualifier.as_deref().is_none_or(|qualifier| {
+                        qualifier_matches_table(
+                            qualifier,
+                            &source.table_name,
+                            source.alias.as_deref(),
+                        )
+                    })
+                })
+                .filter_map(|source| lookup_table(db, &source.table_name))
+                .any(|table| column_holds_arrays(table, db, column.as_str()) == Some(true))
+        })
 }
 
 /// As [`membership_subquery_operands`], for the callers that need the set read plainly.
-fn readable_membership_subquery_operands(expr: &Expr) -> Option<(&Expr, &Query)> {
-    let (lhs, query, refusal) = membership_subquery_operands(expr)?;
+fn readable_membership_subquery_operands<'e, DB: DatabaseLike>(
+    expr: &'e Expr,
+    db: &DB,
+) -> Option<(&'e Expr, &'e Query)> {
+    let (lhs, query, refusal) = membership_subquery_operands(expr, db)?;
     refusal.is_none().then_some((lhs, query))
 }
 
@@ -894,7 +945,7 @@ pub fn recognize_p4_in_subquery<DB: DatabaseLike>(
     command: PolicyCommand,
     state: &ExpansionState,
 ) -> Option<ClassifiedExpr> {
-    let rewritten = membership_exists_from_in_subquery(expr, registry, outer_table)?;
+    let rewritten = membership_exists_from_in_subquery(expr, db, registry, outer_table)?;
     recognize_p5(&rewritten, db, registry, outer_table, command, state)
         .or_else(|| recognize_p4(&rewritten, db, registry, outer_table, state))
 }
@@ -914,12 +965,13 @@ pub fn recognize_p4_in_subquery<DB: DatabaseLike>(
 /// The tested value moves from the enclosing scope into the subquery's, where a source
 /// visible under the tested value's qualifier would capture it. That source is renamed
 /// first, which is what a membership table read against itself needs.
-fn membership_exists_from_in_subquery(
+fn membership_exists_from_in_subquery<DB: DatabaseLike>(
     expr: &Expr,
+    db: &DB,
     registry: &FunctionRegistry,
     outer_table: &str,
 ) -> Option<Expr> {
-    let (tested, query) = readable_membership_subquery_operands(expr)?;
+    let (tested, query) = readable_membership_subquery_operands(expr, db)?;
     let tested = match unparenthesize(tested) {
         Expr::Tuple(values) => values.as_slice(),
         _ => core::slice::from_ref(tested),
@@ -1729,11 +1781,15 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
         };
     }
 
-    let (_, query, refusal) = membership_subquery_operands(expr)?;
+    let (_, query, refusal) = membership_subquery_operands(expr, db)?;
     if let Some(refusal) = refusal {
         return Some(refusal.reason());
     }
     let select = query_select(query)?;
+    // A set read from no table is the caller's, and the fallback names what it lacks.
+    if select.from.is_empty() {
+        return None;
+    }
     // A function read through `*` projects no column either, and the call is what names
     // the refusal.
     if let Some(function) = called_source(select) {
@@ -1748,7 +1804,7 @@ pub(crate) fn diagnose_p4_membership_ambiguity<DB: DatabaseLike>(
     }
     // Diagnose the rewrite the recognizer classifies, so the reason names the shape the
     // analyzer saw rather than the one the policy spells.
-    let rewritten = membership_exists_from_in_subquery(expr, registry, outer_table)?;
+    let rewritten = membership_exists_from_in_subquery(expr, db, registry, outer_table)?;
     let Expr::Exists { subquery, .. } = &rewritten else {
         return None;
     };
@@ -1774,7 +1830,7 @@ pub(crate) fn diagnose_p5_parent_inheritance_ambiguity<DB: DatabaseLike>(
 ) -> Option<String> {
     // The `IN (SELECT ...)` spelling reaches the recognizers rewritten, so the diagnosis
     // has to read the same expression they refused.
-    let rewritten = membership_exists_from_in_subquery(expr, registry, outer_table);
+    let rewritten = membership_exists_from_in_subquery(expr, db, registry, outer_table);
     let expr = rewritten.as_ref().unwrap_or(expr);
     let select = readable_exists_select(expr)?;
     let analysis = analyze_p5_parent_inheritance(select, db, outer_table)?;
@@ -1785,11 +1841,11 @@ pub(crate) fn diagnose_p5_parent_inheritance_ambiguity<DB: DatabaseLike>(
                 .to_string(),
         );
     }
-    if analysis.saw_conflicting_join {
-        return Some(
-            "Ambiguous parent inheritance pattern: conflicting outer FK join columns in EXISTS predicate"
-                .to_string(),
-        );
+    if let Some(parent) = analysis.unkeyed_parent {
+        return Some(format!(
+            "Ambiguous parent inheritance pattern: the columns correlated with '{parent}' are \
+             not exactly the key naming its rows, so they name no single parent row"
+        ));
     }
     // The parent is unambiguous and its own rule is what failed, so say which rule and
     // why. Without this the operator reads "could not infer a unique membership join"
@@ -1858,14 +1914,15 @@ pub(super) struct P5InheritanceCandidate {
     /// Alias the subquery gave the parent table, if any. Predicates nested inside
     /// this subquery refer to the parent through it.
     pub(super) parent_alias: Option<String>,
-    pub(super) fk_column: ColumnName,
+    pub(super) fk_columns: Vec<ColumnName>,
     pub(super) inner_predicates: Vec<Expr>,
 }
 
 #[derive(Debug, Clone, Default)]
 pub(super) struct P5InheritanceAnalysis {
     pub(super) candidates: Vec<P5InheritanceCandidate>,
-    pub(super) saw_conflicting_join: bool,
+    /// A source correlated on several columns that are not exactly its row key.
+    pub(super) unkeyed_parent: Option<String>,
 }
 
 pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
@@ -1893,12 +1950,10 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
         };
         let parent_cols = stored_column_names(parent_table, db);
 
-        let mut fk_column: Option<ColumnName> = None;
+        let mut pairs: Vec<(ColumnName, ColumnName)> = Vec::new();
         let mut inner_predicates = Vec::new();
-        let mut invalid_join = false;
-
         for pred in &predicates {
-            if let Some((outer_fk, _parent_col)) = extract_parent_join_columns(
+            match extract_parent_join_columns(
                 pred,
                 outer_table,
                 &outer_cols,
@@ -1906,24 +1961,23 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
                 source.alias.as_deref(),
                 &parent_cols,
             ) {
-                if fk_column
-                    .as_ref()
-                    .is_none_or(|existing| existing == &outer_fk)
-                {
-                    fk_column = Some(outer_fk);
-                    continue;
-                }
-                invalid_join = true;
-                break;
+                Some(pair) if pairs.contains(&pair) => {}
+                Some(pair) => pairs.push(pair),
+                None => inner_predicates.push((*pred).clone()),
             }
-            inner_predicates.push((*pred).clone());
         }
-
-        if invalid_join {
-            analysis.saw_conflicting_join = true;
+        let correlations = pairs.len();
+        if correlations == 0 {
             continue;
         }
-        let Some(fk_column) = fk_column else {
+        let Some(pairs) = resolve_table_id(db, &source.table_name)
+            .and_then(|parent| resolve_row_identity(&parent, db))
+            .and_then(|key| pairs_in_key_order(pairs, &key))
+        else {
+            // A single correlation off the key is how a membership row is read.
+            if correlations > 1 {
+                analysis.unkeyed_parent.get_or_insert(source.table_name);
+            }
             continue;
         };
         // The policy states the join, so a declared key adds integrity rather than
@@ -1931,7 +1985,7 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
         // because then the shape competes with a membership lookup and the key is what
         // tells them apart. A bare correlation competes with nothing.
         if !inner_predicates.is_empty()
-            && !table_has_fk_to_parent(outer_table_meta, db, fk_column.as_str(), &source.table_name)
+            && !foreign_key_states_pairs(outer_table_meta, db, &pairs, &source.table_name)
         {
             continue;
         }
@@ -1939,12 +1993,37 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
         analysis.candidates.push(P5InheritanceCandidate {
             parent_table: source.table_name,
             parent_alias: source.alias,
-            fk_column,
+            fk_columns: pairs.into_iter().map(|(outer, _)| outer).collect(),
             inner_predicates,
         });
     }
 
     Some(analysis)
+}
+
+/// The `(outer, parent)` pairs ordered by `key`, when their parent columns are exactly
+/// `key` and no outer column fills two of them.
+fn pairs_in_key_order(
+    mut pairs: Vec<(ColumnName, ColumnName)>,
+    key: &[ColumnName],
+) -> Option<Vec<(ColumnName, ColumnName)>> {
+    if pairs.len() != key.len() {
+        return None;
+    }
+    {
+        let mut outers = BTreeSet::new();
+        let mut parents = BTreeSet::new();
+        for (outer, parent) in &pairs {
+            if !key.contains(parent)
+                || !outers.insert(outer.as_str())
+                || !parents.insert(parent.as_str())
+            {
+                return None;
+            }
+        }
+    }
+    pairs.sort_by_key(|(_, parent)| key.iter().position(|column| column == parent));
+    Some(pairs)
 }
 
 pub(super) fn selection_references_current_user(
@@ -2884,13 +2963,42 @@ fn fk_targets_column<DB: DatabaseLike>(
     has_fk_pointing_to(parent, db, column, table, Some(target))
 }
 
-fn table_has_fk_to_parent<DB: DatabaseLike>(
+/// Whether one declared foreign key of `outer_table` into `parent_table_name` runs from
+/// exactly the outer columns of `pairs`, each to the parent column it pairs with.
+fn foreign_key_states_pairs<DB: DatabaseLike>(
     outer_table: &DB::Table,
     db: &DB,
-    fk_column: &str,
+    pairs: &[(ColumnName, ColumnName)],
     parent_table_name: &str,
 ) -> bool {
-    has_fk_pointing_to(outer_table, db, fk_column, parent_table_name, None)
+    outer_table
+        .foreign_keys(db)
+        .into_iter()
+        .flatten()
+        .any(|fk| {
+            let into_parent = fk.referenced_table(db).is_ok_and(|referenced| {
+                qualifier_matches_table(
+                    referenced.stored_table_name().as_ref(),
+                    parent_table_name,
+                    None,
+                )
+            });
+            into_parent
+                && fk
+                    .host_columns(db)
+                    .ok()
+                    .zip(fk.referenced_columns(db).ok())
+                    .is_some_and(|(hosts, targets)| {
+                        let stated: Vec<_> = hosts.zip(targets).collect();
+                        stated.len() == pairs.len()
+                            && pairs.iter().all(|(outer, parent)| {
+                                stated.iter().any(|(host, target)| {
+                                    host.stored_column_name() == outer.as_str()
+                                        && target.stored_column_name() == parent.as_str()
+                                })
+                            })
+                    })
+        })
 }
 
 /// Whether `column` of `table` hosts a declared foreign key into `referenced_table`,

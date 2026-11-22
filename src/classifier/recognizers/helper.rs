@@ -22,7 +22,7 @@ use crate::classifier::recognizers::session::{declared_scalar, grade};
 use crate::classifier::recognizers::subquery::{
     query_select, select_result_shaping_clause, set_limiting_clause,
 };
-use crate::classifier::recognizers::{projected_select, unparenthesize};
+use crate::classifier::recognizers::{projected_select, set_query, unparenthesize};
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::generator::db_lookup::{
     column_kind, resolve_row_identity, row_uniquely_keys, single_identity_column,
@@ -1108,21 +1108,6 @@ fn excluded_set_operands(expr: &Expr) -> Option<(&Expr, &Query)> {
             compare_op: BinaryOperator::NotEq,
             right,
         } => Some((left, set_query(right)?)),
-        _ => None,
-    }
-}
-
-/// The query a quantified comparison reads its set from, `(SELECT ...)` or
-/// `ARRAY(SELECT ...)`.
-fn set_query(set: &Expr) -> Option<&Query> {
-    match set {
-        Expr::Subquery(query) => Some(query),
-        // Under the `PostgreSQL` dialect only the `ARRAY(subquery)` constructor parses as
-        // a call taking a subquery.
-        Expr::Function(array) => match &array.args {
-            FunctionArguments::Subquery(query) => Some(query),
-            _ => None,
-        },
         _ => None,
     }
 }

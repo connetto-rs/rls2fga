@@ -5,9 +5,9 @@ use crate::no_std_prelude::*;
 use sqlparser::ast::{Array, BinaryOperator, Expr};
 
 use crate::classifier::recognizers::helper::compared_column;
-use crate::classifier::recognizers::{takes_a_subquery, unparenthesize};
+use crate::classifier::recognizers::{column_holds_arrays, takes_a_subquery, unparenthesize};
 use crate::parser::names::lookup_table;
-use crate::parser::sql_parser::{ColumnLike, DataTypeLike, DatabaseLike, TableLike};
+use crate::parser::sql_parser::DatabaseLike;
 
 /// `ARRAY[k1, ..., kn] <@ ARRAY(SELECT ...)`, or `ARRAY(SELECT ...) @> ARRAY[k1, ..., kn]`,
 /// rewritten as `k1 = ANY (ARRAY(SELECT ...)) AND ... AND kn = ANY (ARRAY(SELECT ...))`.
@@ -53,15 +53,7 @@ pub(crate) fn contained_keys_as_memberships<DB: DatabaseLike>(
     let mut memberships = Vec::with_capacity(keys.len());
     for key in keys {
         let column = compared_column(key, table)?;
-        let mut stored = guarded
-            .columns(db)
-            .ok()?
-            .find(|candidate| candidate.stored_column_name() == column.as_str())?
-            .data_type(db);
-        while let Some(base) = stored.base_type(db) {
-            stored = base;
-        }
-        if stored.array_dimensions(db).is_some() {
+        if column_holds_arrays(guarded, db, column.as_str())? {
             return None;
         }
         if columns.contains(&column) {

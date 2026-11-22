@@ -1244,7 +1244,7 @@ pub(crate) fn emit_parent_inheritance<DB: DatabaseLike>(
 ) -> UsersetExpr {
     let ParentInheritance {
         parent_table,
-        fk_column,
+        fk_columns,
         inner_pattern,
     } = parent_inheritance;
     let policy_name = ctx.policy_name;
@@ -1254,12 +1254,8 @@ pub(crate) fn emit_parent_inheritance<DB: DatabaseLike>(
 
     let parent_type = table_types.resolve(parent_table);
 
-    let parent_relation = parent_bridge_relation(
-        table_plan,
-        source_table,
-        core::slice::from_ref(fk_column),
-        &parent_type,
-    );
+    let parent_relation =
+        parent_bridge_relation(table_plan, source_table, fk_columns, &parent_type);
     // The inner rule has to land on the parent's plan. When the parent is the
     // table being built, that plan is `table_plan`, held here rather than in
     // `all_types`, so writing it there would be dropped by the re-insert at
@@ -1355,18 +1351,12 @@ pub(crate) fn emit_parent_inheritance<DB: DatabaseLike>(
         });
     }
 
-    if !bridge_is_buildable(
-        table_plan,
-        source_table,
-        core::slice::from_ref(fk_column),
-        &parent_type,
-        db,
-    ) {
+    if !bridge_is_buildable(table_plan, source_table, fk_columns, &parent_type, db) {
         return deny_expr(table_plan);
     }
     table_plan.add_source(TupleSource::ParentBridge {
         table: source_table.clone(),
-        fk_cols: vec![fk_column.clone()],
+        fk_cols: fk_columns.clone(),
         parent_type: parent_type.clone(),
         relation: parent_relation.clone(),
     });

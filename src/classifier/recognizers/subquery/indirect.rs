@@ -11,7 +11,7 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
     outer_table: &str,
     state: &ExpansionState,
 ) -> Option<ClassifiedExpr> {
-    let rewritten = membership_exists_from_in_subquery(expr, registry, outer_table);
+    let rewritten = membership_exists_from_in_subquery(expr, db, registry, outer_table);
     let select = readable_exists_select(rewritten.as_ref().unwrap_or(expr))?;
     let sources = plain_relation_sources(select)?;
 
@@ -22,7 +22,7 @@ pub fn recognize_p19_indirect_membership<DB: DatabaseLike>(
         [(_, source)] => {
             let link = p19_table(db, source)?;
             let (far_expr, far_conjunct) =
-                p19_far_exists(select, &link, outer_table, &outer_columns, registry)?;
+                p19_far_exists(select, &link, outer_table, &outer_columns, db, registry)?;
             let inner_select = readable_exists_select(&far_expr)?;
             let far_sources = plain_relation_sources(inner_select)?;
             let [(_, far_source)] = far_sources.as_slice() else {
@@ -527,11 +527,12 @@ fn p19_conjunct_role(
     Some(P19Role::LinkResidual)
 }
 
-fn p19_far_exists<'a>(
+fn p19_far_exists<'a, DB: DatabaseLike>(
     select: &'a Select,
     link: &P19Table,
     outer_table: &str,
     outer_columns: &[String],
+    db: &DB,
     registry: &FunctionRegistry,
 ) -> Option<(Expr, &'a Expr)> {
     let mut conjuncts = Vec::new();
@@ -541,7 +542,7 @@ fn p19_far_exists<'a>(
         let candidate = if let Expr::Exists { negated: false, .. } = unparenthesize(conjunct) {
             Some(conjunct.clone())
         } else {
-            let Some((tested, _, _)) = membership_subquery_operands(conjunct) else {
+            let Some((tested, _, _)) = membership_subquery_operands(conjunct, db) else {
                 continue;
             };
             let Some((qualifier, column)) = extract_qualified_column(tested) else {
@@ -555,7 +556,7 @@ fn p19_far_exists<'a>(
                 outer_table,
                 outer_columns,
             ) == P19Side::Link;
-            membership_exists_from_in_subquery(conjunct, registry, &link.qualifier())
+            membership_exists_from_in_subquery(conjunct, db, registry, &link.qualifier())
                 .filter(|_| is_link)
         };
         if let Some(candidate) = candidate {

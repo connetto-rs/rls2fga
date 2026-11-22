@@ -335,8 +335,9 @@ pub struct ExistsMembership {
 pub struct ParentInheritance {
     /// Parent table read by the policy.
     pub parent_table: TableId,
-    /// Column of the child table linking to `parent_table`.
-    pub fk_column: ColumnName,
+    /// Columns of the child table naming one `parent_table` row, in the order of the key
+    /// that names its objects.
+    pub fk_columns: Vec<ColumnName>,
     /// The parent-side rule the policy requires.
     pub inner_pattern: Box<ClassifiedExpr>,
 }

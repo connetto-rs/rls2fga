@@ -84,6 +84,7 @@ async fn every_parity_case_agrees() {
             two_owner_columns_grant_independently,
             an_uncorrelated_membership_admits_every_row,
             a_parent_key_subquery_inherits_the_parents_rule,
+            membership_in_readable_rows_inherits_their_read,
             a_correlated_column_membership_compares_the_named_columns,
             a_read_and_a_write_are_judged_separately,
             an_aliased_quoted_guard_falls_closed,
@@ -2463,6 +2464,99 @@ CREATE POLICY doc_links_visible ON doc_links FOR SELECT
             ActionStatement::Select,
             false,
         );
+    }
+    assert_agrees(&case, &run);
+}
+
+/// Membership in the key of rows the caller may read inherits their read, spelled as
+/// `= ANY (ARRAY(...))` beside a key no row holds, and as a row value covering a composite
+/// key, where the two columns tested apart would admit a pair no readable row holds.
+async fn membership_in_readable_rows_inherits_their_read(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-readable-row-membership",
+        "
+CREATE TABLE people (id TEXT PRIMARY KEY, owner_id TEXT NOT NULL);
+CREATE TABLE array_objects (id TEXT PRIMARY KEY REFERENCES people(id));
+CREATE TABLE unlinked_objects (id TEXT PRIMARY KEY);
+CREATE TABLE grantees (id TEXT, kind TEXT, owner_id TEXT NOT NULL, PRIMARY KEY (id, kind));
+CREATE TABLE grants (
+    id TEXT PRIMARY KEY,
+    grantee_id TEXT NOT NULL,
+    grantee_kind TEXT NOT NULL,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind)
+);
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+ALTER TABLE people ENABLE ROW LEVEL SECURITY;
+ALTER TABLE array_objects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE unlinked_objects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;
+ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+CREATE POLICY people_select ON people FOR SELECT USING (owner_id = auth_current_user_id());
+CREATE POLICY array_select ON array_objects FOR SELECT
+    USING (id = ANY (ARRAY(SELECT person.id FROM people person)));
+CREATE POLICY unlinked_select ON unlinked_objects FOR SELECT
+    USING (id = ANY (ARRAY(SELECT person.id FROM people person)));
+CREATE POLICY grantees_select ON grantees FOR SELECT USING (owner_id = auth_current_user_id());
+CREATE POLICY grants_insert ON grants FOR INSERT
+    WITH CHECK ((grantee_id, grantee_kind) IN (SELECT grantee.id, grantee.kind FROM grantees grantee));
+",
+        &[
+            "INSERT INTO people(id, owner_id) VALUES ('p-alice', 'alice'), ('p-bob', 'bob');
+             INSERT INTO array_objects(id) VALUES ('p-alice'), ('p-bob');
+             INSERT INTO unlinked_objects(id) VALUES ('p-alice'), ('ghost');
+             INSERT INTO grantees(id, kind, owner_id) VALUES
+                 ('x', 'team', 'alice'), ('y', 'user', 'alice'), ('x', 'user', 'bob');
+             INSERT INTO grants(id, grantee_id, grantee_kind) VALUES
+                 ('g-xt', 'x', 'team'), ('g-yu', 'y', 'user'), ('g-xu', 'x', 'user')",
+            "CREATE ROLE app_user LOGIN;
+             GRANT SELECT ON people, array_objects, unlinked_objects, grantees TO app_user;
+             GRANT INSERT ON grants TO app_user",
+        ],
+        two_setting_readers("alice", "bob"),
+    )
+    .with_registry(ACCESSOR);
+    let run = support::parity::run(&cluster, &case).await;
+    for (subject, object, statement, allowed) in [
+        (
+            "alice",
+            "array_objects:p-alice",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "alice",
+            "array_objects:p-bob",
+            ActionStatement::Select,
+            false,
+        ),
+        ("bob", "array_objects:p-bob", ActionStatement::Select, true),
+        (
+            "alice",
+            "unlinked_objects:p-alice",
+            ActionStatement::Select,
+            true,
+        ),
+        (
+            "alice",
+            "unlinked_objects:ghost",
+            ActionStatement::Select,
+            false,
+        ),
+        (
+            "bob",
+            "unlinked_objects:p-alice",
+            ActionStatement::Select,
+            false,
+        ),
+        ("alice", "grants:g-xt", ActionStatement::Insert, true),
+        ("alice", "grants:g-yu", ActionStatement::Insert, true),
+        ("alice", "grants:g-xu", ActionStatement::Insert, false),
+        ("bob", "grants:g-xu", ActionStatement::Insert, true),
+        ("bob", "grants:g-xt", ActionStatement::Insert, false),
+    ] {
+        support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
     }
     assert_agrees(&case, &run);
 }
