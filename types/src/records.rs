@@ -424,10 +424,17 @@ impl SubjectKey {
         self.wildcard
     }
 
-    /// Where the value comes from, so a caller can settle whether it reads it.
+    /// The first part, which is the whole key unless the key is composite. A caller
+    /// settling whether it reads the key reads [`SubjectKey::parts`].
     #[must_use]
     pub const fn part(&self) -> &ValueSource {
         &self.part
+    }
+
+    /// Every part in order, the first and those a composite key joins to it, so a
+    /// caller can settle up front whether it reads the shape.
+    pub fn parts(&self) -> impl Iterator<Item = &ValueSource> {
+        core::iter::once(&self.part).chain(&self.rest)
     }
 
     /// Every subject this row names, which is at most one except for a list.
@@ -457,12 +464,7 @@ impl SubjectKey {
             return Eval::Value(vec![format!("{subject_type}:{WILDCARD_SUBJECT_ID}")]);
         }
         if !self.rest.is_empty() {
-            return match render_identity(
-                core::iter::once(&self.part).chain(&self.rest),
-                row,
-                subject_type,
-                fit_subject_name,
-            ) {
+            return match render_identity(self.parts(), row, subject_type, fit_subject_name) {
                 Eval::Value(name) => Eval::Value(vec![name]),
                 Eval::Empty => Eval::Empty,
                 Eval::Refuse(error) => Eval::Refuse(error),
@@ -2733,6 +2735,29 @@ mod tests {
         assert_eq!(
             zoned_list.render(&named("instant"), &bad_zone),
             Err(RecordError::ColumnUndecodable("instants".to_string()))
+        );
+    }
+
+    #[test]
+    fn subject_key_parts_name_every_source_in_order() {
+        let composite = SubjectKey::composite(
+            &ColumnName::from_stored("tenant_id"),
+            &[ColumnName::from_stored("user_id")],
+        );
+        assert_eq!(
+            composite.parts().collect::<Vec<_>>(),
+            [
+                &ValueSource::Column(ColumnRead::text("tenant_id")),
+                &ValueSource::Column(ColumnRead::text("user_id")),
+            ]
+        );
+        assert_eq!(
+            SubjectKey::column("owner_id").parts().collect::<Vec<_>>(),
+            [&ValueSource::column("owner_id")]
+        );
+        assert_eq!(
+            SubjectKey::wildcard().parts().collect::<Vec<_>>(),
+            [&ValueSource::Literal(WILDCARD_SUBJECT_ID.to_string())]
         );
     }
 
