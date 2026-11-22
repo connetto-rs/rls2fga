@@ -103,7 +103,8 @@ fn error_text(answer: &Answer) -> &str {
 /// A read projecting a column the caller's role holds no `SELECT` on fails as `PostgreSQL`
 /// fails it, while one projecting only granted columns answers its rows, a probe naming
 /// nothing the case runs is an error, a schema the parser rejects is refused for every
-/// probe, and a table without a row key cannot name the row a check asks about.
+/// probe, a caller acting as a role the deployment does not list is an error, and a table
+/// without a row key cannot name the row a check asks about.
 #[tokio::test]
 #[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
 async fn probes_outside_the_case() {
@@ -184,6 +185,30 @@ async fn probes_outside_the_case() {
     for answer in &refused.answers {
         assert_eq!(answer.answer, Answer::Refused(reason.clone()));
     }
+
+    let mut admin_only = case.clone();
+    admin_only
+        .config
+        .callers
+        .retain(|caller| caller.name == "alice");
+    admin_only.config.callers[0].role = "app_admin".into();
+    let admin = admin_only
+        .config
+        .deployment()
+        .expect("the deployment is valid");
+    let mut database =
+        Database::create(&cluster.url(PG_DB), &case).expect("the case's database loads");
+    let unlisted = replay(
+        &case,
+        &admin,
+        vec![probe("alice", "docs:1", id)],
+        &mut database,
+        &cluster.openfga_url(),
+    )
+    .await
+    .expect("a caller outside the deployment is a probe error");
+    database.cleanup().expect("the case's database drops");
+    assert!(error_text(&unlisted.answers[0].answer).contains("acting role app_reader"));
 
     case.schema = case.schema.replace("PRIMARY KEY", "");
     let keyless = replayed(&cluster, &case, vec![probe("alice", "docs:1", id)]).await;
