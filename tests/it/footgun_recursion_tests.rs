@@ -783,6 +783,105 @@ CREATE POLICY pb_own ON b FOR SELECT USING (owner_id = current_setting('app.user
     );
 }
 
+/// A read that loops for every acting role raises in `PostgreSQL`, so a clause below the
+/// threshold there diverges from nothing, while other commands and tables keep the note.
+#[test]
+fn below_threshold_clauses_only_report_commands_without_read_recursion() {
+    let db = db_of(
+        r"
+CREATE TABLE a(k INTEGER, viewer TEXT, PRIMARY KEY (k, viewer));
+CREATE TABLE b(k INTEGER, viewer TEXT, PRIMARY KEY (k, viewer));
+CREATE TABLE c(k INTEGER PRIMARY KEY, viewer TEXT);
+ALTER TABLE a ENABLE ROW LEVEL SECURITY;
+ALTER TABLE b ENABLE ROW LEVEL SECURITY;
+ALTER TABLE c ENABLE ROW LEVEL SECURITY;
+CREATE POLICY a_read ON a FOR SELECT USING (
+  EXISTS (SELECT 1 FROM b WHERE b.k = a.k AND b.viewer = a.viewer) AND a.viewer ~ 'x');
+CREATE POLICY b_read ON b FOR SELECT USING (
+  EXISTS (SELECT 1 FROM a WHERE a.k = b.k AND a.viewer = b.viewer) AND b.viewer ~ 'x');
+CREATE POLICY a_all ON a FOR ALL USING (viewer ~ 'x');
+CREATE POLICY c_read ON c FOR SELECT USING (viewer ~ 'x');
+",
+    );
+    let outputs = translator(ConfidenceLevel::B)
+        .translate(&db)
+        .expect("translation should plan")
+        .outputs_accepting_gaps();
+    for name in ["a", "b"] {
+        assert!(outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::PolicyReadRecursion { table, commands, .. }
+                if table.name() == name && commands.iter().any(|command| command == "SELECT")
+        )));
+        assert!(
+            !outputs.notes().iter().any(|note| matches!(
+                note,
+                TranslationNote::ClauseBelowThreshold { table, commands, .. }
+                    | TranslationNote::CoveringPoliciesBelowThreshold { table, commands }
+                    if table.name() == name && commands.iter().any(|command| command == "SELECT")
+            )),
+            "{:#?}",
+            outputs.notes()
+        );
+    }
+    for (name, command) in [("a", "INSERT"), ("c", "SELECT")] {
+        assert!(outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::ClauseBelowThreshold { table, commands, .. }
+                if table.name() == name && commands.iter().any(|named| named == command)
+        )));
+        assert!(outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::CoveringPoliciesBelowThreshold { table, commands }
+                if table.name() == name && commands.iter().any(|named| named == command)
+        )));
+    }
+}
+
+/// A loop that only some acting roles meet still leaves the other roles reading through the
+/// dropped clause, so the note stays.
+#[test]
+fn below_threshold_clauses_still_report_reads_when_only_some_roles_recurse() {
+    let db = db_of(
+        r"
+CREATE ROLE reader NOLOGIN;
+CREATE TABLE docs(id INTEGER PRIMARY KEY, viewer TEXT);
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON docs TO reader;
+CREATE POLICY docs_loop ON docs FOR SELECT TO app_user USING (
+  EXISTS (SELECT 1 FROM docs nested WHERE nested.id = docs.id));
+CREATE POLICY docs_read ON docs FOR SELECT USING (viewer ~ 'x');
+",
+    );
+    let outputs = rls2fga::translator::TranslatorBuilder::new(
+        crate::support::deployment::caller_deployment_acting_as(&["app_user", "reader"], []),
+    )
+    .with_min_confidence(ConfidenceLevel::B)
+    .build()
+    .translate(&db)
+    .expect("translation should plan")
+    .outputs_accepting_gaps();
+    assert!(outputs.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::PolicyReadRecursion { role, commands, .. }
+            if role == "app_user" && commands == &["SELECT"]
+    )));
+    assert!(!outputs.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::PolicyReadRecursion { role, .. } if role == "reader"
+    )));
+    assert!(outputs.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::ClauseBelowThreshold { policy, commands, .. }
+            if policy == "docs_read" && commands == &["SELECT"]
+    )));
+    assert!(outputs.notes().iter().any(|note| matches!(
+        note,
+        TranslationNote::CoveringPoliciesBelowThreshold { table, commands }
+            if table.name() == "docs" && commands.contains(&"SELECT".to_string())
+    )));
+}
+
 /// A membership table whose own reads loop makes every read of the table that joins it
 /// raise, and the note names the relation `PostgreSQL` names. What this pins beyond the
 /// denial is that no query may go looking for rows of a table whose reads raise. Probed on
