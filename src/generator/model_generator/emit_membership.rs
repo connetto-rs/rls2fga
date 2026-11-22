@@ -1142,6 +1142,10 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
     )
 }
 
+/// The sets of users kept from a row by `subtract`, `None` where one does not translate.
+///
+/// A declared helper's call returning no row takes nothing away and adds no set, so where
+/// every set is such a call none is returned.
 pub(super) fn emit_blocked_set<DB: DatabaseLike>(
     subtract: &[ExcludedSet],
     ctx: &PatternCtx<'_, DB>,
@@ -1149,7 +1153,7 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
     notes: &mut Vec<TranslationNote>,
     readability: &mut BTreeMap<TableId, TableReadability>,
-) -> Option<UsersetExpr> {
+) -> Option<Vec<UsersetExpr>> {
     let mut sets = Vec::with_capacity(subtract.len());
     for excluded in subtract {
         let before = notes.len();
@@ -1163,7 +1167,19 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
                 readability,
                 MembershipRoute::Parent(MembershipPolarity::Block),
             ),
-            ExcludedSet::Helper(helper) => emit_declared_helper(helper, ctx, table_plan, all_types),
+            ExcludedSet::Helper(DeclaredHelper { column, call }) => {
+                let Some(returned) = helper_call_relation(call, ctx, table_plan, all_types) else {
+                    continue;
+                };
+                reach_level_relation(
+                    &call.level,
+                    ctx.source_table,
+                    table_plan,
+                    column,
+                    returned,
+                    ctx,
+                )?
+            }
             ExcludedSet::Flag(flag) => translate_pattern(
                 &flag.pattern,
                 ctx,
@@ -1183,7 +1199,7 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
         }
         sets.push(set);
     }
-    combine_union(sets)
+    Some(sets)
 }
 
 pub(super) fn emit_membership_exclusion<DB: DatabaseLike>(
@@ -1209,7 +1225,7 @@ pub(super) fn emit_membership_exclusion<DB: DatabaseLike>(
         notes,
         readability,
     );
-    let Some(subtract) = emit_blocked_set(
+    let Some(sets) = emit_blocked_set(
         &exclusion.subtract,
         ctx,
         table_plan,
@@ -1219,9 +1235,12 @@ pub(super) fn emit_membership_exclusion<DB: DatabaseLike>(
     ) else {
         return deny_expr(table_plan);
     };
-    UsersetExpr::Exclusion {
-        base: Box::new(base),
-        subtract: Box::new(subtract),
+    match combine_union(sets) {
+        Some(subtract) => UsersetExpr::Exclusion {
+            base: Box::new(base),
+            subtract: Box::new(subtract),
+        },
+        None => base,
     }
 }
 

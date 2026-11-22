@@ -239,8 +239,8 @@ fn place(bucket: &mut ModeBuckets, mode: PolicyMode, part: PolicyPart) {
 /// produced. Every target has one gate, so a part is taken at most once.
 ///
 /// A policy the gate applies whose clause produced nothing for the target was dropped,
-/// which a permissive policy does by granting nothing and a restrictive one never does,
-/// since its routing already turns a lost clause into a denial.
+/// which a permissive policy does by granting nothing and a restrictive one only by taking
+/// nothing away, since its routing already turns a lost clause into a denial.
 fn fill_bucket<P: PolicyLike>(
     bucket: &mut ModeBuckets,
     target: ActionTarget,

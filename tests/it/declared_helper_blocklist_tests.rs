@@ -379,3 +379,71 @@ fn an_untranslatable_helper_keeps_its_own_reason() {
         "{reason}"
     );
 }
+
+/// Marks a principal puts on projects, of the kinds the `CHECK` lists, and the helper
+/// returning the projects the caller marked with one kind.
+const MARKS: &str = "
+CREATE TABLE project_marks (project_id TEXT NOT NULL REFERENCES projects (id),
+  principal_id TEXT NOT NULL, kind TEXT NOT NULL CHECK (kind IN ('block', 'mute')),
+  PRIMARY KEY (project_id, principal_id, kind));
+GRANT SELECT ON project_marks TO authz_owner;
+CREATE FUNCTION authz.marked_projects(k TEXT) RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT m.project_id FROM public.project_marks m
+  WHERE m.principal_id = current_setting('app.user_id', true) AND m.kind = k
+$$;
+ALTER FUNCTION authz.marked_projects(TEXT) OWNER TO authz_owner;
+";
+
+/// The model of the blocks and marks with `policies` added.
+fn marked_model(policies: &str) -> String {
+    crate::declared_helper_tests::model(
+        &format!("{BLOCKS}{MARKS}{policies}"),
+        &[
+            "authz.blocked_projects",
+            "authz.blocking_organizations",
+            "authz.marked_projects",
+        ],
+    )
+}
+
+/// `NOT (x = ANY ('{}'))` holds for every `x`, so a call returning no row, here a kind
+/// the `CHECK` never admits, takes nothing away from the grant it is subtracted from.
+#[test]
+fn a_permissive_grant_minus_a_set_returning_no_row_keeps_the_grant() {
+    let docs = |using: &str| {
+        let dsl = marked_model(&format!(
+            "ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY docs_read ON docs FOR SELECT USING ({using});"
+        ));
+        relation_definition(&dsl, "docs", "can_select")
+    };
+    let authored = docs("author_id = current_setting('app.user_id', true)");
+    for exclusion in [
+        "NOT (project_id = ANY (ARRAY(SELECT authz.marked_projects('ban'))))",
+        "project_id <> ALL (ARRAY(SELECT authz.marked_projects('ban')))",
+    ] {
+        assert_eq!(
+            docs(&format!(
+                "author_id = current_setting('app.user_id', true) AND {exclusion}"
+            )),
+            authored,
+            "`{exclusion}`"
+        );
+    }
+}
+
+/// A restrictive policy subtracting a set no row is in keeps every row the permissive
+/// policies grant.
+#[test]
+fn a_restrictive_set_returning_no_row_keeps_every_granted_row() {
+    let projects =
+        |policies: &str| relation_definition(&marked_model(policies), "projects", "can_select");
+    assert_eq!(
+        projects(
+            "CREATE POLICY projects_unmarked ON projects AS RESTRICTIVE FOR SELECT
+               USING (NOT (id = ANY (ARRAY(SELECT authz.marked_projects('ban')))));"
+        ),
+        projects(""),
+    );
+}
