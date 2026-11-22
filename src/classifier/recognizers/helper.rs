@@ -34,10 +34,11 @@ use crate::parser::names::{
     table_identity,
 };
 use crate::parser::sql_parser::{
-    CalledArm, CallerGate, CapLift, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike,
+    ArmCondition, CalledArm, CallerGate, CapOperand, CheckConstraintLike, ColumnLike, DataTypeLike,
     DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike, GrantArm, GrantedTo, HelperArm,
     HelperSet, JoinedRow, ParentArm, Restriction, Returned, RowCap, SettingComparison,
     SettingContent, SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
+    UnsetSetting,
 };
 use crate::types::{ColumnKind, ColumnName, RequestNormalization, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
@@ -1557,7 +1558,7 @@ fn answered_call<'db, DB: DatabaseLike>(
             function: name.clone(),
         })?;
     let set = function
-        .helper_set_with_exclusions(&values, deployment, db)
+        .helper_set(&values, deployment, db, &[ArmCondition::Exclusion])
         .map_err(|source| HelperRefusal::Unanswered {
             function: name,
             source,
@@ -2935,7 +2936,7 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
 /// with `missing_ok`, which reads both states of an unset setting as `NULL`.
 fn lifting_source(
     function: &str,
-    lift: &CapLift<'_>,
+    lift: &UnsetSetting<'_>,
     registry: &FunctionRegistry,
 ) -> Result<DeclaredSource, HelperRefusal> {
     let setting = lift.setting().name();
@@ -2947,7 +2948,7 @@ fn lifting_source(
     if lift.raises_when_unset() {
         return Err(refusal(LiftRefusal::RaisesWhenUnset));
     }
-    if !lift.lifts_on_empty() {
+    if !lift.reads_empty_as_unset() {
         return Err(refusal(LiftRefusal::ReadBare));
     }
     registry
