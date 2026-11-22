@@ -435,3 +435,85 @@ CREATE POLICY labels_insert ON labels FOR INSERT
         assert_agrees(&case, &run);
     }
 }
+
+/// A write whose checks read only the written row is answered from that row, as the
+/// database answers it, including an update the old row allows and the new row refuses.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_written_row_reading_only_itself_is_answered_locally_on_postgres_17_and_18() {
+    let schema = "
+CREATE TABLE notes (id TEXT PRIMARY KEY, author_id TEXT);
+ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY notes_select ON notes FOR SELECT
+  USING (author_id = current_setting('app.user_id', true));
+CREATE POLICY notes_insert ON notes FOR INSERT
+  WITH CHECK (author_id = current_setting('app.user_id', true));
+CREATE POLICY notes_update ON notes FOR UPDATE
+  USING (author_id = current_setting('app.user_id', true));
+";
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        let case = ParityCase::reading(
+            &format!("resulting-row-local-pg{major}"),
+            schema,
+            &[
+                "INSERT INTO notes VALUES ('n1', 'alice'), ('n2', 'bob')",
+                "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT, UPDATE ON notes TO app_reader",
+            ],
+            vec![caller("alice"), caller("bob")],
+        )
+        .with_settings([support::deployment::caller("app.user_id")])
+        .updating("notes", "author_id = 'bob'")
+        .unobservable(
+            "notes",
+            "notes_update",
+            ClauseKind::Using,
+            Side::Denies,
+            REPEATS_SELECT,
+        )
+        .unobservable(
+            "notes",
+            "notes_update",
+            ClauseKind::UsingAsCheck,
+            Side::Denies,
+            "repeats the SELECT policy's USING, which PostgreSQL also checks on the new row of \
+             an UPDATE naming its rows",
+        );
+        let run = support::parity::run(&cluster, &case).await;
+        assert_agrees(&case, &run);
+        let local = |subject: &str, object: &str, statement| {
+            run.observations
+                .iter()
+                .find(|observation| {
+                    observation.subject == subject
+                        && observation.object == object
+                        && observation.statement == statement
+                })
+                .and_then(|observation| observation.local)
+        };
+        assert_eq!(
+            local("alice", "notes:n1", ActionStatement::Insert),
+            Some(true)
+        );
+        assert_eq!(
+            local("alice", "notes:n2", ActionStatement::Insert),
+            Some(false)
+        );
+        // The stored row is Alice's, and the row the update writes is Bob's.
+        assert_eq!(
+            local("alice", "notes:n1", ActionStatement::Update),
+            Some(false)
+        );
+        assert_eq!(
+            local("bob", "notes:n2", ActionStatement::Update),
+            Some(true)
+        );
+        for statement in [ActionStatement::Insert, ActionStatement::Update] {
+            assert!(run
+                .observations
+                .iter()
+                .filter(|observation| observation.statement == statement)
+                .all(|observation| observation.local.is_some()));
+        }
+    }
+}

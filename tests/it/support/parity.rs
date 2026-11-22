@@ -28,8 +28,9 @@ use rls2fga::json_row;
 use rls2fga::parser::sql_parser::SessionSetting;
 use rls2fga::types::{
     records_from_row, ActionAnswer, ActionRelations, ActionStatement, ColumnCommand, ColumnName,
-    ConfidenceLevel, NoteSeverity, RecordError, RequestAtom, RequestComparison, RequestPredicate,
-    RowNaming, RowVersion, TableId, TranslationNote, ValueSource,
+    ConfidenceLevel, NoteSeverity, Record, RecordDescription, RecordError, RequestAtom,
+    RequestComparison, RequestPredicate, RowDecision, RowNaming, RowVersion, TableId,
+    TranslationNote, ValueSource,
 };
 
 use super::openfga;
@@ -548,6 +549,8 @@ pub(crate) struct Mismatch {
     pub(crate) postgres: bool,
     /// What the model answered.
     pub(crate) openfga: bool,
+    /// What the row recipes answered, [`None`] where they leave the pair to the model.
+    pub(crate) local: Option<bool>,
 }
 
 impl Mismatch {
@@ -646,8 +649,8 @@ impl std::fmt::Display for Mismatch {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "user:{} {:?} {}: postgres={}, openfga={}",
-            self.subject, self.statement, self.object, self.postgres, self.openfga
+            "user:{} {:?} {}: postgres={}, openfga={}, local={:?}",
+            self.subject, self.statement, self.object, self.postgres, self.openfga, self.local
         )
     }
 }
@@ -1163,6 +1166,146 @@ fn clock_context(
         .translation
         .clock_context(at, &zone)
         .unwrap_or_else(|error| panic!("{name}: the clock context: {error}"))
+}
+
+/// Whether `decision` grants `user` on `row` for a check carrying `context` and acting as
+/// `acting_role`, [`None`] where a shape cannot read the row.
+///
+/// The consumer's whole evaluation, written from the contract alone.
+pub(crate) fn decision_grants(
+    decision: &RowDecision,
+    row: &serde_json::Value,
+    user: &str,
+    context: &serde_json::Value,
+    acting_role: &str,
+) -> Option<bool> {
+    let records = |shapes: &[RecordDescription]| -> Option<Vec<Record>> {
+        let mut records = Vec::new();
+        for shape in shapes {
+            records.extend(records_from_row(shape, &json_row::JsonRow(row)).ok()?);
+        }
+        Some(records)
+    };
+    let children = |children: &[RowDecision]| -> Option<Vec<bool>> {
+        children
+            .iter()
+            .map(|child| decision_grants(child, row, user, context, acting_role))
+            .collect()
+    };
+    Some(match decision {
+        RowDecision::Leaf { shapes, .. } => records(shapes)?
+            .iter()
+            .any(|record| record.subject == format!("user:{user}")),
+        RowDecision::Everyone { shapes, .. } => !records(shapes)?.is_empty(),
+        RowDecision::RequestGated {
+            shapes,
+            context_key,
+            request_parameter,
+            comparison,
+            ..
+        } => records(shapes)?.iter().any(|record| {
+            let row_side = &record
+                .context
+                .as_ref()
+                .expect("a gated record carries its context")
+                .values[context_key];
+            // A set keeps its own list parameter the row tests membership in, and a
+            // single value travels in the `settings` map under its parameter name.
+            match comparison {
+                RequestComparison::CallerSetHolds => context[request_parameter.as_str()]
+                    .as_array()
+                    .is_some_and(|held| held.iter().any(|value| value == row_side.as_str())),
+                RequestComparison::CallerValueEquals => {
+                    context["settings"][request_parameter.as_str()] == row_side.as_str()
+                }
+                // The absent key reads as `NULL`, which is no inequality either.
+                RequestComparison::CallerValueUnequals => context["settings"]
+                    .get(request_parameter.as_str())
+                    .is_some_and(|caller_side| caller_side != row_side.as_str()),
+            }
+        }),
+        RowDecision::Request {
+            shapes,
+            subject_type,
+            predicate,
+            ..
+        } => {
+            subject_type.as_str() == "user"
+                && !records(shapes)?.is_empty()
+                && request_predicate_holds(predicate, context, acting_role)
+        }
+        RowDecision::Any(nested) => children(nested)?.into_iter().any(|granted| granted),
+        RowDecision::All(nested) => children(nested)?.into_iter().all(|granted| granted),
+    })
+}
+
+/// What the row recipes answer for `principal` on `object`, as a consumer holding the
+/// changed row answers without asking the model, [`None`] where they leave it to the model.
+///
+/// A refusal on one judgement settles the pair whatever the others say, and rows passing
+/// where columns are asked as well leave the columns to the model.
+fn local_allows(
+    model: &Model<'_>,
+    principal: &Principal,
+    context: &serde_json::Value,
+    object: &Object,
+    statement: ActionStatement,
+    produced: Option<&serde_json::Value>,
+) -> Option<bool> {
+    let type_name = object
+        .name
+        .split_once(':')
+        .map_or_else(|| object.name.as_str(), |(type_name, _)| type_name);
+    let entry = model
+        .answers
+        .iter()
+        .find(|entry| entry.type_name == *type_name && entry.statement == statement)?;
+    let (rows, columns_asked) = match &entry.answer {
+        ActionAnswer::ByColumn(answer) => (answer.rows.as_ref(), true),
+        answer => (answer, false),
+    };
+    let judgements = match rows {
+        ActionAnswer::Unrestricted => return (!columns_asked).then_some(true),
+        ActionAnswer::Denied => return Some(false),
+        ActionAnswer::Judged(judgements) if !judgements.is_empty() => judgements,
+        _ => return None,
+    };
+    let mut settled = Some(true);
+    for judgement in judgements {
+        let row = match judgement.version {
+            RowVersion::Resulting => produced,
+            _ => Some(&object.row),
+        };
+        let granted = row.and_then(|row| {
+            let decision = model
+                .translation
+                .relations()
+                .iter()
+                .find(|reported| {
+                    reported.type_name == judgement.type_name
+                        && reported.relation == judgement.relation
+                })?
+                .decision
+                .as_ref()?;
+            decision_grants(
+                decision,
+                row,
+                &principal.user,
+                context,
+                &principal.login_role,
+            )
+        });
+        match granted {
+            Some(false) => return Some(false),
+            Some(true) => {}
+            None => settled = None,
+        }
+    }
+    if columns_asked {
+        None
+    } else {
+        settled
+    }
 }
 
 /// Whether the model grants `principal` the statement on `object`.
@@ -1681,6 +1824,7 @@ async fn run_in(
         settings: &settings,
     };
     let mut observations = compare_every_pair(cluster, database, &model, &objects, &clock).await;
+    assert_recipes_agree(case, &observations);
     let coverage = clause_coverage(cluster, database, case, &objects, &observations, decided);
     observations
         .extend(compare_at_future_instant(conn, case, &model, &objects, &observations).await);
@@ -1689,6 +1833,28 @@ async fn run_in(
         disclosures: disclosed,
         coverage,
     }
+}
+
+/// Fail where a row recipe answered a pair other than the model it was derived from.
+///
+/// A consumer answering from the changed row skips the model, so a recipe the model
+/// disagrees with answers the pair as neither the model nor the database does.
+fn assert_recipes_agree(case: &ParityCase, observations: &[Mismatch]) {
+    let disagreements: Vec<String> = observations
+        .iter()
+        .filter(|observation| {
+            observation
+                .local
+                .is_some_and(|local| local != observation.openfga)
+        })
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        disagreements.is_empty(),
+        "{}: the row recipes and the model disagree:\n{}",
+        case.name,
+        disagreements.join("\n")
+    );
 }
 
 /// Put the case's schema and rows in the database it was given.
@@ -1856,15 +2022,11 @@ async fn compare_every_pair(
                 else {
                     continue;
                 };
-                let openfga = openfga_allows(
-                    model,
-                    principal,
-                    &asked_context(principal, &clock, &model.settings[&principal.subject]),
-                    object,
-                    statement,
-                    answer.produced.as_ref(),
-                )
-                .await;
+                let context = asked_context(principal, &clock, &model.settings[&principal.subject]);
+                let produced = answer.produced.as_ref();
+                let local = local_allows(model, principal, &context, object, statement, produced);
+                let openfga =
+                    openfga_allows(model, principal, &context, object, statement, produced).await;
                 observations.push(Mismatch {
                     subject: principal.subject.clone(),
                     object: object.name.clone(),
@@ -1872,6 +2034,7 @@ async fn compare_every_pair(
                     statement,
                     postgres: answer.postgres,
                     openfga,
+                    local,
                 });
             }
         }
@@ -2635,6 +2798,7 @@ async fn compare_at_future_instant(
                 statement: ActionStatement::Select,
                 postgres,
                 openfga,
+                local: None,
             });
         }
     }

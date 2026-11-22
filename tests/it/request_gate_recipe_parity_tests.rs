@@ -4,22 +4,15 @@
 #![cfg(all(not(target_os = "windows"), feature = "client"))]
 
 use core::time::Duration;
-use std::collections::BTreeMap;
 
-use rls2fga::classifier::function_registry::DeclaredSources;
-use rls2fga::types::{
-    records_from_row, ActionAnswer, ActionStatement, ConfidenceLevel, RelationShapes,
-    RequestComparison, RowDecision,
-};
+use rls2fga::types::ActionStatement;
 
 use crate::support;
 
 use crate::support::deployment;
 use crate::support::parity::{
-    assert_agrees, assert_postgres, request_predicate_holds, settings_map, ClauseKind, Cluster,
-    ParityCase, Principal, Side,
+    assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
 };
-use rls2fga::json_row::JsonRow;
 
 /// The four gates connetto puts on every synced table, one per command.
 fn gates(table: &str) -> String {
@@ -63,36 +56,6 @@ CREATE POLICY flagged_public ON flagged FOR SELECT USING (is_public);
     )
 }
 
-/// Every row of the seed, keyed by the object the model names it as.
-fn rows() -> BTreeMap<String, serde_json::Value> {
-    let mut rows = BTreeMap::new();
-    for id in [1, 2] {
-        rows.insert(
-            format!("orders:{id}"),
-            serde_json::json!({ "id": id, "quantity": id * 10 }),
-        );
-        rows.insert(format!("capped:{id}"), serde_json::json!({ "id": id }));
-        rows.insert(
-            format!("flagged:{id}"),
-            serde_json::json!({ "id": id, "is_public": id == 1 }),
-        );
-    }
-    for (id, owner) in [
-        (1, Some("entry")),
-        (2, Some("wild")),
-        (3, Some("neither")),
-        (4, Some("unset")),
-        (5, None),
-        (6, Some("reader")),
-    ] {
-        rows.insert(
-            format!("notes:{id}"),
-            serde_json::json!({ "id": id, "owner": owner }),
-        );
-    }
-    rows
-}
-
 const SEED: &str = "
 INSERT INTO orders VALUES (1, 10), (2, 20);
 INSERT INTO capped VALUES (1), (2);
@@ -121,91 +84,6 @@ fn callers() -> Vec<Principal> {
             Some(&["orders:read", "capped:read", "notes:read", "flagged:read"]),
         ),
     ]
-}
-
-/// Whether `decision` grants `subject` on `row` for a check carrying `context` and
-/// acting as `acting_role`, completing request gates from `context`.
-///
-/// The consumer's whole evaluation, written from the contract alone.
-fn grants(
-    decision: &RowDecision,
-    row: &serde_json::Value,
-    subject: &str,
-    context: &serde_json::Value,
-    acting_role: &str,
-) -> bool {
-    let records = |shapes: &[rls2fga::types::RecordDescription]| -> Vec<rls2fga::types::Record> {
-        shapes
-            .iter()
-            .flat_map(|shape| {
-                records_from_row(shape, &JsonRow(row)).expect("every seeded row is named")
-            })
-            .collect()
-    };
-    match decision {
-        RowDecision::Leaf { shapes, .. } => records(shapes)
-            .iter()
-            .any(|record| record.subject == format!("user:{subject}")),
-        RowDecision::Everyone { shapes, .. } => !records(shapes).is_empty(),
-        RowDecision::RequestGated {
-            shapes,
-            context_key,
-            request_parameter,
-            comparison,
-            ..
-        } => records(shapes).iter().any(|record| {
-            let row_side = &record
-                .context
-                .as_ref()
-                .expect("a gated record carries its context")
-                .values[context_key];
-            // A set keeps its own list parameter the row tests membership in, and a
-            // single value travels in the `settings` map under its parameter name.
-            let caller_side = match comparison {
-                RequestComparison::CallerSetHolds => &context[request_parameter.as_str()],
-                RequestComparison::CallerValueEquals | RequestComparison::CallerValueUnequals => {
-                    &context["settings"][request_parameter.as_str()]
-                }
-            };
-            match comparison {
-                RequestComparison::CallerSetHolds => caller_side
-                    .as_array()
-                    .is_some_and(|held| held.iter().any(|value| value == row_side.as_str())),
-                RequestComparison::CallerValueEquals => caller_side == row_side.as_str(),
-                // The absent key reads as `NULL`, which is no inequality either.
-                RequestComparison::CallerValueUnequals => {
-                    caller_side != row_side.as_str()
-                        && context["settings"]
-                            .get(request_parameter.as_str())
-                            .is_some()
-                }
-            }
-        }),
-        RowDecision::Request {
-            shapes,
-            subject_type,
-            predicate,
-            ..
-        } => {
-            subject_type.as_str() == "user"
-                && !records(shapes).is_empty()
-                && request_predicate_holds(predicate, context, acting_role)
-        }
-        RowDecision::Any(children) => children
-            .iter()
-            .any(|child| grants(child, row, subject, context, acting_role)),
-        RowDecision::All(children) => children
-            .iter()
-            .all(|child| grants(child, row, subject, context, acting_role)),
-    }
-}
-
-fn recipe<'a>(relations: &'a [RelationShapes], type_name: &str, relation: &str) -> &'a RowDecision {
-    relations
-        .iter()
-        .find(|entry| entry.type_name.as_str() == type_name && entry.relation.as_str() == relation)
-        .and_then(|entry| entry.decision.as_ref())
-        .unwrap_or_else(|| panic!("{type_name}#{relation} has no recipe, so it costs a round trip"))
 }
 
 #[tokio::test]
@@ -257,34 +135,6 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
         );
     }
 
-    // The deployment acts as the caller's login role, whose role and grants the seed declares.
-    let sql = format!(
-        "CREATE ROLE app_reader LOGIN;\n{schema}\n\
-         GRANT SELECT, INSERT, UPDATE, DELETE ON orders, capped, notes, flagged TO app_reader;"
-    );
-    let deployment = deployment::caller_deployment_acting_as(
-        &["app_reader"],
-        [deployment::delimited_set("app.bot_list", ",")],
-    );
-    let (classified, db, registry) = support::classify_with(&sql, None, &deployment);
-    let planned = support::plan_at(classified, &db, &registry, ConfidenceLevel::B);
-    let translation = planned.translation();
-    let rows = rows();
-    // The consumer builds the check's `settings` map from the declared sources beside
-    // the caller's own entries, which the recipe reads the gates from.
-    let sources = DeclaredSources::of(&deployment);
-    let contexts: BTreeMap<String, (serde_json::Value, String)> = callers()
-        .into_iter()
-        .map(|principal| {
-            let map = settings_map(&sources, &principal);
-            let mut context = principal.context;
-            if let Some(entries) = context.as_object_mut() {
-                entries.insert("settings".to_string(), map);
-            }
-            (principal.subject, (context, principal.login_role))
-        })
-        .collect();
-
     let cluster = Cluster::start().await;
     for from_rows in [false, true] {
         case.loading_from_rows = from_rows;
@@ -321,41 +171,9 @@ async fn a_request_gated_table_is_answered_locally_as_the_database_answers() {
         let mut compared = 0usize;
         let mut failures = Vec::new();
         for observation in &run.observations {
-            let Some(row) = rows.get(&observation.object) else {
-                continue;
-            };
-            let (type_name, _) = observation
-                .object
-                .split_once(':')
-                .expect("an object is type:key");
-            let answer = translation
-                .action_relations()
-                .iter()
-                .find(|entry| {
-                    entry.type_name.as_str() == type_name
-                        && entry.statement == observation.statement
-                })
-                .map(|entry| &entry.answer);
-            let local = match answer {
-                Some(ActionAnswer::Unrestricted) => true,
-                Some(ActionAnswer::Judged(judges)) if !judges.is_empty() => {
-                    judges.iter().all(|judge| {
-                        let (context, acting_role) = &contexts[&observation.subject];
-                        grants(
-                            recipe(translation.relations(), type_name, judge.relation.as_str()),
-                            row,
-                            &observation.subject,
-                            context,
-                            acting_role,
-                        )
-                    })
-                }
-                Some(ActionAnswer::Denied) => false,
-                other => panic!(
-                    "{} {:?} is not answered locally: {other:?}",
-                    observation.object, observation.statement
-                ),
-            };
+            let local = observation
+                .local
+                .unwrap_or_else(|| panic!("{observation} is not answered locally"));
             compared += 1;
             if local != observation.postgres {
                 failures.push(format!("{observation}: the recipe answers {local}"));
