@@ -117,6 +117,8 @@ pub(super) enum TargetAnswer {
     Gated(ModeBuckets),
     /// `PostgreSQL` raises, or the answer cannot be settled, so no row passes.
     Refused,
+    /// `PostgreSQL` raises while expanding recursive policies.
+    Recursive,
 }
 
 /// One statement asked of `row_security`. None reads the row, so each of its gates judges
@@ -311,7 +313,7 @@ pub(super) fn answer_targets<'db, DB: DatabaseLike>(
                     .or_default()
                     .extend(targets.iter().copied());
                 for target in targets {
-                    answers.insert(*target, TargetAnswer::Refused);
+                    answers.insert(*target, TargetAnswer::Recursive);
                 }
             }
             Err(error) => {
@@ -382,7 +384,7 @@ pub(super) fn branch_expr(
     table_plan: &mut TypePlan,
 ) -> Option<UsersetExpr> {
     let rule = match answer {
-        TargetAnswer::Refused => return None,
+        TargetAnswer::Refused | TargetAnswer::Recursive => return None,
         // An exempt role reads every row its kind reaches.
         TargetAnswer::Exempt => return walk,
         TargetAnswer::Gated(bucket) if bucket.permissive.is_empty() => return None,

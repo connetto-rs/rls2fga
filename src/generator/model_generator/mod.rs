@@ -1326,26 +1326,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                     .map(|(_, command, _)| command)
                     .collect();
 
-                // Every clause PostgreSQL evaluates that the model does not carry leaves the
-                // relations it fed diverged from the database. Collected before anything is
-                // translated, so a partial drop scars exactly like a total one. Each policy is
-                // classified once per acting role, and says so once.
                 for cp in &table_policies {
-                    for (clause, confidence, targets) in clauses_lost_to_the_threshold(cp) {
-                        mark_narrowed(table_plan, &targets);
-                        let note = TranslationNote::ClauseBelowThreshold {
-                            table: source_table.clone(),
-                            policy: cp.name().to_string(),
-                            mode: cp.mode().to_string(),
-                            clause: clause.to_string(),
-                            confidence,
-                            commands: commands_fed_by(&targets),
-                            relations: narrowed_by(&targets).into_iter().collect(),
-                        };
-                        if !notes.contains(&note) {
-                            notes.push(note);
-                        }
-                    }
                     for (reason, targets) in unreadable_clause_targets(cp) {
                         let note = TranslationNote::ExpressionRefused {
                             policy: cp.name().to_string(),
@@ -1363,6 +1344,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                 let mut held_here: Vec<crate::types::ActingPrivileges> = Vec::new();
                 let mut barrier_denied: BTreeSet<ActionTarget> = BTreeSet::new();
                 let mut refused_everywhere: BTreeMap<ActionTarget, bool> = BTreeMap::new();
+                let mut recursive_everywhere: BTreeMap<ActionTarget, bool> = BTreeMap::new();
                 // Only a catalog table is answered per role, so only there can a policy
                 // reach no acting role, or reach a target only through roles refused it.
                 let mut reached: Option<BTreeMap<ActionTarget, BTreeSet<&str>>> =
@@ -1406,6 +1388,10 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                                 &mut notes,
                                 &mut reaching,
                             );
+                            for (target, answer) in &answers {
+                                *recursive_everywhere.entry(*target).or_insert(true) &=
+                                    matches!(answer, TargetAnswer::Recursive);
+                            }
                             let held = gate_on_privileges(
                                 &mut answers,
                                 table,
@@ -1416,7 +1402,10 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                             // A role refused a target builds no branch for it, so no policy
                             // reaches the role there.
                             for (target, policies) in reaching {
-                                if !matches!(answers.get(&target), Some(TargetAnswer::Refused)) {
+                                if !matches!(
+                                    answers.get(&target),
+                                    Some(TargetAnswer::Refused | TargetAnswer::Recursive)
+                                ) {
                                     reached.entry(target).or_default().extend(policies);
                                 }
                             }
@@ -1426,9 +1415,9 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                         _ => answer_supplied_policies(&table_policies, branch, parts),
                     };
                     let walk = match branch.role {
-                        _ if answers
-                            .values()
-                            .all(|answer| matches!(answer, TargetAnswer::Refused)) =>
+                        _ if answers.values().all(|answer| {
+                            matches!(answer, TargetAnswer::Refused | TargetAnswer::Recursive)
+                        }) =>
                         {
                             None
                         }
@@ -1442,7 +1431,8 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                         None => None,
                     };
                     for (target, answer) in &answers {
-                        let refused = matches!(answer, TargetAnswer::Refused);
+                        let refused =
+                            matches!(answer, TargetAnswer::Refused | TargetAnswer::Recursive);
                         *refused_everywhere.entry(*target).or_insert(true) &= refused;
                         if let TargetAnswer::Gated(bucket) = answer {
                             if bucket.permissive.is_empty()
@@ -1454,6 +1444,29 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
                         }
                         if let Some(expr) = branch_expr(answer, walk.clone(), table_plan) {
                             per_target.entry(*target).or_default().push(expr);
+                        }
+                    }
+                }
+                // PostgreSQL raises for a target whose reads loop for every acting role, so a
+                // clause lost there leaves nothing the model could have granted.
+                for cp in &table_policies {
+                    for (clause, confidence, mut targets) in clauses_lost_to_the_threshold(cp) {
+                        targets.retain(|target| recursive_everywhere.get(target) != Some(&true));
+                        if targets.is_empty() {
+                            continue;
+                        }
+                        mark_narrowed(table_plan, &targets);
+                        let note = TranslationNote::ClauseBelowThreshold {
+                            table: source_table.clone(),
+                            policy: cp.name().to_string(),
+                            mode: cp.mode().to_string(),
+                            clause: clause.to_string(),
+                            confidence,
+                            commands: commands_fed_by(&targets),
+                            relations: narrowed_by(&targets).into_iter().collect(),
+                        };
+                        if !notes.contains(&note) {
+                            notes.push(note);
                         }
                     }
                 }
