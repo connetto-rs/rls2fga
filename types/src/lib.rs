@@ -64,7 +64,7 @@ pub use records::{
     SubjectKey, ValueSource,
 };
 pub use relations::{
-    FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestNormalization,
+    CallerGate, FallbackStep, RelationShapes, RequestAtom, RequestComparison, RequestNormalization,
     RequestPredicate, RequestPrincipal, RowDecision,
 };
 pub use resulting::ResultingRow;

@@ -28,10 +28,10 @@ use rls2fga::types::{
     BoundQuery, Guard, RecordDerivation, RecordDescription, ReplayScope, SubjectKey, TypeName,
     ValueSource,
 };
-use rls2fga::types::{ColumnName, RelationName, TableId};
 use rls2fga::types::{
-    RelationShapes, RequestAtom, RequestComparison, RequestPredicate, RowDecision,
+    CallerGate, RelationShapes, RequestAtom, RequestComparison, RequestPredicate, RowDecision,
 };
+use rls2fga::types::{ColumnName, RelationName, TableId};
 
 use crate::support;
 
@@ -1580,8 +1580,7 @@ enum Leaf<'a> {
     Gated {
         relation: &'a str,
         shapes: &'a [RecordDescription],
-        context_key: &'a str,
-        request_parameter: &'a str,
+        gate: &'a CallerGate,
     },
 }
 
@@ -1617,14 +1616,11 @@ fn recipe_leaves(decision: &RowDecision) -> Vec<Leaf<'_>> {
         RowDecision::RequestGated {
             relation,
             shapes,
-            context_key,
-            request_parameter,
-            ..
+            gate,
         } => vec![Leaf::Gated {
             relation: relation.as_str(),
             shapes: shapes.as_slice(),
-            context_key: context_key.as_str(),
-            request_parameter: request_parameter.as_str(),
+            gate,
         }],
         RowDecision::Any(children) | RowDecision::All(children) => {
             children.iter().flat_map(recipe_leaves).collect()
@@ -1917,11 +1913,7 @@ fn every_leaf_of_every_recipe_names_a_user_from_the_objects_own_row() {
                         // thing standing between it and granting everyone. Losing the
                         // context or naming it differently from the recipe is a wrong
                         // allow no DSL assertion can see.
-                        Leaf::Gated {
-                            context_key,
-                            request_parameter,
-                            ..
-                        } => {
+                        Leaf::Gated { gate, .. } => {
                             assert_eq!(
                                 template.subject_key.part(),
                                 &ValueSource::Literal("*".to_string()),
@@ -1940,15 +1932,28 @@ fn every_leaf_of_every_recipe_names_a_user_from_the_objects_own_row() {
                                 context
                                     .entries
                                     .iter()
-                                    .any(|entry| entry.key == *context_key),
+                                    .any(|entry| entry.key == gate.context_key),
                                 "{fixture}: gated leaf {}#{relation} fills a different \
                                  parameter from the one the recipe names",
                                 reported.type_name
                             );
                             assert!(
-                                !request_parameter.is_empty(),
+                                !gate.request_parameter.is_empty(),
                                 "{fixture}: gated leaf {}#{relation} names no parameter for \
                                  the caller to supply",
+                                reported.type_name
+                            );
+                            assert_eq!(
+                                entry(
+                                    planned.translation().relations(),
+                                    reported.type_name.as_str(),
+                                    relation
+                                )
+                                .caller_gate
+                                .as_ref(),
+                                Some(*gate),
+                                "{fixture}: gated leaf {}#{relation} names a gate its own \
+                                 relation does not report",
                                 reported.type_name
                             );
                         }
@@ -2986,6 +2991,83 @@ fn an_expiring_share_settles_from_its_row_with_the_clock_in_its_condition() {
         "the request supplies the clock: {:?}",
         outputs.notes()
     );
+}
+
+const AVERAGE_WEIGHTED_SHARE: &str = "
+CREATE TABLE public.papers (id INT PRIMARY KEY, owner TEXT NOT NULL);
+CREATE TABLE public.paper_shares (
+    paper_id INT NOT NULL,
+    viewer TEXT NOT NULL,
+    weight INT NOT NULL,
+    PRIMARY KEY (paper_id, viewer)
+);
+ALTER TABLE papers ENABLE ROW LEVEL SECURITY;
+CREATE POLICY papers_p ON papers FOR ALL USING (
+    EXISTS (
+        SELECT 1
+        FROM paper_shares s
+        WHERE s.paper_id = papers.id
+          AND s.viewer = ANY(string_to_array(current_setting('app.subjects', true), ','))
+          AND s.weight > (SELECT avg(weight) FROM paper_shares)
+    )
+);
+";
+
+/// A share no row decides still names the context key its records carry the grantee under.
+#[test]
+fn a_keyed_share_names_its_grantee_key_whatever_decides_its_records() {
+    let expected = CallerGate {
+        context_key: "viewer".to_string(),
+        request_parameter: "app_subjects".to_string(),
+        comparison: RequestComparison::CallerSetHolds,
+    };
+    for (sql, derived) in [
+        (SQL_RESIDUAL_SHARE, "joined"),
+        (AVERAGE_WEIGHTED_SHARE, "whole shape"),
+        (EXPIRING_SHARE, "from row"),
+    ] {
+        let (db, registry, deployment) = parsed_with_settings(sql, EXPIRING_SHARE_SETTINGS);
+        let planned = translation(
+            &db,
+            &registry,
+            ConfidenceLevel::B,
+            &GeneratorSettings::default(),
+            &deployment,
+        );
+        let reported = planned.relations();
+        let gate = reported
+            .iter()
+            .find(|entry| {
+                entry.type_name.as_str() == "paper_shares_share"
+                    && entry.relation.as_str().starts_with("gate_")
+            })
+            .unwrap_or_else(|| panic!("{derived}: the share arm mints a gate relation"));
+        let [shape] = gate.shapes.as_slice() else {
+            panic!(
+                "{derived}: the gate is filled by one shape, got {:?}",
+                gate.shapes
+            );
+        };
+        let kind = match shape.derivation {
+            RecordDerivation::FromRow { .. } => "from row",
+            RecordDerivation::Joined { .. } => "joined",
+            RecordDerivation::WholeShape { .. } => "whole shape",
+            _ => "another",
+        };
+        assert_eq!(
+            kind, derived,
+            "the fixture no longer exercises its derivation"
+        );
+        assert_eq!(
+            gate.decision, None,
+            "{derived}: no row decides a relation whose condition reads more than the row"
+        );
+        assert_eq!(
+            gate.caller_gate.as_ref(),
+            Some(&expected),
+            "{derived}: the gate names the key its records carry the grantee under"
+        );
+    }
 }
 
 /// The membership arm carries a grace period, `s.expires_at > now() - interval '36 hours'`.
