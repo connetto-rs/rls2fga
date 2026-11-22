@@ -4498,6 +4498,25 @@ fn rows_naming_the_guarded_row_refuse_what_they_cannot_carry() {
     }
 }
 
+/// The diagnosis refuses only the rule the recognizer could not read, never a readable one.
+#[test]
+fn rows_naming_the_guarded_row_are_never_diagnosed_when_their_rule_reads() {
+    let db = parse_schema(REFERRING_ROWS_SCHEMA).unwrap();
+    let clause =
+        "id IN (SELECT i.organization_id FROM invitations i WHERE i.accepted_by_id IS NULL)";
+    assert_eq!(
+        diagnose_p31_referring_rows(
+            &parse_expr(clause),
+            &db,
+            &FunctionRegistry::new(),
+            "organizations",
+            PolicyCommand::Select,
+            &ExpansionState::new(),
+        ),
+        None
+    );
+}
+
 // 12. function_has_current_user_arg: non-List args
 #[test]
 fn function_has_current_user_arg_returns_false_for_function_with_no_arg_list() {
