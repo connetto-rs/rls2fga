@@ -1818,7 +1818,7 @@ fn helper_call_relation<DB: DatabaseLike>(
     let mut walked = Vec::new();
     for arm in &call.arms {
         match arm {
-            HelperSetArm::Grant(grant) => parts.extend(caller_gated_grant_parts(
+            HelperSetArm::Grant(grant) => parts.extend(request_gated_grant_parts(
                 grant,
                 &call.level,
                 &level_type,
@@ -1858,7 +1858,7 @@ fn helper_call_relation<DB: DatabaseLike>(
             let kept = selection
                 .iter()
                 .flat_map(|grant| {
-                    caller_gated_grant_parts(
+                    request_gated_grant_parts(
                         grant,
                         &call.level,
                         &level_type,
@@ -2181,9 +2181,9 @@ fn helper_grant_parts<DB: DatabaseLike>(
 }
 
 /// The rows of the level a grant arm returns, as [`capped_grant_parts`] reads them, kept
-/// only while the request carries the caller the arm's gate requires, which a request
-/// without a caller does not, whatever subject its check names.
-fn caller_gated_grant_parts<DB: DatabaseLike>(
+/// only while the request carries the caller the arm's gate requires and leaves absent
+/// every value the arm requires unset, whatever subject its check names.
+fn request_gated_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
     level: &TableId,
     level_type: &TypeName,
@@ -2192,22 +2192,29 @@ fn caller_gated_grant_parts<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
     let parts = capped_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
-    let Some(caller) = &grant.carried_caller else {
+    if grant.carried_caller.is_none() && grant.absent.is_empty() {
         return parts;
-    };
+    }
     let Some(granted) = combine_union(parts) else {
         return Vec::new();
     };
-    let carried = RequestFormula::Presence(PresenceAtom::new(caller, true));
-    let Some(gate) = level_request_gate(&carried, level, level_type, ctx, table_plan, all_types)
+    let mut name = stored_relation_name(grant.table.name());
+    let mut required = Vec::with_capacity(grant.absent.len() + 1);
+    if let Some(caller) = &grant.carried_caller {
+        name.push_str("_carrying_caller");
+        required.push(RequestFormula::Presence(PresenceAtom::new(caller, true)));
+    }
+    for source in &grant.absent {
+        name.push_str("_omitting_");
+        name.push_str(source.condition_parameter().as_str());
+        required.push(RequestFormula::Presence(PresenceAtom::new(source, false)));
+    }
+    let required = RequestFormula::join(BoolOp::And, required);
+    let Some(gate) = level_request_gate(&required, level, level_type, ctx, table_plan, all_types)
     else {
         return Vec::new();
     };
     let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
-    let name = format!(
-        "{}_carrying_caller",
-        stored_relation_name(grant.table.name())
-    );
     vec![UsersetExpr::Computed(plan.ensure_computed(
         name,
         UsersetExpr::Intersection(vec![granted, gate]),
@@ -3037,6 +3044,7 @@ fn set_subjects<DB: DatabaseLike>(
                     && named.outside.is_empty()
                     && named.held.is_none()
                     && named.carried_caller.is_none()
+                    && named.absent.is_empty()
                     && named.time_bounds.is_empty()
                     && (named.returns_the_caller() || named.grantee == HelperGrantee::Anyone))
         });

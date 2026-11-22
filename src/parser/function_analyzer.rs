@@ -145,7 +145,7 @@ pub enum FunctionSemantic {
     /// Declaring one asserts that every role a request runs as may execute it, since a
     /// caller lacking `EXECUTE` gets an error where the model grants. What the helper
     /// returns is read through `sql-traits`' `FunctionLike::helper_set`, naming the
-    /// exclusions it reads, which refuses a body or an owner it cannot prove.
+    /// conditions it reads, which refuses a body or an owner it cannot prove.
     #[serde(rename = "declared_helper")]
     DeclaredHelper {},
 

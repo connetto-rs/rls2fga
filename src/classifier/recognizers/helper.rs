@@ -348,6 +348,20 @@ pub(crate) enum HelperRefusal {
         /// The helper capping the cap's rows.
         nested: String,
     },
+    /// The rows returning a cap's pairs are kept only while the request leaves a setting
+    /// unset.
+    #[error(
+        "{capped} is capped by '{cap}', whose rows are kept only where setting '{setting}' \
+         reads NULL, which no pair object reads"
+    )]
+    CapKeptWhileUnset {
+        /// What the cap keeps rows of.
+        capped: Capped,
+        /// The helper returning the pairs.
+        cap: String,
+        /// The setting the cap's rows require unset.
+        setting: String,
+    },
     /// A cap is lifted by a read the request's absence does not decide.
     #[error(
         "declared helper '{function}' lifts its cap where setting '{setting}' reads NULL, \
@@ -359,7 +373,21 @@ pub(crate) enum HelperRefusal {
         /// The setting the lift reads.
         setting: String,
         /// Why its absence does not decide the lift.
-        reason: LiftRefusal,
+        reason: AbsenceRefusal,
+    },
+    /// An arm keeps its rows only where a read the request's absence does not decide
+    /// reads `NULL`.
+    #[error(
+        "declared helper '{function}' keeps an arm's rows only where setting '{setting}' \
+         reads NULL, {reason}"
+    )]
+    KeptWhileUnset {
+        /// The helper.
+        function: String,
+        /// The setting the arm requires unset.
+        setting: String,
+        /// Why its absence does not decide the arm.
+        reason: AbsenceRefusal,
     },
     /// A cap operand is neither a column nor a literal the model spells.
     #[error(
@@ -546,10 +574,10 @@ pub(crate) enum HelperRefusal {
     },
 }
 
-/// Why the request leaving a setting absent does not decide a cap lifted where the setting
-/// reads `NULL`.
+/// Why the request leaving a setting absent does not decide a condition holding where the
+/// setting reads `NULL`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum LiftRefusal {
+pub(crate) enum AbsenceRefusal {
     /// `current_setting(name)` raises `42704` on a setting the request never set.
     #[error(
         "but reads it through current_setting without missing_ok, which raises 42704 where \
@@ -559,7 +587,7 @@ pub(crate) enum LiftRefusal {
     /// The read is `''` on a pooled connection whose earlier transaction set it.
     #[error(
         "but reads it without NULLIF(..., ''), so the '' a pooled connection reads for an \
-         unset setting keeps the cap a request leaving it absent lifts"
+         unset setting fails a condition a request leaving it absent meets"
     )]
     ReadBare,
     /// The deployment declares the setting no single value a request may leave unset.
@@ -1492,7 +1520,9 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
         // can state once.
         let grant = match arm {
             HelperArm::Grant(grant)
-                if matches!(grant.granted_to(), GrantedTo::Anyone) && grant.gate().is_none() =>
+                if matches!(grant.granted_to(), GrantedTo::Anyone)
+                    && grant.gate().is_none()
+                    && grant.unset_settings().is_empty() =>
             {
                 grant
             }
@@ -1558,7 +1588,12 @@ fn answered_call<'db, DB: DatabaseLike>(
             function: name.clone(),
         })?;
     let set = function
-        .helper_set(&values, deployment, db, &[ArmCondition::Exclusion])
+        .helper_set(
+            &values,
+            deployment,
+            db,
+            &[ArmCondition::Exclusion, ArmCondition::UnsetSetting],
+        )
         .map_err(|source| HelperRefusal::Unanswered {
             function: name,
             source,
@@ -2059,6 +2094,17 @@ fn helper_grant<DB: DatabaseLike>(
             excluded_callers(function, gate, &grantee)?,
         ),
     };
+    let absent = grant
+        .unset_settings()
+        .iter()
+        .map(|unset| {
+            absent_source(unset, registry).map_err(|reason| HelperRefusal::KeptWhileUnset {
+                function: function.to_string(),
+                setting: unset.setting().name().to_string(),
+                reason,
+            })
+        })
+        .collect::<Result<_, _>>()?;
     let (caps, within, held) = match objects {
         [object] => {
             let mut caps = Vec::new();
@@ -2087,6 +2133,7 @@ fn helper_grant<DB: DatabaseLike>(
         grantee,
         excluded,
         carried_caller,
+        absent,
         rows: grant_rows(table, grant.restrictions(), read_labels, db)?,
         time_bounds: grant.time_bounds().iter().map(time_bound).collect(),
         caps,
@@ -2864,7 +2911,13 @@ fn helper_cap<DB: DatabaseLike>(
     let link = paired.held_link(cap.operands(), db)?;
     let lift = cap
         .lift()
-        .map(|lift| lifting_source(function, lift, registry))
+        .map(|lift| {
+            absent_source(lift, registry).map_err(|reason| HelperRefusal::Lift {
+                function: function.to_string(),
+                setting: lift.setting().name().to_string(),
+                reason,
+            })
+        })
         .transpose()?;
     Ok(HelperCap { pairs, link, lift })
 }
@@ -2895,6 +2948,13 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 capped: capped.clone(),
                 cap: name,
                 nested: nested.function().target_name().to_string(),
+            });
+        }
+        if let Some(unset) = grant.unset_settings().first() {
+            return Err(HelperRefusal::CapKeptWhileUnset {
+                capped: capped.clone(),
+                cap: name,
+                setting: unset.setting().name().to_string(),
             });
         }
         let Some(columns) = grant
@@ -2932,30 +2992,24 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
     ))
 }
 
-/// The declared value whose absence lifts a cap, read only through `NULLIF(<read>, '')`
-/// with `missing_ok`, which reads both states of an unset setting as `NULL`.
-fn lifting_source(
-    function: &str,
-    lift: &UnsetSetting<'_>,
+/// The declared value a condition holding while the request leaves it absent reads, read
+/// only through `NULLIF(<read>, '')` with `missing_ok`, which reads both states of an
+/// unset setting as `NULL`.
+fn absent_source(
+    unset: &UnsetSetting<'_>,
     registry: &FunctionRegistry,
-) -> Result<DeclaredSource, HelperRefusal> {
-    let setting = lift.setting().name();
-    let refusal = |reason: LiftRefusal| HelperRefusal::Lift {
-        function: function.to_string(),
-        setting: setting.to_string(),
-        reason,
-    };
-    if lift.raises_when_unset() {
-        return Err(refusal(LiftRefusal::RaisesWhenUnset));
+) -> Result<DeclaredSource, AbsenceRefusal> {
+    if unset.raises_when_unset() {
+        return Err(AbsenceRefusal::RaisesWhenUnset);
     }
-    if !lift.reads_empty_as_unset() {
-        return Err(refusal(LiftRefusal::ReadBare));
+    if !unset.reads_empty_as_unset() {
+        return Err(AbsenceRefusal::ReadBare);
     }
     registry
-        .declared_source(setting, &[])
+        .declared_source(unset.setting().name(), &[])
         .filter(|source| source.is_scalar() && source.may_be_unset())
         .cloned()
-        .ok_or_else(|| refusal(LiftRefusal::NotMaybeUnset))
+        .ok_or(AbsenceRefusal::NotMaybeUnset)
 }
 
 /// `caps` on the level's row where none needs more of a row than the level's row names and

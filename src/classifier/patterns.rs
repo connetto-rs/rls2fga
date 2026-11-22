@@ -734,6 +734,9 @@ pub struct HelperGrant {
     /// compares a column with the caller, which `PostgreSQL` matches with no row while
     /// the caller reads `NULL`.
     pub carried_caller: Option<DeclaredSource>,
+    /// The declared single values the request has to leave absent for the arm to keep any
+    /// row, all of them, from `<read> IS NULL` conjuncts of the arm.
+    pub absent: Vec<DeclaredSource>,
     /// Which grant rows count.
     pub rows: GrantRows,
     /// The bounds a kept row meets against the statement time, all of them, which the

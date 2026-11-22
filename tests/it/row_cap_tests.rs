@@ -779,6 +779,121 @@ fn policy_caps_with_no_pair_relation_are_refused() {
     );
 }
 
+pub(crate) const PERSONAL_RESOURCES: &str = "
+CREATE TABLE resource_notes (
+  id UUID PRIMARY KEY,
+  resource_id UUID NOT NULL REFERENCES resources (id)
+);
+ALTER TABLE resource_notes ENABLE ROW LEVEL SECURITY;
+CREATE FUNCTION authz.personal_resources() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT resource.id FROM public.resources resource
+  WHERE resource.owner_id = authz.caller_id() AND authz.acting_installation_id() IS NULL
+$$;
+ALTER FUNCTION authz.personal_resources() OWNER TO authz_owner;
+CREATE POLICY resource_notes_select ON resource_notes FOR SELECT
+  USING (resource_id IN (SELECT authz.personal_resources()));
+";
+
+/// The helpers [`INSTALLATION_CAPS`] and [`PERSONAL_RESOURCES`] declare.
+pub(crate) const PERSONAL_HELPERS: &[&str] = &[
+    "authz.capped_kinds",
+    "authz.member_organizations",
+    "authz.owned_resources",
+    "authz.personal_resources",
+];
+
+/// A grant arm kept only while the request leaves a setting unset grades A and gates its
+/// rows on the request omitting that setting.
+#[test]
+fn an_arm_kept_while_a_setting_is_unset_translates() {
+    let schema = format!("{INSTALLATION_CAPS}{PERSONAL_RESOURCES}");
+    let using = using_of(&schema, PERSONAL_HELPERS, "resource_notes_select");
+    assert_eq!(using.confidence, ConfidenceLevel::A, "{:?}", using.pattern);
+    let translation = installation_translator(PERSONAL_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema plans");
+    let model = translation
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    let personal = relation_definition(&model, "resources", "personal_resources")
+        .unwrap_or_else(|| panic!("resources holds personal_resources in\n{model}"));
+    let gated = relation_definition(&model, "resources", &personal)
+        .unwrap_or_else(|| panic!("resources holds {personal} in\n{model}"));
+    assert!(
+        gated.contains(" and app_installation_id_absent"),
+        "{personal}: {gated}"
+    );
+}
+
+/// An arm kept while a setting is unset, read where the request's absence does not decide
+/// the setting, or returning a cap's pairs, is refused naming why.
+#[test]
+fn arms_kept_while_a_setting_is_unset_are_refused_where_the_model_cannot_gate_them() {
+    let unset = "authz.acting_installation_id() IS NULL";
+    let personal = format!("{INSTALLATION_CAPS}{PERSONAL_RESOURCES}");
+    let kept = "declared helper 'authz.personal_resources' keeps an arm's rows only where \
+                setting";
+    for (schema, policy, reason) in [
+        (
+            personal.replace(
+                unset,
+                "current_setting('app.installation_id', true)::uuid IS NULL",
+            ),
+            "resource_notes_select",
+            format!(
+                "{kept} 'app.installation_id' reads NULL, but reads it without NULLIF(..., '')"
+            ),
+        ),
+        (
+            personal.replace(
+                unset,
+                "NULLIF(current_setting('app.installation_id'), '')::uuid IS NULL",
+            ),
+            "resource_notes_select",
+            format!(
+                "{kept} 'app.installation_id' reads NULL, but reads it through current_setting \
+                 without missing_ok, which raises 42704"
+            ),
+        ),
+        (
+            personal.replace(
+                unset,
+                "NULLIF(current_setting('app.user_id', true), '')::uuid IS NULL",
+            ),
+            "resource_notes_select",
+            format!(
+                "{kept} 'app.user_id' reads NULL, which the deployment does not declare as one \
+                 value a request may leave unset"
+            ),
+        ),
+        (
+            INSTALLATION_CAPS.replace(
+                "AND permission.max_role >= min_role",
+                "AND permission.max_role >= min_role AND authz.caller_id() IS NULL",
+            ),
+            "organizations_select",
+            "declared helper 'authz.member_organizations' is capped by 'authz.capped_kinds', \
+             whose rows are kept only where setting 'app.user_id' reads NULL, which no pair \
+             object reads"
+                .to_owned(),
+        ),
+    ] {
+        let using = using_of(&schema, PERSONAL_HELPERS, policy);
+        assert_eq!(using.confidence, ConfidenceLevel::D, "{reason}");
+        match using.pattern {
+            PatternClass::Unknown(UnclassifiedExpr {
+                reason: refused, ..
+            }) => assert!(
+                refused.contains(&reason),
+                "expected {reason}, got {refused}"
+            ),
+            other => panic!("{policy} should be refused with {reason}, got {other:?}"),
+        }
+    }
+}
+
 /// The reasons of every refused part of `pattern`.
 fn refusal_reasons(pattern: &PatternClass) -> Vec<String> {
     match pattern {

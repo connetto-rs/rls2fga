@@ -1379,6 +1379,35 @@ fn an_installation_the_request_may_leave_unset_caps_through_its_absence() {
     }
 }
 
+/// A set compared with a request value whose arm keeps its rows only while the request
+/// leaves a setting unset is refused, since its rows differ between requests.
+#[test]
+fn a_set_kept_while_a_setting_is_unset_is_no_request_value_set() {
+    let schema = ABSENT_INSTALLATION.replace(
+        "WHERE ip.table_name = target AND ip.action = command",
+        "WHERE ip.table_name = target AND ip.action = command
+    AND NULLIF(current_setting('app.installation_id', true), '')::uuid IS NULL",
+    );
+    let classified = absent_installation_translator(
+        typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    )
+    .classify(&db_of(&schema));
+    let using = classified
+        .iter()
+        .find(|classified| classified.name() == "docs_installation")
+        .expect("docs_installation should classify")
+        .using_classification()
+        .expect("USING should classify");
+    let refused = format!("{:?}", using.pattern);
+    assert!(
+        refused.contains(
+            "one of its arms is a parent, a walk, another helper's rows or keeps its rows by \
+             what the request carries"
+        ),
+        "{refused}"
+    );
+}
+
 /// The relation report states an absence test as the request omitting the key, and its
 /// negation as the request carrying it, which a consumer decides from the check context
 /// alone.

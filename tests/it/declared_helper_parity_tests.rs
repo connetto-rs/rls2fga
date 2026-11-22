@@ -22,7 +22,7 @@ use crate::declared_helper_tests::{
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
-use crate::row_cap_tests::{INSTALLATION_CAPS, POLICY_CAPS};
+use crate::row_cap_tests::{INSTALLATION_CAPS, PERSONAL_RESOURCES, POLICY_CAPS};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
@@ -1995,6 +1995,24 @@ fn owned_resource(member: usize, resource: usize) -> String {
 /// `organization` as admin and `project` as reader, both in the first organization, and
 /// `…f3` holds `project` as admin in the second.
 fn row_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    capped_members_case(
+        &format!("declared-helper-row-caps-pg{major}"),
+        INSTALLATION_CAPS,
+        ("", "organizations, organization_notes, resources"),
+        CAP_HELPERS,
+        loading_from_rows,
+    )
+}
+
+/// [`row_caps_case`]'s rows and requests over `schema`, seeded further with `extra` and
+/// reading `tables`.
+fn capped_members_case(
+    name: &str,
+    schema: &str,
+    (extra, tables): (&str, &str),
+    registry: &str,
+    loading_from_rows: bool,
+) -> ParityCase {
     let [a1, a2] = ORGANIZATIONS;
     let [f1, f2, f3] = INSTALLATIONS_ACTING;
     let mut seed = format!(
@@ -2023,19 +2041,19 @@ fn row_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
             owned_resource(number, 3),
         );
     }
+    seed.push_str(extra);
     let mut case = ParityCase::reading(
-        &format!(
-            "declared-helper-row-caps-pg{major}{}",
-            if loading_from_rows { "-rows" } else { "" }
-        ),
-        INSTALLATION_CAPS,
+        &format!("{name}{}", if loading_from_rows { "-rows" } else { "" }),
+        schema,
         &[
             &seed,
-            "CREATE ROLE app_reader LOGIN;
-             GRANT SELECT ON organizations, organization_notes, resources TO app_reader;
-             GRANT USAGE ON SCHEMA authz TO app_reader;
-             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
-             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+            &format!(
+                "CREATE ROLE app_reader LOGIN;
+                 GRANT SELECT ON {tables} TO app_reader;
+                 GRANT USAGE ON SCHEMA authz TO app_reader;
+                 REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+                 GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader"
+            ),
         ],
         CAPPED_MEMBERS
             .iter()
@@ -2047,7 +2065,7 @@ fn row_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
         support::deployment::principal("app.installation_id", "installation", DataType::Uuid)
             .may_be_unset(),
     ])
-    .with_registry(CAP_HELPERS);
+    .with_registry(registry);
     case.loading_from_rows = loading_from_rows;
     case
 }
@@ -2098,6 +2116,77 @@ async fn row_caps_agree_with_postgres_17_and_18() {
                 for (resource, allowed) in (1..=3).zip(resources) {
                     expect(
                         format!("resources:{}", owned_resource(index + 1, resource)),
+                        allowed,
+                    );
+                }
+            }
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const PERSONAL_HELPERS: &str = r#"{
+    "authz.capped_kinds": { "kind": "declared_helper" },
+    "authz.member_organizations": { "kind": "declared_helper" },
+    "authz.owned_resources": { "kind": "declared_helper" },
+    "authz.personal_resources": { "kind": "declared_helper" }
+}"#;
+
+/// The note on the first resource member `member` owns, numbered as [`owned_resource`].
+fn personal_note(member: usize) -> String {
+    format!("0e000000-0000-4000-8000-0000000000{member}1")
+}
+
+/// [`row_caps_case`] with a note on each member's first resource, read through
+/// `authz.personal_resources`.
+fn personal_resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut notes = String::from("INSERT INTO resource_notes VALUES ");
+    for number in 1..=CAPPED_MEMBERS.len() {
+        if number > 1 {
+            notes.push_str(", ");
+        }
+        let _ = write!(
+            notes,
+            "('{}', '{}')",
+            personal_note(number),
+            owned_resource(number, 1)
+        );
+    }
+    capped_members_case(
+        &format!("declared-helper-personal-resources-pg{major}"),
+        &format!("{INSTALLATION_CAPS}{PERSONAL_RESOURCES}"),
+        (
+            &notes,
+            "organizations, organization_notes, resources, resource_notes",
+        ),
+        PERSONAL_HELPERS,
+        loading_from_rows,
+    )
+}
+
+/// A request leaving the installation unset or empty reads the notes on its member's own
+/// resources, and one acting through any installation reads none.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn an_arm_kept_while_no_installation_acts_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = personal_resources_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (index, (member, installation)) in CAPPED_MEMBERS.iter().enumerate() {
+                let own = index + 1;
+                let other = own % CAPPED_MEMBERS.len() + 1;
+                for (note, allowed) in [
+                    (own, installation.is_none_or(str::is_empty)),
+                    (other, false),
+                ] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        member,
+                        &format!("resource_notes:{}", personal_note(note)),
+                        ActionStatement::Select,
                         allowed,
                     );
                 }
