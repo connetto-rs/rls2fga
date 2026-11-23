@@ -325,9 +325,9 @@ fn a_request_gate_names_its_link_and_the_type_it_admits() {
     );
 }
 
-/// A membership whose residual reads a request-gated table beside its own join table,
-/// both gated, translates by intersecting the grant with the gate of each.
-fn residual_gated_schema() -> String {
+/// A membership on `paper_shares` qualified by `residual`, with `paper_shares` and `tiers`
+/// both request-gated.
+fn gated_residual_schema(residual: &str) -> String {
     format!(
         "
 CREATE TABLE papers (id UUID PRIMARY KEY);
@@ -341,7 +341,7 @@ CREATE POLICY paper_read ON papers FOR SELECT USING (
         FROM paper_shares s
         WHERE s.paper_id = papers.id
           AND s.viewer = current_setting('app.user_id', true)
-          AND s.weight > (SELECT max(cutoff) FROM tiers)
+          AND {residual}
     )
 );
 {OPEN_PLUS_CAP_BOT_LIST_GATES}"
@@ -352,7 +352,9 @@ CREATE POLICY paper_read ON papers FOR SELECT USING (
 /// the gate of each.
 #[test]
 fn a_residual_over_a_request_gated_relation_translates() {
-    let outputs = outputs_of(&residual_gated_schema());
+    let outputs = outputs_of(&gated_residual_schema(
+        "s.weight > (SELECT max(cutoff) FROM tiers)",
+    ));
     let dsl = outputs.model();
     let can_select =
         relation_definition(&dsl, "papers", "can_select").expect("papers defines can_select");
@@ -373,6 +375,40 @@ fn a_residual_over_a_request_gated_relation_translates() {
         can_select.contains(tier_gate),
         "the grant intersects the residual's table gate, got: {can_select}\n{dsl}"
     );
+}
+
+/// `PostgreSQL` stores a scalar subquery's aggregate under a column alias, so a residual
+/// read back from the catalog is accepted on the relations its written form rests on.
+#[test]
+fn an_aliased_aggregate_residual_is_accepted_as_its_written_form() {
+    let disclosed = |residual: &str| {
+        outputs_of(&gated_residual_schema(residual))
+            .notes()
+            .iter()
+            .find_map(|note| match note {
+                TranslationNote::MembershipResidualReadsUnrestrictedTables { tables, .. } => {
+                    Some(tables.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("the residual is disclosed: {residual}"))
+    };
+    for (written, stored) in [
+        (
+            "s.weight > (SELECT avg(weight) FROM paper_shares)",
+            "s.weight > ( SELECT avg(paper_shares.weight) AS avg FROM paper_shares)",
+        ),
+        (
+            "s.weight > (SELECT max(cutoff) FROM tiers)",
+            "s.weight > ( SELECT max(tiers.cutoff) AS max FROM tiers)",
+        ),
+        (
+            "(SELECT count(*) FROM tiers) > 0",
+            "(( SELECT count(*) AS count FROM tiers) > 0)",
+        ),
+    ] {
+        assert_eq!(disclosed(stored), disclosed(written), "{stored}");
+    }
 }
 
 /// A restrictive membership on `papers` whose residual reads `papers` asks for the
