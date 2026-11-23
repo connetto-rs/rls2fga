@@ -680,7 +680,11 @@ fn scalar_empty_value(query: &Query) -> Option<Expr> {
     if select_result_shaping_clause(select).is_some() {
         return None;
     }
-    let [SelectItem::UnnamedExpr(projection)] = select.projection.as_slice() else {
+    let [SelectItem::UnnamedExpr(projection)
+    | SelectItem::ExprWithAlias {
+        expr: projection, ..
+    }] = select.projection.as_slice()
+    else {
         return None;
     };
     if let Some(function) = function_call(projection) {
