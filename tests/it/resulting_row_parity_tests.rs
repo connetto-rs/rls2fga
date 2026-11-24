@@ -1,4 +1,4 @@
-//! Checks on the row a write produces, compared against `PostgreSQL` 17 and 18.
+//! Checks on the row a write produces, compared against `PostgreSQL` 18.
 //!
 //! A `WITH CHECK` clause reads the new row's own columns, while a helper it calls reads the
 //! statement's snapshot, which never holds the row being written. Each case pins one shape
@@ -83,9 +83,9 @@ fn caller(subject: &str) -> Principal {
 /// Alice belongs to `t1`, Bob to both teams, and Dave to none. Every member probe adds
 /// Dave, so a row that names its own inserter never vouches for itself, and every note
 /// update moves the note to `t2`.
-fn teams_case(major: &str) -> ParityCase {
+fn teams_case() -> ParityCase {
     ParityCase::reading(
-        &format!("resulting-row-teams-pg{major}"),
+        "resulting-row-teams",
         TEAMS,
         &[
             "INSERT INTO teams VALUES ('t1'), ('t2');
@@ -121,9 +121,9 @@ fn teams_case(major: &str) -> ParityCase {
 }
 
 /// Alice owns the open `open` and the archived `shut`, and every update unarchives.
-fn archive_case(major: &str) -> ParityCase {
+fn archive_case() -> ParityCase {
     ParityCase::reading(
-        &format!("resulting-row-archive-pg{major}"),
+        "resulting-row-archive",
         ARCHIVE,
         &[
             "INSERT INTO resources VALUES
@@ -144,51 +144,46 @@ fn archive_case(major: &str) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_written_row_is_judged_where_it_lands_and_never_vouches_for_itself_on_postgres_17_and_18()
-{
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let case = teams_case(major);
-        let run = support::parity::run(&cluster, &case).await;
-        let expect = |subject: &str, object: &str, statement, allowed| {
-            assert_postgres(&case, &run, subject, object, statement, allowed);
-        };
-        // The new member row names Dave, and the helper never sees it.
-        expect("dave", "team_members:m1", ActionStatement::Insert, false);
-        expect("alice", "team_members:m1", ActionStatement::Insert, true);
-        expect("alice", "team_members:m2", ActionStatement::Insert, false);
-        // Alice may change `n1` where it is, and not move it to a team she is not in.
-        expect("alice", "notes:n1", ActionStatement::Update, false);
-        expect("bob", "notes:n1", ActionStatement::Update, true);
-        assert_agrees(&case, &run);
-    }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_written_row_is_judged_where_it_lands_and_never_vouches_for_itself_on_postgres() {
+    let cluster = Cluster::start().await;
+    let case = teams_case();
+    let run = support::parity::run(&cluster, &case).await;
+    let expect = |subject: &str, object: &str, statement, allowed| {
+        assert_postgres(&case, &run, subject, object, statement, allowed);
+    };
+    // The new member row names Dave, and the helper never sees it.
+    expect("dave", "team_members:m1", ActionStatement::Insert, false);
+    expect("alice", "team_members:m1", ActionStatement::Insert, true);
+    expect("alice", "team_members:m2", ActionStatement::Insert, false);
+    // Alice may change `n1` where it is, and not move it to a team she is not in.
+    expect("alice", "notes:n1", ActionStatement::Update, false);
+    expect("bob", "notes:n1", ActionStatement::Update, true);
+    assert_agrees(&case, &run);
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_check_looking_up_its_own_key_reads_the_stored_row_on_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let case = archive_case(major);
-        let run = support::parity::run(&cluster, &case).await;
-        let expect = |subject: &str, object: &str, statement, allowed| {
-            assert_postgres(&case, &run, subject, object, statement, allowed);
-        };
-        // A fresh key is no stored row, so copying an archived row is no archived row.
-        expect("alice", "resources:shut", ActionStatement::Insert, true);
-        // Unarchiving still reads the stored row, which is archived.
-        expect("alice", "resources:shut", ActionStatement::Update, false);
-        expect("alice", "resources:open", ActionStatement::Update, true);
-        assert_agrees(&case, &run);
-    }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_check_looking_up_its_own_key_reads_the_stored_row_on_postgres() {
+    let cluster = Cluster::start().await;
+    let case = archive_case();
+    let run = support::parity::run(&cluster, &case).await;
+    let expect = |subject: &str, object: &str, statement, allowed| {
+        assert_postgres(&case, &run, subject, object, statement, allowed);
+    };
+    // A fresh key is no stored row, so copying an archived row is no archived row.
+    expect("alice", "resources:shut", ActionStatement::Insert, true);
+    // Unarchiving still reads the stored row, which is archived.
+    expect("alice", "resources:shut", ActionStatement::Update, false);
+    expect("alice", "resources:open", ActionStatement::Update, true);
+    assert_agrees(&case, &run);
 }
 
 /// A direct check keeps reading the new row where a helper reads the same flag of the
 /// stored row, though both compile to one gate.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_shared_gate_keeps_direct_reads_on_the_written_row_on_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_shared_gate_keeps_direct_reads_on_the_written_row_on_postgres() {
     let schema = "
 CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
 CREATE SCHEMA authz;
@@ -209,69 +204,67 @@ CREATE POLICY t_update ON t FOR UPDATE
   USING (owner_id = current_setting('app.user_id', true))
   WITH CHECK (NOT authz.is_locked(id));
 ";
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let case = ParityCase::reading(
-            &format!("resulting-row-shared-gate-pg{major}"),
-            schema,
-            &[
-                "INSERT INTO t VALUES ('open', 'alice', false), ('shut', 'alice', true)",
-                &format!("{READER}; GRANT SELECT, INSERT, UPDATE ON t TO app_reader"),
-            ],
-            vec![caller("alice"), caller("bob")],
-        )
-        .with_settings([support::deployment::caller("app.user_id")])
-        .updating("t", "locked = false")
-        .unobservable(
-            "t",
-            "t_update",
-            ClauseKind::Using,
-            Side::Denies,
-            REPEATS_SELECT,
-        );
-        let run = support::parity::run(&cluster, &case).await;
-        // The new row states the flag, and a fresh key has no stored row to read it from.
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "t:shut",
-            ActionStatement::Insert,
-            true,
-        );
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "t:open",
-            ActionStatement::Insert,
-            false,
-        );
-        // Unlocking reads the stored row through the helper, which is still locked.
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "t:shut",
-            ActionStatement::Update,
-            false,
-        );
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "t:open",
-            ActionStatement::Update,
-            true,
-        );
-        assert_agrees(&case, &run);
-    }
+    let cluster = Cluster::start().await;
+    let case = ParityCase::reading(
+        "resulting-row-shared-gate",
+        schema,
+        &[
+            "INSERT INTO t VALUES ('open', 'alice', false), ('shut', 'alice', true)",
+            &format!("{READER}; GRANT SELECT, INSERT, UPDATE ON t TO app_reader"),
+        ],
+        vec![caller("alice"), caller("bob")],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .updating("t", "locked = false")
+    .unobservable(
+        "t",
+        "t_update",
+        ClauseKind::Using,
+        Side::Denies,
+        REPEATS_SELECT,
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    // The new row states the flag, and a fresh key has no stored row to read it from.
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "t:shut",
+        ActionStatement::Insert,
+        true,
+    );
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "t:open",
+        ActionStatement::Insert,
+        false,
+    );
+    // Unlocking reads the stored row through the helper, which is still locked.
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "t:shut",
+        ActionStatement::Update,
+        false,
+    );
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "t:open",
+        ActionStatement::Update,
+        true,
+    );
+    assert_agrees(&case, &run);
 }
 
 /// A check requiring a query refuses both changed and unchanged resulting values.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn an_unreadable_written_fact_denies_updates_on_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn an_unreadable_written_fact_denies_updates_on_postgres() {
     use crate::resulting_type_tests::UNREADABLE_METADATA;
     use crate::support::parity::{assert_disclosed_where_noted, Direction, Licence};
 
@@ -287,67 +280,65 @@ async fn an_unreadable_written_fact_denies_updates_on_postgres_17_and_18() {
             if table == &resulting.table
     )));
 
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        // One update clears the document of `cleared` and keeps the one of `kept`, so the
-        // check both refuses and admits a written row.
-        let case = ParityCase::reading(
-            &format!("resulting-row-metadata-pg{major}"),
-            UNREADABLE_METADATA,
-            &[
-                "INSERT INTO docs VALUES ('kept', 'alice', '{}'::jsonb),
+    let cluster = Cluster::start().await;
+    // One update clears the document of `cleared` and keeps the one of `kept`, so the
+    // check both refuses and admits a written row.
+    let case = ParityCase::reading(
+        "resulting-row-metadata",
+        UNREADABLE_METADATA,
+        &[
+            "INSERT INTO docs VALUES ('kept', 'alice', '{}'::jsonb),
                    ('cleared', 'alice', '{}'::jsonb)",
-                "CREATE ROLE app_reader LOGIN; GRANT SELECT, UPDATE ON docs TO app_reader",
-            ],
-            vec![caller("alice"), caller("bob")],
-        )
-        .with_settings([support::deployment::caller("app.user_id")])
-        .updating(
-            "docs",
-            "metadata = CASE WHEN id = 'cleared' THEN NULL ELSE metadata END",
-        )
-        .unobservable(
-            "docs",
-            "docs_update",
-            ClauseKind::Using,
-            Side::Denies,
-            REPEATS_SELECT,
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT, UPDATE ON docs TO app_reader",
+        ],
+        vec![caller("alice"), caller("bob")],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .updating(
+        "docs",
+        "metadata = CASE WHEN id = 'cleared' THEN NULL ELSE metadata END",
+    )
+    .unobservable(
+        "docs",
+        "docs_update",
+        ClauseKind::Using,
+        Side::Denies,
+        REPEATS_SELECT,
+    );
+    let run = support::parity::run_disclosing(&cluster, &case).await;
+    for (object, allowed) in [("docs:kept", true), ("docs:cleared", false)] {
+        assert_postgres(
+            &case,
+            &run,
+            "alice",
+            object,
+            ActionStatement::Update,
+            allowed,
         );
-        let run = support::parity::run_disclosing(&cluster, &case).await;
-        for (object, allowed) in [("docs:kept", true), ("docs:cleared", false)] {
-            assert_postgres(
-                &case,
-                &run,
-                "alice",
-                object,
-                ActionStatement::Update,
-                allowed,
-            );
-        }
-        let updates: Vec<_> = run
-            .observations
-            .iter()
-            .filter(|observation| observation.statement == ActionStatement::Update)
-            .collect();
-        assert!(!updates.is_empty(), "{}: no update was compared", case.name);
-        assert!(updates.iter().all(|observation| !observation.openfga));
-        assert!(!run.disclosures.is_empty());
-        assert!(run.disclosures.iter().all(|disclosure| matches!(
-            &disclosure.licence,
-            Licence::Located {
-                table,
-                direction: Direction::Narrower,
-                ..
-            } if table == &resulting.table.sql_name()
-        )));
-        assert_disclosed_where_noted(&case, &run);
     }
+    let updates: Vec<_> = run
+        .observations
+        .iter()
+        .filter(|observation| observation.statement == ActionStatement::Update)
+        .collect();
+    assert!(!updates.is_empty(), "{}: no update was compared", case.name);
+    assert!(updates.iter().all(|observation| !observation.openfga));
+    assert!(!run.disclosures.is_empty());
+    assert!(run.disclosures.iter().all(|disclosure| matches!(
+        &disclosure.licence,
+        Licence::Located {
+            table,
+            direction: Direction::Narrower,
+            ..
+        } if table == &resulting.table.sql_name()
+    )));
+    assert_disclosed_where_noted(&case, &run);
 }
 
 /// A two-column key names the written row and its stored counterpart consistently.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_composite_key_insert_carries_its_stored_link_on_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_composite_key_insert_carries_its_stored_link_on_postgres() {
     let schema = "
 CREATE TABLE pairs (a TEXT, b TEXT, owner_id TEXT NOT NULL, PRIMARY KEY (a, b));
 ALTER TABLE pairs ENABLE ROW LEVEL SECURITY;
@@ -356,44 +347,42 @@ CREATE POLICY pairs_select ON pairs FOR SELECT
 CREATE POLICY pairs_insert ON pairs FOR INSERT
   WITH CHECK (owner_id = current_setting('app.user_id', true));
 ";
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let case = ParityCase::reading(
-            &format!("resulting-row-composite-pg{major}"),
-            schema,
-            &[
-                "INSERT INTO pairs VALUES ('first', 'left', 'alice'), ('first', 'right', 'bob')",
-                "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT ON pairs TO app_reader",
-            ],
-            vec![caller("alice"), caller("bob")],
-        )
-        .with_settings([support::deployment::caller("app.user_id")]);
-        let run = support::parity::run(&cluster, &case).await;
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "pairs:first|left",
-            ActionStatement::Insert,
-            true,
-        );
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "pairs:first|right",
-            ActionStatement::Insert,
-            false,
-        );
-        assert_agrees(&case, &run);
-    }
+    let cluster = Cluster::start().await;
+    let case = ParityCase::reading(
+        "resulting-row-composite",
+        schema,
+        &[
+            "INSERT INTO pairs VALUES ('first', 'left', 'alice'), ('first', 'right', 'bob')",
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT ON pairs TO app_reader",
+        ],
+        vec![caller("alice"), caller("bob")],
+    )
+    .with_settings([support::deployment::caller("app.user_id")]);
+    let run = support::parity::run(&cluster, &case).await;
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "pairs:first|left",
+        ActionStatement::Insert,
+        true,
+    );
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "pairs:first|right",
+        ActionStatement::Insert,
+        false,
+    );
+    assert_agrees(&case, &run);
 }
 
 /// An insert declaring one column of a two-column key writes onto the key it declares,
 /// the other column copied, so a check reading that other column still decides.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_declared_key_column_keeps_the_rest_of_the_key_on_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_declared_key_column_keeps_the_rest_of_the_key_on_postgres() {
     let schema = "
 CREATE TABLE labels (owner_id TEXT, label TEXT, PRIMARY KEY (owner_id, label));
 ALTER TABLE labels ENABLE ROW LEVEL SECURITY;
@@ -402,45 +391,43 @@ CREATE POLICY labels_select ON labels FOR SELECT
 CREATE POLICY labels_insert ON labels FOR INSERT
   WITH CHECK (owner_id = current_setting('app.user_id', true));
 ";
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let case = ParityCase::reading(
-            &format!("resulting-row-declared-key-pg{major}"),
-            schema,
-            &[
-                "INSERT INTO labels VALUES ('alice', 'a'), ('bob', 'b')",
-                "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT ON labels TO app_reader",
-            ],
-            vec![caller("alice"), caller("bob")],
-        )
-        .with_settings([support::deployment::caller("app.user_id")])
-        .inserting_values("labels", &[("label", "fresh")]);
-        let run = support::parity::run(&cluster, &case).await;
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "labels:alice|a",
-            ActionStatement::Insert,
-            true,
-        );
-        assert_postgres(
-            &case,
-            &run,
-            "alice",
-            "labels:bob|b",
-            ActionStatement::Insert,
-            false,
-        );
-        assert_agrees(&case, &run);
-    }
+    let cluster = Cluster::start().await;
+    let case = ParityCase::reading(
+        "resulting-row-declared-key",
+        schema,
+        &[
+            "INSERT INTO labels VALUES ('alice', 'a'), ('bob', 'b')",
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT ON labels TO app_reader",
+        ],
+        vec![caller("alice"), caller("bob")],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .inserting_values("labels", &[("label", "fresh")]);
+    let run = support::parity::run(&cluster, &case).await;
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "labels:alice|a",
+        ActionStatement::Insert,
+        true,
+    );
+    assert_postgres(
+        &case,
+        &run,
+        "alice",
+        "labels:bob|b",
+        ActionStatement::Insert,
+        false,
+    );
+    assert_agrees(&case, &run);
 }
 
 /// A write whose checks read only the written row is answered from that row, as the
 /// database answers it, including an update the old row allows and the new row refuses.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_written_row_reading_only_itself_is_answered_locally_on_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_written_row_reading_only_itself_is_answered_locally_on_postgres() {
     let schema = "
 CREATE TABLE notes (id TEXT PRIMARY KEY, author_id TEXT);
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
@@ -451,69 +438,67 @@ CREATE POLICY notes_insert ON notes FOR INSERT
 CREATE POLICY notes_update ON notes FOR UPDATE
   USING (author_id = current_setting('app.user_id', true));
 ";
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        let case = ParityCase::reading(
-            &format!("resulting-row-local-pg{major}"),
-            schema,
-            &[
-                "INSERT INTO notes VALUES ('n1', 'alice'), ('n2', 'bob')",
-                "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT, UPDATE ON notes TO app_reader",
-            ],
-            vec![caller("alice"), caller("bob")],
-        )
-        .with_settings([support::deployment::caller("app.user_id")])
-        .updating("notes", "author_id = 'bob'")
-        .unobservable(
-            "notes",
-            "notes_update",
-            ClauseKind::Using,
-            Side::Denies,
-            REPEATS_SELECT,
-        )
-        .unobservable(
-            "notes",
-            "notes_update",
-            ClauseKind::UsingAsCheck,
-            Side::Denies,
-            "repeats the SELECT policy's USING, which PostgreSQL also checks on the new row of \
+    let cluster = Cluster::start().await;
+    let case = ParityCase::reading(
+        "resulting-row-local",
+        schema,
+        &[
+            "INSERT INTO notes VALUES ('n1', 'alice'), ('n2', 'bob')",
+            "CREATE ROLE app_reader LOGIN; GRANT SELECT, INSERT, UPDATE ON notes TO app_reader",
+        ],
+        vec![caller("alice"), caller("bob")],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .updating("notes", "author_id = 'bob'")
+    .unobservable(
+        "notes",
+        "notes_update",
+        ClauseKind::Using,
+        Side::Denies,
+        REPEATS_SELECT,
+    )
+    .unobservable(
+        "notes",
+        "notes_update",
+        ClauseKind::UsingAsCheck,
+        Side::Denies,
+        "repeats the SELECT policy's USING, which PostgreSQL also checks on the new row of \
              an UPDATE naming its rows",
-        );
-        let run = support::parity::run(&cluster, &case).await;
-        assert_agrees(&case, &run);
-        let local = |subject: &str, object: &str, statement| {
-            run.observations
-                .iter()
-                .find(|observation| {
-                    observation.subject == subject
-                        && observation.object == object
-                        && observation.statement == statement
-                })
-                .and_then(|observation| observation.local)
-        };
-        assert_eq!(
-            local("alice", "notes:n1", ActionStatement::Insert),
-            Some(true)
-        );
-        assert_eq!(
-            local("alice", "notes:n2", ActionStatement::Insert),
-            Some(false)
-        );
-        // The stored row is Alice's, and the row the update writes is Bob's.
-        assert_eq!(
-            local("alice", "notes:n1", ActionStatement::Update),
-            Some(false)
-        );
-        assert_eq!(
-            local("bob", "notes:n2", ActionStatement::Update),
-            Some(true)
-        );
-        for statement in [ActionStatement::Insert, ActionStatement::Update] {
-            assert!(run
-                .observations
-                .iter()
-                .filter(|observation| observation.statement == statement)
-                .all(|observation| observation.local.is_some()));
-        }
+    );
+    let run = support::parity::run(&cluster, &case).await;
+    assert_agrees(&case, &run);
+    let local = |subject: &str, object: &str, statement| {
+        run.observations
+            .iter()
+            .find(|observation| {
+                observation.subject == subject
+                    && observation.object == object
+                    && observation.statement == statement
+            })
+            .and_then(|observation| observation.local)
+    };
+    assert_eq!(
+        local("alice", "notes:n1", ActionStatement::Insert),
+        Some(true)
+    );
+    assert_eq!(
+        local("alice", "notes:n2", ActionStatement::Insert),
+        Some(false)
+    );
+    // The stored row is Alice's, and the row the update writes is Bob's.
+    assert_eq!(
+        local("alice", "notes:n1", ActionStatement::Update),
+        Some(false)
+    );
+    assert_eq!(
+        local("bob", "notes:n2", ActionStatement::Update),
+        Some(true)
+    );
+    for statement in [ActionStatement::Insert, ActionStatement::Update] {
+        assert!(run
+            .observations
+            .iter()
+            .filter(|observation| observation.statement == statement)
+            .all(|observation| observation.local.is_some()));
     }
 }

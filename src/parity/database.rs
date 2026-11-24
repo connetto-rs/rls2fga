@@ -63,11 +63,7 @@ impl Database {
             .append_pair("connect_timeout", "10");
         let mut admin = PgConnection::establish(database_url.as_str())?;
         admin.batch_execute("SET statement_timeout = '30s'; SET lock_timeout = '5s'")?;
-        let version: String =
-            diesel::select(current_setting("server_version_num")).get_result(&mut admin)?;
-        if version.parse::<u32>().ok().map(|number| number / 10_000) != Some(18) {
-            return Err(ParityError::Version(version));
-        }
+        postgres_18(diesel::select(current_setting("server_version_num")).get_result(&mut admin)?)?;
         let mut roles = Vec::new();
         for statement in
             Parser::parse_sql(&PostgreSqlDialect {}, &case.schema).map_err(ParityError::Roles)?
@@ -185,10 +181,37 @@ impl Database {
     }
 }
 
+/// Refuse a cluster whose `server_version_num` is not of the `PostgreSQL` 18 series.
+fn postgres_18(version: String) -> Result<(), ParityError> {
+    if version.parse::<u32>().ok().map(|number| number / 10_000) == Some(18) {
+        Ok(())
+    } else {
+        Err(ParityError::Version(version))
+    }
+}
+
 impl Drop for Database {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
             let _ = writeln!(std::io::stderr(), "Database cleanup failed {error}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Only a `server_version_num` of the 18 series is a cluster the fixtures were
+    /// recorded on.
+    #[test]
+    fn a_cluster_other_than_postgres_18_is_refused() {
+        assert!(postgres_18("180001".to_owned()).is_ok());
+        for version in ["170004", "190000", "18", "not a number"] {
+            assert!(
+                matches!(postgres_18(version.to_owned()), Err(ParityError::Version(refused)) if refused == version),
+                "{version} is refused"
+            );
         }
     }
 }

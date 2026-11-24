@@ -192,29 +192,27 @@ fn panic_message(joined: tokio::task::JoinError) -> String {
         .unwrap_or_else(|| "panicked with no message".to_string())
 }
 
-/// Compare table privileges on `PostgreSQL` 17 and 18.
+/// Compare table privileges on `PostgreSQL` 18.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn table_privileges_agree_on_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        a_withheld_privilege_refuses_what_the_policy_admits(&cluster, major).await;
-        a_kind_reaches_a_privilege_through_its_membership(&cluster, major).await;
-        every_grant_shape_gates_its_command(&cluster, major).await;
-        session_grantees_resolve_to_the_role_the_ddl_ran_as(&cluster, major).await;
-        a_keyless_table_keeps_role_scoped_permissions(&cluster, major).await;
-        column_grants_answer_the_columns_a_statement_touches(&cluster, major).await;
-        a_statement_reading_no_column_needs_one_column_held(&cluster, major).await;
-        a_composite_key_read_back_needs_every_key_column(&cluster, major).await;
-        a_whole_table_grant_on_rls_off_answers_unrestricted(&cluster, major).await;
-        a_role_lacking_the_command_keeps_the_answer_judged(&cluster, major).await;
-        a_policy_reaching_only_the_role_lacking_the_command_denies_it(&cluster, major).await;
-        a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(&cluster, major).await;
-        an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(&cluster, major).await;
-    }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn table_privileges_agree_on_postgres() {
+    let cluster = Cluster::start().await;
+    a_withheld_privilege_refuses_what_the_policy_admits(&cluster).await;
+    a_kind_reaches_a_privilege_through_its_membership(&cluster).await;
+    every_grant_shape_gates_its_command(&cluster).await;
+    session_grantees_resolve_to_the_role_the_ddl_ran_as(&cluster).await;
+    a_keyless_table_keeps_role_scoped_permissions(&cluster).await;
+    column_grants_answer_the_columns_a_statement_touches(&cluster).await;
+    a_statement_reading_no_column_needs_one_column_held(&cluster).await;
+    a_composite_key_read_back_needs_every_key_column(&cluster).await;
+    a_whole_table_grant_on_rls_off_answers_unrestricted(&cluster).await;
+    a_role_lacking_the_command_keeps_the_answer_judged(&cluster).await;
+    a_policy_reaching_only_the_role_lacking_the_command_denies_it(&cluster).await;
+    a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(&cluster).await;
+    an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(&cluster).await;
 }
 
-/// The probe's constraint-block reading, on `PostgreSQL` 17 and 18.
+/// The probe's constraint-block reading, on `PostgreSQL` 18.
 ///
 /// A write the policy admits meets the table's own declared integrity when the copy
 /// itself breaks one, and the probe reads it as allowed. A delete reaches its trigger only
@@ -222,32 +220,22 @@ async fn table_privileges_agree_on_postgres_17_and_18() {
 /// allowed too. A trigger that `RAISE`s the same SQLSTATE names no constraint, and the
 /// probe must fail loudly instead.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
 async fn the_probe_tells_a_constraint_block_from_a_trigger_raise() {
-    for major in ["17", "18"] {
-        let cluster = Arc::new(Cluster::start_on(major).await);
-        a_declared_check_block_is_read_as_allowed(Arc::clone(&cluster), major).await;
-        a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(Arc::clone(&cluster), major).await;
-        a_delete_whose_trigger_breaks_another_tables_key_is_read_as_allowed(
-            Arc::clone(&cluster),
-            major,
-        )
-        .await;
-        a_trigger_raise_is_not_a_constraint_block(Arc::clone(&cluster), major).await;
-        a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(
-            Arc::clone(&cluster),
-            major,
-        )
-        .await;
-    }
+    let cluster = Arc::new(Cluster::start().await);
+    a_declared_check_block_is_read_as_allowed(Arc::clone(&cluster)).await;
+    a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(Arc::clone(&cluster)).await;
+    a_delete_whose_trigger_breaks_another_tables_key_is_read_as_allowed(Arc::clone(&cluster)).await;
+    a_trigger_raise_is_not_a_constraint_block(Arc::clone(&cluster)).await;
+    a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(Arc::clone(&cluster)).await;
 }
 
 /// A `CHECK` the probed table declares blocking a copy the policy admits reads as allowed.
-async fn a_declared_check_block_is_read_as_allowed(cluster: Arc<Cluster>, major: &str) {
+async fn a_declared_check_block_is_read_as_allowed(cluster: Arc<Cluster>) {
     // The check binds the key column, so the probe's fresh key breaks it while the seeded
     // rows keep it, and only the copy's own violation raises.
     let case = ParityCase::reading(
-        &format!("probe-declared-check-{major}"),
+        "probe-declared-check",
 "
 CREATE ROLE checker NOLOGIN;
 CREATE TABLE checked_notes (
@@ -277,12 +265,9 @@ GRANT ALL ON checked_notes TO checker;
 
 /// A `DELETE` of a parent row its children reference reads as allowed, the foreign key
 /// being on the child, not the probed table.
-async fn a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(
-    cluster: Arc<Cluster>,
-    major: &str,
-) {
+async fn a_parent_delete_blocked_by_a_child_fk_is_read_as_allowed(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
-        &format!("probe-parent-delete-fk-{major}"),
+        "probe-parent-delete-fk",
         "
 CREATE ROLE archivist NOLOGIN;
 CREATE TABLE papers (id TEXT PRIMARY KEY);
@@ -329,10 +314,9 @@ GRANT ALL ON papers, paper_copies TO archivist;
 /// the owner's delete as allowed and the other caller's as the policy's denial.
 async fn a_delete_whose_trigger_breaks_another_tables_key_is_read_as_allowed(
     cluster: Arc<Cluster>,
-    major: &str,
 ) {
     let case = ParityCase::reading(
-        &format!("probe-trigger-delete-fk-{major}"),
+        "probe-trigger-delete-fk",
         "
 CREATE ROLE curator NOLOGIN;
 CREATE TABLE heads (id TEXT PRIMARY KEY);
@@ -389,9 +373,9 @@ CREATE TRIGGER items_head_removed AFTER DELETE ON items
 
 /// A trigger that `RAISE`s the check-violation SQLSTATE without naming a constraint is not
 /// a constraint block, so the probe fails loudly rather than reading the raise as allowed.
-async fn a_trigger_raise_is_not_a_constraint_block(cluster: Arc<Cluster>, major: &str) {
+async fn a_trigger_raise_is_not_a_constraint_block(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
-        &format!("probe-trigger-raise-{major}"),
+        "probe-trigger-raise",
         "
 CREATE ROLE triggerer NOLOGIN;
 CREATE TABLE trigger_notes (id TEXT PRIMARY KEY, body TEXT);
@@ -435,12 +419,9 @@ $$;",
 /// A `23503` naming a real foreign key that references neither the probed table nor is
 /// declared on it is not a constraint block of the probe's table, so the probe fails
 /// loudly rather than reading the violation as allowed.
-async fn a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(
-    cluster: Arc<Cluster>,
-    major: &str,
-) {
+async fn a_foreign_key_outside_the_probed_table_is_not_a_constraint_block(cluster: Arc<Cluster>) {
     let case = ParityCase::reading(
-        &format!("probe-foreign-key-outside-{major}"),
+        "probe-foreign-key-outside",
         "
 CREATE ROLE decoy NOLOGIN;
 CREATE TABLE decoy_notes (id TEXT PRIMARY KEY, body TEXT);
@@ -496,9 +477,9 @@ $$;",
 }
 
 /// Missing privileges deny rows an ownership policy admits.
-async fn a_withheld_privilege_refuses_what_the_policy_admits(cluster: &Cluster, major: &str) {
+async fn a_withheld_privilege_refuses_what_the_policy_admits(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-withheld-{major}"),
+        "privileges-withheld",
         "
 CREATE TABLE notes (id BIGINT PRIMARY KEY, owner TEXT NOT NULL, body TEXT);
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
@@ -540,9 +521,9 @@ GRANT SELECT, UPDATE ON notes TO kind_user;
 }
 
 /// An acting role inherits privileges from its granted roles.
-async fn a_kind_reaches_a_privilege_through_its_membership(cluster: &Cluster, major: &str) {
+async fn a_kind_reaches_a_privilege_through_its_membership(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-kind-membership-{major}"),
+        "privileges-kind-membership",
         "
 CREATE TABLE notes (id BIGINT PRIMARY KEY, owner TEXT NOT NULL, body TEXT);
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
@@ -576,9 +557,9 @@ GRANT UPDATE ON notes TO writers;
 }
 
 /// Public grants, all privileges and revokes apply independently.
-async fn every_grant_shape_gates_its_command(cluster: &Cluster, major: &str) {
+async fn every_grant_shape_gates_its_command(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-every-shape-{major}"),
+        "privileges-every-shape",
         r"
 CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -628,9 +609,9 @@ REVOKE DELETE ON docs FROM editor;
 }
 
 /// DDL session grantees bind to the role selected by `SET ROLE`.
-async fn session_grantees_resolve_to_the_role_the_ddl_ran_as(cluster: &Cluster, major: &str) {
+async fn session_grantees_resolve_to_the_role_the_ddl_ran_as(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-session-grantees-{major}"),
+        "privileges-session-grantees",
         "
 CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT);
 ALTER TABLE notes OWNER TO app_owner;
@@ -663,9 +644,9 @@ RESET ROLE;
     assert_agrees(&case, &run);
 }
 
-async fn a_keyless_table_keeps_role_scoped_permissions(cluster: &Cluster, major: &str) {
+async fn a_keyless_table_keeps_role_scoped_permissions(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-keyless-{major}"),
+        "privileges-keyless",
         "
 CREATE TABLE scratch(note TEXT);
 GRANT SELECT ON scratch TO reader;
@@ -701,9 +682,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON scratch TO writer;
 }
 
 /// Column grants allow a statement exactly where every column it touches is held.
-async fn column_grants_answer_the_columns_a_statement_touches(cluster: &Cluster, major: &str) {
+async fn column_grants_answer_the_columns_a_statement_touches(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-columns-{major}"),
+        "privileges-columns",
         "
 CREATE TABLE docs (id TEXT PRIMARY KEY, body TEXT, title TEXT);
 ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
@@ -781,9 +762,9 @@ GRANT SELECT (id, body), INSERT, UPDATE (body) ON docs TO filer;
 }
 
 /// A statement reading no column needs `SELECT` on any one column.
-async fn a_statement_reading_no_column_needs_one_column_held(cluster: &Cluster, major: &str) {
+async fn a_statement_reading_no_column_needs_one_column_held(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-columns-keyless-{major}"),
+        "privileges-columns-keyless",
         "
 CREATE TABLE scratch (note TEXT, tag TEXT);
 GRANT SELECT (tag), UPDATE (note) ON scratch TO tagger;
@@ -817,9 +798,9 @@ GRANT SELECT (tag), UPDATE (tag) ON scratch TO untagger;
 }
 
 /// Reading a written row back by a composite key reads every key column.
-async fn a_composite_key_read_back_needs_every_key_column(cluster: &Cluster, major: &str) {
+async fn a_composite_key_read_back_needs_every_key_column(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-columns-composite-{major}"),
+        "privileges-columns-composite",
         "
 CREATE TABLE pairs (a TEXT, b TEXT, note TEXT, PRIMARY KEY (a, b));
 ALTER TABLE pairs ENABLE ROW LEVEL SECURITY;
@@ -851,9 +832,9 @@ GRANT INSERT, SELECT (a, b) ON pairs TO whole;
 }
 
 /// Commands held by every acting role on an unguarded table grant locally.
-async fn a_whole_table_grant_on_rls_off_answers_unrestricted(cluster: &Cluster, major: &str) {
+async fn a_whole_table_grant_on_rls_off_answers_unrestricted(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-unrestricted-{major}"),
+        "privileges-unrestricted",
         "
 CREATE TABLE ledger (id TEXT PRIMARY KEY, note TEXT);
 GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
@@ -901,9 +882,9 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON ledger TO ledger_a, ledger_b;
 }
 
 /// A role lacking the command keeps the answer judged, and a role holding no privilege anywhere still blocks the local grant.
-async fn a_role_lacking_the_command_keeps_the_answer_judged(cluster: &Cluster, major: &str) {
+async fn a_role_lacking_the_command_keeps_the_answer_judged(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-one-lacks-{major}"),
+        "privileges-one-lacks",
         "
 CREATE TABLE vault (id TEXT PRIMARY KEY, note TEXT);
 GRANT SELECT ON vault TO vault_keeper;
@@ -947,12 +928,9 @@ GRANT SELECT ON vault TO vault_keeper;
 
 /// A policy reaching only the role without `INSERT` leaves `INSERT` denied to both roles, one
 /// for want of a policy and the other for want of the privilege.
-async fn a_policy_reaching_only_the_role_lacking_the_command_denies_it(
-    cluster: &Cluster,
-    major: &str,
-) {
+async fn a_policy_reaching_only_the_role_lacking_the_command_denies_it(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-policy-on-unprivileged-{major}"),
+        "privileges-policy-on-unprivileged",
         "
 CREATE TABLE t0 (id INTEGER PRIMARY KEY, owner TEXT NOT NULL);
 ALTER TABLE t0 ENABLE ROW LEVEL SECURITY;
@@ -990,12 +968,9 @@ CREATE POLICY p ON t0 FOR ALL TO gen_r1 USING (owner = current_setting('app.user
 }
 
 /// An all-roles `USING (true)` policy is the local grant, and a surviving row predicate or a clock condition is not.
-async fn a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(
-    cluster: &Cluster,
-    major: &str,
-) {
+async fn a_true_policy_is_unrestricted_beside_a_restrictive_and_a_clocked_one(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-true-beside-restrictive-{major}"),
+        "privileges-true-beside-restrictive",
         "
 CREATE TABLE open_memo (id TEXT PRIMARY KEY, note TEXT);
 ALTER TABLE open_memo ENABLE ROW LEVEL SECURITY;
@@ -1088,12 +1063,9 @@ GRANT SELECT ON open_memo, private_memo, windowed_memo TO memo_a, memo_b;
 }
 
 /// A direct partition route can grant locally while its root route filters rows.
-async fn an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(
-    cluster: &Cluster,
-    major: &str,
-) {
+async fn an_rls_off_child_is_unrestricted_beside_its_filtered_ancestor(cluster: &Cluster) {
     let case = ParityCase::reading(
-        &format!("privileges-partition-child-{major}"),
+        "privileges-partition-child",
         "
 CREATE TABLE audit_events (
     id TEXT, owner_id TEXT, note TEXT, bucket TEXT NOT NULL DEFAULT 'recent',

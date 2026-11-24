@@ -1,4 +1,4 @@
-//! The core schema of connetto-schema, compared against `PostgreSQL` 17 and 18 over every
+//! The core schema of connetto-schema, compared against `PostgreSQL` 18 over every
 //! table, every command and a principal for each way the core grants or refuses access.
 //!
 //! `tests/fixtures/core_schema/input.sql` is the schema at a pinned connetto-schema commit,
@@ -46,7 +46,8 @@ const ERIN: &str = "00000000-0000-0000-0000-000000000105";
 const GRACE: &str = "00000000-0000-0000-0000-000000000106";
 /// Organization admin acting through the installation `IN1`, capped below admin.
 const IVAN: &str = "00000000-0000-0000-0000-000000000107";
-/// Organization writer the organization blocked.
+/// Organization writer the organization blocked. Only seeded, never asked, because the
+/// database answers her on every pair as it answers `QUINN`.
 const JUDY: &str = "00000000-0000-0000-0000-000000000108";
 /// Organization admin acting through the blocked installation `IN2`.
 const KATE: &str = "00000000-0000-0000-0000-000000000109";
@@ -344,9 +345,8 @@ fn committed_principals() -> Vec<Principal> {
         user(CAROL, &[]),
         user(DAVE, &[]),
         user(ERIN, &[]),
-        user(GRACE, &[("app.verified_email", "grace@example.com")]),
+        grace(),
         user(IVAN, &[("app.installation_id", IN1)]),
-        user(JUDY, &[]),
         user(KATE, &[("app.installation_id", IN2)]),
         user(LEO, &[]),
         user(MIA, &[]),
@@ -363,6 +363,11 @@ fn committed_principals() -> Vec<Principal> {
     ]
 }
 
+/// `GRACE`, invited to `O1` by her verified email.
+fn grace() -> Principal {
+    user(GRACE, &[("app.verified_email", "grace@example.com")])
+}
+
 /// The committed state, its inserts written onto keys an arm admits: a grant of each
 /// granted resource and a block, a membership and a team membership for callers who hold
 /// none yet, a permission for a kind `IN1` is not capped to, and a link token no link
@@ -373,47 +378,43 @@ fn committed_principals() -> Vec<Principal> {
 /// archived `P3`. `CAROL` lifts `P2` from `F1` to `O1`, which she does not administer, and
 /// `ALICE` moves `P1` below the archived `F2`. The grant of `P1` to `T2` is raised to
 /// admin, a role `BOB` may not share.
-fn committed(major: &str) -> ParityCase {
-    core_case(
-        &format!("core-schema-pg{major}"),
-        &committed_seed(),
-        committed_principals(),
-    )
-    .updating(
-        "ownables",
-        &format!(
-            "project_id = CASE id WHEN '{W2}' THEN '{P1}'::uuid WHEN '{W1}' THEN '{P3}'::uuid \
+fn committed() -> ParityCase {
+    core_case("core-schema", &committed_seed(), committed_principals())
+        .updating(
+            "ownables",
+            &format!(
+                "project_id = CASE id WHEN '{W2}' THEN '{P1}'::uuid WHEN '{W1}' THEN '{P3}'::uuid \
              ELSE project_id END"
-        ),
-    )
-    .updating(
-        "resource_parents",
-        &format!(
-            "parent_id = CASE id WHEN '{P2}' THEN '{O1}'::uuid WHEN '{P1}' THEN '{F2}'::uuid \
+            ),
+        )
+        .updating(
+            "resource_parents",
+            &format!(
+                "parent_id = CASE id WHEN '{P2}' THEN '{O1}'::uuid WHEN '{P1}' THEN '{F2}'::uuid \
              ELSE parent_id END, \
              parent_kind = CASE id WHEN '{P2}' THEN 'organization'::authz.resource_kind \
              WHEN '{P1}' THEN 'folder'::authz.resource_kind ELSE parent_kind END"
-        ),
-    )
-    .updating(
-        "grants",
-        &format!("role = CASE WHEN grantee_id = '{T2}' THEN 'admin'::authz.role ELSE role END"),
-    )
-    .inserting_values("memberships", &[("organization_id", O1), ("user_id", PAUL)])
-    // A copied invitation belongs to another membership, so a new one is left to its
-    // default of none.
-    .inserting_columns("memberships", &["organization_id", "user_id", "state"])
-    .inserting_values("grants", &[("grantee_id", PAUL)])
-    .inserting_values("team_members", &[("team_id", T2), ("user_id", ERIN)])
-    .inserting_values(
-        "organization_blocks",
-        &[("organization_id", O1), ("principal_id", PAUL)],
-    )
-    .inserting_values(
-        "installation_permissions",
-        &[("installation_id", IN1), ("kind", "folder")],
-    )
-    .inserting_values("share_links", &[("token_hash", &unused_token())])
+            ),
+        )
+        .updating(
+            "grants",
+            &format!("role = CASE WHEN grantee_id = '{T2}' THEN 'admin'::authz.role ELSE role END"),
+        )
+        .inserting_values("memberships", &[("organization_id", O1), ("user_id", PAUL)])
+        // A copied invitation belongs to another membership, so a new one is left to its
+        // default of none.
+        .inserting_columns("memberships", &["organization_id", "user_id", "state"])
+        .inserting_values("grants", &[("grantee_id", PAUL)])
+        .inserting_values("team_members", &[("team_id", T2), ("user_id", ERIN)])
+        .inserting_values(
+            "organization_blocks",
+            &[("organization_id", O1), ("principal_id", PAUL)],
+        )
+        .inserting_values(
+            "installation_permissions",
+            &[("installation_id", IN1), ("kind", "folder")],
+        )
+        .inserting_values("share_links", &[("token_hash", &unused_token())])
 }
 
 /// A link token no seeded link holds, since a copied one would break the column's
@@ -424,9 +425,10 @@ fn unused_token() -> String {
 
 /// The committed state, its membership inserts accepting `GRACE`'s pending invitation,
 /// directly and through the blocked installation `IN2`, whose permissions admit the
-/// acceptance and whose block refuses it.
-fn accepting_an_invitation(major: &str) -> ParityCase {
-    let mut case = committed(major)
+/// acceptance and whose block refuses it. The acceptance is `GRACE`'s, so only she is
+/// asked, directly and through `IN2`.
+fn accepting_an_invitation() -> ParityCase {
+    let mut case = committed()
         .inserting_values(
             "memberships",
             &[
@@ -448,8 +450,8 @@ fn accepting_an_invitation(major: &str) -> ParityCase {
         ),
         ("app.installation_id".to_string(), IN2.to_string()),
     ]);
-    case.principals.push(holding_links(through_blocked, &[]));
-    case.name = format!("core-schema-invitation-pg{major}");
+    case.principals = vec![grace(), holding_links(through_blocked, &[])];
+    case.name = "core-schema-invitation".to_string();
     case
 }
 
@@ -460,7 +462,7 @@ fn accepting_an_invitation(major: &str) -> ParityCase {
 /// founding arms of `memberships_insert`, `grants_insert` and `resources_insert` decide
 /// anything. A replica session skips the triggers that refuse it, which plants it as rows,
 /// grantees included since their trigger is skipped too.
-fn before_founding(major: &str) -> ParityCase {
+fn before_founding() -> ParityCase {
     let seed = format!(
         "DO $$
 BEGIN
@@ -478,7 +480,7 @@ BEGIN
 END $$"
     );
     core_case(
-        &format!("core-schema-founding-pg{major}"),
+        "core-schema-founding",
         &seed,
         vec![user(HENRY, &[]), user(PAUL, &[]), role("anonymous", "app")],
     )
@@ -498,27 +500,11 @@ END $$"
 
 /// The three states together decide every clause side, the founding state reaching the
 /// founding arms the others never can.
-///
-/// The runner's probes block the thread they run on, so each major gets a worker of its own.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn the_core_schema_agrees_with_postgres_17_and_18() {
-    let majors = ["17", "18"].map(|major| tokio::spawn(agrees_on(major)));
-    for major in majors {
-        if let Err(joined) = major.await {
-            std::panic::resume_unwind(joined.into_panic());
-        }
-    }
-}
-
-/// The core schema's three states on `PostgreSQL` `major`.
-async fn agrees_on(major: &'static str) {
-    let cluster = Cluster::start_on(major).await;
-    let variants = [
-        committed(major),
-        accepting_an_invitation(major),
-        before_founding(major),
-    ];
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn the_core_schema_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    let variants = [committed(), accepting_an_invitation(), before_founding()];
     let runs = run_variants_before(&cluster, &variants, DEADLINE).await;
     for (case, run) in variants.iter().zip(&runs) {
         assert_agrees(case, run);

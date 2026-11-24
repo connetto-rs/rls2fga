@@ -1,5 +1,4 @@
-//! Declared definer helpers compared against `PostgreSQL` 17 and 18, with both tuple
-//! loaders.
+//! Declared definer helpers compared against `PostgreSQL` 18, with both tuple loaders.
 
 #![cfg(all(not(target_os = "windows"), feature = "client"))]
 
@@ -48,10 +47,10 @@ fn caller(subject: &str) -> Principal {
     Principal::with_setting(subject, "app_reader", "app.user_id", subject)
 }
 
-fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn levels_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helpers-pg{major}{}",
+            "declared-helpers{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &format!("{LEVELS}{OWNER_READS}{ORDERS}{LEVEL_READS}{INSTALLATIONS}"),
@@ -94,71 +93,69 @@ fn levels_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn declared_helpers_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = levels_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            // A team writer reads and changes every order under the team.
-            expect("bob", "orders:o1", ActionStatement::Select, true);
-            expect("bob", "orders:o2", ActionStatement::Update, true);
-            expect("bob", "orders:o_move", ActionStatement::Update, false);
-            // Reading the destination project leaves the check to refuse the move.
-            expect("hank", "orders:o_move", ActionStatement::Update, false);
-            expect("hank", "orders:o3", ActionStatement::Select, true);
-            expect("bob", "orders:o3", ActionStatement::Select, false);
-            expect("bob", "teams:T1", ActionStatement::Select, true);
-            // A project reader reads that project's orders and changes none.
-            expect("carol", "orders:o2", ActionStatement::Select, true);
-            expect("carol", "orders:o2", ActionStatement::Update, false);
-            expect("carol", "orders:o1", ActionStatement::Select, false);
-            expect("carol", "projects:P2", ActionStatement::Select, true);
-            expect("carol", "teams:T1", ActionStatement::Select, false);
-            // A reader of another team sees only that team's orders.
-            expect("dave", "orders:o3", ActionStatement::Select, true);
-            expect("dave", "orders:o1", ActionStatement::Select, false);
-            // A project admin writes.
-            expect("frank", "orders:o3", ActionStatement::Update, true);
-            // An installation is read by an admin of the level its owner names.
-            expect("frank", "installations:i2", ActionStatement::Select, true);
-            expect("frank", "installations:i1", ActionStatement::Select, false);
-            expect("hank", "installations:i1", ActionStatement::Select, true);
-            expect("hank", "installations:i2", ActionStatement::Select, false);
-            expect("bob", "installations:i1", ActionStatement::Select, false);
-            expect(
-                "hank",
-                "installation_tables:t1",
-                ActionStatement::Select,
-                true,
-            );
-            expect(
-                "frank",
-                "installation_tables:t2",
-                ActionStatement::Select,
-                true,
-            );
-            expect(
-                "frank",
-                "installation_tables:t1",
-                ActionStatement::Select,
-                false,
-            );
-            // No grant, and no caller at all, read nothing.
-            expect("erin", "orders:o1", ActionStatement::Select, false);
-            expect("anonymous", "orders:o1", ActionStatement::Select, false);
-            expect(
-                "anonymous",
-                "installations:i3",
-                ActionStatement::Select,
-                false,
-            );
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn declared_helpers_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = levels_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        // A team writer reads and changes every order under the team.
+        expect("bob", "orders:o1", ActionStatement::Select, true);
+        expect("bob", "orders:o2", ActionStatement::Update, true);
+        expect("bob", "orders:o_move", ActionStatement::Update, false);
+        // Reading the destination project leaves the check to refuse the move.
+        expect("hank", "orders:o_move", ActionStatement::Update, false);
+        expect("hank", "orders:o3", ActionStatement::Select, true);
+        expect("bob", "orders:o3", ActionStatement::Select, false);
+        expect("bob", "teams:T1", ActionStatement::Select, true);
+        // A project reader reads that project's orders and changes none.
+        expect("carol", "orders:o2", ActionStatement::Select, true);
+        expect("carol", "orders:o2", ActionStatement::Update, false);
+        expect("carol", "orders:o1", ActionStatement::Select, false);
+        expect("carol", "projects:P2", ActionStatement::Select, true);
+        expect("carol", "teams:T1", ActionStatement::Select, false);
+        // A reader of another team sees only that team's orders.
+        expect("dave", "orders:o3", ActionStatement::Select, true);
+        expect("dave", "orders:o1", ActionStatement::Select, false);
+        // A project admin writes.
+        expect("frank", "orders:o3", ActionStatement::Update, true);
+        // An installation is read by an admin of the level its owner names.
+        expect("frank", "installations:i2", ActionStatement::Select, true);
+        expect("frank", "installations:i1", ActionStatement::Select, false);
+        expect("hank", "installations:i1", ActionStatement::Select, true);
+        expect("hank", "installations:i2", ActionStatement::Select, false);
+        expect("bob", "installations:i1", ActionStatement::Select, false);
+        expect(
+            "hank",
+            "installation_tables:t1",
+            ActionStatement::Select,
+            true,
+        );
+        expect(
+            "frank",
+            "installation_tables:t2",
+            ActionStatement::Select,
+            true,
+        );
+        expect(
+            "frank",
+            "installation_tables:t1",
+            ActionStatement::Select,
+            false,
+        );
+        // No grant, and no caller at all, read nothing.
+        expect("erin", "orders:o1", ActionStatement::Select, false);
+        expect("anonymous", "orders:o1", ActionStatement::Select, false);
+        expect(
+            "anonymous",
+            "installations:i3",
+            ActionStatement::Select,
+            false,
+        );
+        assert_agrees(&case, &run);
     }
 }
 
@@ -175,10 +172,10 @@ CREATE POLICY groups_read ON groups FOR SELECT USING (
 
 /// `org` holds `team` and `side`, `team` holds `squad`, `other` is a tree of its own, and
 /// `loop_a` and `loop_b` are each other's parent.
-fn groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn groups_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-walk-pg{major}{}",
+            "declared-helper-walk{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &format!("{LEVELS}{OWNER_READS}{GROUPS}{GROUP_READS}"),
@@ -221,54 +218,52 @@ fn groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_walk_down_the_group_tree_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = groups_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            // A grant in the middle reaches the subtree, not the parent or a sibling.
-            expect("alice", "docs:d_team", ActionStatement::Select, true);
-            expect("alice", "docs:d_squad", ActionStatement::Select, true);
-            expect("alice", "docs:d_org", ActionStatement::Select, false);
-            expect("alice", "docs:d_side", ActionStatement::Select, false);
-            expect("alice", "docs:d_other", ActionStatement::Select, false);
-            expect("alice", "docs:d_squad", ActionStatement::Update, false);
-            expect("alice", "groups:squad", ActionStatement::Select, true);
-            expect("alice", "groups:org", ActionStatement::Select, false);
-            // A write grant at the root reads and changes the whole tree, and no other.
-            expect("bob", "docs:d_org", ActionStatement::Select, true);
-            expect("bob", "docs:d_squad", ActionStatement::Update, true);
-            expect("bob", "docs:d_side", ActionStatement::Update, true);
-            expect("bob", "docs:d_move", ActionStatement::Update, false);
-            // Reading the destination group leaves the check to refuse the move.
-            expect("gina", "docs:d_move", ActionStatement::Update, false);
-            expect("gina", "docs:d_other", ActionStatement::Select, true);
-            expect("bob", "docs:d_other", ActionStatement::Select, false);
-            // A grant on a cycle reaches every group on it, and a walk never reaching a
-            // grant ends.
-            expect("dave", "docs:d_loop_a", ActionStatement::Select, true);
-            expect("dave", "docs:d_loop_b", ActionStatement::Select, true);
-            expect("alice", "docs:d_loop_a", ActionStatement::Select, false);
-            // No grant, and no caller at all, read nothing.
-            expect("erin", "docs:d_squad", ActionStatement::Select, false);
-            expect("anonymous", "docs:d_org", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_walk_down_the_group_tree_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = groups_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        // A grant in the middle reaches the subtree, not the parent or a sibling.
+        expect("alice", "docs:d_team", ActionStatement::Select, true);
+        expect("alice", "docs:d_squad", ActionStatement::Select, true);
+        expect("alice", "docs:d_org", ActionStatement::Select, false);
+        expect("alice", "docs:d_side", ActionStatement::Select, false);
+        expect("alice", "docs:d_other", ActionStatement::Select, false);
+        expect("alice", "docs:d_squad", ActionStatement::Update, false);
+        expect("alice", "groups:squad", ActionStatement::Select, true);
+        expect("alice", "groups:org", ActionStatement::Select, false);
+        // A write grant at the root reads and changes the whole tree, and no other.
+        expect("bob", "docs:d_org", ActionStatement::Select, true);
+        expect("bob", "docs:d_squad", ActionStatement::Update, true);
+        expect("bob", "docs:d_side", ActionStatement::Update, true);
+        expect("bob", "docs:d_move", ActionStatement::Update, false);
+        // Reading the destination group leaves the check to refuse the move.
+        expect("gina", "docs:d_move", ActionStatement::Update, false);
+        expect("gina", "docs:d_other", ActionStatement::Select, true);
+        expect("bob", "docs:d_other", ActionStatement::Select, false);
+        // A grant on a cycle reaches every group on it, and a walk never reaching a
+        // grant ends.
+        expect("dave", "docs:d_loop_a", ActionStatement::Select, true);
+        expect("dave", "docs:d_loop_b", ActionStatement::Select, true);
+        expect("alice", "docs:d_loop_a", ActionStatement::Select, false);
+        // No grant, and no caller at all, read nothing.
+        expect("erin", "docs:d_squad", ActionStatement::Select, false);
+        expect("anonymous", "docs:d_org", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }
 
 /// `org`, a folder, holds `team`, which holds `squad`, a project, and `other` is a folder
 /// of its own. The walk reads every group it reached, and changes only the folders and
 /// projects among them.
-fn reselected_groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn reselected_groups_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-reselection-pg{major}{}",
+            "declared-helper-reselection{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &format!(
@@ -307,32 +302,30 @@ fn reselected_groups_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_walk_reselecting_the_groups_it_reached_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = reselected_groups_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            // Reading keeps every group the walk reached.
-            expect("alice", "docs:d_team", ActionStatement::Select, true);
-            expect("alice", "docs:d_squad", ActionStatement::Select, true);
-            expect("alice", "docs:d_org", ActionStatement::Select, false);
-            expect("bob", "docs:d_team", ActionStatement::Select, true);
-            // Changing keeps the folders and projects among them, not the team.
-            expect("bob", "docs:d_org", ActionStatement::Update, true);
-            expect("bob", "docs:d_squad", ActionStatement::Update, true);
-            expect("bob", "docs:d_team", ActionStatement::Update, false);
-            expect("bob", "docs:d_move", ActionStatement::Update, false);
-            expect("bob", "docs:d_other", ActionStatement::Update, false);
-            expect("alice", "docs:d_squad", ActionStatement::Update, false);
-            expect("erin", "docs:d_org", ActionStatement::Select, false);
-            expect("anonymous", "docs:d_org", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_walk_reselecting_the_groups_it_reached_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = reselected_groups_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        // Reading keeps every group the walk reached.
+        expect("alice", "docs:d_team", ActionStatement::Select, true);
+        expect("alice", "docs:d_squad", ActionStatement::Select, true);
+        expect("alice", "docs:d_org", ActionStatement::Select, false);
+        expect("bob", "docs:d_team", ActionStatement::Select, true);
+        // Changing keeps the folders and projects among them, not the team.
+        expect("bob", "docs:d_org", ActionStatement::Update, true);
+        expect("bob", "docs:d_squad", ActionStatement::Update, true);
+        expect("bob", "docs:d_team", ActionStatement::Update, false);
+        expect("bob", "docs:d_move", ActionStatement::Update, false);
+        expect("bob", "docs:d_other", ActionStatement::Update, false);
+        expect("alice", "docs:d_squad", ActionStatement::Update, false);
+        expect("erin", "docs:d_org", ActionStatement::Select, false);
+        expect("anonymous", "docs:d_org", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -344,10 +337,10 @@ const EDGE_FOLDER_HELPERS: &str = r#"{
 /// `root` holds `mid`, which holds `leaf`, and `other` stands alone, each edge a row of
 /// `folder_parents`. `p_leaf`, `p_mid` and `p_other` sit in the folder they name, and
 /// `p_loose` in none.
-fn edge_folders_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn edge_folders_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-edges-pg{major}{}",
+            "declared-helper-edges{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         EDGE_FOLDERS,
@@ -379,44 +372,42 @@ fn edge_folders_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_walk_and_a_parent_arm_through_edge_tables_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = edge_folders_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            };
-            // A grant on the root reaches the whole chain and the projects in it, and a
-            // project in no folder inherits nothing.
-            expect("alice", "folders:root", true);
-            expect("alice", "folders:leaf", true);
-            expect("alice", "folders:other", false);
-            expect("alice", "projects:p_leaf", true);
-            expect("alice", "projects:p_mid", true);
-            expect("alice", "projects:p_loose", false);
-            // A grant in the middle reaches below it, not above.
-            expect("bob", "folders:root", false);
-            expect("bob", "folders:leaf", true);
-            expect("bob", "projects:p_leaf", true);
-            expect("bob", "projects:p_other", false);
-            // A folder with no edge is a tree of its own.
-            expect("carol", "projects:p_other", true);
-            expect("carol", "projects:p_leaf", false);
-            // No grant, and no caller at all, read nothing.
-            expect("erin", "folders:root", false);
-            expect("anonymous", "projects:p_leaf", false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_walk_and_a_parent_arm_through_edge_tables_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = edge_folders_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        };
+        // A grant on the root reaches the whole chain and the projects in it, and a
+        // project in no folder inherits nothing.
+        expect("alice", "folders:root", true);
+        expect("alice", "folders:leaf", true);
+        expect("alice", "folders:other", false);
+        expect("alice", "projects:p_leaf", true);
+        expect("alice", "projects:p_mid", true);
+        expect("alice", "projects:p_loose", false);
+        // A grant in the middle reaches below it, not above.
+        expect("bob", "folders:root", false);
+        expect("bob", "folders:leaf", true);
+        expect("bob", "projects:p_leaf", true);
+        expect("bob", "projects:p_other", false);
+        // A folder with no edge is a tree of its own.
+        expect("carol", "projects:p_other", true);
+        expect("carol", "projects:p_leaf", false);
+        // No grant, and no caller at all, read nothing.
+        expect("erin", "folders:root", false);
+        expect("anonymous", "projects:p_leaf", false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -428,10 +419,10 @@ const RESOURCE_HELPERS: &str = r#"{
 /// The folder `f_team` under `f_root`, the project `p1` under `f_team`, the project
 /// `p_other` under no folder, and the ownables `o1` in `p1` and `o2` in `p_other`, read
 /// through the walk down both edge tables and changed through the walk up them.
-fn resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn resources_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-lateral-edges-pg{major}{}",
+            "declared-helper-lateral-edges{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         RESOURCES,
@@ -473,37 +464,35 @@ fn resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn lateral_walks_over_composite_key_edge_tables_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = resources_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            // Walking down both edge tables, a folder's grant reaches its projects and
-            // their ownables, and a project's grant only its own ownables.
-            expect("alice", "resources:f_team", ActionStatement::Select, true);
-            expect("alice", "resources:o1", ActionStatement::Select, true);
-            expect("alice", "resources:f_root", ActionStatement::Select, false);
-            expect("bob", "resources:o1", ActionStatement::Select, true);
-            expect("carol", "resources:o2", ActionStatement::Select, true);
-            expect("carol", "resources:o1", ActionStatement::Select, false);
-            expect("dave", "resources:p1", ActionStatement::Select, false);
-            // Walking up both, a grant reaches every row above it, which a change needs
-            // beside reading the row.
-            expect("dave", "resources:o1", ActionStatement::Update, true);
-            expect("alice", "resources:f_team", ActionStatement::Update, true);
-            expect("alice", "resources:p1", ActionStatement::Update, false);
-            expect("bob", "resources:f_root", ActionStatement::Update, true);
-            expect("bob", "resources:f_team", ActionStatement::Update, false);
-            // No grant, and no caller at all, read nothing.
-            expect("erin", "resources:f_root", ActionStatement::Select, false);
-            expect("anonymous", "resources:o1", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn lateral_walks_over_composite_key_edge_tables_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = resources_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        // Walking down both edge tables, a folder's grant reaches its projects and
+        // their ownables, and a project's grant only its own ownables.
+        expect("alice", "resources:f_team", ActionStatement::Select, true);
+        expect("alice", "resources:o1", ActionStatement::Select, true);
+        expect("alice", "resources:f_root", ActionStatement::Select, false);
+        expect("bob", "resources:o1", ActionStatement::Select, true);
+        expect("carol", "resources:o2", ActionStatement::Select, true);
+        expect("carol", "resources:o1", ActionStatement::Select, false);
+        expect("dave", "resources:p1", ActionStatement::Select, false);
+        // Walking up both, a grant reaches every row above it, which a change needs
+        // beside reading the row.
+        expect("dave", "resources:o1", ActionStatement::Update, true);
+        expect("alice", "resources:f_team", ActionStatement::Update, true);
+        expect("alice", "resources:p1", ActionStatement::Update, false);
+        expect("bob", "resources:f_root", ActionStatement::Update, true);
+        expect("bob", "resources:f_team", ActionStatement::Update, false);
+        // No grant, and no caller at all, read nothing.
+        expect("erin", "resources:f_root", ActionStatement::Select, false);
+        expect("anonymous", "resources:o1", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -514,10 +503,10 @@ const BLOCK_HELPERS: &str = r#"{
 
 /// `O1` blocks `alice` and `O2` blocks `carol`, who own projects or write documents in
 /// both organizations.
-fn blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn blocks_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-blocklist-pg{major}{}",
+            "declared-helper-blocklist{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &format!("{BLOCKS}{PROJECTS_UNBLOCKED}{DOCS_UNBLOCKED}"),
@@ -558,46 +547,44 @@ fn blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_blocklist_through_a_declared_helper_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = blocks_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            // A block hides the organization's projects from their owner, for every
-            // command, and their documents through the project.
-            expect("alice", "projects:P1", ActionStatement::Select, false);
-            expect("alice", "projects:P1", ActionStatement::Update, false);
-            expect("alice", "projects:P2", ActionStatement::Select, true);
-            expect("alice", "projects:P2", ActionStatement::Update, true);
-            expect("alice", "docs:d1", ActionStatement::Select, false);
-            expect("alice", "docs:d2", ActionStatement::Select, true);
-            // A block on someone else changes nothing for an unblocked owner.
-            expect("bob", "projects:P3", ActionStatement::Select, true);
-            expect("bob", "projects:P4", ActionStatement::Update, true);
-            expect("bob", "docs:d3", ActionStatement::Select, true);
-            // A block reaches only its own organization's projects.
-            expect("carol", "docs:d4", ActionStatement::Select, false);
-            expect("carol", "docs:d5", ActionStatement::Select, true);
-            // No grant, and no caller at all, read nothing.
-            expect("erin", "projects:P2", ActionStatement::Select, false);
-            expect("anonymous", "projects:P2", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_blocklist_through_a_declared_helper_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = blocks_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        // A block hides the organization's projects from their owner, for every
+        // command, and their documents through the project.
+        expect("alice", "projects:P1", ActionStatement::Select, false);
+        expect("alice", "projects:P1", ActionStatement::Update, false);
+        expect("alice", "projects:P2", ActionStatement::Select, true);
+        expect("alice", "projects:P2", ActionStatement::Update, true);
+        expect("alice", "docs:d1", ActionStatement::Select, false);
+        expect("alice", "docs:d2", ActionStatement::Select, true);
+        // A block on someone else changes nothing for an unblocked owner.
+        expect("bob", "projects:P3", ActionStatement::Select, true);
+        expect("bob", "projects:P4", ActionStatement::Update, true);
+        expect("bob", "docs:d3", ActionStatement::Select, true);
+        // A block reaches only its own organization's projects.
+        expect("carol", "docs:d4", ActionStatement::Select, false);
+        expect("carol", "docs:d5", ActionStatement::Select, true);
+        // No grant, and no caller at all, read nothing.
+        expect("erin", "projects:P2", ActionStatement::Select, false);
+        expect("anonymous", "projects:P2", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }
 
 /// `root`, an organization, holds the team `mid`, which holds the project `leaf`, and the
 /// team `other` stands alone. A block on `leaf` walks up to `root` and past it to the
 /// `NULL` above, and the final query keeps the teams and projects among them.
-fn blocked_units_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn blocked_units_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-blocked-units-pg{major}{}",
+            "declared-helper-blocked-units{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &blocked_units(UNITS_RESELECTED),
@@ -629,34 +616,32 @@ fn blocked_units_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_blocklist_reselecting_the_units_a_walk_up_reached_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = blocked_units_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            };
-            // A block hides the team or project and those above it, never an organization.
-            expect("alice", "units:leaf", false);
-            expect("alice", "units:root", true);
-            expect("alice", "units:other", true);
-            expect("bob", "units:mid", false);
-            expect("erin", "units:other", false);
-            expect("anonymous", "units:other", false);
-            expect("alice", "projects:P1", true);
-            expect("bob", "projects:P1", false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_blocklist_reselecting_the_units_a_walk_up_reached_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = blocked_units_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        };
+        // A block hides the team or project and those above it, never an organization.
+        expect("alice", "units:leaf", false);
+        expect("alice", "units:root", true);
+        expect("alice", "units:other", true);
+        expect("bob", "units:mid", false);
+        expect("erin", "units:other", false);
+        expect("anonymous", "units:other", false);
+        expect("alice", "projects:P1", true);
+        expect("bob", "projects:P1", false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -677,10 +662,10 @@ fn acting(subject: &str, caller: Option<&str>, installation: Option<&str>) -> Pr
 
 /// `O1` blocks the caller `alice` and the installation `i1`, `O2` blocked `i2` until
 /// yesterday, blocks `i3` until tomorrow and blocks `i4` for good.
-fn principal_blocks_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn principal_blocks_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-principal-blocks-pg{major}{}",
+            "declared-helper-principal-blocks{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &principal_blocks(&format!(
@@ -727,35 +712,33 @@ const PRINCIPAL_BLOCK_HELPERS: &str = r#"{
 /// as a block on the caller does, for a user acting through it, for no user at all, and
 /// for an installation acting as the caller itself.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn blocks_on_the_acting_installation_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = principal_blocks_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (subject, p1, p2) in [
-                ("alice", false, true),
-                ("bob", false, true),
-                ("carol", true, true),
-                ("dave", true, false),
-                ("erin", true, true),
-                ("i4", true, false),
-                ("anonymous", false, true),
-            ] {
-                for (object, allowed) in [("projects:P1", p1), ("projects:P2", p2)] {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        subject,
-                        object,
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn blocks_on_the_acting_installation_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = principal_blocks_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, p1, p2) in [
+            ("alice", false, true),
+            ("bob", false, true),
+            ("carol", true, true),
+            ("dave", true, false),
+            ("erin", true, true),
+            ("i4", true, false),
+            ("anonymous", false, true),
+        ] {
+            for (object, allowed) in [("projects:P1", p1), ("projects:P2", p2)] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
             }
-            assert_agrees(&case, &run);
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -778,10 +761,10 @@ fn presenting(subject: &str, links: &[&str], installation: Option<&str>) -> Prin
 }
 
 /// `l2` is revoked, `i1` may read the docs and `i2` may only update them.
-fn request_values_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn request_values_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-request-values-pg{major}{}",
+            "declared-helper-request-values{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &format!("{LEVELS}{OWNER_READS}{REQUEST_VALUES}"),
@@ -815,36 +798,34 @@ fn request_values_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn request_values_behind_helpers_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = request_values_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            };
-            // A presented link reads its docs, a revoked one does not.
-            expect("direct", "docs:d1", true);
-            expect("direct", "docs:d2", false);
-            expect("direct", "docs:d3", false);
-            // An installation approved for reading passes the cap, another does not.
-            expect("via_i1", "docs:d1", true);
-            expect("via_i1", "docs:d3", true);
-            expect("via_i2", "docs:d1", false);
-            // No link, and an installation never set, read nothing.
-            expect("no_links", "docs:d1", false);
-            expect("unset_installation", "docs:d1", false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn request_values_behind_helpers_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = request_values_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        };
+        // A presented link reads its docs, a revoked one does not.
+        expect("direct", "docs:d1", true);
+        expect("direct", "docs:d2", false);
+        expect("direct", "docs:d3", false);
+        // An installation approved for reading passes the cap, another does not.
+        expect("via_i1", "docs:d1", true);
+        expect("via_i1", "docs:d3", true);
+        expect("via_i2", "docs:d1", false);
+        // No link, and an installation never set, read nothing.
+        expect("no_links", "docs:d1", false);
+        expect("unset_installation", "docs:d1", false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -869,10 +850,10 @@ fn installed(subject: &str, installation: Option<&str>) -> Principal {
 
 /// [`ABSENT_INSTALLATION`] with one document, which [`READING_INSTALLATION`] may read and
 /// [`UPDATING_INSTALLATION`] may only update.
-fn absent_installation_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn absent_installation_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-absent-installation-pg{major}{}",
+            "declared-helper-absent-installation{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         ABSENT_INSTALLATION,
@@ -910,31 +891,29 @@ fn absent_installation_case(major: &str, loading_from_rows: bool) -> ParityCase 
 /// connection reads it as `''`, which `NULLIF` reads as `NULL`, and one presenting an
 /// installation passes where the helper allows that installation to read.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn an_absent_installation_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = absent_installation_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (subject, allowed) in [
-                ("via_i1", true),
-                ("via_i2", false),
-                ("via_other", false),
-                ("unset_installation", true),
-                ("empty_installation", true),
-            ] {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    "docs:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-                    ActionStatement::Select,
-                    allowed,
-                );
-            }
-            assert_agrees(&case, &run);
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn an_absent_installation_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = absent_installation_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, allowed) in [
+            ("via_i1", true),
+            ("via_i2", false),
+            ("via_other", false),
+            ("unset_installation", true),
+            ("empty_installation", true),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                "docs:aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                ActionStatement::Select,
+                allowed,
+            );
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -944,10 +923,10 @@ const AUDIENCE_HELPERS: &str = r#"{
 
 /// `p_public` is everyone's, `p_signed` every caller's but `anonymous`, and `p_private`
 /// its members', `alice` and `anonymous`, whom the arm's gate excludes.
-fn audiences_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn audiences_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-audiences-pg{major}{}",
+            "declared-helper-audiences{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         AUDIENCES,
@@ -975,33 +954,31 @@ fn audiences_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn audiences_and_caller_gates_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = audiences_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            };
-            // Everyone includes the caller the other arms' gates exclude.
-            expect("anonymous", "docs:d_public", true);
-            expect("bob", "docs:d_signed", true);
-            expect("anonymous", "docs:d_signed", false);
-            // A member is admitted unless the gate excludes it.
-            expect("alice", "docs:d_private", true);
-            expect("bob", "docs:d_private", false);
-            expect("anonymous", "docs:d_private", false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn audiences_and_caller_gates_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = audiences_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        };
+        // Everyone includes the caller the other arms' gates exclude.
+        expect("anonymous", "docs:d_public", true);
+        expect("bob", "docs:d_signed", true);
+        expect("anonymous", "docs:d_signed", false);
+        // A member is admitted unless the gate excludes it.
+        expect("alice", "docs:d_private", true);
+        expect("bob", "docs:d_private", false);
+        expect("anonymous", "docs:d_private", false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -1024,7 +1001,6 @@ const GATED_GRANT_ARM: &str = "IN (SELECT authz.caller_grantees()) \
 /// `anonymous`, which the signed-in audience excludes, and the grant arm too where
 /// `gated`. Where `inline`, the set holds only the caller and the audiences.
 fn grantees_case(
-    major: &str,
     caller_arm: &str,
     gated: bool,
     inline: bool,
@@ -1046,7 +1022,7 @@ fn grantees_case(
     }
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-grantees-pg{major}{narrowed}{}{}{}",
+            "declared-helper-grantees{narrowed}{}{}{}",
             if gated { "-gated" } else { "" },
             if inline { "-inline" } else { "" },
             if loading_from_rows { "-rows" } else { "" }
@@ -1099,59 +1075,56 @@ fn grantees_case(
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn grants_naming_typed_grantees_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for (caller_arm, gated, inline) in [
-            (CALLER_ARM, false, false),
-            (USER_CALLER_ARM, false, false),
-            (CALLER_ARM, true, false),
-            (CALLER_ARM, true, true),
-        ] {
-            for loading_from_rows in [false, true] {
-                let case = grantees_case(major, caller_arm, gated, inline, loading_from_rows);
-                let run =
-                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-                let expect = |subject: &str, object: &str, allowed| {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        subject,
-                        object,
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                };
-                // A user grant reaches that user alone.
-                expect("alice", "docs:d_user", true);
-                expect("bob", "docs:d_user", false);
-                // An organization grant reaches its active members, unless the set holds
-                // only the caller and the audiences.
-                expect("bob", "docs:d_org", !inline);
-                expect("carol", "docs:d_org", false);
-                // A team grant reaches the team's members and those of every team below.
-                expect("dave", "docs:d_leaf", !inline);
-                expect("dave", "docs:d_root", !inline);
-                expect("erin", "docs:d_root", !inline);
-                expect("erin", "docs:d_leaf", false);
-                // Everyone includes a request without a caller unless the grant arm's
-                // gate excludes it, and signed-in always excludes it.
-                expect("anonymous", "docs:d_everyone", !gated);
-                expect("anonymous", "docs:d_signed", false);
-                expect("carol", "docs:d_signed", true);
-                // A caller spelling a grantee's id is that grantee only where the arm
-                // reads every kind, and climbs the teams above it like a member would.
-                expect("org1", "docs:d_org", caller_arm == CALLER_ARM);
-                expect(
-                    "team_leaf",
-                    "docs:d_root",
-                    caller_arm == CALLER_ARM && !inline,
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn grants_naming_typed_grantees_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for (caller_arm, gated, inline) in [
+        (CALLER_ARM, false, false),
+        (USER_CALLER_ARM, false, false),
+        (CALLER_ARM, true, false),
+        (CALLER_ARM, true, true),
+    ] {
+        for loading_from_rows in [false, true] {
+            let case = grantees_case(caller_arm, gated, inline, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
                 );
-                // A grant naming the caller the grant arm's gate excludes holds it nowhere.
-                expect("anonymous", "docs:d_anonymous", !gated);
-                assert_agrees(&case, &run);
-            }
+            };
+            // A user grant reaches that user alone.
+            expect("alice", "docs:d_user", true);
+            expect("bob", "docs:d_user", false);
+            // An organization grant reaches its active members, unless the set holds
+            // only the caller and the audiences.
+            expect("bob", "docs:d_org", !inline);
+            expect("carol", "docs:d_org", false);
+            // A team grant reaches the team's members and those of every team below.
+            expect("dave", "docs:d_leaf", !inline);
+            expect("dave", "docs:d_root", !inline);
+            expect("erin", "docs:d_root", !inline);
+            expect("erin", "docs:d_leaf", false);
+            // Everyone includes a request without a caller unless the grant arm's
+            // gate excludes it, and signed-in always excludes it.
+            expect("anonymous", "docs:d_everyone", !gated);
+            expect("anonymous", "docs:d_signed", false);
+            expect("carol", "docs:d_signed", true);
+            // A caller spelling a grantee's id is that grantee only where the arm
+            // reads every kind, and climbs the teams above it like a member would.
+            expect("org1", "docs:d_org", caller_arm == CALLER_ARM);
+            expect(
+                "team_leaf",
+                "docs:d_root",
+                caller_arm == CALLER_ARM && !inline,
+            );
+            // A grant naming the caller the grant arm's gate excludes holds it nowhere.
+            expect("anonymous", "docs:d_anonymous", !gated);
+            assert_agrees(&case, &run);
         }
     }
 }
@@ -1170,7 +1143,7 @@ const INSTALLATION: &str = "00000000-0000-0000-0000-0000000000f1";
 /// signed-in user and one with nobody, read by both callers, by a request carrying no
 /// caller, by one whose pooled connection reads the caller as `''`, and by an
 /// installation acting alone. Where `excluding`, the signed-in arm's gate excludes `BOB`.
-fn signed_in_case(major: &str, excluding: bool, loading_from_rows: bool) -> ParityCase {
+fn signed_in_case(excluding: bool, loading_from_rows: bool) -> ParityCase {
     let caller_set = |subject: &str, value: &str| {
         Principal::with_setting(subject, "app_reader", "app.user_id", value)
     };
@@ -1188,7 +1161,7 @@ fn signed_in_case(major: &str, excluding: bool, loading_from_rows: bool) -> Pari
     };
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-signed-in-pg{major}{}{}",
+            "declared-helper-signed-in{}{}",
             if excluding { "-excluding" } else { "" },
             if loading_from_rows { "-rows" } else { "" }
         ),
@@ -1234,40 +1207,38 @@ fn signed_in_case(major: &str, excluding: bool, loading_from_rows: bool) -> Pari
 /// reads `''`, nor an installation acting without a user, while a resource shared with
 /// everyone reaches them all.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_signed_in_audience_behind_an_unset_caller_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for (excluding, loading_from_rows) in
-            [(false, false), (false, true), (true, false), (true, true)]
-        {
-            let case = signed_in_case(major, excluding, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (subject, own, everyone, signed_in) in [
-                (ALICE, true, true, true),
-                (BOB, false, true, !excluding),
-                ("anonymous", false, true, false),
-                ("pooled", false, true, false),
-                ("installation", false, true, false),
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_signed_in_audience_behind_an_unset_caller_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for (excluding, loading_from_rows) in
+        [(false, false), (false, true), (true, false), (true, true)]
+    {
+        let case = signed_in_case(excluding, loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, own, everyone, signed_in) in [
+            (ALICE, true, true, true),
+            (BOB, false, true, !excluding),
+            ("anonymous", false, true, false),
+            ("pooled", false, true, false),
+            ("installation", false, true, false),
+        ] {
+            for (resource, allowed) in [
+                ("a1", own),
+                ("a2", everyone),
+                ("a3", signed_in),
+                ("a4", false),
             ] {
-                for (resource, allowed) in [
-                    ("a1", own),
-                    ("a2", everyone),
-                    ("a3", signed_in),
-                    ("a4", false),
-                ] {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        subject,
-                        &format!("resources:00000000-0000-0000-0000-0000000000{resource}"),
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                }
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("resources:00000000-0000-0000-0000-0000000000{resource}"),
+                    ActionStatement::Select,
+                    allowed,
+                );
             }
-            assert_agrees(&case, &run);
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -1277,10 +1248,10 @@ const EXPIRING_HELPERS: &str = r#"{
 
 /// `alice` holds an open grant, `bob` one ending tomorrow, `carol` one that ended
 /// yesterday, `dave` one starting next month, and `erin` one ending in two years.
-fn expiring_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn expiring_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-expiry-pg{major}{}",
+            "declared-helper-expiry{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         EXPIRING,
@@ -1318,38 +1289,36 @@ fn expiring_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn expiring_grants_agree_with_postgres_17_and_18_now_and_a_year_on() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = expiring_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (subject, allowed) in [
-                ("alice", true),
-                ("bob", true),
-                ("carol", false),
-                ("dave", false),
-            ] {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    "docs:d1",
-                    ActionStatement::Select,
-                    allowed,
-                );
-            }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn expiring_grants_agree_with_postgres_now_and_a_year_on() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = expiring_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, allowed) in [
+            ("alice", true),
+            ("bob", true),
+            ("carol", false),
+            ("dave", false),
+        ] {
             assert_postgres(
                 &case,
                 &run,
-                "erin",
-                "docs:d2",
+                subject,
+                "docs:d1",
                 ActionStatement::Select,
-                true,
+                allowed,
             );
-            assert_agrees(&case, &run);
         }
+        assert_postgres(
+            &case,
+            &run,
+            "erin",
+            "docs:d2",
+            ActionStatement::Select,
+            true,
+        );
+        assert_agrees(&case, &run);
     }
 }
 
@@ -1373,7 +1342,7 @@ const INVITEES: [(&str, Option<&str>, &str); 5] = [
 /// `ann`'s invitation ends tomorrow and `emile`'s in two years, `bob` accepted his,
 /// and `carol`'s ended yesterday. `l1` ends tomorrow, `l2` in two years and `l3`
 /// ended yesterday.
-fn invitations_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn invitations_case(loading_from_rows: bool) -> ParityCase {
     let principals = INVITEES
         .iter()
         .map(|(subject, email, links)| {
@@ -1405,7 +1374,7 @@ fn invitations_case(major: &str, loading_from_rows: bool) -> ParityCase {
         .join(", ");
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-invitations-pg{major}{}",
+            "declared-helper-invitations{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         INVITATIONS,
@@ -1469,55 +1438,53 @@ fn invitations_case(major: &str, loading_from_rows: bool) -> ParityCase {
 /// accessor and inline, or with the address as sent, and a set kept while its rows last,
 /// agree with `PostgreSQL` now and a year on.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn request_values_behind_helpers_agree_with_postgres_17_and_18_now_and_a_year_on() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = invitations_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (subject, object, allowed) in [
-                ("ann", "memberships:m1", true),
-                ("ann", "claims:c1", true),
-                ("ann", "notices:n1", false),
-                ("ann", "docs:d1", true),
-                ("emile", "memberships:m2", true),
-                ("emile", "claims:c2", true),
-                ("emile", "docs:d2", true),
-                ("bob", "memberships:m3", false),
-                ("bob", "claims:c3", true),
-                ("bob", "notices:n3", true),
-                ("bob", "docs:d3", false),
-                ("carol", "memberships:m4", false),
-                ("carol", "claims:c4", true),
-                ("carol", "notices:n4", true),
-                ("unset", "memberships:m1", false),
-                ("unset", "claims:c1", false),
-                ("unset", "docs:d1", true),
-            ] {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            }
-            assert_agrees(&case, &run);
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn request_values_behind_helpers_agree_with_postgres_now_and_a_year_on() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = invitations_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, object, allowed) in [
+            ("ann", "memberships:m1", true),
+            ("ann", "claims:c1", true),
+            ("ann", "notices:n1", false),
+            ("ann", "docs:d1", true),
+            ("emile", "memberships:m2", true),
+            ("emile", "claims:c2", true),
+            ("emile", "docs:d2", true),
+            ("bob", "memberships:m3", false),
+            ("bob", "claims:c3", true),
+            ("bob", "notices:n3", true),
+            ("bob", "docs:d3", false),
+            ("carol", "memberships:m4", false),
+            ("carol", "claims:c4", true),
+            ("carol", "notices:n4", true),
+            ("unset", "memberships:m1", false),
+            ("unset", "claims:c1", false),
+            ("unset", "docs:d1", true),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
         }
+        assert_agrees(&case, &run);
     }
 }
 
 /// One bound over grant rows that can repeat: `bob` holds one grant that ended and one
 /// ending tomorrow, `frank` one that ended and one with no end.
-fn repeated_expiry_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn repeated_expiry_case(loading_from_rows: bool) -> ParityCase {
     let schema = EXPIRING
         .replace(",\n  PRIMARY KEY (project_id, grantee_id)", "")
         .replace("    AND now() >= pg.starts_at\n", "");
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-repeated-expiry-pg{major}{}",
+            "declared-helper-repeated-expiry{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &schema,
@@ -1557,7 +1524,7 @@ fn repeated_expiry_case(major: &str, loading_from_rows: bool) -> ParityCase {
 async fn repeated_expiring_grants_agree_with_postgres_now_and_a_year_on() {
     let cluster = Cluster::start().await;
     for loading_from_rows in [false, true] {
-        let case = repeated_expiry_case("18", loading_from_rows);
+        let case = repeated_expiry_case(loading_from_rows);
         let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
         for (subject, allowed) in [("bob", true), ("frank", true), ("erin", false)] {
             assert_postgres(
@@ -1584,7 +1551,7 @@ const EXPIRING_GRANTEE_CALLERS: [&str; 6] =
 /// one ending in two years. Every caller but `anonymous` holds one grant ending tomorrow,
 /// and each opening ends tomorrow, ended yesterday or has no end. Grants have no key, and
 /// `alice`, `bob`, `team_a` and everyone each hold an ended grant beside a live one.
-fn expiring_grantees_case(major: &str, arms: GranteeArms, loading_from_rows: bool) -> ParityCase {
+fn expiring_grantees_case(arms: GranteeArms, loading_from_rows: bool) -> ParityCase {
     let callers = EXPIRING_GRANTEE_CALLERS
         .iter()
         .map(|subject| format!("('{subject}')"))
@@ -1602,7 +1569,7 @@ fn expiring_grantees_case(major: &str, arms: GranteeArms, loading_from_rows: boo
     };
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-expiring-grantees-pg{major}-{arms:?}{}",
+            "declared-helper-expiring-grantees-{arms:?}{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &arms
@@ -1681,48 +1648,45 @@ fn expiring_grantees_case(major: &str, arms: GranteeArms, loading_from_rows: boo
 /// set, and projects open to everyone, each kept until its end, agree with `PostgreSQL`
 /// now and a year on, whether the set is read as whoever it holds or as the users it names.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn expiring_grants_naming_grantees_agree_with_postgres_17_and_18_now_and_a_year_on() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for arms in GranteeArms::ALL {
-            for loading_from_rows in [false, true] {
-                let case = expiring_grantees_case(major, arms, loading_from_rows);
-                let run =
-                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-                let teams = arms == GranteeArms::WithTeams;
-                for (subject, object, allowed) in [
-                    ("alice", "docs:d_alice", true),
-                    ("bob", "docs:d_bob", true),
-                    ("carol", "docs:d_carol", false),
-                    (
-                        "mallory",
-                        "docs:d_mallory",
-                        arms != GranteeArms::DisablingCaller,
-                    ),
-                    ("dave", "docs:d_team", teams),
-                    ("dave", "docs:d_team_open", teams),
-                    ("anonymous", "docs:d_everyone", true),
-                    ("anonymous", "docs:d_everyone_past", false),
-                    ("anonymous", "docs:d_everyone_open", true),
-                    ("anonymous", "docs:d_twice", true),
-                    ("anonymous", "docs:d_signed", false),
-                    ("bob", "docs:d_signed", true),
-                    ("anonymous", "docs:d_opening", true),
-                    ("anonymous", "docs:d_opening_past", false),
-                    ("anonymous", "docs:d_opening_open", true),
-                ] {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        subject,
-                        object,
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                }
-                assert_agrees(&case, &run);
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn expiring_grants_naming_grantees_agree_with_postgres_now_and_a_year_on() {
+    let cluster = Cluster::start().await;
+    for arms in GranteeArms::ALL {
+        for loading_from_rows in [false, true] {
+            let case = expiring_grantees_case(arms, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let teams = arms == GranteeArms::WithTeams;
+            for (subject, object, allowed) in [
+                ("alice", "docs:d_alice", true),
+                ("bob", "docs:d_bob", true),
+                ("carol", "docs:d_carol", false),
+                (
+                    "mallory",
+                    "docs:d_mallory",
+                    arms != GranteeArms::DisablingCaller,
+                ),
+                ("dave", "docs:d_team", teams),
+                ("dave", "docs:d_team_open", teams),
+                ("anonymous", "docs:d_everyone", true),
+                ("anonymous", "docs:d_everyone_past", false),
+                ("anonymous", "docs:d_everyone_open", true),
+                ("anonymous", "docs:d_twice", true),
+                ("anonymous", "docs:d_signed", false),
+                ("bob", "docs:d_signed", true),
+                ("anonymous", "docs:d_opening", true),
+                ("anonymous", "docs:d_opening_past", false),
+                ("anonymous", "docs:d_opening_open", true),
+            ] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
             }
+            assert_agrees(&case, &run);
         }
     }
 }
@@ -1738,10 +1702,10 @@ CREATE POLICY folders_read ON folders FOR SELECT USING (
 ";
 
 /// `alice` owns the root `f1`, `f2` under it and `f4` under `bob`'s `f3`.
-fn containment_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn containment_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-containment-pg{major}{}",
+            "declared-helper-containment{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &format!("{FOLDERS}{CONTAINED_KEYS}"),
@@ -1768,26 +1732,24 @@ fn containment_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn contained_row_keys_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = containment_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            expect("alice", "folders:f2", ActionStatement::Select, true);
-            // A root's `NULL` parent makes the containment false.
-            expect("alice", "folders:f1", ActionStatement::Select, false);
-            // Each key must be in the set, a parent owned by someone else failing it.
-            expect("alice", "folders:f4", ActionStatement::Select, false);
-            expect("bob", "folders:f3", ActionStatement::Select, false);
-            expect("erin", "folders:f2", ActionStatement::Select, false);
-            expect("anonymous", "folders:f2", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn contained_row_keys_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = containment_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        expect("alice", "folders:f2", ActionStatement::Select, true);
+        // A root's `NULL` parent makes the containment false.
+        expect("alice", "folders:f1", ActionStatement::Select, false);
+        // Each key must be in the set, a parent owned by someone else failing it.
+        expect("alice", "folders:f4", ActionStatement::Select, false);
+        expect("bob", "folders:f3", ActionStatement::Select, false);
+        expect("erin", "folders:f2", ActionStatement::Select, false);
+        expect("anonymous", "folders:f2", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -1798,10 +1760,10 @@ const FOUNDED_HELPERS: &str = r#"{
 /// `alice` founded `o1` and `bob` `o2`, each with a project, and a note on `o1` and one on
 /// `alice`. Where `through_kind`, the organization's key references the grantee's through
 /// the pair of its key and its kind.
-fn founded_case(major: &str, through_kind: bool, loading_from_rows: bool) -> ParityCase {
+fn founded_case(through_kind: bool, loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-founded-pg{major}{}{}",
+            "declared-helper-founded{}{}",
             if through_kind { "-kind" } else { "" },
             if loading_from_rows { "-rows" } else { "" }
         ),
@@ -1836,37 +1798,34 @@ fn founded_case(major: &str, through_kind: bool, loading_from_rows: bool) -> Par
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_helper_returning_its_own_key_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for through_kind in [false, true] {
-            for loading_from_rows in [false, true] {
-                let case = founded_case(major, through_kind, loading_from_rows);
-                let run =
-                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-                let expect = |subject: &str, object: &str, allowed| {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        subject,
-                        object,
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                };
-                expect("alice", "projects:p1", true);
-                expect("alice", "projects:p2", false);
-                expect("bob", "projects:p2", true);
-                expect("erin", "projects:p1", false);
-                expect("anonymous", "projects:p1", false);
-                // The organization is a grantee, while its founder's own grantee is not
-                // an organization.
-                expect("alice", "notes:n1", true);
-                expect("alice", "notes:n2", false);
-                expect("bob", "notes:n1", false);
-                assert_agrees(&case, &run);
-            }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_helper_returning_its_own_key_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for through_kind in [false, true] {
+        for loading_from_rows in [false, true] {
+            let case = founded_case(through_kind, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            let expect = |subject: &str, object: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            expect("alice", "projects:p1", true);
+            expect("alice", "projects:p2", false);
+            expect("bob", "projects:p2", true);
+            expect("erin", "projects:p1", false);
+            expect("anonymous", "projects:p1", false);
+            // The organization is a grantee, while its founder's own grantee is not
+            // an organization.
+            expect("alice", "notes:n1", true);
+            expect("alice", "notes:n2", false);
+            expect("bob", "notes:n1", false);
+            assert_agrees(&case, &run);
         }
     }
 }
@@ -1878,10 +1837,10 @@ const EXTENSION_HELPERS: &str = r#"{
 
 /// `alice` is granted `r1` and `bob` `r2`, two ownables each extended by a template, a
 /// procedure template, a weighing template and a paired template.
-fn extensions_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn extensions_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-extensions-pg{major}{}",
+            "declared-helper-extensions{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         EXTENSIONS,
@@ -1912,37 +1871,35 @@ fn extensions_case(major: &str, loading_from_rows: bool) -> ParityCase {
 /// Each table extending an ownable holds the grants on the resource its key reaches through
 /// one, two or three keys, or through two tables it extends.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn keys_extending_a_resource_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = extensions_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for table in [
-                "templates",
-                "procedure_templates",
-                "weighing_templates",
-                "paired_templates",
-                "ordered_templates",
-            ] {
-                let expect = |subject: &str, row: &str, allowed| {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        subject,
-                        &format!("{table}:{row}"),
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                };
-                expect("alice", "r1", true);
-                expect("alice", "r2", false);
-                expect("bob", "r2", true);
-                expect("erin", "r1", false);
-            }
-            assert_agrees(&case, &run);
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn keys_extending_a_resource_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = extensions_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for table in [
+            "templates",
+            "procedure_templates",
+            "weighing_templates",
+            "paired_templates",
+            "ordered_templates",
+        ] {
+            let expect = |subject: &str, row: &str, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("{table}:{row}"),
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            expect("alice", "r1", true);
+            expect("alice", "r2", false);
+            expect("bob", "r2", true);
+            expect("erin", "r1", false);
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -1994,9 +1951,9 @@ fn owned_resource(member: usize, resource: usize) -> String {
 /// `…f1` holds `organization` as reader and `project` as writer, `…f2` holds
 /// `organization` as admin and `project` as reader, both in the first organization, and
 /// `…f3` holds `project` as admin in the second.
-fn row_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn row_caps_case(loading_from_rows: bool) -> ParityCase {
     capped_members_case(
-        &format!("declared-helper-row-caps-pg{major}"),
+        "declared-helper-row-caps",
         INSTALLATION_CAPS,
         ("", "organizations, organization_notes, resources"),
         CAP_HELPERS,
@@ -2076,52 +2033,50 @@ fn capped_members_case(
 /// resource where it holds the resource's kind in the resource's organization at writer or
 /// above.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn row_caps_agree_with_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn row_caps_agree_with_postgres() {
     let [a1, a2] = ORGANIZATIONS;
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = row_caps_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (index, (member, organizations, resources)) in [
-                (CAPPED_MEMBERS[0].0, [true, true], [true, true, true]),
-                (CAPPED_MEMBERS[1].0, [true, true], [true, true, true]),
-                (CAPPED_MEMBERS[2].0, [true, false], [true, false, false]),
-                (CAPPED_MEMBERS[3].0, [true, false], [false, true, false]),
-                (CAPPED_MEMBERS[4].0, [false, false], [false, false, true]),
-            ]
-            .into_iter()
-            .enumerate()
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = row_caps_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (index, (member, organizations, resources)) in [
+            (CAPPED_MEMBERS[0].0, [true, true], [true, true, true]),
+            (CAPPED_MEMBERS[1].0, [true, true], [true, true, true]),
+            (CAPPED_MEMBERS[2].0, [true, false], [true, false, false]),
+            (CAPPED_MEMBERS[3].0, [true, false], [false, true, false]),
+            (CAPPED_MEMBERS[4].0, [false, false], [false, false, true]),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let expect = |object: String, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    member,
+                    &object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            for ((organization, note), allowed) in
+                [(a1, "a1"), (a2, "a2")].into_iter().zip(organizations)
             {
-                let expect = |object: String, allowed| {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        member,
-                        &object,
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                };
-                for ((organization, note), allowed) in
-                    [(a1, "a1"), (a2, "a2")].into_iter().zip(organizations)
-                {
-                    expect(format!("organizations:{organization}"), allowed);
-                    expect(
-                        format!("organization_notes:0d000000-0000-4000-8000-0000000000{note}"),
-                        allowed,
-                    );
-                }
-                for (resource, allowed) in (1..=3).zip(resources) {
-                    expect(
-                        format!("resources:{}", owned_resource(index + 1, resource)),
-                        allowed,
-                    );
-                }
+                expect(format!("organizations:{organization}"), allowed);
+                expect(
+                    format!("organization_notes:0d000000-0000-4000-8000-0000000000{note}"),
+                    allowed,
+                );
             }
-            assert_agrees(&case, &run);
+            for (resource, allowed) in (1..=3).zip(resources) {
+                expect(
+                    format!("resources:{}", owned_resource(index + 1, resource)),
+                    allowed,
+                );
+            }
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -2139,7 +2094,7 @@ fn personal_note(member: usize) -> String {
 
 /// [`row_caps_case`] with a note on each member's first resource, read through
 /// `authz.personal_resources`.
-fn personal_resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn personal_resources_case(loading_from_rows: bool) -> ParityCase {
     let mut notes = String::from("INSERT INTO resource_notes VALUES ");
     for number in 1..=CAPPED_MEMBERS.len() {
         if number > 1 {
@@ -2153,7 +2108,7 @@ fn personal_resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
         );
     }
     capped_members_case(
-        &format!("declared-helper-personal-resources-pg{major}"),
+        "declared-helper-personal-resources",
         &format!("{INSTALLATION_CAPS}{PERSONAL_RESOURCES}"),
         (
             &notes,
@@ -2167,32 +2122,30 @@ fn personal_resources_case(major: &str, loading_from_rows: bool) -> ParityCase {
 /// A request leaving the installation unset or empty reads the notes on its member's own
 /// resources, and one acting through any installation reads none.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn an_arm_kept_while_no_installation_acts_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = personal_resources_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (index, (member, installation)) in CAPPED_MEMBERS.iter().enumerate() {
-                let own = index + 1;
-                let other = own % CAPPED_MEMBERS.len() + 1;
-                for (note, allowed) in [
-                    (own, installation.is_none_or(str::is_empty)),
-                    (other, false),
-                ] {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        member,
-                        &format!("resource_notes:{}", personal_note(note)),
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn an_arm_kept_while_no_installation_acts_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = personal_resources_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (index, (member, installation)) in CAPPED_MEMBERS.iter().enumerate() {
+            let own = index + 1;
+            let other = own % CAPPED_MEMBERS.len() + 1;
+            for (note, allowed) in [
+                (own, installation.is_none_or(str::is_empty)),
+                (other, false),
+            ] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    member,
+                    &format!("resource_notes:{}", personal_note(note)),
+                    ActionStatement::Select,
+                    allowed,
+                );
             }
-            assert_agrees(&case, &run);
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -2235,7 +2188,7 @@ const STRANGER_INVITATION: &str = "0c300000-0000-4000-8000-000000000099";
 
 /// Every member belongs to the first organization and is invited to both, beside a stranger
 /// invited to the first.
-fn policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn policy_caps_case(loading_from_rows: bool) -> ParityCase {
     let [a1, a2] = ORGANIZATIONS;
     let [f1, f2, f3] = INSTALLATIONS_ACTING;
     let mut seed = format!(
@@ -2268,7 +2221,7 @@ fn policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
     }
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-policy-caps-pg{major}{}",
+            "declared-helper-policy-caps{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         POLICY_CAPS,
@@ -2298,67 +2251,65 @@ fn policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
 /// An installation reads the projects, reports and invitations whose pair it holds at the
 /// role each policy caps them by, and a request without one reads what its member reads.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn policy_clauses_capped_by_helper_pairs_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = policy_caps_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (index, (member, projects, reports, invitations)) in [
-                (CAPPED_MEMBERS[0].0, [true; 3], [true; 3], [true; 3]),
-                (CAPPED_MEMBERS[1].0, [true; 3], [true; 3], [true; 3]),
-                (
-                    CAPPED_MEMBERS[2].0,
-                    [true, false, false],
-                    [true, true, false],
-                    [true, false, true],
-                ),
-                (
-                    CAPPED_MEMBERS[3].0,
-                    [false, true, false],
-                    [true, true, false],
-                    [true, false, true],
-                ),
-                (
-                    CAPPED_MEMBERS[4].0,
-                    [false, false, true],
-                    [false, false, true],
-                    [false; 3],
-                ),
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn policy_clauses_capped_by_helper_pairs_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = policy_caps_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (index, (member, projects, reports, invitations)) in [
+            (CAPPED_MEMBERS[0].0, [true; 3], [true; 3], [true; 3]),
+            (CAPPED_MEMBERS[1].0, [true; 3], [true; 3], [true; 3]),
+            (
+                CAPPED_MEMBERS[2].0,
+                [true, false, false],
+                [true, true, false],
+                [true, false, true],
+            ),
+            (
+                CAPPED_MEMBERS[3].0,
+                [false, true, false],
+                [true, true, false],
+                [true, false, true],
+            ),
+            (
+                CAPPED_MEMBERS[4].0,
+                [false, false, true],
+                [false, false, true],
+                [false; 3],
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let expect = |object: String, allowed| {
+                assert_postgres(
+                    &case,
+                    &run,
+                    member,
+                    &object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            };
+            for (((project, report, ..), project_allowed), report_allowed) in
+                CAPPED_ROWS.into_iter().zip(projects).zip(reports)
+            {
+                expect(format!("projects:{project}"), project_allowed);
+                expect(format!("reports:{report}"), report_allowed);
+            }
+            for (invited, allowed) in [
+                invitation(index + 1, 1),
+                invitation(index + 1, 2),
+                STRANGER_INVITATION.to_string(),
             ]
             .into_iter()
-            .enumerate()
+            .zip(invitations)
             {
-                let expect = |object: String, allowed| {
-                    assert_postgres(
-                        &case,
-                        &run,
-                        member,
-                        &object,
-                        ActionStatement::Select,
-                        allowed,
-                    );
-                };
-                for (((project, report, ..), project_allowed), report_allowed) in
-                    CAPPED_ROWS.into_iter().zip(projects).zip(reports)
-                {
-                    expect(format!("projects:{project}"), project_allowed);
-                    expect(format!("reports:{report}"), report_allowed);
-                }
-                for (invited, allowed) in [
-                    invitation(index + 1, 1),
-                    invitation(index + 1, 2),
-                    STRANGER_INVITATION.to_string(),
-                ]
-                .into_iter()
-                .zip(invitations)
-                {
-                    expect(format!("invitations:{invited}"), allowed);
-                }
+                expect(format!("invitations:{invited}"), allowed);
             }
-            assert_agrees(&case, &run);
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -2374,10 +2325,10 @@ const UNBLOCKED_MEMBER: &str = "0b000000-0000-4000-8000-000000000006";
 /// [`policy_caps_case`] with `authz.capped_kinds` keeping only the pairs whose organization
 /// does not block the caller. The first organization blocks the first, third and fifth
 /// member, and [`UNBLOCKED_MEMBER`] reads through the third member's installation.
-fn blocked_policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
-    let mut case = policy_caps_case(major, loading_from_rows).with_registry(BLOCKED_CAP_HELPERS);
+fn blocked_policy_caps_case(loading_from_rows: bool) -> ParityCase {
+    let mut case = policy_caps_case(loading_from_rows).with_registry(BLOCKED_CAP_HELPERS);
     case.name = format!(
-        "declared-helper-blocked-policy-caps-pg{major}{}",
+        "declared-helper-blocked-policy-caps{}",
         if loading_from_rows { "-rows" } else { "" }
     );
     case.schema = blocked_caps("permission.organization_id");
@@ -2398,48 +2349,46 @@ fn blocked_policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase 
 /// A block on an organization takes its pairs away from the blocked caller alone, and only
 /// where an installation acts.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_cap_excluding_blocked_organizations_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = blocked_policy_caps_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            for (member, projects, reports) in [
-                (CAPPED_MEMBERS[0].0, [true; 3], [true; 3]),
-                (CAPPED_MEMBERS[2].0, [false; 3], [false; 3]),
-                (
-                    CAPPED_MEMBERS[3].0,
-                    [false, true, false],
-                    [true, true, false],
-                ),
-                (
-                    CAPPED_MEMBERS[4].0,
-                    [false, false, true],
-                    [false, false, true],
-                ),
-                (UNBLOCKED_MEMBER, [true, false, false], [true, true, false]),
-            ] {
-                for (((project, report, ..), project_allowed), report_allowed) in
-                    CAPPED_ROWS.into_iter().zip(projects).zip(reports)
-                {
-                    for (object, allowed) in [
-                        (format!("projects:{project}"), project_allowed),
-                        (format!("reports:{report}"), report_allowed),
-                    ] {
-                        assert_postgres(
-                            &case,
-                            &run,
-                            member,
-                            &object,
-                            ActionStatement::Select,
-                            allowed,
-                        );
-                    }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_cap_excluding_blocked_organizations_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = blocked_policy_caps_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (member, projects, reports) in [
+            (CAPPED_MEMBERS[0].0, [true; 3], [true; 3]),
+            (CAPPED_MEMBERS[2].0, [false; 3], [false; 3]),
+            (
+                CAPPED_MEMBERS[3].0,
+                [false, true, false],
+                [true, true, false],
+            ),
+            (
+                CAPPED_MEMBERS[4].0,
+                [false, false, true],
+                [false, false, true],
+            ),
+            (UNBLOCKED_MEMBER, [true, false, false], [true, true, false]),
+        ] {
+            for (((project, report, ..), project_allowed), report_allowed) in
+                CAPPED_ROWS.into_iter().zip(projects).zip(reports)
+            {
+                for (object, allowed) in [
+                    (format!("projects:{project}"), project_allowed),
+                    (format!("reports:{report}"), report_allowed),
+                ] {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        member,
+                        &object,
+                        ActionStatement::Select,
+                        allowed,
+                    );
                 }
             }
-            assert_agrees(&case, &run);
         }
+        assert_agrees(&case, &run);
     }
 }
 
@@ -2482,7 +2431,7 @@ fn joined_cap_requests() -> [(String, usize, Option<&'static str>); 8] {
 /// organization and `project` otherwise. `…f1` holds `organization` as admin and `project`
 /// as reader and `…f2` holds `organization` as writer, both in the first organization, and
 /// `…f3` holds `organization` as admin in the second. Teams are read through `helper`.
-fn joined_caps_case(major: &str, helper: &str, loading_from_rows: bool) -> ParityCase {
+fn joined_caps_case(helper: &str, loading_from_rows: bool) -> ParityCase {
     let [a1, a2] = ORGANIZATIONS;
     let [f1, f2, f3] = INSTALLATIONS_ACTING;
     let [e1, e2] = CAPPED_TEAMS;
@@ -2523,7 +2472,7 @@ fn joined_caps_case(major: &str, helper: &str, loading_from_rows: bool) -> Parit
     }
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-{}-pg{major}{}",
+            "declared-helper-{}{}",
             helper.replace('_', "-"),
             if loading_from_rows { "-rows" } else { "" }
         ),
@@ -2566,70 +2515,67 @@ fn joined_caps_case(major: &str, helper: &str, loading_from_rows: bool) -> Parit
 /// `scoped_teams` the membership's organization as the membership's scope at reader.
 /// Member rows are read through `administered_teams` in every case.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn caps_over_joined_rows_agree_with_postgres_17_and_18() {
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn caps_over_joined_rows_agree_with_postgres() {
     let [e1, e2] = CAPPED_TEAMS;
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for (helper, teams) in [
-            (
-                "administered_teams",
-                [
-                    [true, false],
-                    [true, false],
-                    [true, false],
-                    [false, false],
-                    [false, false],
-                    [false, true],
-                    [false, false],
-                    [false, false],
-                ],
-            ),
-            (
-                "capped_teams",
-                [
-                    [true, true],
-                    [true, true],
-                    [true, false],
-                    [true, false],
-                    [false, false],
-                    [false, true],
-                    [true, false],
-                    [true, false],
-                ],
-            ),
-            (
-                "scoped_teams",
-                [
-                    [true, true],
-                    [true, true],
-                    [true, false],
-                    [true, false],
-                    [false, false],
-                    [false, false],
-                    [true, false],
-                    [true, false],
-                ],
-            ),
-        ] {
-            for loading_from_rows in [false, true] {
-                let case = joined_caps_case(major, helper, loading_from_rows);
-                let run =
-                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-                for ((subject, _, _), allowed) in joined_cap_requests().into_iter().zip(teams) {
-                    for (team, allowed) in [e1, e2].into_iter().zip(allowed) {
-                        assert_postgres(
-                            &case,
-                            &run,
-                            &subject,
-                            &format!("teams:{team}"),
-                            ActionStatement::Select,
-                            allowed,
-                        );
-                    }
+    let cluster = Cluster::start().await;
+    for (helper, teams) in [
+        (
+            "administered_teams",
+            [
+                [true, false],
+                [true, false],
+                [true, false],
+                [false, false],
+                [false, false],
+                [false, true],
+                [false, false],
+                [false, false],
+            ],
+        ),
+        (
+            "capped_teams",
+            [
+                [true, true],
+                [true, true],
+                [true, false],
+                [true, false],
+                [false, false],
+                [false, true],
+                [true, false],
+                [true, false],
+            ],
+        ),
+        (
+            "scoped_teams",
+            [
+                [true, true],
+                [true, true],
+                [true, false],
+                [true, false],
+                [false, false],
+                [false, false],
+                [true, false],
+                [true, false],
+            ],
+        ),
+    ] {
+        for loading_from_rows in [false, true] {
+            let case = joined_caps_case(helper, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for ((subject, _, _), allowed) in joined_cap_requests().into_iter().zip(teams) {
+                for (team, allowed) in [e1, e2].into_iter().zip(allowed) {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        &subject,
+                        &format!("teams:{team}"),
+                        ActionStatement::Select,
+                        allowed,
+                    );
                 }
-                assert_agrees(&case, &run);
             }
+            assert_agrees(&case, &run);
         }
     }
 }
@@ -2637,16 +2583,11 @@ async fn caps_over_joined_rows_agree_with_postgres_17_and_18() {
 /// `t1` holds `bob`, `carol`, whose deactivated membership has expired, and `dave`, whose
 /// active membership expires, `t2` holds `alice` and `bob`, and `bob`'s membership is
 /// deactivated where `deactivated`. Teams are read through `helper`.
-fn membership_states_case(
-    major: &str,
-    helper: &str,
-    deactivated: bool,
-    loading_from_rows: bool,
-) -> ParityCase {
+fn membership_states_case(helper: &str, deactivated: bool, loading_from_rows: bool) -> ParityCase {
     let bob = if deactivated { "deactivated" } else { "active" };
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-{}-pg{major}{}{}",
+            "declared-helper-{}{}{}",
             helper.replace('_', "-"),
             if deactivated { "-deactivated" } else { "" },
             if loading_from_rows { "-rows" } else { "" }
@@ -2689,43 +2630,39 @@ fn membership_states_case(
 /// both keeps active ones never expiring, and an anti-join on the expiry keeps those never
 /// expiring. Deactivating `bob` moves only the helpers reading the state.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn grant_arms_kept_by_membership_state_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for (helper, by_state, carol, dave) in [
-            ("joined_teams", true, false, true),
-            ("unblocked_teams", true, false, true),
-            ("member_teams", false, true, true),
-            ("current_teams", true, false, false),
-            ("unexpiring_teams", false, false, false),
-        ] {
-            for deactivated in [false, true] {
-                for loading_from_rows in [false, true] {
-                    let case =
-                        membership_states_case(major, helper, deactivated, loading_from_rows);
-                    let run =
-                        support::parity::run_before(&cluster, &case, Duration::from_secs(180))
-                            .await;
-                    let expect = |subject: &str, team: &str, allowed| {
-                        assert_postgres(
-                            &case,
-                            &run,
-                            subject,
-                            &format!("teams:{team}"),
-                            ActionStatement::Select,
-                            allowed,
-                        );
-                    };
-                    expect("alice", "t1", false);
-                    expect("alice", "t2", true);
-                    expect("bob", "t1", !(by_state && deactivated));
-                    expect("bob", "t2", !(by_state && deactivated));
-                    expect("carol", "t1", carol);
-                    expect("dave", "t1", dave);
-                    expect("anonymous", "t2", false);
-                    assert_agrees(&case, &run);
-                }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn grant_arms_kept_by_membership_state_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for (helper, by_state, carol, dave) in [
+        ("joined_teams", true, false, true),
+        ("unblocked_teams", true, false, true),
+        ("member_teams", false, true, true),
+        ("current_teams", true, false, false),
+        ("unexpiring_teams", false, false, false),
+    ] {
+        for deactivated in [false, true] {
+            for loading_from_rows in [false, true] {
+                let case = membership_states_case(helper, deactivated, loading_from_rows);
+                let run =
+                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+                let expect = |subject: &str, team: &str, allowed| {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        subject,
+                        &format!("teams:{team}"),
+                        ActionStatement::Select,
+                        allowed,
+                    );
+                };
+                expect("alice", "t1", false);
+                expect("alice", "t2", true);
+                expect("bob", "t1", !(by_state && deactivated));
+                expect("bob", "t2", !(by_state && deactivated));
+                expect("carol", "t1", carol);
+                expect("dave", "t1", dave);
+                expect("anonymous", "t2", false);
+                assert_agrees(&case, &run);
             }
         }
     }
@@ -2733,10 +2670,10 @@ async fn grant_arms_kept_by_membership_state_agree_with_postgres_17_and_18() {
 
 /// Resources `r1`, `r3` and `r4` let their writers share. `alice` writes `r1`, administers
 /// `r2` and reads `r3`, and `bob` writes `r3` and `r4` and administers `r1`.
-fn shares_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn shares_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-labelled-shares-pg{major}{}",
+            "declared-helper-labelled-shares{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         SHARES,
@@ -2768,36 +2705,34 @@ const SHARE_HELPERS_JSON: &str = r#"{
 /// role it may share there, an admin sharing every role and a writer the roles up to writer
 /// where the resource lets writers share.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn grants_shared_by_label_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = shares_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, grant: &str, statement, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    &format!("grants:{grant}"),
-                    statement,
-                    allowed,
-                );
-            };
-            // `alice` shares every role on `r2` and reader and writer on `r1`.
-            expect("alice", "r1|bob", ActionStatement::Select, true);
-            expect("alice", "r1|bob", ActionStatement::Delete, false);
-            expect("alice", "r1|alice", ActionStatement::Delete, true);
-            expect("alice", "r2|alice", ActionStatement::Delete, true);
-            expect("alice", "r3|bob", ActionStatement::Select, false);
-            // `bob` shares every role on `r1` and reader and writer on `r3` and `r4`.
-            expect("bob", "r1|bob", ActionStatement::Delete, true);
-            expect("bob", "r3|alice", ActionStatement::Delete, true);
-            expect("bob", "r2|alice", ActionStatement::Select, false);
-            expect("carol", "r1|alice", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn grants_shared_by_label_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = shares_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, grant: &str, statement, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                &format!("grants:{grant}"),
+                statement,
+                allowed,
+            );
+        };
+        // `alice` shares every role on `r2` and reader and writer on `r1`.
+        expect("alice", "r1|bob", ActionStatement::Select, true);
+        expect("alice", "r1|bob", ActionStatement::Delete, false);
+        expect("alice", "r1|alice", ActionStatement::Delete, true);
+        expect("alice", "r2|alice", ActionStatement::Delete, true);
+        expect("alice", "r3|bob", ActionStatement::Select, false);
+        // `bob` shares every role on `r1` and reader and writer on `r3` and `r4`.
+        expect("bob", "r1|bob", ActionStatement::Delete, true);
+        expect("bob", "r3|alice", ActionStatement::Delete, true);
+        expect("bob", "r2|alice", ActionStatement::Select, false);
+        expect("carol", "r1|alice", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }
 
@@ -2821,7 +2756,7 @@ const EXCLUDING_READS: [(&str, &str); 4] = [
 /// `O1` blocks `alice` and `O2` blocks `carol`, who own projects or write documents in
 /// both organizations, and `d5` blocks `carol`. Each notes table holds one note per
 /// project, read through one excluding helper, and the projects themselves go unguarded.
-fn excluding_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn excluding_case(loading_from_rows: bool) -> ParityCase {
     let mut schema = format!(
         "{BLOCKS}{EXCLUDING}
          DROP POLICY projects_owner ON projects;
@@ -2855,7 +2790,7 @@ fn excluding_case(major: &str, loading_from_rows: bool) -> ParityCase {
     }
     let mut case = ParityCase::reading(
         &format!(
-            "declared-helper-exclusion-pg{major}{}",
+            "declared-helper-exclusion{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         &schema,
@@ -2884,43 +2819,41 @@ fn excluding_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_helper_excluding_another_helpers_set_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = excluding_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            };
-            // A block on its organization hides an owned project, by its key or by the
-            // organization alike.
-            for table in ["owned_notes", "outside_notes"] {
-                expect("alice", &format!("{table}:P1"), false);
-                expect("alice", &format!("{table}:P2"), true);
-                expect("bob", &format!("{table}:P3"), true);
-                expect("carol", &format!("{table}:P4"), false);
-            }
-            // A blocked project is not returned for the documents written in it.
-            expect("alice", "authored_notes:P1", false);
-            expect("alice", "authored_notes:P2", true);
-            expect("carol", "authored_notes:P1", true);
-            expect("carol", "authored_notes:P2", false);
-            // A blocked document takes away only its own project's return through it.
-            expect("carol", "doc_notes:P1", false);
-            expect("carol", "doc_notes:P2", true);
-            expect("carol", "doc_notes:P4", true);
-            expect("alice", "doc_notes:P1", true);
-            expect("anonymous", "owned_notes:P2", false);
-            assert_agrees(&case, &run);
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_helper_excluding_another_helpers_set_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = excluding_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        };
+        // A block on its organization hides an owned project, by its key or by the
+        // organization alike.
+        for table in ["owned_notes", "outside_notes"] {
+            expect("alice", &format!("{table}:P1"), false);
+            expect("alice", &format!("{table}:P2"), true);
+            expect("bob", &format!("{table}:P3"), true);
+            expect("carol", &format!("{table}:P4"), false);
         }
+        // A blocked project is not returned for the documents written in it.
+        expect("alice", "authored_notes:P1", false);
+        expect("alice", "authored_notes:P2", true);
+        expect("carol", "authored_notes:P1", true);
+        expect("carol", "authored_notes:P2", false);
+        // A blocked document takes away only its own project's return through it.
+        expect("carol", "doc_notes:P1", false);
+        expect("carol", "doc_notes:P2", true);
+        expect("carol", "doc_notes:P4", true);
+        expect("alice", "doc_notes:P1", true);
+        expect("anonymous", "owned_notes:P2", false);
+        assert_agrees(&case, &run);
     }
 }
