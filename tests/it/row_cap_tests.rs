@@ -887,6 +887,58 @@ fn cap_exclusions_the_pairs_cannot_carry_are_refused() {
     }
 }
 
+/// The pairs `capped_kinds('writer')` returns in `schema`, read on its pair type.
+fn writer_pairs(schema: &str, helpers: &[&str]) -> Option<String> {
+    let model = installation_translator(helpers)
+        .translate(&db_of(schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    relation_definition(&model, "capped_kinds_writer_pair", "capped_kinds_writer")
+}
+
+/// `schema` declaring `authz.marking_organizations(marked)`, the organizations marking the
+/// caller as `marked`, which returns no row for a mark the `CHECK` refuses.
+fn with_marks(schema: &str) -> String {
+    schema.replace(
+        "CREATE FUNCTION authz.capped_kinds",
+        "CREATE TABLE organization_marks (
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  user_id UUID NOT NULL,
+  kind TEXT NOT NULL CHECK (kind IN ('block', 'mute')),
+  PRIMARY KEY (organization_id, user_id, kind)
+);
+GRANT SELECT ON organization_marks TO authz_owner;
+CREATE FUNCTION authz.marking_organizations(marked TEXT) RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT mark.organization_id FROM public.organization_marks mark
+  WHERE mark.user_id = authz.caller_id() AND mark.kind = marked
+$$;
+ALTER FUNCTION authz.marking_organizations(TEXT) OWNER TO authz_owner;
+CREATE FUNCTION authz.capped_kinds",
+    )
+}
+
+const MARKING_CAP_HELPERS: &[&str] = &[
+    "authz.capped_kinds",
+    "authz.member_organizations",
+    "authz.blocking_organizations",
+    "authz.marking_organizations",
+];
+
+/// `NOT (x = ANY ('{}'))` holds for every `x`, so a set returning no row takes no pair away.
+#[test]
+fn a_cap_excluding_a_set_returning_no_row_keeps_every_pair() {
+    let banned = with_marks(&blocked_caps("permission.organization_id")).replace(
+        "ARRAY(SELECT authz.blocking_organizations())",
+        "ARRAY(SELECT authz.marking_organizations('ban'))",
+    );
+    let kept = writer_pairs(&banned, MARKING_CAP_HELPERS);
+    assert!(kept.is_some(), "{banned}");
+    assert_eq!(kept, writer_pairs(POLICY_CAPS, POLICY_CAP_HELPERS));
+}
+
 pub(crate) const PERSONAL_RESOURCES: &str = "
 CREATE TABLE resource_notes (
   id UUID PRIMARY KEY,

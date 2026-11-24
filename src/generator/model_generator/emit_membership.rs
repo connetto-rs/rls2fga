@@ -2733,12 +2733,9 @@ fn pair_grant_parts<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
     let parts = helper_grant_parts(arm, None, pair_type, ctx, table_plan, all_types);
-    if arm.outside.is_empty() {
+    if arm.outside.is_empty() || parts.is_empty() {
         return parts;
     }
-    let Some(granted) = combine_union(parts) else {
-        return Vec::new();
-    };
     let mut name = stored_relation_name(arm.table.name());
     let mut outside = Vec::with_capacity(arm.outside.len());
     for helper in &arm.outside {
@@ -2761,17 +2758,19 @@ fn pair_grant_parts<DB: DatabaseLike>(
             computed: relation,
         });
     }
-    let Some(subtract) = combine_union(outside) else {
-        return vec![granted];
-    };
-    let plan = helper_level_plan(pair_type, None, table_plan, all_types);
-    vec![UsersetExpr::Computed(plan.ensure_computed(
-        name,
-        UsersetExpr::Exclusion {
-            base: Box::new(granted),
-            subtract: Box::new(subtract),
-        },
-    ))]
+    match (combine_union(parts), combine_union(outside)) {
+        (Some(granted), Some(subtract)) => {
+            let plan = helper_level_plan(pair_type, None, table_plan, all_types);
+            vec![UsersetExpr::Computed(plan.ensure_computed(
+                name,
+                UsersetExpr::Exclusion {
+                    base: Box::new(granted),
+                    subtract: Box::new(subtract),
+                },
+            ))]
+        }
+        (granted, _) => granted.into_iter().collect(),
+    }
 }
 
 /// The objects of `level_type` reaching a pair `holder` holds, each linked to the pairs
