@@ -754,7 +754,8 @@ pub struct HelperGrant {
     /// arm of a cap.
     pub outside: Vec<DeclaredHelper>,
     /// Each row of the arm's table held as its own object, with the rows of other tables
-    /// it names, `None` where the level's row holds the grant.
+    /// it names, `None` where the level's row, or the pair an arm of a cap returns, holds
+    /// the grant.
     pub held: Option<HeldRows>,
 }
 
@@ -818,12 +819,14 @@ impl HelperGrant {
 /// arm's condition, keeping a row only where the pair its operands name is one the helper
 /// returns, unless the request leaves the lifting value absent.
 ///
-/// Each row of the level reaches the pair its operands name.
+/// Each row of the level, or each pair an arm of a cap returns, reaches the pair its
+/// operands name.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperCap {
     /// The pairs the cap keeps rows by.
     pub pairs: HelperPairs,
-    /// The rows naming the pair each row of the level, or each held row, reaches.
+    /// The rows naming the pair each row of the level, each pair an arm of a cap returns,
+    /// or each held row, reaches.
     pub link: CapLink,
     /// The declared single value whose absence lifts the cap, `None` where it holds for
     /// every request.
@@ -858,17 +861,20 @@ pub struct RowInHelperPairs {
     pub pairs: HelperPairs,
 }
 
-/// Which rows name the pair a row of the level or a held row reaches.
+/// Which rows name the pair a row of the level, a pair an arm of a cap returns, or a held
+/// row reaches.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CapLink {
     /// The capped arm's own row, whose `columns` hold the pair in the order the helper
-    /// returns it, and whose object columns name the level's row.
+    /// returns it, and whose object columns name the level's row, or the pair for an arm
+    /// of a cap.
     Row {
         /// The operands, columns of the arm's table.
         columns: Vec<ColumnName>,
     },
     /// Each pair the cap returns, whose column at `object` holds the level's row the arm
-    /// returns, and whose other columns hold the literals the operands name there.
+    /// returns, or the one-column pair for an arm of a cap, and whose other columns hold
+    /// the literals the operands name there.
     Pair {
         /// The position of the operand naming the level's row.
         object: usize,

@@ -344,7 +344,8 @@ pub(crate) struct LoadedTuple {
     pub(crate) condition: Option<(String, String)>,
 }
 
-/// Run every tuple query and collect what it loaded, sorted and deduplicated.
+/// Run every tuple query and collect what it loaded, sorted and deduplicated across
+/// queries, failing where one query returns a record twice.
 ///
 /// Beside the per-case loaders, for the generic parity runner.
 #[cfg(all(not(target_os = "windows"), feature = "client"))]
@@ -403,14 +404,13 @@ pub(crate) fn execute_tuple_queries_for_parity(
                             query.comment, query.sql
                         )
                     });
-            for row in rows {
-                keys.insert(LoadedTuple {
-                    object: row.object,
-                    relation: row.relation,
-                    subject: row.subject,
-                    condition: Some((row.condition, row.context.to_string())),
-                });
-            }
+            let loaded = rows.into_iter().map(|row| LoadedTuple {
+                object: row.object,
+                relation: row.relation,
+                subject: row.subject,
+                condition: Some((row.condition, row.context.to_string())),
+            });
+            keep_once(&mut keys, query, loaded);
         } else {
             let rows: Vec<Plain> =
                 diesel::sql_query(&query.sql)
@@ -421,15 +421,34 @@ pub(crate) fn execute_tuple_queries_for_parity(
                             query.comment, query.sql
                         )
                     });
-            for row in rows {
-                keys.insert(LoadedTuple {
-                    object: row.object,
-                    relation: row.relation,
-                    subject: row.subject,
-                    condition: None,
-                });
-            }
+            let loaded = rows.into_iter().map(|row| LoadedTuple {
+                object: row.object,
+                relation: row.relation,
+                subject: row.subject,
+                condition: None,
+            });
+            keep_once(&mut keys, query, loaded);
         }
     }
     keys.into_iter().collect()
+}
+
+/// Add `loaded` to `keys`, failing where `query` returns one record twice, since `OpenFGA`
+/// refuses a write naming one tuple twice.
+#[cfg(all(not(target_os = "windows"), feature = "client"))]
+fn keep_once(
+    keys: &mut std::collections::BTreeSet<LoadedTuple>,
+    query: &rls2fga::generator::tuple_generator::TupleQuery,
+    loaded: impl Iterator<Item = LoadedTuple>,
+) {
+    let mut seen = std::collections::BTreeSet::new();
+    for tuple in loaded {
+        assert!(
+            seen.insert(tuple.clone()),
+            "tuple query returned {tuple:?} twice: {}\n{}",
+            query.comment,
+            query.sql
+        );
+        keys.insert(tuple);
+    }
 }

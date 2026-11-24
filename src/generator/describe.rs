@@ -666,6 +666,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
         TupleSource::PolicyScope {
             table,
             identity_cols,
+            shared: _,
             scope_relation,
             scope_type,
             scope_object,
@@ -1020,6 +1021,7 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             link_table,
             object_cols,
             subject_cols,
+            shared: _,
             guarded_type,
             owner_type,
             relation,
