@@ -462,6 +462,30 @@ fn a_restrictive_exclusion_past_the_nested_chain_depth_bound_refuses() {
 }
 
 #[test]
+fn a_restrictive_or_past_the_left_chain_depth_bound_refuses() {
+    let deep_arms = format!(" OR {OWNER}").repeat(64);
+    let sql = format!(
+        "{TABLES}
+         CREATE POLICY docs_read ON docs FOR SELECT USING ({SHARED});
+         CREATE POLICY docs_blocks ON docs AS RESTRICTIVE FOR SELECT
+             USING ({OWNER}{deep_arms} OR NOT {BLOCKED});"
+    );
+    let db = parse_schema(&sql).expect("schema parses");
+    let classified = translator().classify(&db);
+    let blocks = classified
+        .iter()
+        .find(|policy| policy.name() == "docs_blocks")
+        .and_then(|policy| policy.using_classification())
+        .expect("classifies");
+    assert_eq!(
+        blocks.confidence,
+        ConfidenceLevel::D,
+        "{:?}",
+        blocks.pattern
+    );
+}
+
+#[test]
 fn a_restrictive_exclusion_past_the_is_true_chain_depth_bound_refuses() {
     let mut clause = format!("NOT {BLOCKED}");
     for _ in 0..65 {
