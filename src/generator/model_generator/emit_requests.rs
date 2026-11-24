@@ -209,9 +209,13 @@ pub(crate) fn emit_request_formula<DB: DatabaseLike>(
         | RequestFormula::Any(_)
         | RequestFormula::All(_) => {}
     }
-    let Some((gated, entries)) =
-        request_gate_on(formula, ctx.source_table, ctx, table_plan, all_types)
-    else {
+    let Some((gated, entries)) = request_gate_on(
+        formula,
+        GatedObjects::Rows(ctx.source_table),
+        ctx,
+        table_plan,
+        all_types,
+    ) else {
         return deny_expr(table_plan);
     };
     for entry in entries {
@@ -220,19 +224,52 @@ pub(crate) fn emit_request_formula<DB: DatabaseLike>(
     gated
 }
 
-/// `formula` stated on the request-gate object standing for `plan`'s type, which each row
-/// of `rows` links to, with the tuples it writes on that object. `None` for a constant, or
-/// where no tuple names a row of `rows`.
+/// The rows linking each object of a type to the request-gate object standing for it.
+#[derive(Clone, Copy)]
+pub(crate) enum GatedObjects<'a> {
+    /// The rows of the table the type stands for, each an object named by the table's key.
+    Rows(&'a TableId),
+    /// The objects of a type standing for no table, several rows of which may name one.
+    NamedBy {
+        /// The table whose rows name the objects.
+        table: &'a TableId,
+        /// The columns of `table` naming an object, in the order of its key.
+        columns: &'a [ColumnName],
+    },
+}
+
+impl<'a> GatedObjects<'a> {
+    /// The table the type stands for, `None` for a type standing for no table.
+    pub(crate) fn level(self) -> Option<&'a TableId> {
+        match self {
+            Self::Rows(table) => Some(table),
+            Self::NamedBy { .. } => None,
+        }
+    }
+}
+
+/// `formula` stated on the request-gate object standing for `plan`'s type, which each
+/// object `objects` names links to, with the tuples it writes on that object. `None` for a
+/// constant, or where no tuple names an object.
 pub(crate) fn request_gate_on<DB: DatabaseLike>(
     formula: &RequestFormula,
-    rows: &TableId,
+    objects: GatedObjects<'_>,
     ctx: &PatternCtx<'_, DB>,
     plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<(UsersetExpr, Vec<TupleSource>)> {
-    let Some(identity_cols) = resolve_row_identity(rows, ctx.db) else {
-        skip_source_without_row_identity(plan, rows, "request gate links", ctx.db);
-        return None;
+    let (rows, identity_cols, shared) = match objects {
+        GatedObjects::Rows(rows) => {
+            let Some(identity_cols) = resolve_row_identity(rows, ctx.db) else {
+                skip_source_without_row_identity(plan, rows, "request gate links", ctx.db);
+                return None;
+            };
+            (rows, identity_cols, false)
+        }
+        GatedObjects::NamedBy { table, columns } => {
+            let keyed = row_uniquely_keys(table, &columns.iter().collect::<Vec<_>>(), ctx.db);
+            (table, columns.to_vec(), !keyed)
+        }
     };
 
     let well_known = &ctx.settings.well_known;
@@ -259,6 +296,7 @@ pub(crate) fn request_gate_on<DB: DatabaseLike>(
     plan.add_source(TupleSource::PolicyScope {
         table: rows.clone(),
         identity_cols,
+        shared,
         scope_relation: link.clone(),
         scope_type: gate_type,
         scope_object: gate_object,

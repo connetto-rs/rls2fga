@@ -384,6 +384,8 @@ pub(crate) enum TupleSource {
         object_cols: Vec<ColumnName>,
         /// Columns of `link_table` naming the owner, in the owner key's order.
         subject_cols: Vec<ColumnName>,
+        /// Whether several rows may name one link, so each link is written once.
+        shared: bool,
         /// The guarded table's own type, which the objects belong to.
         guarded_type: TypeName,
         /// The owner type the closure rows carry.
@@ -424,7 +426,8 @@ pub(crate) enum TupleSource {
 
     /// Links every row of a table to one object of a synthetic type standing for
     /// something every row shares, such as the gates that read only the request. Produces
-    /// `(type:pk, scope_relation, scope_type:scope_object)` per row.
+    /// `(type:identity_cols, scope_relation, scope_type:scope_object)` per row, the row's
+    /// own key, or the columns naming the pair it returns for a type of a cap's pairs.
     ///
     /// What the object admits is a fact about the policy, carried once by
     /// [`Self::RequestGateEntry`], so a table carrying several gates writes one fact per
@@ -432,6 +435,9 @@ pub(crate) enum TupleSource {
     PolicyScope {
         table: TableId,
         identity_cols: Vec<ColumnName>,
+        /// Whether several rows may hold one value in `identity_cols`, so each object's
+        /// link is written once.
+        shared: bool,
         scope_relation: RelationName,
         /// Synthetic type the scope objects belong to.
         scope_type: TypeName,
@@ -1211,6 +1217,7 @@ impl TupleSource {
                 link_table,
                 object_cols,
                 subject_cols,
+                shared: _,
                 guarded_type,
                 owner_type,
                 relation,
@@ -1271,6 +1278,7 @@ impl TupleSource {
             Self::PolicyScope {
                 table,
                 identity_cols,
+                shared: _,
                 scope_relation,
                 scope_type,
                 scope_object,

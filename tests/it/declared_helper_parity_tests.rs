@@ -22,7 +22,10 @@ use crate::declared_helper_tests::{
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
-use crate::row_cap_tests::{blocked_caps, INSTALLATION_CAPS, PERSONAL_RESOURCES, POLICY_CAPS};
+use crate::row_cap_tests::{
+    blocked_caps, nested_caps, scoped_nested_caps, INSTALLATION_CAPS, PERSONAL_RESOURCES,
+    POLICY_CAPS,
+};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
@@ -2448,6 +2451,109 @@ const CAPPED_TEAMS: [&str; 2] = [
     "0e000000-0000-4000-8000-0000000000e1",
     "0e000000-0000-4000-8000-0000000000e2",
 ];
+
+const NESTED_CAP_HELPERS: &str = r#"{
+    "authz.capped_kinds": { "kind": "declared_helper" },
+    "authz.member_organizations": { "kind": "declared_helper" },
+    "authz.owned_resources": { "kind": "declared_helper" },
+    "authz.blocking_organizations": { "kind": "declared_helper" },
+    "authz.caller_grantees": { "kind": "declared_helper" }
+}"#;
+
+/// Which schema [`nested_caps_case`] reads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NestedCap {
+    /// [`nested_caps`] without the block exclusion.
+    Literal,
+    /// [`nested_caps`] with it.
+    Blocked,
+    /// [`scoped_nested_caps`], the fifth member's membership in the second organization
+    /// scoped at `project`.
+    Scoped,
+}
+
+/// [`row_caps_case`] over the schema `nested` names, each member on both
+/// [`CAPPED_TEAMS`]. The first member no longer belongs to the second organization, and the
+/// first organization blocks the second and fourth member.
+fn nested_caps_case(major: &str, nested: NestedCap, loading_from_rows: bool) -> ParityCase {
+    let [a1, a2] = ORGANIZATIONS;
+    let [e1, e2] = CAPPED_TEAMS;
+    let mut extra = format!("INSERT INTO teams VALUES ('{e1}', '{a1}'), ('{e2}', '{a2}');");
+    for (member, _) in CAPPED_MEMBERS {
+        let _ = write!(
+            extra,
+            "INSERT INTO team_members VALUES ('{e1}', '{a1}', '{member}'), \
+             ('{e2}', '{a2}', '{member}');"
+        );
+    }
+    let _ = write!(
+        extra,
+        "DELETE FROM memberships WHERE organization_id = '{a2}' AND user_id = '{}';
+         INSERT INTO organization_blocks VALUES ('{a1}', '{}'), ('{a1}', '{}');",
+        CAPPED_MEMBERS[0].0, CAPPED_MEMBERS[1].0, CAPPED_MEMBERS[3].0,
+    );
+    let (suffix, schema) = match nested {
+        NestedCap::Literal => ("", nested_caps(false)),
+        NestedCap::Blocked => ("-blocked", nested_caps(true)),
+        NestedCap::Scoped => {
+            let _ = write!(
+                extra,
+                "UPDATE memberships SET scope = 'project' \
+                 WHERE organization_id = '{a2}' AND user_id = '{}';",
+                CAPPED_MEMBERS[4].0,
+            );
+            ("-scoped", scoped_nested_caps())
+        }
+    };
+    capped_members_case(
+        &format!("declared-helper-nested-caps{suffix}-pg{major}"),
+        &schema,
+        (
+            &extra,
+            "organizations, organization_notes, resources, teams",
+        ),
+        NESTED_CAP_HELPERS,
+        loading_from_rows,
+    )
+}
+
+/// A team reads through its member row only where its organization is one the member
+/// belongs to, and where an installation acts, one the installation holds at reader or
+/// above for the kind the membership is capped at. A block takes the organization away only
+/// where an installation acts, since the cap holding the exclusion lifts with it.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_cap_whose_own_rows_another_cap_keeps_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for nested in [NestedCap::Literal, NestedCap::Blocked, NestedCap::Scoped] {
+            for loading_from_rows in [false, true] {
+                let case = nested_caps_case(major, nested, loading_from_rows);
+                let run =
+                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+                for (member, teams) in [
+                    (CAPPED_MEMBERS[0].0, [true, false]),
+                    (CAPPED_MEMBERS[1].0, [true, true]),
+                    (CAPPED_MEMBERS[2].0, [true, false]),
+                    (CAPPED_MEMBERS[3].0, [nested != NestedCap::Blocked, false]),
+                    (CAPPED_MEMBERS[4].0, [false, nested == NestedCap::Scoped]),
+                ] {
+                    for (team, allowed) in CAPPED_TEAMS.into_iter().zip(teams) {
+                        assert_postgres(
+                            &case,
+                            &run,
+                            member,
+                            &format!("teams:{team}"),
+                            ActionStatement::Select,
+                            allowed,
+                        );
+                    }
+                }
+                assert_agrees(&case, &run);
+            }
+        }
+    }
+}
 
 /// Each request of [`joined_caps_case`], its own user acting as one of four profiles,
 /// through the installation acting for it, `None` leaving the installation unset and `""`

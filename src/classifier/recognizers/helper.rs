@@ -335,19 +335,6 @@ pub(crate) enum HelperRefusal {
         /// The helper returning the pairs.
         cap: String,
     },
-    /// The rows returning a cap's pairs are capped in turn.
-    #[error(
-        "{capped} is capped by '{cap}', whose own rows '{nested}' caps, while a pair object \
-         carries no cap"
-    )]
-    CappedCap {
-        /// What the cap keeps rows of.
-        capped: Capped,
-        /// The helper returning the pairs.
-        cap: String,
-        /// The helper capping the cap's rows.
-        nested: String,
-    },
     /// The rows returning a cap's pairs are kept only while the request leaves a setting
     /// unset.
     #[error(
@@ -2105,25 +2092,17 @@ fn helper_grant<DB: DatabaseLike>(
             })
         })
         .collect::<Result<_, _>>()?;
-    let (caps, within, held) = match objects {
-        [object] => {
-            let mut caps = Vec::new();
-            let mut within = Vec::new();
-            for cap in grant.caps() {
-                match level.filter(|_| caps_own_key(cap, object)) {
-                    Some(level) => {
-                        within.push(within_call(function, cap, object, level, db, registry)?);
-                    }
-                    None => caps.push(helper_cap(function, grant, cap, db, registry)?),
-                }
+    let mut caps = Vec::new();
+    let mut within = Vec::new();
+    for cap in grant.caps() {
+        match (level, objects) {
+            (Some(level), [object]) if caps_own_key(cap, object) => {
+                within.push(within_call(function, cap, object, level, db, registry)?);
             }
-            let (caps, held) = place_caps(function, grant, object, caps, held, db)?;
-            (caps, within, held)
+            _ => caps.push(helper_cap(function, grant, cap, db, registry)?),
         }
-        // Only an arm of a cap returns several columns, and `helper_cap` refuses one
-        // carrying caps of its own.
-        _ => (Vec::new(), Vec::new(), held),
-    };
+    }
+    let (caps, held) = place_caps(function, grant, objects, caps, held, db)?;
     let grant = HelperGrant {
         table: table_identity(table),
         object_columns: objects
@@ -2956,13 +2935,6 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 cap: name,
             });
         };
-        if let Some(nested) = grant.caps().first() {
-            return Err(HelperRefusal::CappedCap {
-                capped: capped.clone(),
-                cap: name,
-                nested: nested.function().target_name().to_string(),
-            });
-        }
         if let Some(unset) = grant.unset_settings().first() {
             return Err(HelperRefusal::CapKeptWhileUnset {
                 capped: capped.clone(),
@@ -3026,13 +2998,14 @@ fn absent_source(
         .ok_or(AbsenceRefusal::NotMaybeUnset)
 }
 
-/// `caps` on the level's row where none needs more of a row than the level's row names and
-/// no row is held for its joins, and on each held row otherwise, the arm's rows then held by
-/// their key, refused where no key names each of them.
+/// `caps` on the level's row, or on the pair an arm of a cap returns, where none needs more
+/// of a row than `objects` name and no row is held for its joins, and on each held row
+/// otherwise, the arm's rows then held by their key, refused where no key names each of
+/// them.
 fn place_caps<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
-    object: &DB::Column,
+    objects: &[&DB::Column],
     caps: Vec<HelperCap>,
     held: Option<HeldRows>,
     db: &DB,
@@ -3041,11 +3014,14 @@ fn place_caps<DB: DatabaseLike>(
         return Ok((caps, held));
     }
     let table = table_identity(grant.table());
-    let object = ColumnName::from_stored(object.stored_column_name());
-    let keyed = row_uniquely_keys(&table, &[&object], db);
+    let objects: Vec<ColumnName> = objects
+        .iter()
+        .map(|object| ColumnName::from_stored(object.stored_column_name()))
+        .collect();
+    let keyed = row_uniquely_keys(&table, &objects.iter().collect::<Vec<_>>(), db);
     let shapes: Option<Vec<LevelShape>> = caps
         .iter()
-        .map(|cap| level_shape(&cap.link, &object, keyed))
+        .map(|cap| level_shape(&cap.link, &objects, keyed))
         .collect();
     if let Some(shapes) = shapes {
         let caps = caps
@@ -3058,9 +3034,9 @@ fn place_caps<DB: DatabaseLike>(
     let Some(identity) = resolve_row_identity(&table, db) else {
         let (column, cap) = caps
             .into_iter()
-            .find(|cap| level_shape(&cap.link, &object, keyed).is_none())
+            .find(|cap| level_shape(&cap.link, &objects, keyed).is_none())
             .map_or_else(Default::default, |cap| {
-                (paired_column(&cap.link, &object), cap.pairs.function)
+                (paired_column(&cap.link, &objects), cap.pairs.function)
             });
         return Err(HelperRefusal::CapOnSeveralRows {
             function: function.to_string(),
@@ -3080,7 +3056,8 @@ fn place_caps<DB: DatabaseLike>(
     ))
 }
 
-/// How a cap linked from the held row reads on the level's row instead.
+/// How a cap linked from the held row reads on the level's row, or on the pair an arm of a
+/// cap returns, instead.
 #[derive(Clone, Copy)]
 enum LevelShape {
     /// Its columns name the pair on the arm's own row, which names one row of the level.
@@ -3089,11 +3066,11 @@ enum LevelShape {
     Pair(usize),
 }
 
-/// How `link` reads on the level's row, `None` where it needs more of the arm's row than
-/// `object` names: columns of the arm's own row name the pair where `object` keys the table
-/// or every operand is `object`, and literals beside `object` alone name the pairs whose
-/// column at its position holds the level's row.
-fn level_shape(link: &CapLink, object: &ColumnName, keyed: bool) -> Option<LevelShape> {
+/// How `link` reads on the object `objects` name, `None` where it needs more of the arm's
+/// row than they name: columns of the arm's own row name the pair where `objects` key the
+/// table or every operand is one of them, and literals beside one object column alone name
+/// the pairs whose column at its position holds that object.
+fn level_shape(link: &CapLink, objects: &[ColumnName], keyed: bool) -> Option<LevelShape> {
     let CapLink::Held {
         reader: CapReader::Arm,
         columns,
@@ -3103,11 +3080,11 @@ fn level_shape(link: &CapLink, object: &ColumnName, keyed: bool) -> Option<Level
         return None;
     };
     if literals.is_empty() {
-        return (keyed || columns.iter().all(|(_, column)| column == object))
+        return (keyed || columns.iter().all(|(_, column)| objects.contains(column)))
             .then_some(LevelShape::Row);
     }
-    match columns.as_slice() {
-        [(position, column)] if column == object => Some(LevelShape::Pair(*position)),
+    match (columns.as_slice(), objects) {
+        ([(position, column)], [object]) if column == object => Some(LevelShape::Pair(*position)),
         _ => None,
     }
 }
@@ -3126,17 +3103,21 @@ fn leveled(cap: HelperCap, shape: LevelShape) -> HelperCap {
     HelperCap { link, ..cap }
 }
 
-/// The column `link` pairs beside `object`, or `object` itself where it pairs no other.
-fn paired_column(link: &CapLink, object: &ColumnName) -> String {
+/// The column `link` pairs beside `objects`, or the first of them where it pairs no other.
+fn paired_column(link: &CapLink, objects: &[ColumnName]) -> String {
+    let first = || {
+        objects
+            .first()
+            .map_or_else(String::new, ToString::to_string)
+    };
     let CapLink::Held { columns, .. } = link else {
-        return object.to_string();
+        return first();
     };
     columns
         .iter()
         .map(|(_, column)| column)
-        .find(|column| *column != object)
-        .unwrap_or(object)
-        .to_string()
+        .find(|column| !objects.contains(column))
+        .map_or_else(first, ToString::to_string)
 }
 
 /// A column operand of a held row's cap.

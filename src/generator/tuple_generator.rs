@@ -1392,6 +1392,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             link_table,
             object_cols,
             subject_cols,
+            shared,
             guarded_type,
             owner_type,
             relation,
@@ -1423,12 +1424,13 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 || format!("\nWHERE {guards}"),
                 |e| format!("\nWHERE {guards}\nAND ({e})"),
             );
+            let distinct = if *shared { "DISTINCT " } else { "" };
             Some(TupleQuery {
                 comment: format!(
                     "-- {guarded_type} to {owner_type} closure link from {link_table}"
                 ),
                 sql: format!(
-                    "SELECT {object_sql} AS object, '{relation}' AS relation, \
+                    "SELECT {distinct}{object_sql} AS object, '{relation}' AS relation, \
                      {subject_sql} AS subject\n\
                      FROM {link_table_sql}{where_clause};"
                 ),
@@ -1944,6 +1946,7 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
         TupleSource::PolicyScope {
             table,
             identity_cols,
+            shared,
             scope_relation,
             scope_type,
             scope_object,
@@ -1951,10 +1954,11 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             let (table_sql, object_sql, key_not_null) =
                 owner_object_sql(owner_type, table, identity_cols, only_own_rows, names);
             let subject_sql = typed_name_literal(scope_type, scope_object);
+            let distinct = if *shared { "DISTINCT " } else { "" };
             Some(TupleQuery {
                 comment: format!("-- Every {table} row is judged by the scope {scope_object}"),
                 sql: format!(
-                    "SELECT {object_sql} AS object, \
+                    "SELECT {distinct}{object_sql} AS object, \
                      '{scope_relation}' AS relation, \
                      {subject_sql} AS subject\n\
                      FROM {table_sql}\n\

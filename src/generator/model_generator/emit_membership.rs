@@ -5,7 +5,7 @@
 
 use super::emit_requests::{
     declare_condition, request_comparison_spec, request_gate_on, reserve_temporal_clocks,
-    temporal_gates,
+    temporal_gates, GatedObjects,
 };
 use super::*;
 
@@ -1060,10 +1060,12 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
         format!("indirect_{owner_type}"),
         vec![DirectSubject::Type(owner_type.clone())],
     );
+    let shared = rows_share_links(link_table, &join_columns, owner_columns, ctx.db);
     table_plan.add_source(TupleSource::ClosureBridge {
         link_table: link_table.clone(),
         object_cols: join_columns,
         subject_cols: owner_columns.clone(),
+        shared,
         guarded_type: table_plan.type_name.clone(),
         owner_type: owner_type.clone(),
         relation: link_relation.clone(),
@@ -1604,7 +1606,7 @@ pub(crate) fn emit_row_in_helper_pairs<DB: DatabaseLike>(
     reached_pairs(
         (pairs, holder),
         reach,
-        (source_table, &level_type),
+        (Some(source_table), &level_type),
         ctx,
         table_plan,
         all_types,
@@ -1661,7 +1663,7 @@ pub(crate) fn emit_flagged_row<DB: DatabaseLike>(
     let flagged_type = ctx.table_types.resolve(&flag.table);
     let plan = helper_level_plan(&flagged_type, Some(&flag.table), table_plan, all_types);
     for step in flag.steps.iter().rev() {
-        let (link, _) = flag_edge_link(plan, step, &flagged_type);
+        let (link, _) = flag_edge_link(plan, step, &flagged_type, ctx.db);
         flagged = plan.ensure_computed(
             format!("{flagged}_from_{link}"),
             UsersetExpr::TupleToUserset {
@@ -1709,7 +1711,7 @@ fn flag_relation<DB: DatabaseLike>(
     }
     let mut links = Vec::with_capacity(flag.edges.len());
     for edge in &flag.edges {
-        let (link, edge_key) = flag_edge_link(plan, edge, &flagged_type);
+        let (link, edge_key) = flag_edge_link(plan, edge, &flagged_type, ctx.db);
         let _ = write!(key, ":{}:{edge_key}", edge_key.len());
         links.push(link);
     }
@@ -1760,10 +1762,11 @@ fn attribute_gates(
 
 /// The tupleset naming, on the flagged row each edge's child names, the flagged row its
 /// parent names, with the source loading it and the key it is held under.
-fn flag_edge_link(
+fn flag_edge_link<DB: DatabaseLike>(
     plan: &mut TypePlan,
     edge: &TreeEdges,
     flagged_type: &TypeName,
+    db: &DB,
 ) -> (RelationName, String) {
     let TreeEdges {
         table,
@@ -1781,10 +1784,13 @@ fn flag_edge_link(
         format!("{}_{parent_column}", table.name()),
         vec![DirectSubject::Type(flagged_type.clone())],
     );
+    let object_cols = vec![child_column.clone()];
+    let subject_cols = vec![parent_column.clone()];
     plan.add_source(TupleSource::ClosureBridge {
         link_table: table.clone(),
-        object_cols: vec![child_column.clone()],
-        subject_cols: vec![parent_column.clone()],
+        shared: rows_share_links(table, &object_cols, &subject_cols, db),
+        object_cols,
+        subject_cols,
         guarded_type: flagged_type.clone(),
         owner_type: flagged_type.clone(),
         relation: link.clone(),
@@ -1890,7 +1896,7 @@ fn helper_call_relation<DB: DatabaseLike>(
                 WalkDirection::Down => {
                     helper_parent_link(plan, &walk.edges, &call.level, level_type.clone(), ctx.db)
                 }
-                WalkDirection::Up => helper_child_link(plan, &walk.edges, &level_type),
+                WalkDirection::Up => helper_child_link(plan, &walk.edges, &level_type, ctx.db),
             })
             .collect();
         let relation = plan.ensure_walk_computed(reached_name, parts, walks);
@@ -1945,10 +1951,13 @@ fn helper_parent_link<DB: DatabaseLike>(
         parent_type.as_str(),
         vec![DirectSubject::Type(parent_type.clone())],
     );
+    let object_cols = vec![edges.child_column.clone()];
+    let subject_cols = vec![edges.parent_column.clone()];
     plan.add_source(TupleSource::ClosureBridge {
         link_table: edges.table.clone(),
-        object_cols: vec![edges.child_column.clone()],
-        subject_cols: vec![edges.parent_column.clone()],
+        shared: rows_share_links(&edges.table, &object_cols, &subject_cols, db),
+        object_cols,
+        subject_cols,
         guarded_type: plan.type_name.clone(),
         owner_type: parent_type,
         relation: tupleset.clone(),
@@ -1981,10 +1990,11 @@ fn helper_parent_bridge(
 
 /// The tupleset naming, on the level's row each edge's parent names, the row of the
 /// level the edge's child names, with the source loading it.
-fn helper_child_link(
+fn helper_child_link<DB: DatabaseLike>(
     plan: &mut TypePlan,
     edges: &TreeEdges,
     level_type: &TypeName,
+    db: &DB,
 ) -> RelationName {
     let mut source_key = table_source_key("child_bridge", &edges.table);
     source_key_part(&mut source_key, edges.parent_column.as_str());
@@ -1994,10 +2004,13 @@ fn helper_child_link(
         "child",
         vec![DirectSubject::Type(level_type.clone())],
     );
+    let object_cols = vec![edges.parent_column.clone()];
+    let subject_cols = vec![edges.child_column.clone()];
     plan.add_source(TupleSource::ClosureBridge {
         link_table: edges.table.clone(),
-        object_cols: vec![edges.parent_column.clone()],
-        subject_cols: vec![edges.child_column.clone()],
+        shared: rows_share_links(&edges.table, &object_cols, &subject_cols, db),
+        object_cols,
+        subject_cols,
         guarded_type: level_type.clone(),
         owner_type: level_type.clone(),
         relation: tupleset.clone(),
@@ -2210,8 +2223,14 @@ fn request_gated_grant_parts<DB: DatabaseLike>(
         required.push(RequestFormula::Presence(PresenceAtom::new(source, false)));
     }
     let required = RequestFormula::join(BoolOp::And, required);
-    let Some(gate) = level_request_gate(&required, level, level_type, ctx, table_plan, all_types)
-    else {
+    let Some(gate) = level_request_gate(
+        &required,
+        GatedObjects::Rows(level),
+        level_type,
+        ctx,
+        table_plan,
+        all_types,
+    ) else {
         return Vec::new();
     };
     let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
@@ -2232,7 +2251,7 @@ fn capped_grant_parts<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
-    let parts = kept_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
+    let parts = kept_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types);
     if grant.within.is_empty() && grant.outside.is_empty() {
         return parts;
     }
@@ -2308,15 +2327,17 @@ fn outside_expr<DB: DatabaseLike>(
     reach_level_relation(&call.level, source, plan, column, relation, ctx)
 }
 
-/// The rows of the level a grant arm returns, as [`helper_grant_parts`] reads them, kept
-/// by each cap on the arm as one relation, or as [`held_grant_expr`] reads them where the
-/// arm's rows are held.
+/// The rows of the level a grant arm returns, or the pairs an arm of a cap returns where
+/// `level` is `None`, as [`helper_grant_parts`] reads them, kept by each cap on the arm as
+/// one relation, or as [`held_grant_expr`] reads them where the arm's rows are held.
 ///
 /// A cap read on the level's row has operands the level's row or the arm's own row where the
 /// level's row keys it, so the rows keeping the pair are the ones granting the level's row.
+/// A cap read on a pair has operands among the pair's columns or the arm's own row where
+/// those key it, so the rows keeping the cap's pair are again the ones returning the pair.
 fn kept_grant_parts<DB: DatabaseLike>(
     grant: &HelperGrant,
-    level: &TableId,
+    level: Option<&TableId>,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
@@ -2327,7 +2348,7 @@ fn kept_grant_parts<DB: DatabaseLike>(
             .into_iter()
             .collect();
     }
-    let parts = helper_grant_parts(grant, Some(level), level_type, ctx, table_plan, all_types);
+    let parts = helper_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
     if grant.caps.is_empty() {
         return parts;
     }
@@ -2336,6 +2357,13 @@ fn kept_grant_parts<DB: DatabaseLike>(
     };
     let mut kept = vec![granted];
     let mut name = stored_relation_name(grant.table.name());
+    let objects = level.map_or(
+        GatedObjects::NamedBy {
+            table: &grant.table,
+            columns: &grant.object_columns,
+        },
+        GatedObjects::Rows,
+    );
     for cap in &grant.caps {
         let reach = match &cap.link {
             CapLink::Row { columns } => CapReach::Rows {
@@ -2352,7 +2380,7 @@ fn kept_grant_parts<DB: DatabaseLike>(
             // A cap needing more of a row than the level's row names holds its rows.
             CapLink::Held { .. } => return Vec::new(),
         };
-        let Some(capped) = cap_expr(cap, reach, level, level_type, ctx, table_plan, all_types)
+        let Some(capped) = cap_expr(cap, reach, objects, level_type, ctx, table_plan, all_types)
         else {
             return Vec::new();
         };
@@ -2363,14 +2391,15 @@ fn kept_grant_parts<DB: DatabaseLike>(
         ));
         kept.push(capped);
     }
-    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    let plan = helper_level_plan(level_type, level, table_plan, all_types);
     vec![UsersetExpr::Computed(
         plan.ensure_computed(name, UsersetExpr::Intersection(kept)),
     )]
 }
 
-/// The rows of the level a grant arm returns where each row it joins meets the join, no
-/// row blocking it does, no set it stays outside holds it, and every cap on it keeps it.
+/// The rows of the level a grant arm returns, or the pairs an arm of a cap returns where
+/// `level` is `None`, where each row it joins meets the join, no row blocking it does, no
+/// set it stays outside holds it, and every cap on it keeps it.
 ///
 /// Each row of the arm's table is an object of its type, holding the grant the row makes
 /// while every row it joins holds a gate, no row blocking it does, no set it stays outside
@@ -2380,7 +2409,7 @@ fn kept_grant_parts<DB: DatabaseLike>(
 fn held_grant_expr<DB: DatabaseLike>(
     grant: &HelperGrant,
     held: &HeldRows,
-    level: &TableId,
+    level: Option<&TableId>,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
@@ -2451,7 +2480,7 @@ fn held_grant_expr<DB: DatabaseLike>(
 
     let mut key = table_source_key("joined-grant-rows", &grant.table);
     source_key_columns(&mut key, &grant.object_columns);
-    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    let plan = helper_level_plan(level_type, level, table_plan, all_types);
     let link = plan.membership_source_relation(
         &key,
         stored_relation_name(grant.table.name()),
@@ -2461,6 +2490,7 @@ fn held_grant_expr<DB: DatabaseLike>(
         link_table: grant.table.clone(),
         object_cols: grant.object_columns.clone(),
         subject_cols: held.identity.clone(),
+        shared: false,
         guarded_type: level_type.clone(),
         owner_type: row_type,
         relation: link.clone(),
@@ -2541,6 +2571,7 @@ fn joined_row_link(
         link_table: grant.table.clone(),
         object_cols: held.identity.clone(),
         subject_cols: joined.columns.clone(),
+        shared: false,
         guarded_type: row_plan.type_name.clone(),
         owner_type: joined_type.clone(),
         relation: link.clone(),
@@ -2583,7 +2614,7 @@ fn held_cap_expr<DB: DatabaseLike>(
         return cap_expr(
             cap,
             reach(&grant.table, &held.identity),
-            &grant.table,
+            GatedObjects::Rows(&grant.table),
             row_type,
             ctx,
             table_plan,
@@ -2595,7 +2626,7 @@ fn held_cap_expr<DB: DatabaseLike>(
     let capped = cap_expr(
         cap,
         reach(&joined.table, &joined.identity),
-        &joined.table,
+        GatedObjects::Rows(&joined.table),
         &joined_type,
         ctx,
         table_plan,
@@ -2634,12 +2665,13 @@ enum CapReach<'a> {
 
 /// The objects of `level_type` `cap` keeps, `None` where it keeps none.
 ///
-/// Each object of `level_type` links to the pairs the cap's operands name as `reach` reads
-/// them, and while the request leaves the lifting value absent, every object is kept.
+/// Each object of `level_type`, named as `objects` names it, links to the pairs the cap's
+/// operands name as `reach` reads them, and while the request leaves the lifting value
+/// absent, every object is kept.
 fn cap_expr<DB: DatabaseLike>(
     cap: &HelperCap,
     reach: CapReach<'_>,
-    level: &TableId,
+    objects: GatedObjects<'_>,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
@@ -2650,14 +2682,14 @@ fn cap_expr<DB: DatabaseLike>(
     if let Some(lift) = &cap.lift {
         let absent = RequestFormula::Presence(PresenceAtom::new(lift, false));
         kept.extend(level_request_gate(
-            &absent, level, level_type, ctx, table_plan, all_types,
+            &absent, objects, level_type, ctx, table_plan, all_types,
         ));
     }
     if let Some(holder) = holder {
         kept.push(reached_pairs(
             (&cap.pairs, holder),
             reach,
-            (level, level_type),
+            (objects.level(), level_type),
             ctx,
             table_plan,
             all_types,
@@ -2666,12 +2698,12 @@ fn cap_expr<DB: DatabaseLike>(
     combine_union(kept)
 }
 
-/// `formula` stated on the request gate each row of `level` links to, a rule of
-/// `level_type`, the tuples it writes added to `table_plan`. `None` where no tuple names a
-/// row of `level`.
+/// `formula` stated on the request gate each object `objects` names links to, a rule of
+/// `level_type`, the tuples it writes added to `table_plan`. `None` where no tuple names an
+/// object.
 fn level_request_gate<DB: DatabaseLike>(
     formula: &RequestFormula,
-    level: &TableId,
+    objects: GatedObjects<'_>,
     level_type: &TypeName,
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
@@ -2680,13 +2712,15 @@ fn level_request_gate<DB: DatabaseLike>(
     // The gate object stands for the level's type, so its plan leaves `all_types` while
     // the request-gate plan there takes the formula.
     let (gated, entries) = if table_plan.type_name == *level_type {
-        request_gate_on(formula, level, ctx, table_plan, all_types)
+        request_gate_on(formula, objects, ctx, table_plan, all_types)
     } else {
         let mut plan = all_types.remove(level_type).unwrap_or_else(|| {
             TypePlan::new_with_well_known(level_type.clone(), &table_plan.well_known)
         });
-        plan.names_rows_of(level);
-        let gated = request_gate_on(formula, level, ctx, &mut plan, all_types);
+        if let Some(level) = objects.level() {
+            plan.names_rows_of(level);
+        }
+        let gated = request_gate_on(formula, objects, ctx, &mut plan, all_types);
         all_types.insert(level_type.clone(), plan);
         gated
     }?;
@@ -2719,8 +2753,8 @@ fn pairs_holder<DB: DatabaseLike>(
     })
 }
 
-/// The pairs an arm of a cap returns, as [`helper_grant_parts`] reads them, less those
-/// whose column a set the arm stays outside of holds.
+/// The pairs an arm of a cap returns, as [`kept_grant_parts`] reads them, less those whose
+/// column a set the arm stays outside of holds.
 ///
 /// Every row returning a pair holds the same value in each of the pair's columns, so each
 /// pair links to the row of the excluded set's level that column names, loaded from the
@@ -2732,7 +2766,7 @@ fn pair_grant_parts<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
-    let parts = helper_grant_parts(arm, None, pair_type, ctx, table_plan, all_types);
+    let parts = kept_grant_parts(arm, None, pair_type, ctx, table_plan, all_types);
     if arm.outside.is_empty() || parts.is_empty() {
         return parts;
     }
@@ -2754,7 +2788,7 @@ fn pair_grant_parts<DB: DatabaseLike>(
             ResidualPredicates::default(),
         )];
         outside.push(UsersetExpr::TupleToUserset {
-            tupleset: cap_link(&named_type, rows, plan),
+            tupleset: cap_link(&named_type, rows, plan, ctx.db),
             computed: relation,
         });
     }
@@ -2781,7 +2815,7 @@ fn pair_grant_parts<DB: DatabaseLike>(
 fn reached_pairs<DB: DatabaseLike>(
     (pairs, holder): (&HelperPairs, RelationName),
     reach: CapReach<'_>,
-    (level, level_type): (&TableId, &TypeName),
+    (level, level_type): (Option<&TableId>, &TypeName),
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
@@ -2789,9 +2823,14 @@ fn reached_pairs<DB: DatabaseLike>(
     let pair_type = cap_type_name(pairs, "pair", ctx.table_types);
     match reach {
         CapReach::Pairs { object, literals } => {
-            let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
             UsersetExpr::TupleToUserset {
-                tupleset: cap_link(&pair_type, literal_links(pairs, &[object], literals), plan),
+                tupleset: cap_link(
+                    &pair_type,
+                    literal_links(pairs, &[object], literals),
+                    plan,
+                    ctx.db,
+                ),
                 computed: holder,
             }
         }
@@ -2802,10 +2841,10 @@ fn reached_pairs<DB: DatabaseLike>(
             literals: [],
             ..
         } => {
-            let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
             let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
             UsersetExpr::TupleToUserset {
-                tupleset: cap_link(&pair_type, rows, plan),
+                tupleset: cap_link(&pair_type, rows, plan, ctx.db),
                 computed: holder,
             }
         }
@@ -2827,6 +2866,7 @@ fn reached_pairs<DB: DatabaseLike>(
                 &pair_type,
                 literal_links(pairs, &positions, literals),
                 key_plan,
+                ctx.db,
             );
             let at_key = key_plan.ensure_computed(
                 helper_call_relation_name(&pairs.function, &pairs.arguments),
@@ -2835,10 +2875,10 @@ fn reached_pairs<DB: DatabaseLike>(
                     computed: holder,
                 },
             );
-            let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
             let rows = vec![(table, keys.to_vec(), columns, ResidualPredicates::default())];
             UsersetExpr::TupleToUserset {
-                tupleset: cap_link(&key_type, rows, plan),
+                tupleset: cap_link(&key_type, rows, plan, ctx.db),
                 computed: at_key,
             }
         }
@@ -2909,7 +2949,12 @@ fn literal_links<'a>(
 
 /// The tupleset naming, on each object of `plan`'s type, the objects of `owner` the rows of
 /// `links` link it to, with the sources loading it.
-fn cap_link(owner: &TypeName, links: Vec<CapLinkRows<'_>>, plan: &mut TypePlan) -> RelationName {
+fn cap_link<DB: DatabaseLike>(
+    owner: &TypeName,
+    links: Vec<CapLinkRows<'_>>,
+    plan: &mut TypePlan,
+    db: &DB,
+) -> RelationName {
     let level_type = plan.type_name.clone();
     let mut key = format!("cap:{owner}");
     for (table, object_cols, subject_cols, predicates) in &links {
@@ -2929,6 +2974,7 @@ fn cap_link(owner: &TypeName, links: Vec<CapLinkRows<'_>>, plan: &mut TypePlan) 
     );
     for (table, object_cols, subject_cols, extra_predicates) in links {
         plan.add_source(TupleSource::ClosureBridge {
+            shared: rows_share_links(table, &object_cols, &subject_cols, db),
             link_table: table.clone(),
             object_cols,
             subject_cols,
@@ -2939,6 +2985,18 @@ fn cap_link(owner: &TypeName, links: Vec<CapLinkRows<'_>>, plan: &mut TypePlan) 
         });
     }
     link
+}
+
+/// Whether several rows of `table` may name one link, `object_cols` and `subject_cols`
+/// together keying none of its rows.
+fn rows_share_links<DB: DatabaseLike>(
+    table: &TableId,
+    object_cols: &[ColumnName],
+    subject_cols: &[ColumnName],
+    db: &DB,
+) -> bool {
+    let columns: Vec<&ColumnName> = object_cols.iter().chain(subject_cols).collect();
+    !row_uniquely_keys(table, &columns, db)
 }
 
 /// Who a grant row grants.
@@ -3561,6 +3619,7 @@ pub(crate) fn emit_request_value_in_helper_set<DB: DatabaseLike>(
     table_plan.add_source(TupleSource::PolicyScope {
         table: ctx.source_table.clone(),
         identity_cols,
+        shared: false,
         scope_relation: link.clone(),
         scope_type: gate_type,
         scope_object: gate_object,

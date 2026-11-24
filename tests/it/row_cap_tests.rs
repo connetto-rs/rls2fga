@@ -326,14 +326,11 @@ fn a_pair_type_named_like_a_table_takes_a_name_of_its_own() {
     );
 }
 
-/// A cap the model cannot keep is refused naming why, never dropped.
-#[test]
-fn caps_with_no_pair_relation_are_refused() {
-    let lifted = "authz.acting_installation_id() IS NULL";
-    let capped = "(SELECT * FROM authz.capped_kinds('reader'))";
-    let reader_kinds = |condition: &str| {
-        format!(
-            "{INSTALLATION_CAPS}CREATE FUNCTION authz.reader_kinds()
+/// [`INSTALLATION_CAPS`] with `authz.member_organizations` capped by `authz.reader_kinds`,
+/// which returns the installation's permissions meeting `condition`.
+fn reader_kinds(condition: &str) -> String {
+    format!(
+        "{INSTALLATION_CAPS}CREATE FUNCTION authz.reader_kinds()
 RETURNS TABLE (organization_id UUID, kind authz.resource_kind)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
   SELECT permission.organization_id, permission.kind FROM public.installation_permissions permission
@@ -341,9 +338,199 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
 $$;
 ALTER FUNCTION authz.reader_kinds() OWNER TO authz_owner;
 "
-        )
-        .replace(capped, "(SELECT * FROM authz.reader_kinds())")
+    )
+    .replace(
+        "(SELECT * FROM authz.capped_kinds('reader'))",
+        "(SELECT * FROM authz.reader_kinds())",
+    )
+}
+
+/// [`INSTALLATION_CAPS`] with teams read through `authz.caller_grantees`, capped by
+/// `authz.member_organizations`, whose own rows `authz.capped_kinds` caps. Where `blocked`,
+/// `authz.capped_kinds` also leaves out the organizations blocking the caller.
+pub(crate) fn nested_caps(blocked: bool) -> String {
+    let exclusion = if blocked {
+        "    AND NOT (permission.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))\n"
+    } else {
+        ""
     };
+    let capped = INSTALLATION_CAPS
+        .replace(
+            "CREATE FUNCTION authz.capped_kinds",
+            "CREATE TABLE organization_blocks (
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  user_id UUID NOT NULL,
+  PRIMARY KEY (organization_id, user_id)
+);
+GRANT SELECT ON organization_blocks TO authz_owner;
+CREATE FUNCTION authz.blocking_organizations() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT block.organization_id FROM public.organization_blocks block
+  WHERE block.user_id = authz.caller_id()
+$$;
+ALTER FUNCTION authz.blocking_organizations() OWNER TO authz_owner;
+CREATE FUNCTION authz.capped_kinds",
+        )
+        .replace(
+            "    AND permission.max_role >= min_role\n",
+            &format!("    AND permission.max_role >= min_role\n{exclusion}"),
+        );
+    format!(
+        "{capped}CREATE TABLE teams (
+  id UUID PRIMARY KEY,
+  organization_id UUID NOT NULL REFERENCES organizations (id)
+);
+CREATE TABLE team_members (
+  team_id UUID NOT NULL REFERENCES teams (id),
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  user_id UUID NOT NULL,
+  PRIMARY KEY (team_id, user_id)
+);
+ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON team_members TO authz_owner;
+CREATE FUNCTION authz.caller_grantees() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_id FROM public.team_members member
+  WHERE member.user_id = authz.caller_id()
+    AND member.organization_id IN (SELECT authz.member_organizations())
+$$;
+ALTER FUNCTION authz.caller_grantees() OWNER TO authz_owner;
+CREATE POLICY teams_visible ON teams FOR SELECT
+  USING (id IN (SELECT authz.caller_grantees()));
+"
+    )
+}
+
+pub(crate) const NESTED_CAP_HELPERS: &[&str] = &[
+    "authz.capped_kinds",
+    "authz.member_organizations",
+    "authz.owned_resources",
+    "authz.blocking_organizations",
+    "authz.caller_grantees",
+];
+
+/// A cap whose own rows another cap keeps holds each of its pairs for the callers its rows
+/// return the pair to only where the nested cap keeps that row, and the request gate lifting
+/// the nested cap lifts it on the pair, whether the nested cap's rows stay outside a set or
+/// not.
+#[test]
+fn a_cap_whose_own_rows_another_cap_keeps_translates() {
+    for blocked in [false, true] {
+        let schema = nested_caps(blocked);
+        let using = using_of(&schema, NESTED_CAP_HELPERS, "teams_visible");
+        assert_eq!(
+            using.confidence,
+            ConfidenceLevel::A,
+            "blocked {blocked}: {:?}",
+            using.pattern
+        );
+        let model = installation_translator(NESTED_CAP_HELPERS)
+            .translate(&db_of(&schema))
+            .expect("the schema plans")
+            .outputs()
+            .expect("the schema translates")
+            .model();
+        let pair = "member_organizations_pair";
+        let held = relation_definition(&model, pair, "member_organizations")
+            .unwrap_or_else(|| panic!("{pair} holds member_organizations in\n{model}"));
+        let kept = relation_definition(&model, pair, &held)
+            .unwrap_or_else(|| panic!("{pair} holds {held} in\n{model}"));
+        let (granted, capped) = kept
+            .split_once(" and ")
+            .unwrap_or_else(|| panic!("{held} intersects the grant with the cap: {kept}"));
+        assert_eq!(
+            relation_definition(&model, pair, granted).as_deref(),
+            Some("[user]"),
+            "{held} intersects the members' grant with the cap: {kept}\n{model}"
+        );
+        let capped = capped
+            .strip_prefix('(')
+            .and_then(|capped| capped.strip_suffix(')'))
+            .unwrap_or_else(|| panic!("{held} reads the cap or its lift: {kept}"));
+        let (lifted, through) = capped
+            .split_once(" or ")
+            .unwrap_or_else(|| panic!("{held} lifts the cap: {capped}"));
+        assert!(
+            lifted.ends_with(" from request_gate"),
+            "{held} lifts the cap on the request gate: {capped}\n{model}"
+        );
+        assert_eq!(
+            through, "capped_kinds_reader from capped_kinds_reader_pair",
+            "{model}"
+        );
+    }
+}
+
+/// [`nested_caps`] with each membership carrying the kind its organization is capped at,
+/// which several memberships of one organization may differ in.
+pub(crate) fn scoped_nested_caps() -> String {
+    nested_caps(false)
+        .replace(
+            "  user_id UUID NOT NULL,\n  PRIMARY KEY (organization_id, user_id)\n);\n\
+             CREATE TABLE app_installations",
+            "  user_id UUID NOT NULL,\n  scope authz.resource_kind NOT NULL DEFAULT 'organization',\n  \
+             PRIMARY KEY (organization_id, user_id)\n);\nCREATE TABLE app_installations",
+        )
+        .replace(
+            "(membership.organization_id, 'organization'::authz.resource_kind)",
+            "(membership.organization_id, membership.scope)",
+        )
+}
+
+/// A nested cap reading more of a row than the pair it returns names holds the pair
+/// through each of those rows, kept by the nested cap on its own.
+#[test]
+fn a_nested_cap_reading_more_than_its_pair_holds_the_pair_through_each_row() {
+    let schema = scoped_nested_caps();
+    let using = using_of(&schema, NESTED_CAP_HELPERS, "teams_visible");
+    assert_eq!(using.confidence, ConfidenceLevel::A, "{:?}", using.pattern);
+    let model = installation_translator(NESTED_CAP_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    let pair = "member_organizations_pair";
+    let held = relation_definition(&model, pair, "member_organizations")
+        .unwrap_or_else(|| panic!("{pair} holds member_organizations in\n{model}"));
+    let (rows, link) = held
+        .split_once(" from ")
+        .unwrap_or_else(|| panic!("{pair} holds its pairs through rows: {held}\n{model}"));
+    assert_eq!(
+        relation_definition(&model, pair, link).as_deref(),
+        Some("[memberships]"),
+        "{model}"
+    );
+    let kept = relation_definition(&model, "memberships", rows)
+        .unwrap_or_else(|| panic!("memberships holds {rows} in\n{model}"));
+    assert!(
+        kept.contains("capped_kinds_reader from"),
+        "each membership row meets the nested cap: {kept}\n{model}"
+    );
+}
+
+/// A cap returning several columns, whose own rows another cap keeps by those columns,
+/// grades A and translates.
+#[test]
+fn a_cap_of_several_columns_whose_rows_another_cap_keeps_translates() {
+    let schema = reader_kinds(
+        "(permission.organization_id, permission.kind) \
+         IN (SELECT * FROM authz.capped_kinds('admin'))",
+    );
+    let helpers = [CAP_HELPERS, &["authz.reader_kinds"]].concat();
+    let using = using_of(&schema, &helpers, "organizations_select");
+    assert_eq!(using.confidence, ConfidenceLevel::A, "{:?}", using.pattern);
+    installation_translator(&helpers)
+        .translate(&db_of(&schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates");
+}
+
+/// A cap the model cannot keep is refused naming why, never dropped.
+#[test]
+fn caps_with_no_pair_relation_are_refused() {
+    let lifted = "authz.acting_installation_id() IS NULL";
     let notes = "CREATE TABLE kind_notes (
   organization_id UUID NOT NULL REFERENCES organizations (id),
   kind authz.resource_kind NOT NULL,
@@ -422,15 +609,6 @@ CREATE POLICY organizations_noted ON organizations FOR SELECT
             "organizations_select",
             "declared helper 'authz.member_organizations' calls 'authz.undeclared_kinds', \
              which is not declared",
-        ),
-        (
-            reader_kinds(
-                "(permission.organization_id, permission.kind) \
-                 IN (SELECT * FROM authz.capped_kinds('admin'))",
-            ),
-            "organizations_select",
-            "declared helper 'authz.member_organizations' is capped by 'authz.reader_kinds', \
-             whose own rows 'authz.capped_kinds' caps",
         ),
         (
             INSTALLATION_CAPS.replace(

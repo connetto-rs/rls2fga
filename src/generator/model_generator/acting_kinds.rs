@@ -76,6 +76,7 @@ pub(crate) fn acting_kind_walk<DB: DatabaseLike>(
         Some(identity_cols) => TupleSource::PolicyScope {
             table: source_table.clone(),
             identity_cols,
+            shared: false,
             scope_relation: link.clone(),
             scope_type: gate_type,
             scope_object: gate_object,
