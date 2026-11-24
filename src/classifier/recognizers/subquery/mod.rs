@@ -1846,8 +1846,15 @@ pub(crate) fn diagnose_p5_parent_inheritance_ambiguity<DB: DatabaseLike>(
     }
     if let Some(parent) = analysis.unkeyed_parent {
         return Some(format!(
-            "Ambiguous parent inheritance pattern: the columns correlated with '{parent}' are \
-             not exactly the key naming its rows, so they name no single parent row"
+            "Ambiguous parent inheritance pattern: the columns correlated with '{parent}' do \
+             not cover the key naming its rows, so they name no single parent row"
+        ));
+    }
+    if let Some(parent) = analysis.unbound_parent {
+        return Some(format!(
+            "Ambiguous parent inheritance pattern: the columns correlated with '{parent}' go \
+             beyond the key naming its rows, and no validated foreign key checked whenever \
+             that key is set states every correlated pair"
         ));
     }
     // The parent is unambiguous and its own rule is what failed, so say which rule and
@@ -1924,8 +1931,11 @@ pub(super) struct P5InheritanceCandidate {
 #[derive(Debug, Clone, Default)]
 pub(super) struct P5InheritanceAnalysis {
     pub(super) candidates: Vec<P5InheritanceCandidate>,
-    /// A source correlated on several columns that are not exactly its row key.
+    /// A source correlated on several columns that do not cover its row key.
     pub(super) unkeyed_parent: Option<String>,
+    /// A source correlated on its row key and further columns that no declared foreign key
+    /// holds every row to.
+    pub(super) unbound_parent: Option<String>,
 }
 
 pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
@@ -1973,7 +1983,7 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
         if correlations == 0 {
             continue;
         }
-        let Some(pairs) = resolve_table_id(db, &source.table_name)
+        let Some((mut pairs, key_len)) = resolve_table_id(db, &source.table_name)
             .and_then(|parent| resolve_row_identity(&parent, db))
             .and_then(|key| pairs_in_key_order(pairs, &key))
         else {
@@ -1983,15 +1993,28 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
             }
             continue;
         };
-        // The policy states the join, so a declared key adds integrity rather than
-        // meaning. It is still required wherever the subquery carries a rule of its own,
-        // because then the shape competes with a membership lookup and the key is what
-        // tells them apart. A bare correlation competes with nothing.
-        if !inner_predicates.is_empty()
-            && !foreign_key_states_pairs(outer_table_meta, db, &pairs, &source.table_name)
+        let beyond_key = pairs.get(key_len..).unwrap_or_default();
+        if beyond_key.is_empty() {
+            // The policy states the join, so a declared key adds integrity rather than
+            // meaning. It is still required wherever the subquery carries a rule of its own,
+            // because then the shape competes with a membership lookup and the key is what
+            // tells them apart. A bare correlation competes with nothing.
+            if !inner_predicates.is_empty()
+                && foreign_keys_stating_pairs(outer_table_meta, db, &pairs, &source.table_name)
+                    .next()
+                    .is_none()
+            {
+                continue;
+            }
+        } else if !foreign_keys_stating_pairs(outer_table_meta, db, &pairs, &source.table_name)
+            .any(|fk| checks_every_bridged_row(fk, db, beyond_key))
         {
+            // The bridge names the row by its key alone, so only a foreign key checking every
+            // bridged row against the whole pair keeps the further equalities true.
+            analysis.unbound_parent.get_or_insert(source.table_name);
             continue;
         }
+        pairs.truncate(key_len);
 
         analysis.candidates.push(P5InheritanceCandidate {
             parent_table: source.table_name,
@@ -2004,29 +2027,50 @@ pub(super) fn analyze_p5_parent_inheritance<DB: DatabaseLike>(
     Some(analysis)
 }
 
-/// The pairs ordered by `key`, when their second columns are exactly `key` and no first
-/// column fills two of them.
+/// The pairs naming `key` first, in key order, then the rest, beside how many name `key`,
+/// or `None` when they do not cover `key` or a column fills two pairs.
 fn pairs_in_key_order(
     mut pairs: Vec<(ColumnName, ColumnName)>,
     key: &[ColumnName],
-) -> Option<Vec<(ColumnName, ColumnName)>> {
-    if pairs.len() != key.len() {
-        return None;
-    }
+) -> Option<(Vec<(ColumnName, ColumnName)>, usize)> {
     {
         let mut outers = BTreeSet::new();
         let mut parents = BTreeSet::new();
         for (outer, parent) in &pairs {
-            if !key.contains(parent)
-                || !outers.insert(outer.as_str())
-                || !parents.insert(parent.as_str())
-            {
+            if !outers.insert(outer.as_str()) || !parents.insert(parent.as_str()) {
                 return None;
             }
         }
+        if !key.iter().all(|column| parents.contains(column.as_str())) {
+            return None;
+        }
     }
-    pairs.sort_by_key(|(_, parent)| key.iter().position(|column| column == parent));
-    Some(pairs)
+    pairs.sort_by_key(|(_, parent)| {
+        key.iter()
+            .position(|column| column == parent)
+            .unwrap_or(key.len())
+    });
+    Some((pairs, key.len()))
+}
+
+/// Whether `fk` checks every row whose key columns are set, so the columns of `beyond_key`
+/// hold the parent's values wherever the bridge is written.
+fn checks_every_bridged_row<DB: DatabaseLike>(
+    fk: &DB::ForeignKey,
+    db: &DB,
+    beyond_key: &[(ColumnName, ColumnName)],
+) -> bool {
+    // `NOT VALID` skips the rows predating the key, and `MATCH SIMPLE` any row with a `NULL`.
+    fk.is_validated(db) == Ok(true)
+        && (fk.match_full(db)
+            || fk.host_columns(db).is_ok_and(|mut hosts| {
+                hosts.all(|host| {
+                    host.is_nullable(db) == Ok(false)
+                        || !beyond_key
+                            .iter()
+                            .any(|(outer, _)| outer.as_str() == host.stored_column_name())
+                })
+            }))
 }
 
 pub(super) fn selection_references_current_user(
@@ -2966,19 +3010,19 @@ fn fk_targets_column<DB: DatabaseLike>(
     has_fk_pointing_to(parent, db, column, table, Some(target))
 }
 
-/// Whether one declared foreign key of `outer_table` into `parent_table_name` runs from
+/// Each declared foreign key of `outer_table` into `parent_table_name` running from
 /// exactly the outer columns of `pairs`, each to the parent column it pairs with.
-fn foreign_key_states_pairs<DB: DatabaseLike>(
-    outer_table: &DB::Table,
-    db: &DB,
-    pairs: &[(ColumnName, ColumnName)],
-    parent_table_name: &str,
-) -> bool {
+fn foreign_keys_stating_pairs<'db, DB: DatabaseLike>(
+    outer_table: &'db DB::Table,
+    db: &'db DB,
+    pairs: &'db [(ColumnName, ColumnName)],
+    parent_table_name: &'db str,
+) -> impl Iterator<Item = &'db DB::ForeignKey> + 'db {
     outer_table
         .foreign_keys(db)
         .into_iter()
         .flatten()
-        .any(|fk| {
+        .filter(move |fk| {
             let into_parent = fk.referenced_table(db).is_ok_and(|referenced| {
                 qualifier_matches_table(
                     referenced.stored_table_name().as_ref(),

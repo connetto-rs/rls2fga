@@ -4031,7 +4031,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID);
 }
 
 #[test]
-fn diagnose_p5_names_a_parent_correlated_off_its_key() {
+fn diagnose_p5_names_a_parent_correlated_beyond_its_key() {
     let db = parse_schema(
             r"
 CREATE TABLE users(id UUID PRIMARY KEY);
@@ -4058,7 +4058,7 @@ CREATE TABLE tasks(id UUID PRIMARY KEY, project_id UUID REFERENCES projects(id),
     );
     let result = result.expect("a correlation beyond the key should produce a diagnostic");
     assert!(
-        result.contains("not exactly the key naming its rows"),
+        result.contains("beyond the key naming its rows"),
         "got: {result}"
     );
 }
@@ -4209,9 +4209,14 @@ CREATE TABLE grants (
 );
 ";
 
-/// The inheritance `clause` on `table` reads as, through the `IN` spellings' rewrite.
-fn inherited_through_in_subquery(clause: &str, table: &str) -> Option<ParentInheritance> {
-    let db = parse_schema(READABLE_ROWS_SCHEMA).unwrap();
+/// The inheritance `clause` on `table` of `schema` reads as, through the `IN` spellings'
+/// rewrite.
+fn inherited_through_in_subquery(
+    schema: &str,
+    clause: &str,
+    table: &str,
+) -> Option<ParentInheritance> {
+    let db = parse_schema(schema).unwrap();
     let classified = recognize_p4_in_subquery(
         &parse_expr(clause),
         &db,
@@ -4235,7 +4240,7 @@ fn the_array_spelling_of_a_readable_row_membership_inherits_like_in() {
         "id IN (SELECT person.id FROM people person)",
         "id = ANY (ARRAY(SELECT person.id FROM people person))",
     ]
-    .map(|clause| inherited_through_in_subquery(clause, "objects"));
+    .map(|clause| inherited_through_in_subquery(READABLE_ROWS_SCHEMA, clause, "objects"));
     let [Some(in_form), Some(array_form)] = spellings else {
         panic!("both spellings inherit from people, got {spellings:?}");
     };
@@ -4256,7 +4261,9 @@ fn a_row_value_covering_a_composite_key_inherits_from_the_row_it_names() {
         "(grantee_id, grantee_kind) IN (SELECT grantee.id, grantee.kind FROM grantees grantee)",
         "(grantee_kind, grantee_id) IN (SELECT grantee.kind, grantee.id FROM grantees grantee)",
     ] {
-        let Some(inheritance) = inherited_through_in_subquery(clause, "grants") else {
+        let Some(inheritance) =
+            inherited_through_in_subquery(READABLE_ROWS_SCHEMA, clause, "grants")
+        else {
             panic!("`{clause}` names one grantees row");
         };
         assert_eq!(inheritance.parent_table.to_string(), "public.grantees");
@@ -4291,9 +4298,130 @@ fn a_correlation_off_the_referenced_key_does_not_inherit() {
         ),
     ] {
         assert_eq!(
-            inherited_through_in_subquery(clause, table),
+            inherited_through_in_subquery(READABLE_ROWS_SCHEMA, clause, table),
             None,
             "`{clause}` names no single row"
+        );
+    }
+}
+
+const ALTERNATE_KEY_SCHEMA: &str = r"
+CREATE TABLE grantees (
+    id UUID PRIMARY KEY,
+    kind TEXT NOT NULL,
+    owner_id UUID NOT NULL,
+    UNIQUE (id, kind)
+);
+ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;
+CREATE TABLE grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID NOT NULL,
+    grantee_kind TEXT NOT NULL,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind)
+);
+CREATE TABLE optional_grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID,
+    grantee_kind TEXT NOT NULL,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind)
+);
+CREATE TABLE full_grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID,
+    grantee_kind TEXT,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind) MATCH FULL
+);
+CREATE TABLE simple_grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID NOT NULL,
+    grantee_kind TEXT,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind)
+);
+CREATE TABLE split_grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID NOT NULL REFERENCES grantees (id),
+    grantee_kind TEXT NOT NULL
+);
+CREATE TABLE unchecked_grants (
+    id UUID PRIMARY KEY,
+    grantee_id UUID NOT NULL,
+    grantee_kind TEXT NOT NULL
+);
+ALTER TABLE unchecked_grants ADD CONSTRAINT names_grantee
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind) NOT VALID;
+";
+
+/// A correlation beyond the referenced key names the row its key columns name, and a
+/// declared key holding every stored row to the whole pair keeps the extra equality true
+/// wherever the bridge is written. The bridge names the row by its key alone, so the pair
+/// and the key spell one object.
+#[test]
+fn a_row_value_extending_the_referenced_key_inherits_where_a_foreign_key_binds_it() {
+    for table in ["grants", "optional_grants", "full_grants"] {
+        for clause in [
+            "(grantee_id, grantee_kind) IN (SELECT grantee.id, grantee.kind FROM grantees grantee)",
+            "(grantee_kind, grantee_id) IN (SELECT grantee.kind, grantee.id FROM grantees grantee)",
+        ] {
+            let Some(inheritance) =
+                inherited_through_in_subquery(ALTERNATE_KEY_SCHEMA, clause, table)
+            else {
+                panic!("`{clause}` on {table} names one grantees row");
+            };
+            assert_eq!(inheritance.parent_table.to_string(), "public.grantees");
+            assert_eq!(
+                inheritance.fk_columns,
+                [ColumnName::from_stored("grantee_id")],
+                "`{clause}` on {table} names the row by its key"
+            );
+        }
+    }
+    let db = parse_schema(ALTERNATE_KEY_SCHEMA).unwrap();
+    let exists = parse_expr(
+        "EXISTS (SELECT 1 FROM grantees grantee \
+         WHERE grantee.id = grants.grantee_id AND grantee.kind = grants.grantee_kind)",
+    );
+    assert!(matches!(
+        recognize_p5(
+            &exists,
+            &db,
+            &FunctionRegistry::new(),
+            "grants",
+            PolicyCommand::Select,
+            &ExpansionState::new(),
+        )
+        .map(|classified| classified.pattern),
+        Some(PatternClass::P5ParentInheritance(ParentInheritance { ref fk_columns, .. }))
+            if matches!(fk_columns.as_slice(), [column] if column == "grantee_id")
+    ));
+}
+
+/// Without a validated key stating the whole pair and checked whenever the key columns
+/// are set, a stored row can hold a pair no referenced row holds, which the policy denies
+/// and a bridge written from the key columns alone would admit.
+#[test]
+fn a_row_value_extending_the_referenced_key_without_a_binding_foreign_key_does_not_inherit() {
+    let db = parse_schema(ALTERNATE_KEY_SCHEMA).unwrap();
+    let clause = parse_expr(
+        "(grantee_id, grantee_kind) IN (SELECT grantee.id, grantee.kind FROM grantees grantee)",
+    );
+    for table in ["simple_grants", "split_grants", "unchecked_grants"] {
+        assert_eq!(
+            inherited_through_in_subquery(ALTERNATE_KEY_SCHEMA, &clause.to_string(), table),
+            None,
+            "{table} can hold a pair no grantees row holds"
+        );
+        let reason = diagnose_p5_parent_inheritance_ambiguity(
+            &clause,
+            &db,
+            &FunctionRegistry::new(),
+            table,
+            PolicyCommand::Select,
+            &ExpansionState::new(),
+        )
+        .unwrap_or_default();
+        assert!(
+            reason.contains("beyond the key naming its rows"),
+            "{table}: {reason}"
         );
     }
 }

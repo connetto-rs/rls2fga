@@ -85,6 +85,7 @@ async fn every_parity_case_agrees() {
             an_uncorrelated_membership_admits_every_row,
             a_parent_key_subquery_inherits_the_parents_rule,
             membership_in_readable_rows_inherits_their_read,
+            membership_in_readable_rows_beyond_their_key_inherits_their_read,
             rows_naming_the_guarded_row_admit_it_through_their_own_read,
             a_correlated_column_membership_compares_the_named_columns,
             a_read_and_a_write_are_judged_separately,
@@ -2530,6 +2531,65 @@ CREATE POLICY grants_insert ON grants FOR INSERT
         ("bob", "grants:g-xt", ActionStatement::Insert, false),
     ] {
         support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+    }
+    assert_agrees(&case, &run);
+}
+
+/// Membership in readable rows named by a key and one more column a composite foreign key
+/// binds to it, read on one table by the key alone and by the whole pair, so both reach
+/// the referenced row as one object, and a row naming no referenced row reaches none.
+async fn membership_in_readable_rows_beyond_their_key_inherits_their_read(cluster: Arc<Cluster>) {
+    let case = ParityCase::reading(
+        "runner-readable-row-alternate-key",
+        "
+CREATE TABLE grantees (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    UNIQUE (id, kind)
+);
+CREATE TABLE grants (
+    id TEXT PRIMARY KEY,
+    grantee_id TEXT,
+    grantee_kind TEXT NOT NULL,
+    FOREIGN KEY (grantee_id, grantee_kind) REFERENCES grantees (id, kind)
+);
+CREATE FUNCTION auth_current_user_id() RETURNS TEXT
+    LANGUAGE sql STABLE
+    AS 'SELECT current_setting(''app.current_user_id'')';
+ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;
+ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+CREATE POLICY grantees_select ON grantees FOR SELECT USING (owner_id = auth_current_user_id());
+CREATE POLICY grants_select ON grants FOR SELECT
+    USING (grantee_id IN (SELECT grantee.id FROM grantees grantee));
+CREATE POLICY grants_insert ON grants FOR INSERT
+    WITH CHECK ((grantee_id, grantee_kind) IN (SELECT grantee.id, grantee.kind FROM grantees grantee));
+",
+        &[
+            "INSERT INTO grantees(id, kind, owner_id) VALUES
+                 ('x', 'team', 'alice'), ('y', 'user', 'alice'), ('z', 'user', 'bob');
+             INSERT INTO grants(id, grantee_id, grantee_kind) VALUES
+                 ('g-x', 'x', 'team'), ('g-y', 'y', 'user'), ('g-z', 'z', 'user'),
+                 ('g-none', NULL, 'user')",
+            "CREATE ROLE app_user LOGIN;
+             GRANT SELECT ON grantees TO app_user;
+             GRANT SELECT, INSERT ON grants TO app_user",
+        ],
+        two_setting_readers("alice", "bob"),
+    )
+    .with_registry(ACCESSOR);
+    let run = support::parity::run(&cluster, &case).await;
+    for statement in [ActionStatement::Select, ActionStatement::Insert] {
+        for (subject, object, allowed) in [
+            ("alice", "grants:g-x", true),
+            ("alice", "grants:g-y", true),
+            ("alice", "grants:g-z", false),
+            ("alice", "grants:g-none", false),
+            ("bob", "grants:g-z", true),
+            ("bob", "grants:g-x", false),
+        ] {
+            support::parity::assert_postgres(&case, &run, subject, object, statement, allowed);
+        }
     }
     assert_agrees(&case, &run);
 }

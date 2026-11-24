@@ -141,7 +141,7 @@ A report names a pattern by its number, so `P4 (EXISTS members)` beside a TODO p
 | P2 | `RoleNameInList` | `role_fn(user, resource) IN ('viewer', ...)` | One relation per role name |
 | P3 | `DirectOwnership` | `owner_id = current_user_id()` | `owner: [user]` |
 | P4 | `ExistsMembership` | `EXISTS (SELECT 1 FROM members ...)`, `IN`, `= ANY` | Source-specific membership relations |
-| P5 | `ParentInheritance` | Correlation on the parent's whole key carrying a parent-side rule, `(a, b) IN (SELECT p.x, p.y FROM parents p)` and `a = ANY (ARRAY(SELECT p.x FROM parents p))` included | `owner from parent`, gated by the parent's `can_select` |
+| P5 | `ParentInheritance` | Correlation on the parent's whole key carrying a parent-side rule, plus any further columns one validated foreign key binds to it, `(a, b) IN (SELECT p.x, p.y FROM parents p)` and `a = ANY (ARRAY(SELECT p.x FROM parents p))` included | `owner from parent`, gated by the parent's `can_select` |
 | P6 | `BooleanFlag` | `is_public = TRUE` | `[user:*]` |
 | P7 | `AbacAnd` | Relationship check `AND` attribute guard | Relationship half only, guard as a TODO |
 | P8 | `Composite` | `expr OR expr`, `expr AND expr` | Union, intersection, graded as its weakest part |
