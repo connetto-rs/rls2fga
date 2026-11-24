@@ -1148,7 +1148,7 @@ pub(crate) fn emit_indirect_membership<DB: DatabaseLike>(
 ///
 /// A declared helper's call returning no row takes nothing away and adds no set, so where
 /// every set is such a call none is returned.
-pub(super) fn emit_blocked_set<DB: DatabaseLike>(
+fn emit_blocked_set<DB: DatabaseLike>(
     subtract: &[ExcludedSet],
     ctx: &PatternCtx<'_, DB>,
     table_plan: &mut TypePlan,
@@ -1202,6 +1202,88 @@ pub(super) fn emit_blocked_set<DB: DatabaseLike>(
         sets.push(set);
     }
     Some(sets)
+}
+
+/// What a restrictive clause keeping the rows outside a blocklist takes away from the
+/// grants beside it.
+pub(super) enum Removal {
+    /// The rows taken away.
+    Rows(UsersetExpr),
+    /// No row, since no blocklist blocks anyone.
+    Nothing,
+}
+
+/// The rows a restrictive clause keeping the rows outside a blocklist takes away from the
+/// grants beside it. `NOT B` takes away `B`, and `NOT B OR S` takes away `B but not S`,
+/// every blocklist arm of the `OR` keeping the rows outside its own set.
+///
+/// `None` where the clause is no such barrier, where a blocked set does not translate, or
+/// where an arm beside the blocklists drops an attribute guard, which would widen what it
+/// spares.
+pub(super) fn emit_restrictive_removal<DB: DatabaseLike>(
+    pattern: &PatternClass,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+    notes: &mut Vec<TranslationNote>,
+    readability: &mut BTreeMap<TableId, TableReadability>,
+) -> Option<Removal> {
+    fn blocklist(pattern: &PatternClass) -> Option<&[ExcludedSet]> {
+        match pattern {
+            PatternClass::MembershipExclusion(MembershipExclusion {
+                base: None,
+                subtract,
+            }) => Some(subtract),
+            _ => None,
+        }
+    }
+    if let Some(subtract) = blocklist(pattern) {
+        let sets = emit_blocked_set(subtract, ctx, table_plan, all_types, notes, readability)?;
+        return Some(combine_union(sets).map_or(Removal::Nothing, Removal::Rows));
+    }
+    let PatternClass::P8Composite(Composite {
+        op: BoolOp::Or,
+        parts,
+    }) = pattern
+    else {
+        return None;
+    };
+    if !parts.iter().any(|part| blocklist(&part.pattern).is_some())
+        || !dropped_attribute_guards(pattern).is_empty()
+    {
+        return None;
+    }
+    let mut blocked = Vec::new();
+    for subtract in parts.iter().filter_map(|part| blocklist(&part.pattern)) {
+        let sets = emit_blocked_set(subtract, ctx, table_plan, all_types, notes, readability)?;
+        // An arm blocking nobody keeps every row, and so does the clause.
+        let Some(set) = combine_union(sets) else {
+            return Some(Removal::Nothing);
+        };
+        blocked.push(set);
+    }
+    let blocked = combine_intersection(blocked)?;
+    let spared = parts
+        .iter()
+        .filter(|part| blocklist(&part.pattern).is_none())
+        .map(|part| {
+            translate_pattern(
+                &part.pattern,
+                ctx,
+                table_plan,
+                all_types,
+                notes,
+                readability,
+            )
+        })
+        .collect();
+    Some(Removal::Rows(match combine_union(spared) {
+        Some(spared) => UsersetExpr::Exclusion {
+            base: Box::new(blocked),
+            subtract: Box::new(spared),
+        },
+        None => blocked,
+    }))
 }
 
 pub(super) fn emit_membership_exclusion<DB: DatabaseLike>(

@@ -3,7 +3,7 @@
 
 use rls2fga::types::ConfidenceLevel;
 
-use crate::declared_helper_tests::{refusal_of, translator};
+use crate::declared_helper_tests::{refusal_of, translator, using_of};
 use crate::support::footgun::{db_of, relation_definition, relation_definitions};
 
 /// Organizations blocking principals, the projects those blocks reach, and the documents
@@ -115,6 +115,45 @@ fn a_restrictive_negated_helper_subtracts_its_set() {
         relation_definition(&dsl, "projects", "blocked_projects").as_deref(),
         Some("blocking_organizations from organizations"),
         "{dsl}"
+    );
+}
+
+/// A blocklist beside other arms of an `OR` takes away only the blocked rows none of those
+/// arms holds, since the clause keeps every row one of them holds.
+#[test]
+fn a_restrictive_blocklist_beside_other_arms_spares_their_rows() {
+    let sql = restricted(
+        "NOT (id = ANY (ARRAY(SELECT authz.blocked_projects())))
+           OR owner_id = current_setting('app.user_id', true)
+           OR owner_id = current_setting('app.tenant', true)",
+    );
+    assert_eq!(
+        using_of(&sql, HELPERS, "projects_unblocked").confidence,
+        ConfidenceLevel::A
+    );
+    let dsl = model(&sql);
+    assert_eq!(
+        relation_definition(&dsl, "projects", "can_select").as_deref(),
+        Some(
+            "(owner but not (blocked_projects but not (owner or gate_projects_unblocked_469c5685))) \
+             and acting_app_user from request_gate"
+        ),
+        "{dsl}"
+    );
+}
+
+/// Outside a restrictive policy no grant is beside the blocklist to subtract it from.
+#[test]
+fn a_permissive_blocklist_beside_other_arms_is_refused() {
+    let sql = format!(
+        "{BLOCKS}
+         CREATE POLICY projects_unblocked ON projects FOR SELECT
+           USING (NOT (id = ANY (ARRAY(SELECT authz.blocked_projects())))
+             OR owner_id = current_setting('app.tenant', true));"
+    );
+    assert_eq!(
+        using_of(&sql, HELPERS, "projects_unblocked").confidence,
+        ConfidenceLevel::D
     );
 }
 

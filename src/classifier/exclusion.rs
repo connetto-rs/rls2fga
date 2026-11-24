@@ -162,6 +162,92 @@ pub(crate) fn try_membership_exclusion<DB: DatabaseLike>(
     }))
 }
 
+/// A restrictive clause's `OR` keeping the rows outside a blocklist and the rows another arm
+/// holds, `NOT B OR S`, as the composite of its arms.
+///
+/// The clause is `P AND (NOT B OR S)` beside the grants `P`, which is `P` but not the rows
+/// of `B` outside `S`, so a blocklist arm needs no grant of its own here. In three-valued
+/// logic too, since `AND` distributes over `OR` there as well, and an arm left unknown keeps
+/// no row on either side. `None` where `expr` is no `OR`, where no arm is a blocklist alone,
+/// or past the classifier's depth bound.
+pub(crate) fn try_spared_exclusion<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    command: PolicyCommand,
+    state: &ExpansionState,
+) -> Option<ClassifiedExpr> {
+    let mut disjuncts = Vec::new();
+    if !collect_disjuncts(expr, 0, &mut disjuncts) || disjuncts.len() < 2 {
+        return None;
+    }
+    let blocklists: Vec<Option<ClassifiedExpr>> = disjuncts
+        .iter()
+        .map(|&(disjunct, depth)| {
+            try_membership_exclusion(disjunct, db, registry, table, command, depth, state, true)
+                .ok()
+                .flatten()
+                .filter(|classified| {
+                    matches!(
+                        classified.pattern,
+                        PatternClass::MembershipExclusion(MembershipExclusion { base: None, .. })
+                    )
+                })
+        })
+        .collect();
+    if blocklists.iter().all(Option::is_none) {
+        return None;
+    }
+    let parts: Vec<ClassifiedExpr> = disjuncts
+        .into_iter()
+        .zip(blocklists)
+        .map(|((disjunct, depth), blocklist)| {
+            blocklist.unwrap_or_else(|| {
+                crate::classifier::policy_classifier::classify_expr_depth(
+                    disjunct,
+                    db,
+                    registry,
+                    table,
+                    command,
+                    depth + 1,
+                    state,
+                )
+            })
+        })
+        .collect();
+    Some(ClassifiedExpr {
+        confidence: composite_confidence(&parts),
+        pattern: PatternClass::P8Composite(Composite {
+            op: BoolOp::Or,
+            parts,
+        }),
+    })
+}
+
+/// Flatten `expr` through `OR` and parentheses into `disjuncts`, each with the depth it
+/// sits at. `false` past the classifier's depth bound.
+fn collect_disjuncts<'e>(expr: &'e Expr, depth: u32, disjuncts: &mut Vec<(&'e Expr, u32)>) -> bool {
+    if depth > crate::classifier::policy_classifier::MAX_CLASSIFY_DEPTH {
+        return false;
+    }
+    match expr {
+        Expr::Nested(inner) => collect_disjuncts(inner, depth + 1, disjuncts),
+        Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Or,
+            right,
+        } => {
+            collect_disjuncts(left, depth + 1, disjuncts)
+                && collect_disjuncts(right, depth + 1, disjuncts)
+        }
+        _ => {
+            disjuncts.push((expr, depth));
+            true
+        }
+    }
+}
+
 /// Cheap pre-check for the ordinary path: whether `expr`, flattened through `AND`
 /// and parentheses only, carries a conjunct shaped as a negated membership check.
 /// Skipped under `see_through_functions`, where a function call may still hide

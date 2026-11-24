@@ -784,9 +784,9 @@ fn a_flag_testing_a_comparison_with_is_true_is_refused() {
     assert!(!reason.contains("negation cannot be expressed"), "{reason}");
 }
 
-/// `owner OR NOT flagged` admits the owner's rows and every row not flagged.
+/// `owner OR NOT flagged` takes away the flagged rows the caller does not own.
 #[test]
-fn a_negated_flag_inside_an_or_grants_every_row_but_the_flagged_ones() {
+fn a_negated_flag_inside_an_or_takes_away_the_flagged_rows_outside_the_other_arm() {
     let dsl = archive_model(
         OBJECTS,
         "CREATE POLICY live ON objects AS RESTRICTIVE FOR SELECT
@@ -796,11 +796,8 @@ fn a_negated_flag_inside_an_or_grants_every_row_but_the_flagged_ones() {
     assert_eq!(
         relation_definition(&dsl, "objects", "can_select").as_deref(),
         Some(
-            format!(
-                "owner and (owner or (public_viewer but not {gate})) and acting_app_user from \
-                 request_gate"
-            )
-            .as_str()
+            format!("(owner but not ({gate} but not owner)) and acting_app_user from request_gate")
+                .as_str()
         ),
         "{dsl}"
     );

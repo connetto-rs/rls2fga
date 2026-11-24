@@ -92,10 +92,10 @@ use branches::{
 };
 use dsl::render_dsl;
 use emit_membership::{
-    emit_abac_and, emit_blocked_set, emit_composite, emit_declared_helper, emit_exists_membership,
-    emit_flagged_row, emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
-    emit_referring_rows, emit_request_value_in_helper_set, emit_row_in_helper_pairs,
-    emit_uncorrelated_membership,
+    emit_abac_and, emit_composite, emit_declared_helper, emit_exists_membership, emit_flagged_row,
+    emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
+    emit_referring_rows, emit_request_value_in_helper_set, emit_restrictive_removal,
+    emit_row_in_helper_pairs, emit_uncorrelated_membership, Removal,
 };
 use emit_ownership::{
     attribute_gate_key, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
@@ -1741,26 +1741,20 @@ impl<DB: DatabaseLike> TableBuild<'_, DB> {
                 settings: self.settings,
                 condition_parameters: self.condition_parameters,
             };
-            if let PatternClass::MembershipExclusion(MembershipExclusion {
-                base: None,
-                subtract,
-            }) = &classified.pattern
-            {
-                if cp.mode() == PolicyMode::Restrictive {
-                    if let Some(sets) = emit_blocked_set(
-                        subtract,
-                        &ctx,
-                        self.plan,
-                        &mut *self.other_types,
-                        self.notes,
-                        self.readability,
-                    ) {
-                        // A barrier taking nothing away keeps every row, so it adds no part.
-                        if let Some(set) = combine_union(sets) {
-                            parts.insert(target, PolicyPart::Subtract(set));
-                        }
-                        return;
+            if cp.mode() == PolicyMode::Restrictive {
+                if let Some(removal) = emit_restrictive_removal(
+                    &classified.pattern,
+                    &ctx,
+                    self.plan,
+                    &mut *self.other_types,
+                    self.notes,
+                    self.readability,
+                ) {
+                    // A barrier taking nothing away keeps every row, so it adds no part.
+                    if let Removal::Rows(set) = removal {
+                        parts.insert(target, PolicyPart::Subtract(set));
                     }
+                    return;
                 }
             }
             let expr = translate_pattern(
