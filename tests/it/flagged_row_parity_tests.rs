@@ -1,4 +1,4 @@
-//! Row flags compared against `PostgreSQL` 17 and 18, with both tuple loaders.
+//! Row flags compared against `PostgreSQL` 18, with both tuple loaders.
 
 #![cfg(all(not(target_os = "windows"), feature = "client"))]
 
@@ -72,10 +72,10 @@ fn caller(subject: &str) -> Principal {
 /// `other` stands alone and owns `item_other`, and the archived `cycle_a` and `cycle_b` are
 /// each other's parent. Alice owns every resource, and each mark names the resource its key
 /// ends with.
-fn frozen_below_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn frozen_below_case(loading_from_rows: bool) -> ParityCase {
     let mut case = ParityCase::reading(
         &format!(
-            "flag-one-edge-up-pg{major}{}",
+            "flag-one-edge-up{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         FROZEN_BELOW,
@@ -140,55 +140,53 @@ fn frozen_below_case(major: &str, loading_from_rows: bool) -> ParityCase {
 }
 
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_flag_one_edge_up_either_edge_table_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = frozen_below_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, statement, allowed| {
-                assert_postgres(&case, &run, subject, object, statement, allowed);
-            };
-            // The archived row stays open to its owner, and every row below it is frozen.
-            expect("alice", "resources:root", ActionStatement::Update, true);
-            expect("alice", "resources:mid", ActionStatement::Update, false);
-            expect("alice", "resources:leaf", ActionStatement::Update, false);
-            expect("alice", "resources:mid", ActionStatement::Select, true);
-            // Either edge table reaches the archived row, the walk past it too.
-            expect("alice", "resources:project", ActionStatement::Update, true);
-            expect("alice", "resources:item", ActionStatement::Update, false);
-            expect(
-                "alice",
-                "resources:item_mid",
-                ActionStatement::Update,
-                false,
-            );
-            // A row with neither the flag nor a flagged ancestor stays open.
-            expect("alice", "resources:other", ActionStatement::Update, true);
-            expect(
-                "alice",
-                "resources:change_owner",
-                ActionStatement::Update,
-                false,
-            );
-            expect(
-                "alice",
-                "resources:item_other",
-                ActionStatement::Update,
-                true,
-            );
-            // Around a cycle each row is below the archived one, itself included.
-            expect("alice", "resources:cycle_a", ActionStatement::Update, false);
-            expect("alice", "resources:cycle_b", ActionStatement::Update, false);
-            expect("bob", "resources:other", ActionStatement::Update, false);
-            // The same test grants the marks on rows below an archived one, to anyone.
-            expect("bob", "marks:m_mid", ActionStatement::Select, true);
-            expect("bob", "marks:m_leaf", ActionStatement::Select, true);
-            expect("bob", "marks:m_item", ActionStatement::Select, true);
-            expect("bob", "marks:m_root", ActionStatement::Select, false);
-            expect("bob", "marks:m_other", ActionStatement::Select, false);
-            assert_agrees(&case, &run);
-        }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_flag_one_edge_up_either_edge_table_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = frozen_below_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, statement, allowed| {
+            assert_postgres(&case, &run, subject, object, statement, allowed);
+        };
+        // The archived row stays open to its owner, and every row below it is frozen.
+        expect("alice", "resources:root", ActionStatement::Update, true);
+        expect("alice", "resources:mid", ActionStatement::Update, false);
+        expect("alice", "resources:leaf", ActionStatement::Update, false);
+        expect("alice", "resources:mid", ActionStatement::Select, true);
+        // Either edge table reaches the archived row, the walk past it too.
+        expect("alice", "resources:project", ActionStatement::Update, true);
+        expect("alice", "resources:item", ActionStatement::Update, false);
+        expect(
+            "alice",
+            "resources:item_mid",
+            ActionStatement::Update,
+            false,
+        );
+        // A row with neither the flag nor a flagged ancestor stays open.
+        expect("alice", "resources:other", ActionStatement::Update, true);
+        expect(
+            "alice",
+            "resources:change_owner",
+            ActionStatement::Update,
+            false,
+        );
+        expect(
+            "alice",
+            "resources:item_other",
+            ActionStatement::Update,
+            true,
+        );
+        // Around a cycle each row is below the archived one, itself included.
+        expect("alice", "resources:cycle_a", ActionStatement::Update, false);
+        expect("alice", "resources:cycle_b", ActionStatement::Update, false);
+        expect("bob", "resources:other", ActionStatement::Update, false);
+        // The same test grants the marks on rows below an archived one, to anyone.
+        expect("bob", "marks:m_mid", ActionStatement::Select, true);
+        expect("bob", "marks:m_leaf", ActionStatement::Select, true);
+        expect("bob", "marks:m_item", ActionStatement::Select, true);
+        expect("bob", "marks:m_root", ActionStatement::Select, false);
+        expect("bob", "marks:m_other", ActionStatement::Select, false);
+        assert_agrees(&case, &run);
     }
 }

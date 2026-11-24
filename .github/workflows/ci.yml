@@ -42,7 +42,6 @@ jobs:
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
-          cargo test --workspace --lib --tests
           cargo test --workspace --all-features --no-run --lib --tests
           cargo test --workspace --doc --all-features
 
@@ -87,10 +86,8 @@ jobs:
   coverage:
     name: Coverage and runtime parity (Codecov)
     runs-on: ubuntu-26.04
-    # The container suites run one test at a time on an instrumented build, and a fresh
-    # runner pulls their images cold.
-    timeout-minutes: 90
-    needs: quality
+    # The container suites run on an instrumented build.
+    timeout-minutes: 60
     permissions:
       contents: read
       id-token: write
@@ -121,9 +118,15 @@ jobs:
       - name: Collect in-process coverage for both workspace packages
         run: cargo llvm-cov -p rls2fga -p rls2fga-types --no-report --features parity --lib --tests
 
-      # One thread because a fresh runner pulls both images cold.
+      # Pulled up front, so no test spends its startup deadline on a cold pull and the
+      # suites can run side by side.
+      - name: Pull the container images
+        run: |
+          docker pull postgres:18
+          docker pull openfga/openfga:v1.11.6
+
       - name: Run the container-backed suites
-        run: cargo llvm-cov -p rls2fga --no-report --features parity --test it -- --ignored --test-threads=1
+        run: cargo llvm-cov -p rls2fga --no-report --features parity --test it -- --ignored --test-threads="$(nproc)"
 
       - name: Report coverage for both workspace packages
         run: cargo llvm-cov report -p rls2fga -p rls2fga-types --lcov --output-path lcov.info

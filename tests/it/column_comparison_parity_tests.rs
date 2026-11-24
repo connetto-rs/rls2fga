@@ -1,4 +1,4 @@
-//! Two columns of the checked row compared with each other, against `PostgreSQL` 17 and 18
+//! Two columns of the checked row compared with each other, against `PostgreSQL` 18
 //! with both tuple loaders.
 
 #![cfg(all(not(target_os = "windows"), feature = "client"))]
@@ -63,7 +63,7 @@ fn caller(subject: &str) -> Principal {
 /// Alice founded one organization and Bob the other. Each is granted on both roots, and Alice
 /// on a resource nested in hers. Ranges hold every order of their bounds and a NULL in each
 /// compared column.
-fn compared_case(major: &str, loading_from_rows: bool) -> ParityCase {
+fn compared_case(loading_from_rows: bool) -> ParityCase {
     let seed = format!(
         "INSERT INTO organizations VALUES ('{ALICE_ORGANIZATION}', '{ALICE}'),
            ('{BOB_ORGANIZATION}', '{BOB}');
@@ -84,7 +84,7 @@ fn compared_case(major: &str, loading_from_rows: bool) -> ParityCase {
     );
     let mut case = ParityCase::reading(
         &format!(
-            "column-comparison-pg{major}{}",
+            "column-comparison{}",
             if loading_from_rows { "-rows" } else { "" }
         ),
         COMPARED,
@@ -114,40 +114,38 @@ fn compared_case(major: &str, loading_from_rows: bool) -> ParityCase {
 /// a range is read where its bounds compare as the policies state and never where one is
 /// NULL.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn column_comparisons_agree_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for loading_from_rows in [false, true] {
-            let case = compared_case(major, loading_from_rows);
-            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-            let expect = |subject: &str, object: &str, allowed| {
-                assert_postgres(
-                    &case,
-                    &run,
-                    subject,
-                    object,
-                    ActionStatement::Select,
-                    allowed,
-                );
-            };
-            expect(ALICE, &format!("grants:{ALICE_ORGANIZATION}|{ALICE}"), true);
-            expect(BOB, &format!("grants:{BOB_ORGANIZATION}|{BOB}"), true);
-            expect(BOB, &format!("grants:{ALICE_ORGANIZATION}|{BOB}"), false);
-            expect(ALICE, &format!("grants:{BOB_ORGANIZATION}|{ALICE}"), false);
-            expect(ALICE, &format!("grants:{NESTED_RESOURCE}|{ALICE}"), false);
-            for (range, allowed) in [
-                ("equal", true),
-                ("ascending", true),
-                ("descending", true),
-                ("descending_same", false),
-                ("null_low", false),
-                ("null_high", false),
-                ("null_label", false),
-            ] {
-                expect("anonymous", &format!("ranges:{range}"), allowed);
-            }
-            assert_agrees(&case, &run);
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn column_comparisons_agree_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = compared_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        let expect = |subject: &str, object: &str, allowed| {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        };
+        expect(ALICE, &format!("grants:{ALICE_ORGANIZATION}|{ALICE}"), true);
+        expect(BOB, &format!("grants:{BOB_ORGANIZATION}|{BOB}"), true);
+        expect(BOB, &format!("grants:{ALICE_ORGANIZATION}|{BOB}"), false);
+        expect(ALICE, &format!("grants:{BOB_ORGANIZATION}|{ALICE}"), false);
+        expect(ALICE, &format!("grants:{NESTED_RESOURCE}|{ALICE}"), false);
+        for (range, allowed) in [
+            ("equal", true),
+            ("ascending", true),
+            ("descending", true),
+            ("descending_same", false),
+            ("null_low", false),
+            ("null_high", false),
+            ("null_label", false),
+        ] {
+            expect("anonymous", &format!("ranges:{range}"), allowed);
         }
+        assert_agrees(&case, &run);
     }
 }

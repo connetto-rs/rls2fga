@@ -1607,12 +1607,7 @@ pub(crate) struct Cluster {
 impl Cluster {
     /// Start the pair, on `PostgreSQL` 18.
     pub(crate) async fn start() -> Self {
-        Self::start_on("18").await
-    }
-
-    /// Start the pair, on `PostgreSQL` major version `major`.
-    pub(crate) async fn start_on(major: &str) -> Self {
-        let postgres = super::containers::start_postgres_version(major).await;
+        let postgres = super::containers::start_postgres().await;
         let pg_port = postgres.get_host_port_ipv4(5432).await.unwrap();
         let openfga = super::containers::start_openfga().await;
         let grpc_port = openfga.get_host_port_ipv4(8081).await.unwrap();

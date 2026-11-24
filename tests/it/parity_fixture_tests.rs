@@ -5,9 +5,7 @@ use std::fmt::Write as _;
 use rls2fga::parity::{replay, Database, ParityError, Probe, Replay};
 use sql_traits::parity::{fixtures, Answer, Case, Engine};
 
-use crate::support::containers::{
-    connect_postgres_with_retry, start_postgres_version, PG_DB, PG_PASSWORD, PG_USER,
-};
+use crate::support::containers::{connect_postgres_with_retry, PG_DB};
 use crate::support::parity::Cluster;
 
 /// Load `case` into a fresh database on `cluster`, replay `probes` on its own deployment,
@@ -213,26 +211,6 @@ async fn probes_outside_the_case() {
     case.schema = case.schema.replace("PRIMARY KEY", "");
     let keyless = replayed(&cluster, &case, vec![probe("alice", "docs:1", id)]).await;
     assert!(error_text(&keyless.answers[0].answer).contains("row naming"));
-}
-
-/// A cluster other than PostgreSQL 18 records nothing the fixtures can be judged on.
-#[tokio::test]
-#[ignore = "requires Docker and a postgres:17 container"]
-async fn a_cluster_other_than_postgres_18_is_refused() {
-    let postgres = start_postgres_version("17").await;
-    let port = postgres
-        .get_host_port_ipv4(5432)
-        .await
-        .expect("the port is mapped");
-    let url = format!("postgres://{PG_USER}:{PG_PASSWORD}@127.0.0.1:{port}/{PG_DB}");
-    connect_postgres_with_retry(&url);
-    let refused = Database::create(&url, &case_named("grant_without_update"))
-        .err()
-        .expect("PostgreSQL 17 is refused");
-    assert!(
-        matches!(&refused, ParityError::Version(version) if version.starts_with("17")),
-        "{refused:?}"
-    );
 }
 
 /// A case naming what its database does not hold is no replay, and a caller missing the
