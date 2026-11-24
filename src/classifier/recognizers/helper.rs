@@ -1535,7 +1535,7 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
         };
         bounded_by_no_time(&name, grant)?;
         uncapped(&name, grant)?;
-        unjoined(&name, grant)?;
+        unjoined(&name, grant, &[])?;
         let column = granted_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
@@ -2169,7 +2169,8 @@ fn helper_grant<DB: DatabaseLike>(
 
 /// The sets `grant`'s rows stay outside, those read on the level's row, where the
 /// compared column is the arm's object, which names that row, or the arm's row is the
-/// level's row, apart from those read on each held row of the arm.
+/// level's row, and those read on the pair an arm of a cap returns, where the compared
+/// column is one of the pair's, apart from those read on each held row of the arm.
 ///
 /// A set a helper not declared returns, or one a `NULL` on either side of the comparison
 /// would let a row past, is refused, so no row the body leaves out is kept.
@@ -2231,7 +2232,13 @@ fn outside_sets<DB: DatabaseLike>(
             column: compared,
             call,
         };
-        if on_object.is_some() || level_row {
+        // An arm of a cap returns its pairs on no level, and every row returning a pair
+        // holds the same value in each of the pair's columns.
+        let on_pair = level.is_none()
+            && objects
+                .iter()
+                .any(|object| same_column::<DB>(object, column));
+        if on_object.is_some() || level_row || on_pair {
             on_level.push(helper);
         } else {
             on_row.push(helper);
@@ -2697,11 +2704,13 @@ fn uncapped<DB: DatabaseLike>(
 }
 
 /// Refuses an arm keeping only the rows that name a joined row meeting the join, that no
-/// row of another table blocks, or that stay outside another helper's set, read where no
-/// link from the arm's own row reaches the other table's row or the set.
+/// row of another table blocks, or that stay outside another helper's set compared on a
+/// column other than those of `carried`, read where no link from the arm's own row
+/// reaches the other table's row or the set.
 fn unjoined<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
+    carried: &[&DB::Column],
 ) -> Result<(), HelperRefusal> {
     let table = || table_identity(grant.table()).to_string();
     if let Some(joined) = grant.joined_rows().first() {
@@ -2718,7 +2727,12 @@ fn unjoined<DB: DatabaseLike>(
             blocking: table_identity(anti_join.table()).to_string(),
         });
     }
-    match grant.exclusions().first() {
+    let uncarried = grant.exclusions().iter().find(|excluded| {
+        !carried
+            .iter()
+            .any(|column| same_column::<DB>(column, excluded.column()))
+    });
+    match uncarried {
         None => Ok(()),
         Some(excluded) => Err(HelperRefusal::Excluding {
             function: function.to_string(),
@@ -2942,7 +2956,6 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 cap: name,
             });
         };
-        unjoined(&name, grant)?;
         if let Some(nested) = grant.caps().first() {
             return Err(HelperRefusal::CappedCap {
                 capped: capped.clone(),
@@ -2971,6 +2984,7 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 cap: name,
             });
         };
+        unjoined(&name, grant, &columns)?;
         let paired_arm = helper_grant(&name, grant, (&columns, Vec::new()), None, db, registry)?;
         if let Some(caller) = &paired_arm.carried_caller {
             return Err(HelperRefusal::GateOnUnsetCaller {

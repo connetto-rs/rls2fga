@@ -22,7 +22,7 @@ use crate::declared_helper_tests::{
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
-use crate::row_cap_tests::{INSTALLATION_CAPS, PERSONAL_RESOURCES, POLICY_CAPS};
+use crate::row_cap_tests::{blocked_caps, INSTALLATION_CAPS, PERSONAL_RESOURCES, POLICY_CAPS};
 use crate::support;
 use crate::support::parity::{
     assert_agrees, assert_postgres, ClauseKind, Cluster, ParityCase, Principal, Side,
@@ -2355,6 +2355,87 @@ async fn policy_clauses_capped_by_helper_pairs_agree_with_postgres_17_and_18() {
                 .zip(invitations)
                 {
                     expect(format!("invitations:{invited}"), allowed);
+                }
+            }
+            assert_agrees(&case, &run);
+        }
+    }
+}
+
+const BLOCKED_CAP_HELPERS: &str = r#"{
+    "authz.capped_kinds": { "kind": "declared_helper" },
+    "authz.member_organizations": { "kind": "declared_helper" },
+    "authz.blocking_organizations": { "kind": "declared_helper" }
+}"#;
+
+/// A member who reads through `…f1` with no membership and no block.
+const UNBLOCKED_MEMBER: &str = "0b000000-0000-4000-8000-000000000006";
+
+/// [`policy_caps_case`] with `authz.capped_kinds` keeping only the pairs whose organization
+/// does not block the caller. The first organization blocks the first, third and fifth
+/// member, and [`UNBLOCKED_MEMBER`] reads through the third member's installation.
+fn blocked_policy_caps_case(major: &str, loading_from_rows: bool) -> ParityCase {
+    let mut case = policy_caps_case(major, loading_from_rows).with_registry(BLOCKED_CAP_HELPERS);
+    case.name = format!(
+        "declared-helper-blocked-policy-caps-pg{major}{}",
+        if loading_from_rows { "-rows" } else { "" }
+    );
+    case.schema = blocked_caps("permission.organization_id");
+    let [a1, _] = ORGANIZATIONS;
+    let blocked = [0, 2, 4].map(|member| format!("('{a1}', '{}')", CAPPED_MEMBERS[member].0));
+    case.seed.push(format!(
+        "INSERT INTO organization_blocks VALUES {}",
+        blocked.join(", ")
+    ));
+    case.principals.push(acting(
+        UNBLOCKED_MEMBER,
+        Some(UNBLOCKED_MEMBER),
+        Some(INSTALLATIONS_ACTING[0]),
+    ));
+    case
+}
+
+/// A block on an organization takes its pairs away from the blocked caller alone, and only
+/// where an installation acts.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
+async fn a_cap_excluding_blocked_organizations_agrees_with_postgres_17_and_18() {
+    for major in ["17", "18"] {
+        let cluster = Cluster::start_on(major).await;
+        for loading_from_rows in [false, true] {
+            let case = blocked_policy_caps_case(major, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (member, projects, reports) in [
+                (CAPPED_MEMBERS[0].0, [true; 3], [true; 3]),
+                (CAPPED_MEMBERS[2].0, [false; 3], [false; 3]),
+                (
+                    CAPPED_MEMBERS[3].0,
+                    [false, true, false],
+                    [true, true, false],
+                ),
+                (
+                    CAPPED_MEMBERS[4].0,
+                    [false, false, true],
+                    [false, false, true],
+                ),
+                (UNBLOCKED_MEMBER, [true, false, false], [true, true, false]),
+            ] {
+                for (((project, report, ..), project_allowed), report_allowed) in
+                    CAPPED_ROWS.into_iter().zip(projects).zip(reports)
+                {
+                    for (object, allowed) in [
+                        (format!("projects:{project}"), project_allowed),
+                        (format!("reports:{report}"), report_allowed),
+                    ] {
+                        assert_postgres(
+                            &case,
+                            &run,
+                            member,
+                            &object,
+                            ActionStatement::Select,
+                            allowed,
+                        );
+                    }
                 }
             }
             assert_agrees(&case, &run);
