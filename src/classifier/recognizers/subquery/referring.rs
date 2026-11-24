@@ -161,7 +161,10 @@ fn referring_rows_candidate<DB: DatabaseLike>(
             None => rule.push(predicate.clone()),
         }
     }
-    let pairs = pairs_in_key_order(pairs, &resolve_row_identity(&guarded, db)?)?;
+    let (pairs, key_len) = pairs_in_key_order(pairs, &resolve_row_identity(&guarded, db)?)?;
+    if pairs.len() != key_len {
+        return None;
+    }
     Some(ReferringRowsCandidate {
         referring_table,
         table_name: source.table_name,
