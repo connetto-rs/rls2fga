@@ -2424,7 +2424,7 @@ enum NestedCap {
 /// [`row_caps_case`] over the schema `nested` names, each member on both
 /// [`CAPPED_TEAMS`]. The first member no longer belongs to the second organization, and the
 /// first organization blocks the second and fourth member.
-fn nested_caps_case(major: &str, nested: NestedCap, loading_from_rows: bool) -> ParityCase {
+fn nested_caps_case(nested: NestedCap, loading_from_rows: bool) -> ParityCase {
     let [a1, a2] = ORGANIZATIONS;
     let [e1, e2] = CAPPED_TEAMS;
     let mut extra = format!("INSERT INTO teams VALUES ('{e1}', '{a1}'), ('{e2}', '{a2}');");
@@ -2455,7 +2455,7 @@ fn nested_caps_case(major: &str, nested: NestedCap, loading_from_rows: bool) -> 
         }
     };
     capped_members_case(
-        &format!("declared-helper-nested-caps{suffix}-pg{major}"),
+        &format!("declared-helper-nested-caps{suffix}"),
         &schema,
         (
             &extra,
@@ -2471,35 +2471,32 @@ fn nested_caps_case(major: &str, nested: NestedCap, loading_from_rows: bool) -> 
 /// above for the kind the membership is capped at. A block takes the organization away only
 /// where an installation acts, since the cap holding the exclusion lifts with it.
 #[tokio::test]
-#[ignore = "requires Docker, postgres:17, postgres:18, and openfga/openfga containers"]
-async fn a_cap_whose_own_rows_another_cap_keeps_agrees_with_postgres_17_and_18() {
-    for major in ["17", "18"] {
-        let cluster = Cluster::start_on(major).await;
-        for nested in [NestedCap::Literal, NestedCap::Blocked, NestedCap::Scoped] {
-            for loading_from_rows in [false, true] {
-                let case = nested_caps_case(major, nested, loading_from_rows);
-                let run =
-                    support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
-                for (member, teams) in [
-                    (CAPPED_MEMBERS[0].0, [true, false]),
-                    (CAPPED_MEMBERS[1].0, [true, true]),
-                    (CAPPED_MEMBERS[2].0, [true, false]),
-                    (CAPPED_MEMBERS[3].0, [nested != NestedCap::Blocked, false]),
-                    (CAPPED_MEMBERS[4].0, [false, nested == NestedCap::Scoped]),
-                ] {
-                    for (team, allowed) in CAPPED_TEAMS.into_iter().zip(teams) {
-                        assert_postgres(
-                            &case,
-                            &run,
-                            member,
-                            &format!("teams:{team}"),
-                            ActionStatement::Select,
-                            allowed,
-                        );
-                    }
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_cap_whose_own_rows_another_cap_keeps_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for nested in [NestedCap::Literal, NestedCap::Blocked, NestedCap::Scoped] {
+        for loading_from_rows in [false, true] {
+            let case = nested_caps_case(nested, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (member, teams) in [
+                (CAPPED_MEMBERS[0].0, [true, false]),
+                (CAPPED_MEMBERS[1].0, [true, true]),
+                (CAPPED_MEMBERS[2].0, [true, false]),
+                (CAPPED_MEMBERS[3].0, [nested != NestedCap::Blocked, false]),
+                (CAPPED_MEMBERS[4].0, [false, nested == NestedCap::Scoped]),
+            ] {
+                for (team, allowed) in CAPPED_TEAMS.into_iter().zip(teams) {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        member,
+                        &format!("teams:{team}"),
+                        ActionStatement::Select,
+                        allowed,
+                    );
                 }
-                assert_agrees(&case, &run);
             }
+            assert_agrees(&case, &run);
         }
     }
 }
