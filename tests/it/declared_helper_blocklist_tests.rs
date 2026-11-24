@@ -486,3 +486,36 @@ fn a_restrictive_set_returning_no_row_keeps_every_granted_row() {
         projects(""),
     );
 }
+
+/// An `OR` keeps every row once one of its blocklist arms subtracts a set no row is in.
+#[test]
+fn a_restrictive_or_with_a_blocklist_returning_no_row_keeps_every_granted_row() {
+    let projects =
+        |policies: &str| relation_definition(&marked_model(policies), "projects", "can_select");
+    assert_eq!(
+        projects(
+            "CREATE POLICY projects_unmarked ON projects AS RESTRICTIVE FOR SELECT
+               USING (NOT (id = ANY (ARRAY(SELECT authz.marked_projects('ban'))))
+                 OR owner_id = current_setting('app.tenant', true));"
+        ),
+        projects(""),
+    );
+}
+
+/// An `OR` of blocklists alone takes away only the rows every one of them blocks.
+#[test]
+fn a_restrictive_or_of_blocklists_subtracts_their_intersection() {
+    let dsl = marked_model(
+        "CREATE POLICY projects_unmarked ON projects AS RESTRICTIVE FOR SELECT
+           USING (NOT (id = ANY (ARRAY(SELECT authz.blocked_projects())))
+             OR NOT (id = ANY (ARRAY(SELECT authz.marked_projects('mute')))));",
+    );
+    assert_eq!(
+        relation_definition(&dsl, "projects", "can_select").as_deref(),
+        Some(
+            "(owner but not (blocked_projects and marked_projects_mute)) \
+             and acting_app_user from request_gate"
+        ),
+        "{dsl}"
+    );
+}
