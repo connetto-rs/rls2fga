@@ -667,6 +667,32 @@ ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
              with column 'kind' of the rows 'authz.capped_kinds' returns, and the two are not \
              of one type",
         ),
+        (
+            format!(
+                "{INSTALLATION_CAPS}CREATE TABLE kind_grants (
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  kind authz.resource_kind NOT NULL
+);
+GRANT SELECT ON kind_grants TO authz_owner;
+CREATE FUNCTION authz.granted_kinds()
+RETURNS TABLE (organization_id UUID, kind authz.resource_kind)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT kind_grant.organization_id, kind_grant.kind FROM public.kind_grants kind_grant
+  WHERE (kind_grant.organization_id, 'organization'::authz.resource_kind)
+    IN (SELECT * FROM authz.capped_kinds('admin'))
+$$;
+ALTER FUNCTION authz.granted_kinds() OWNER TO authz_owner;
+"
+            )
+            .replace(
+                "(SELECT * FROM authz.capped_kinds('reader'))",
+                "(SELECT * FROM authz.granted_kinds())",
+            ),
+            "organizations_select",
+            "declared helper 'authz.granted_kinds' pairs column 'organization_id' of \
+             'public.kind_grants' with the rows 'authz.capped_kinds' returns, while several \
+             rows of 'public.kind_grants' can return one row and no key names each of its rows",
+        ),
     ] {
         let helpers = [
             CAP_HELPERS,
@@ -674,6 +700,7 @@ ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
             &[
                 "authz.noted_organizations",
                 "authz.reader_kinds",
+                "authz.granted_kinds",
                 "authz.installation_organizations",
                 "authz.installation_resources",
             ],

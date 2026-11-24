@@ -3105,19 +3105,16 @@ fn leveled(cap: HelperCap, shape: LevelShape) -> HelperCap {
 
 /// The column `link` pairs beside `objects`, or the first of them where it pairs no other.
 fn paired_column(link: &CapLink, objects: &[ColumnName]) -> String {
-    let first = || {
-        objects
-            .first()
-            .map_or_else(String::new, ToString::to_string)
-    };
-    let CapLink::Held { columns, .. } = link else {
-        return first();
+    let columns = match link {
+        CapLink::Held { columns, .. } => columns.as_slice(),
+        CapLink::Row { .. } | CapLink::Pair { .. } => &[],
     };
     columns
         .iter()
         .map(|(_, column)| column)
         .find(|column| !objects.contains(column))
-        .map_or_else(first, ToString::to_string)
+        .or(objects.first())
+        .map_or_else(String::new, ToString::to_string)
 }
 
 /// A column operand of a held row's cap.
