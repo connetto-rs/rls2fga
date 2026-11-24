@@ -53,7 +53,8 @@ pub use attribute::{
 pub(crate) use attribute::{
     boolean_column_comparison, clock_refusals, column_comparison, comparison_renaming_cast,
     conjunct_reads_only_the_row, local_literal_comparison, residual_predicate_reading,
-    temporal_literal_comparison, temporal_literal_comparisons, TemporalColumns,
+    temporal_literal_comparison, temporal_literal_comparisons, transaction_time_bound,
+    TemporalColumns,
 };
 pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use containment::contained_keys_as_memberships;

@@ -37,6 +37,55 @@ pub fn attribute_request_predicate(expr: &Expr) -> Option<AttributeRequestPredic
     })
 }
 
+/// The column `expr` orders against the start of the transaction, the bound a declared
+/// helper's grant arm carries: a bare column on one side and `now()`, `CURRENT_TIMESTAMP`
+/// or `transaction_timestamp()` on the other, neither cast, shifted nor rounded.
+pub(crate) fn transaction_time_bound(expr: &Expr) -> Option<ColumnName> {
+    let Expr::BinaryOp { left, op, right } = unparenthesize(expr) else {
+        return None;
+    };
+    if !matches!(
+        op,
+        BinaryOperator::Gt | BinaryOperator::GtEq | BinaryOperator::Lt | BinaryOperator::LtEq
+    ) {
+        return None;
+    }
+    let column = if reads_transaction_start(right) {
+        left
+    } else if reads_transaction_start(left) {
+        right
+    } else {
+        return None;
+    };
+    match unparenthesize(column) {
+        Expr::Identifier(_) | Expr::CompoundIdentifier(_) => extract_column_name(column),
+        _ => None,
+    }
+}
+
+/// Whether `expr` is a call reading the start of the transaction as written, uncast.
+fn reads_transaction_start(expr: &Expr) -> bool {
+    let Expr::Function(call) = unparenthesize(expr) else {
+        return false;
+    };
+    let plain = call.filter.is_none()
+        && call.over.is_none()
+        && call.null_treatment.is_none()
+        && call.within_group.is_empty()
+        && matches!(call.parameters, FunctionArguments::None);
+    plain
+        && match (builtin_function_name(call).as_deref(), &call.args) {
+            // `CURRENT_TIMESTAMP(<precision>)` rounds the time it reads.
+            (Some("current_timestamp"), FunctionArguments::None) => true,
+            (Some("now" | "transaction_timestamp"), FunctionArguments::List(list)) => {
+                list.args.is_empty()
+                    && list.duplicate_treatment.is_none()
+                    && list.clauses.is_empty()
+            }
+            _ => false,
+        }
+}
+
 /// The threshold a temporal comparison reads, or `None` when the side is not the clock
 /// or the clock shifted by an interval the threshold can follow, so the caller leaves
 /// the guard in SQL and the shape stays joined.

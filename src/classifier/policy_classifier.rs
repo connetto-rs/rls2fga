@@ -1,12 +1,13 @@
 use crate::generator::db_lookup::{
-    key_collation_refusal, resolve_row_identity, TEAM_PRINCIPAL_TABLES, USER_PRINCIPAL_TABLES,
+    column_kind, key_collation_refusal, resolve_row_identity, TEAM_PRINCIPAL_TABLES,
+    USER_PRINCIPAL_TABLES,
 };
 use crate::generator::model_generator::resolve_principal_info;
 #[cfg(not(feature = "std"))]
 use crate::no_std_prelude::*;
 use crate::parser::expr::CastChain;
 use crate::parser::names::{lookup_table, resolve_table_id, table_has_column};
-use crate::types::{ColumnName, TableId};
+use crate::types::{ColumnKind, ColumnName, TableId};
 use core::ops::ControlFlow;
 use sqlparser::ast::{BinaryOperator, Expr, InTarget, UnaryOperator, Value};
 
@@ -169,6 +170,25 @@ fn literal_attribute_confidence<DB: DatabaseLike>(
     } else {
         ConfidenceLevel::B
     }
+}
+
+/// A clock bound's grade, A for the bound a declared helper's grant arm carries on a
+/// confirmed `timestamptz` column of `table`, which a condition on `request_time` decides
+/// as `PostgreSQL` does at the transaction's start.
+fn clock_bound_confidence<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> ConfidenceLevel {
+    let instant = recognizers::transaction_time_bound(expr).filter(|column| {
+        resolve_table_id(db, table).is_some_and(|guarded| {
+            column_kind(&guarded, column.as_str(), db) == ColumnKind::TimestampTz
+        })
+    });
+    instant.map_or(ConfidenceLevel::B, |column| {
+        literal_attribute_confidence(db, registry, table, &column)
+    })
 }
 
 fn unknown_d(expr: &Expr, reason: impl Into<String>) -> ClassifiedExpr {
@@ -1355,11 +1375,11 @@ fn recognize_leaf<DB: DatabaseLike>(
     let value_desc = describe_comparison_value(expr);
     let predicate = recognizers::attribute_literal_predicate(expr);
     let request_predicate = recognizers::attribute_request_predicate(expr);
-    // No confirmation vouches for a request value, which the service evaluates.
+    // A confirmation vouches for the column, and the declared helper contract for the clock.
     let confidence = if predicate.is_some() {
         literal_attribute_confidence(db, registry, table, &col)
     } else if request_predicate.is_some() {
-        ConfidenceLevel::B
+        clock_bound_confidence(expr, db, registry, table)
     } else {
         ConfidenceLevel::C
     };
@@ -1799,7 +1819,8 @@ CREATE TABLE grants (
   id UUID PRIMARY KEY,
   role TEXT,
   expires_on DATE,
-  starts_at TIMESTAMPTZ
+  starts_at TIMESTAMPTZ,
+  ends_at TIMESTAMP
 );
 CREATE TABLE app.grants (
   id UUID PRIMARY KEY,
@@ -1879,25 +1900,63 @@ CREATE TABLE teams (
     }
 
     #[test]
+    fn a_confirmed_instant_column_grades_its_transaction_time_bounds_a() {
+        let mut registry = FunctionRegistry::new();
+        registry.register_attribute_column("grants", "starts_at");
+
+        for expr_sql in [
+            "starts_at > now()",
+            "starts_at >= CURRENT_TIMESTAMP",
+            "starts_at < transaction_timestamp()",
+            "now() >= starts_at",
+            "(starts_at <= (pg_catalog.now()))",
+        ] {
+            assert_eq!(
+                grade(&registry, "grants", expr_sql),
+                ConfidenceLevel::A,
+                "`{expr_sql}`"
+            );
+            assert_eq!(
+                grade(&FunctionRegistry::new(), "grants", expr_sql),
+                ConfidenceLevel::B,
+                "`{expr_sql}` unconfirmed"
+            );
+        }
+    }
+
+    #[test]
     fn an_attribute_confirmation_leaves_checks_the_row_does_not_decide() {
         let mut registry = FunctionRegistry::new();
         registry.register_attribute_column("grants", "expires_on");
         registry.register_attribute_column("grants", "starts_at");
+        registry.register_attribute_column("grants", "ends_at");
 
-        // The session TimeZone places a zoneless literal, so each request decides it.
-        assert_eq!(
-            grade(
-                &registry,
-                "grants",
-                "starts_at >= TIMESTAMP '2024-01-01 00:00:00'"
-            ),
-            ConfidenceLevel::B
-        );
-        // A clock reading admits a row today and refuses it tomorrow.
-        assert_eq!(
-            grade(&registry, "grants", "expires_on > now()"),
-            ConfidenceLevel::B
-        );
+        for expr_sql in [
+            // The session TimeZone places a zoneless literal, a local clock, a calendar
+            // shift and a zoneless column.
+            "starts_at >= TIMESTAMP '2024-01-01 00:00:00'",
+            "starts_at > current_date",
+            "starts_at > localtimestamp",
+            "starts_at > now() - interval '1 day'",
+            "expires_on > now()",
+            "ends_at > now()",
+            // A shifted, rounded or cast clock is no bound a declared helper carries.
+            "starts_at > now() - interval '1 hour'",
+            "starts_at > CURRENT_TIMESTAMP(3)",
+            "starts_at > now()::timestamptz",
+            // Each call reads a later instant than the transaction's start.
+            "starts_at > statement_timestamp()",
+            "starts_at > clock_timestamp()",
+            // Only an ordering bounds the column.
+            "starts_at = now()",
+            "starts_at <> now()",
+        ] {
+            assert_eq!(
+                grade(&registry, "grants", expr_sql),
+                ConfidenceLevel::B,
+                "`{expr_sql}`"
+            );
+        }
     }
 
     #[test]
