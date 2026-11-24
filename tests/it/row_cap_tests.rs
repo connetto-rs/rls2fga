@@ -779,6 +779,114 @@ fn policy_caps_with_no_pair_relation_are_refused() {
     );
 }
 
+/// [`POLICY_CAPS`] with `authz.capped_kinds` keeping only the permission rows whose
+/// `compared` column stays outside the organizations blocking the caller.
+pub(crate) fn blocked_caps(compared: &str) -> String {
+    POLICY_CAPS
+        .replace(
+            "CREATE FUNCTION authz.capped_kinds",
+            "CREATE TABLE organization_blocks (
+  organization_id UUID NOT NULL REFERENCES organizations (id),
+  user_id UUID NOT NULL,
+  PRIMARY KEY (organization_id, user_id)
+);
+GRANT SELECT ON organization_blocks TO authz_owner;
+CREATE FUNCTION authz.blocking_organizations() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT block.organization_id FROM public.organization_blocks block
+  WHERE block.user_id = authz.caller_id()
+$$;
+ALTER FUNCTION authz.blocking_organizations() OWNER TO authz_owner;
+CREATE FUNCTION authz.capped_kinds",
+        )
+        .replace(
+            "    AND permission.max_role >= min_role\n",
+            &format!(
+                "    AND permission.max_role >= min_role\n    \
+                 AND NOT ({compared} = ANY (ARRAY(SELECT authz.blocking_organizations())))\n"
+            ),
+        )
+}
+
+pub(crate) const BLOCKED_CAP_HELPERS: &[&str] = &[
+    "authz.capped_kinds",
+    "authz.member_organizations",
+    "authz.blocking_organizations",
+];
+
+/// Every row returning a pair holds the pair's organization, so each pair holds the
+/// callers its rows return it to but not those its organization blocks.
+#[test]
+fn a_cap_excluding_a_set_on_a_pair_column_subtracts_it_from_each_pair() {
+    let schema = blocked_caps("permission.organization_id");
+    for policy in ["projects_capped", "reports_capped", "invitations_capped"] {
+        let using = using_of(&schema, BLOCKED_CAP_HELPERS, policy);
+        assert_eq!(
+            using.confidence,
+            ConfidenceLevel::A,
+            "{policy}: {:?}",
+            using.pattern
+        );
+    }
+    let model = installation_translator(BLOCKED_CAP_HELPERS)
+        .translate(&db_of(&schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    let pair = "capped_kinds_writer_pair";
+    let held = relation_definition(&model, pair, "capped_kinds_writer")
+        .unwrap_or_else(|| panic!("{pair} holds capped_kinds_writer in\n{model}"));
+    let kept = relation_definition(&model, pair, &held)
+        .unwrap_or_else(|| panic!("{pair} holds {held} in\n{model}"));
+    let (_, link) = kept
+        .split_once(" but not blocking_organizations from ")
+        .unwrap_or_else(|| panic!("{held} subtracts the blocks: {kept}"));
+    assert_eq!(
+        relation_definition(&model, pair, link).as_deref(),
+        Some("[organizations]"),
+        "{model}"
+    );
+}
+
+/// An exclusion compared on a column no pair carries, or one a `NULL` or an undeclared
+/// helper keeps the model from stating, is refused naming why.
+#[test]
+fn cap_exclusions_the_pairs_cannot_carry_are_refused() {
+    let blocked = blocked_caps("permission.organization_id");
+    for (schema, helpers, reason) in [
+        (
+            blocked_caps("permission.installation_id"),
+            BLOCKED_CAP_HELPERS,
+            "declared helper 'authz.capped_kinds' keeps the rows of \
+             'public.installation_permissions' only outside the set \
+             'authz.blocking_organizations' returns",
+        ),
+        (
+            blocked.replace(
+                "  organization_id UUID NOT NULL REFERENCES organizations (id),\n  \
+                 user_id UUID NOT NULL,\n  PRIMARY KEY (organization_id, user_id)",
+                "  organization_id UUID REFERENCES organizations (id),\n  user_id UUID NOT NULL",
+            ),
+            BLOCKED_CAP_HELPERS,
+            "organization_blocks.organization_id' must be provably non-null",
+        ),
+        (
+            blocked,
+            POLICY_CAP_HELPERS,
+            "'authz.blocking_organizations', which is not declared",
+        ),
+    ] {
+        let using = using_of(&schema, helpers, "projects_capped");
+        assert_eq!(using.confidence, ConfidenceLevel::D, "{reason}");
+        let refused = refusal_reasons(&using.pattern);
+        assert!(
+            refused.iter().any(|refused| refused.contains(reason)),
+            "expected {reason}, got {refused:?}"
+        );
+    }
+}
+
 pub(crate) const PERSONAL_RESOURCES: &str = "
 CREATE TABLE resource_notes (
   id UUID PRIMARY KEY,

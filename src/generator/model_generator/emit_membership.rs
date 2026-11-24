@@ -2707,8 +2707,8 @@ fn pairs_holder<DB: DatabaseLike>(
     let pair_type = cap_type_name(pairs, "pair", ctx.table_types);
     let mut held = Vec::new();
     for arm in &pairs.arms {
-        held.extend(helper_grant_parts(
-            arm, None, &pair_type, ctx, table_plan, all_types,
+        held.extend(pair_grant_parts(
+            arm, &pair_type, ctx, table_plan, all_types,
         ));
     }
     combine_union(held).map(|held| {
@@ -2717,6 +2717,61 @@ fn pairs_holder<DB: DatabaseLike>(
             held,
         )
     })
+}
+
+/// The pairs an arm of a cap returns, as [`helper_grant_parts`] reads them, less those
+/// whose column a set the arm stays outside of holds.
+///
+/// Every row returning a pair holds the same value in each of the pair's columns, so each
+/// pair links to the row of the excluded set's level that column names, loaded from the
+/// arm's rows, and the set is read there.
+fn pair_grant_parts<DB: DatabaseLike>(
+    arm: &HelperGrant,
+    pair_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
+    let parts = helper_grant_parts(arm, None, pair_type, ctx, table_plan, all_types);
+    if arm.outside.is_empty() {
+        return parts;
+    }
+    let Some(granted) = combine_union(parts) else {
+        return Vec::new();
+    };
+    let mut name = stored_relation_name(arm.table.name());
+    let mut outside = Vec::with_capacity(arm.outside.len());
+    for helper in &arm.outside {
+        // A call returning no row takes nothing away.
+        let Some(relation) = helper_call_relation(&helper.call, ctx, table_plan, all_types) else {
+            continue;
+        };
+        name.push_str("_outside_");
+        name.push_str(relation.as_str());
+        let named_type = ctx.table_types.resolve(&helper.call.level);
+        let plan = helper_level_plan(pair_type, None, table_plan, all_types);
+        let rows = vec![(
+            &arm.table,
+            arm.object_columns.clone(),
+            vec![helper.column.clone()],
+            ResidualPredicates::default(),
+        )];
+        outside.push(UsersetExpr::TupleToUserset {
+            tupleset: cap_link(&named_type, rows, plan),
+            computed: relation,
+        });
+    }
+    let Some(subtract) = combine_union(outside) else {
+        return vec![granted];
+    };
+    let plan = helper_level_plan(pair_type, None, table_plan, all_types);
+    vec![UsersetExpr::Computed(plan.ensure_computed(
+        name,
+        UsersetExpr::Exclusion {
+            base: Box::new(granted),
+            subtract: Box::new(subtract),
+        },
+    ))]
 }
 
 /// The objects of `level_type` reaching a pair `holder` holds, each linked to the pairs

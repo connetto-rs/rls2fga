@@ -747,10 +747,11 @@ pub struct HelperGrant {
     /// The calls whose keys the level's row the arm returns has to be among, all of them,
     /// from `<key> IN (SELECT <function>(<arguments>))` on the arm's table's own key.
     pub within: Vec<HelperCall>,
-    /// The sets the level's row the arm returns has to stay outside, all of them, from
-    /// `NOT (<column> = ANY (ARRAY(SELECT <function>(<arguments>))))` on a column of the
-    /// arm's table, its object column, which names the level's row, or any column where
-    /// the arm's row is the level's row.
+    /// The sets the level's row or the pair the arm returns has to stay outside, all of
+    /// them, from `NOT (<column> = ANY (ARRAY(SELECT <function>(<arguments>))))` on a
+    /// column of the arm's table, its object column, which names the level's row, any
+    /// column where the arm's row is the level's row, or one of the pair's columns for an
+    /// arm of a cap.
     pub outside: Vec<DeclaredHelper>,
     /// Each row of the arm's table held as its own object, with the rows of other tables
     /// it names, `None` where the level's row holds the grant.
