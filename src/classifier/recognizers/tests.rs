@@ -4490,6 +4490,24 @@ fn rows_naming_the_guarded_row_grade_their_confirmed_rule() {
     }
 }
 
+/// Only a bare column ordered against the transaction's start is a helper's time bound.
+#[test]
+fn a_transaction_time_bound_names_a_bare_column_ordered_against_the_clock() {
+    for (expr_sql, column) in [
+        ("i.expires_at > now()", Some("expires_at")),
+        ("now() <= expires_at", Some("expires_at")),
+        ("expires_at::timestamptz > now()", None),
+        ("expires_at IS NULL", None),
+        ("now()", None),
+    ] {
+        assert_eq!(
+            transaction_time_bound(&parse_expr(expr_sql)),
+            column.map(ColumnName::from_stored),
+            "`{expr_sql}`"
+        );
+    }
+}
+
 /// A referring row's rule that does not translate is named as the reason, and a negated
 /// read of referring rows is refused.
 #[test]
