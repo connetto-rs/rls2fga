@@ -236,7 +236,10 @@ fn classify_clause<DB: DatabaseLike>(
     let classified = match crate::classifier::exclusion::try_membership_exclusion(
         expr, db, registry, table, command, 0, &state, true,
     ) {
-        Ok(None) => classify_expr_inner(expr, db, registry, table, command, 0, &state),
+        Ok(None) => crate::classifier::exclusion::try_spared_exclusion(
+            expr, db, registry, table, command, &state,
+        )
+        .unwrap_or_else(|| classify_expr_inner(expr, db, registry, table, command, 0, &state)),
         Err(reason) => unknown_d(expr, reason.to_string()),
         Ok(Some(classified)) => classified,
     };

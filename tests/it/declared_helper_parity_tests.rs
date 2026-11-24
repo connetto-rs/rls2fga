@@ -745,6 +745,101 @@ async fn blocks_on_the_acting_installation_agree_with_postgres() {
     }
 }
 
+const SPARED_BLOCKS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE organizations (id TEXT PRIMARY KEY);
+CREATE TABLE projects (id TEXT PRIMARY KEY,
+  organization_id TEXT NOT NULL REFERENCES organizations (id), owner_id TEXT NOT NULL);
+CREATE TABLE organization_blocks (
+  organization_id TEXT NOT NULL REFERENCES organizations (id),
+  principal_id TEXT NOT NULL,
+  PRIMARY KEY (organization_id, principal_id)
+);
+GRANT SELECT ON organization_blocks TO authz_owner;
+CREATE FUNCTION authz.blocking_organizations() RETURNS SETOF TEXT
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT b.organization_id FROM public.organization_blocks b
+  WHERE b.principal_id = current_setting('app.user_id', true)
+$$;
+ALTER FUNCTION authz.blocking_organizations() OWNER TO authz_owner;
+ALTER TABLE projects ENABLE ROW LEVEL SECURITY;
+CREATE POLICY projects_all ON projects FOR SELECT USING (true);
+CREATE POLICY projects_unblocked ON projects AS RESTRICTIVE FOR SELECT
+  USING (NOT (organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))
+    OR owner_id = current_setting('app.user_id', true)
+    OR owner_id = NULLIF(current_setting('app.installation_id', true), ''));
+";
+
+fn spared_blocks_case(loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-spared-blocks{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        SPARED_BLOCKS,
+        &[
+            "INSERT INTO organizations VALUES ('O1'), ('O2');
+             INSERT INTO projects VALUES ('P1', 'O1', 'alice'), ('P2', 'O1', 'carol'),
+               ('P3', 'O1', 'i1'), ('P4', 'O2', 'carol');
+             INSERT INTO organization_blocks VALUES ('O1', 'alice'), ('O2', 'bob')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON projects TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            acting("alice", Some("alice"), None),
+            acting("alice_via_i1", Some("alice"), Some("i1")).acting_for("alice"),
+            acting("alice_pooled", Some("alice"), Some("")).acting_for("alice"),
+            acting("bob", Some("bob"), None),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id"),
+        support::deployment::typed_scalar("app.installation_id", DataType::Text).may_be_unset(),
+    ])
+    .with_registry(PRINCIPAL_BLOCK_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A block hides an organization's projects from the blocked caller except those the
+/// caller owns and those the installation the request acts through owns, whether that
+/// installation is set, unset, or read as `''` on a pooled connection.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_blocklist_sparing_the_owners_rows_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = spared_blocks_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, visible) in [
+            ("alice", [true, false, false, true]),
+            ("alice_via_i1", [true, false, true, true]),
+            ("alice_pooled", [true, false, false, true]),
+            ("bob", [true, true, true, false]),
+        ] {
+            for (object, allowed) in ["projects:P1", "projects:P2", "projects:P3", "projects:P4"]
+                .into_iter()
+                .zip(visible)
+            {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
 const REQUEST_HELPERS: &str = r#"{
     "authz.presented_links": { "kind": "declared_helper" },
     "authz.installations_allowing": { "kind": "declared_helper" }

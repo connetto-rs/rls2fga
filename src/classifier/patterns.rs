@@ -1073,7 +1073,8 @@ pub struct TreeEdges {
 /// Sets subtracted from a positive grant.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MembershipExclusion {
-    /// The grant, absent only for a negative-only top-level restrictive clause.
+    /// The grant, absent only for a blocklist standing alone as a restrictive clause or as
+    /// an arm of the `OR` at the top of one.
     pub base: Option<Box<ClassifiedExpr>>,
     /// The blocked sets whose union is removed from the grant.
     pub subtract: Vec<ExcludedSet>,
