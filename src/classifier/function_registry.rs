@@ -522,7 +522,9 @@ impl FunctionRegistry {
         self.public_flag_columns.contains(column)
     }
 
-    /// Confirm `column` of `table` as an access attribute, grading its literal checks A.
+    /// Confirm `column` of `table` as an access attribute, grading A its literal checks
+    /// and, on a `timestamptz` column, its bounds against the transaction's start such as
+    /// `expires_at > now()`, the bound a declared helper's grant arm carries.
     ///
     /// `table` resolves against the schema, so another table's `column` stays unconfirmed.
     pub fn register_attribute_column(

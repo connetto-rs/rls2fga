@@ -4465,6 +4465,31 @@ fn rows_naming_the_guarded_row_are_read_only_through_their_own_read_and_key() {
     }
 }
 
+/// An invitation's acceptance and expiry grade the organization it names A once the
+/// deployment confirms both columns, and the unconfirmed expiry holds it at B.
+#[test]
+fn rows_naming_the_guarded_row_grade_their_confirmed_rule() {
+    let db = parse_schema(REFERRING_ROWS_SCHEMA).unwrap();
+    let clause = "id = ANY (ARRAY(SELECT i.organization_id FROM invitations i \
+                  WHERE i.accepted_by_id IS NULL AND i.expires_at > now()))";
+    let mut acceptance = FunctionRegistry::new();
+    acceptance.register_attribute_column("invitations", "accepted_by_id");
+    let mut both = acceptance.clone();
+    both.register_attribute_column("invitations", "expires_at");
+    for (registry, expected) in [(acceptance, ConfidenceLevel::B), (both, ConfidenceLevel::A)] {
+        let classified = recognize_p31_referring_rows(
+            &parse_expr(clause),
+            &db,
+            &registry,
+            "organizations",
+            PolicyCommand::Select,
+            &ExpansionState::new(),
+        )
+        .expect("the invitations name the organization");
+        assert_eq!(classified.confidence, expected);
+    }
+}
+
 /// A referring row's rule that does not translate is named as the reason, and a negated
 /// read of referring rows is refused.
 #[test]
