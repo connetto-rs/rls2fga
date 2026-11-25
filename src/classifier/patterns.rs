@@ -8,6 +8,7 @@ use sql_traits::structs::{PolicyClause, PolicyExpression, PolicyTarget};
 use sqlparser::ast::{CreatePolicyCommand, CreatePolicyType, Expr};
 
 use crate::classifier::function_registry::DeclaredSource;
+use crate::classifier::request_formula::RequestFormula;
 use crate::clock::ClockThreshold;
 use crate::parser::column_type_casts::without_column_type_casts;
 use crate::parser::names::table_identity;
@@ -16,7 +17,7 @@ pub(crate) use crate::types::{
     AttributeLiteral, AttributeOperator, AttributePredicate, AttributeTest, ColumnName,
     ConfidenceLevel, PolicyCommand, RolePrivilege, TableId,
 };
-use crate::types::{FallbackStep, TypeName};
+use crate::types::{FallbackStep, RequestPredicate, TypeName};
 
 /// Policy combination mode in `PostgreSQL` RLS.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1273,6 +1274,33 @@ pub enum PatternClass {
     ExpandedFunction(ExpandedFunction),
     /// No known pattern matched.
     Unknown(UnclassifiedExpr),
+}
+
+impl PatternClass {
+    /// What the clause tests of the request, or `None` where no [`RequestTest`] states it.
+    ///
+    /// The clauses stated are a constant, a test of a declared request value against
+    /// constants the policy names, a test of whether the request carries such a value, and
+    /// an `AND` or `OR` of those. A test of the role the request acts as, a call expanded to
+    /// its function's body and every clause reading the row answer `None`.
+    ///
+    /// The predicate is in the canonical form
+    /// [`RowDecision::Request`](crate::types::RowDecision::Request) carries for the same
+    /// clause, so a consumer settling the clause from the request agrees with the model's
+    /// request gate.
+    #[must_use]
+    pub fn request_test(&self) -> Option<RequestTest> {
+        RequestFormula::of(self)?.request_test()
+    }
+}
+
+/// What a clause reading only the request tests, the same for every row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RequestTest {
+    /// The clause holds for every request, or for none.
+    Constant(bool),
+    /// The clause holds for the requests satisfying the predicate.
+    Predicate(RequestPredicate),
 }
 
 /// A classified expression with its pattern and confidence.

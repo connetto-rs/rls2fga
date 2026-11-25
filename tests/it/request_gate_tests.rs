@@ -4,12 +4,15 @@
 //! model declares nor the tuples a row carries may grow with what it does not read.
 
 use core::fmt::Write as _;
+use std::collections::BTreeMap;
 
+use rls2fga::classifier::patterns::RequestTest;
 use rls2fga::generator::well_known::WellKnownTypes;
+use rls2fga::parser::sql_parser::Deployment;
 use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{
-    ConfidenceLevel, RecordDerivation, RecordDescription, RequestComparison, RequestNormalization,
-    RequestPredicate, RowDecision, TranslationNote,
+    ConfidenceLevel, RecordDerivation, RecordDescription, RequestAtom, RequestComparison,
+    RequestNormalization, RequestPredicate, RowDecision, TranslationNote,
 };
 
 use crate::support::deployment;
@@ -500,4 +503,128 @@ CREATE POLICY email_inline ON objects FOR SELECT
         "{}",
         contract.message()
     );
+}
+
+/// What each policy's `USING` clause tests of the request alone, by policy name, for
+/// every policy carrying one.
+fn request_tests(sql: &str, deployment: Deployment) -> BTreeMap<String, Option<RequestTest>> {
+    TranslatorBuilder::new(deployment)
+        .build()
+        .classify(&db_of(sql))
+        .iter()
+        .filter_map(|policy| {
+            let clause = policy.using_classification()?;
+            Some((policy.name().to_string(), clause.pattern.request_test()))
+        })
+        .collect()
+}
+
+/// `'value' = ANY(app.bot_list)`.
+fn bot_list_holds(value: &str) -> RequestPredicate {
+    RequestPredicate::Holds(RequestAtom {
+        request_parameter: "app_bot_list".to_string(),
+        comparison: RequestComparison::CallerSetHolds,
+        value: value.to_string(),
+        fallback: vec![],
+    })
+}
+
+/// A clause reading only the request states its test in normal form, a constant clause
+/// stays a constant, and a clause reading the row states none.
+#[test]
+fn a_request_only_clause_states_its_test() {
+    let sql = "
+CREATE TABLE items (id TEXT PRIMARY KEY, owner TEXT);
+ALTER TABLE items ENABLE ROW LEVEL SECURITY;
+CREATE POLICY bot_read ON items FOR SELECT USING (
+    'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
+CREATE POLICY bot_read_or_all ON items FOR SELECT USING (
+    'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+    OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+    OR 'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
+CREATE POLICY off_main ON items FOR SELECT USING (current_setting('app.mode', true) <> 'main');
+CREATE POLICY bot_read_on_main ON items FOR SELECT USING (
+    'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+    AND current_setting('app.mode', true) = 'main');
+CREATE POLICY no_installation ON items FOR SELECT
+    USING (NULLIF(current_setting('app.installation_id', true), '') IS NULL);
+CREATE POLICY everyone ON items FOR SELECT USING (true);
+CREATE POLICY owned ON items FOR SELECT USING (owner = current_setting('app.user_id', true));
+";
+    let deployment = deployment::caller_deployment_with([
+        deployment::delimited_set("app.bot_list", ","),
+        deployment::scalar("app.mode"),
+        deployment::scalar("app.installation_id").may_be_unset(),
+    ]);
+    let mode = |comparison: RequestComparison| {
+        RequestPredicate::Holds(RequestAtom {
+            request_parameter: "app_mode".to_string(),
+            comparison,
+            value: "main".to_string(),
+            fallback: vec![],
+        })
+    };
+    let expected = BTreeMap::from([
+        (
+            "bot_read".to_string(),
+            Some(RequestTest::Predicate(bot_list_holds("items:read"))),
+        ),
+        (
+            "bot_read_or_all".to_string(),
+            Some(RequestTest::Predicate(RequestPredicate::Any(vec![
+                bot_list_holds("*"),
+                bot_list_holds("items:read"),
+            ]))),
+        ),
+        (
+            "off_main".to_string(),
+            Some(RequestTest::Predicate(mode(
+                RequestComparison::CallerValueUnequals,
+            ))),
+        ),
+        (
+            "bot_read_on_main".to_string(),
+            Some(RequestTest::Predicate(RequestPredicate::All(vec![
+                bot_list_holds("items:read"),
+                mode(RequestComparison::CallerValueEquals),
+            ]))),
+        ),
+        (
+            "no_installation".to_string(),
+            Some(RequestTest::Predicate(RequestPredicate::Omits {
+                request_parameter: "app_installation_id".to_string(),
+            })),
+        ),
+        ("everyone".to_string(), Some(RequestTest::Constant(true))),
+        ("owned".to_string(), None),
+    ]);
+    assert_eq!(request_tests(sql, deployment), expected);
+}
+
+/// The test a gate clause states is the predicate the model's request gate carries for
+/// it, so a consumer settling the clause and one checking the model agree.
+#[test]
+fn a_gate_clause_states_the_predicate_its_request_gate_carries() {
+    let sql = gated_tables(1);
+    let deployment =
+        deployment::caller_deployment_with([deployment::delimited_set("app.bot_list", ",")]);
+    let stated = request_tests(&sql, deployment)
+        .remove("t0_cap_read")
+        .flatten();
+    let outputs = outputs_of(&sql);
+    let select = outputs
+        .translation()
+        .relations()
+        .iter()
+        .find(|entry| entry.type_name.as_str() == "t0" && entry.relation.as_str() == "can_select")
+        .expect("t0 defines can_select");
+    let carried: Vec<RequestTest> =
+        request_predicates(select.decision.as_ref().expect("the read is decidable"))
+            .into_iter()
+            .filter(|predicate| !matches!(predicate, RequestPredicate::ActsAs { .. }))
+            .cloned()
+            .map(RequestTest::Predicate)
+            .collect();
+    assert_eq!(carried.len(), 1, "one request gate: {carried:#?}");
+    assert_eq!(stated.as_ref(), carried.first());
 }

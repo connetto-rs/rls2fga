@@ -14,7 +14,8 @@ use crate::classifier::function_registry::DeclaredSource;
 use crate::classifier::patterns::{
     BoolOp, CallerScalarEqualsConstant, CallerScalarInConstantList, CallerScalarUnequalsConstant,
     Composite, ConstantBool, ConstantInCallerSet, FallbackScalarEqualsConstant,
-    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass, RequestValueAbsent,
+    FallbackScalarInConstantList, FallbackScalarUnequalsConstant, PatternClass, RequestTest,
+    RequestValueAbsent,
 };
 use crate::types::{
     ConditionParameterName, FallbackStep, RequestAtom, RequestComparison, RequestNormalization,
@@ -370,6 +371,32 @@ impl RequestFormula {
             Self::Presence(presence) => presence.key(),
             Self::Any(children) => format!("any({})", child_keys(children)),
             Self::All(children) => format!("all({})", child_keys(children)),
+        }
+    }
+
+    /// The formula as a consumer settles it, or `None` where a constant sits below the
+    /// root, which the normal form never leaves.
+    pub(crate) fn request_test(&self) -> Option<RequestTest> {
+        match self {
+            Self::Const(value) => Some(RequestTest::Constant(*value)),
+            _ => self.request_predicate().map(RequestTest::Predicate),
+        }
+    }
+
+    /// The formula as the recipe states it, or `None` where it holds a constant.
+    fn request_predicate(&self) -> Option<RequestPredicate> {
+        let members = |children: &[Self]| {
+            children
+                .iter()
+                .map(Self::request_predicate)
+                .collect::<Option<Vec<_>>>()
+        };
+        match self {
+            Self::Const(_) => None,
+            Self::Atom(atom) => Some(RequestPredicate::Holds(atom.request_atom())),
+            Self::Presence(presence) => Some(presence.request_predicate()),
+            Self::Any(children) => members(children).map(RequestPredicate::Any),
+            Self::All(children) => members(children).map(RequestPredicate::All),
         }
     }
 }
