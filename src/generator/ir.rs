@@ -5,7 +5,7 @@
 //! cannot drift apart.
 
 use crate::classifier::patterns::{AttributePredicate, ResidualPredicates};
-use crate::generator::model_generator::{GateAtom, PresenceAtom};
+use crate::classifier::request_formula::{GateAtom, PresenceAtom};
 use crate::generator::notes::SkippedTuples;
 use crate::generator::well_known::member_relation;
 #[cfg(not(feature = "std"))]

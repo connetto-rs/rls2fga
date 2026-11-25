@@ -17,5 +17,7 @@ pub mod policy_classifier;
 pub(crate) mod readability;
 /// Individual pattern recognizers (P1 to P6) that probe a single AST expression node.
 pub mod recognizers;
+// `request_formula` documents itself in the file.
+pub(crate) mod request_formula;
 // `role_keywords` documents itself in the file.
 pub(crate) mod role_keywords;

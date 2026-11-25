@@ -67,8 +67,6 @@ mod emit_ownership;
 mod emit_requests;
 /// Emission for the patterns a role decides.
 mod emit_roles;
-/// A gate that reads only the request, reduced to one normal form.
-mod request_formula;
 /// The type judging the row a write produces.
 mod resulting;
 /// Role-threshold resource-column inference and tuple-source population.
@@ -76,6 +74,7 @@ mod role_threshold;
 /// Whole-plan passes that run once every table is translated.
 mod simplify;
 
+use crate::classifier::request_formula::{GateAtom, PresenceAtom, RequestFormula};
 use acting_kinds::{acting_kind_walk, plant_column_relations};
 use actions::{
     action_relation_commands, clauses_lost_to_the_threshold, commands_a_permissive_policy_covers,
@@ -106,8 +105,6 @@ use emit_requests::{
     emit_request_formula, emit_request_gate, RequestSide,
 };
 use emit_roles::{emit_numeric_threshold, emit_role_name_in_list, OwnerScope};
-use request_formula::RequestFormula;
-pub(crate) use request_formula::{GateAtom, PresenceAtom};
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
 use simplify::{
     drop_implied_insert_readback, grants_nothing, inline_synthetic_rule_aliases,
