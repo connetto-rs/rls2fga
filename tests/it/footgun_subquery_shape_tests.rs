@@ -165,6 +165,24 @@ fn an_aggregating_exists_subquery_is_refused() {
     ]);
 }
 
+/// A set-returning call returns its own rows for each matched row, none included, so
+/// `EXISTS` over it can fail for a member a membership relation would grant.
+#[test]
+fn a_set_returning_exists_projection_is_refused() {
+    assert_every_spelling_refused(&[
+        (
+            "EXISTS (SELECT generate_series(1, 0) FROM doc_members WHERE doc_id = docs.id \
+             AND user_id = current_setting('app.user_id', true))",
+            "'generate_series'",
+        ),
+        (
+            "EXISTS (SELECT unnest(string_to_array(role, ',')) FROM doc_members \
+             WHERE doc_id = docs.id AND user_id = current_setting('app.user_id', true))",
+            "'unnest'",
+        ),
+    ]);
+}
+
 /// `DISTINCT ON` keeps one arbitrary row per key and drops the rest.
 #[test]
 fn a_distinct_on_membership_subquery_is_refused() {

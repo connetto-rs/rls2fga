@@ -1,4 +1,4 @@
-use super::invariant::query_aggregating_call;
+use super::invariant::query_row_changing_call;
 use super::*;
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::DeclaredSource;
@@ -757,9 +757,9 @@ pub(super) enum SubqueryRefusal {
     /// `ARRAY(subquery)` over an array column holds every row's elements rather than one
     /// value per row.
     FlattensArrays,
-    /// A call that may be an aggregate folds the rows into one row, which `EXISTS` finds
-    /// even where no row matches.
-    Aggregates(String),
+    /// A call in what the subquery selects or orders by may return other than one row per
+    /// matched row, so `EXISTS` no longer tests whether a row matches.
+    ChangesRowCount(String),
 }
 
 impl SubqueryRefusal {
@@ -767,8 +767,9 @@ impl SubqueryRefusal {
     ///
     /// A shaped subquery returns a subset, which pre-computing recovers. A binding is not
     /// a subset at all: the rows may come from anywhere the `WITH` reads. A lock is a
-    /// subset again, but of a set the reader's own update rights decide. An aggregate
-    /// returns a row of its own, matching or not. Each wants different advice.
+    /// subset again, but of a set the reader's own update rights decide. A call that
+    /// aggregates or returns a set decides the row count itself. Each wants different
+    /// advice.
     fn reason(self) -> String {
         match self {
             Self::Shaped(clause) => format!(
@@ -790,11 +791,11 @@ impl SubqueryRefusal {
                  elements, so = ANY tests each element rather than one value per row, which \
                  no membership relation carries",
             ),
-            Self::Aggregates(call) => format!(
-                "Subquery calls '{call}', which may aggregate its rows, and an aggregate \
-                 returns one row even where no row matches, so EXISTS holds for every caller \
-                 where a membership relation would grant only the members, select a constant \
-                 such as 1 instead"
+            Self::ChangesRowCount(call) => format!(
+                "Subquery calls '{call}' in what it selects or orders by, which may be an \
+                 aggregate returning one row where no row matches or a set-returning function \
+                 returning no row where one does, so EXISTS does not test whether a member \
+                 row exists, select a constant such as 1 instead"
             ),
         }
     }
@@ -847,7 +848,7 @@ fn exists_subquery_select(expr: &Expr) -> Option<(&Select, Option<SubqueryRefusa
     let refusal = query_level_refusal(subquery)
         .or_else(|| exists_emptying_limit_clause(subquery).map(SubqueryRefusal::Shaped))
         .or_else(|| select_result_shaping_clause(select).map(SubqueryRefusal::Shaped))
-        .or_else(|| query_aggregating_call(subquery).map(SubqueryRefusal::Aggregates));
+        .or_else(|| query_row_changing_call(subquery).map(SubqueryRefusal::ChangesRowCount));
     Some((select, refusal))
 }
 
