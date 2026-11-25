@@ -183,6 +183,21 @@ fn a_set_returning_exists_projection_is_refused() {
     ]);
 }
 
+/// A windowed aggregate answers once per row it reads, so `EXISTS` over it still tests
+/// whether a member row exists.
+#[test]
+fn a_windowed_exists_projection_stays_membership() {
+    let clause = "EXISTS (SELECT count(*) OVER () FROM doc_members WHERE doc_id = docs.id \
+                  AND user_id = current_setting('app.user_id', true))";
+    let (dsl, tuples) = membership_translation(clause);
+    assert_ne!(
+        relation_definition(&dsl, "docs", "can_select").as_deref(),
+        Some("no_access"),
+        "`{clause}` reads every member row:\n{dsl}"
+    );
+    assert!(tuples.contains("doc_members"), "{tuples}");
+}
+
 /// `DISTINCT ON` keeps one arbitrary row per key and drops the rest.
 #[test]
 fn a_distinct_on_membership_subquery_is_refused() {
