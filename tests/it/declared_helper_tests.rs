@@ -617,6 +617,8 @@ fn organization_grants(keys: &str) -> String {
            organization_id TEXT NOT NULL REFERENCES organizations (id), UNIQUE (organization_id, id));
          CREATE TABLE resource_labels (resource_id TEXT NOT NULL REFERENCES resources (id),
            label TEXT NOT NULL, PRIMARY KEY (resource_id, label));
+         CREATE TABLE resource_codes (code TEXT PRIMARY KEY,
+           resource_id TEXT NOT NULL UNIQUE REFERENCES resources (id));
          CREATE TABLE grants (resource_id TEXT NOT NULL, organization_id TEXT NOT NULL,
            label TEXT NOT NULL, grantee_id TEXT NOT NULL, PRIMARY KEY (resource_id, grantee_id){keys});
          CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
@@ -634,7 +636,7 @@ fn organization_grants(keys: &str) -> String {
 }
 
 /// A grant column held in a foreign key of any width names the rows of the table whose
-/// key column it is paired with, and a pairing with any other column says nothing.
+/// key column it is paired with.
 #[test]
 fn a_grant_column_in_a_composite_key_names_the_rows_its_paired_key_references() {
     let single = model(
@@ -645,14 +647,36 @@ fn a_grant_column_in_a_composite_key_names_the_rows_its_paired_key_references() 
         relation_definition(&single, "resources", "can_select").as_deref(),
         Some("reach and acting_app_user from request_gate")
     );
+    assert_eq!(
+        model(
+            &organization_grants(
+                ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id)"
+            ),
+            &["authz.reach"]
+        ),
+        single
+    );
+}
+
+/// A grant column a key checked on every row holding it pairs with a column naming
+/// resources names resources, as the column it references does, while a key pairing the
+/// column with itself says nothing.
+#[test]
+fn a_grant_column_a_checked_key_pairs_with_a_resource_column_names_resources() {
+    let single = model(
+        &organization_grants(", FOREIGN KEY (resource_id) REFERENCES resources (id)"),
+        &["authz.reach"],
+    );
     for keys in [
-        ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id)",
-        // `resource_labels` has no one key column, so the label key types nothing.
+        ", FOREIGN KEY (resource_id, label) REFERENCES resource_labels (resource_id, label)",
+        ", FOREIGN KEY (resource_id) REFERENCES resource_codes (resource_id)",
+        // `MATCH FULL` checks every row whose `resource_id` is set, `tag` set or not.
+        ", tag TEXT,
+           FOREIGN KEY (resource_id, tag) REFERENCES resource_labels (resource_id, label) MATCH FULL",
         ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id),
            FOREIGN KEY (resource_id, label) REFERENCES resource_labels (resource_id, label)",
-        // Paired with `organization_id`, the column names no resource through this key.
         ", FOREIGN KEY (resource_id) REFERENCES resources (id),
-           FOREIGN KEY (resource_id, organization_id) REFERENCES resources (organization_id, id)",
+           FOREIGN KEY (resource_id, grantee_id) REFERENCES grants (resource_id, grantee_id)",
     ] {
         assert_eq!(
             model(&organization_grants(keys), &["authz.reach"]),
@@ -662,23 +686,37 @@ fn a_grant_column_in_a_composite_key_names_the_rows_its_paired_key_references() 
     }
 }
 
-/// A grant column whose composite keys pair it with the key columns of two tables, or
-/// whose only composite key pairs it with no key column, names no one table's rows.
+/// A grant column whose keys pair it with the rows of two tables neither of which extends
+/// the other, or whose only composite key leaves rows unchecked, names no one table's rows.
 #[test]
 fn a_grant_column_its_keys_pair_with_no_one_table_key_is_refused() {
-    for keys in [
-        ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id),
-           FOREIGN KEY (organization_id, resource_id) REFERENCES archives (organization_id, id)",
-        ", FOREIGN KEY (resource_id, organization_id) REFERENCES resources (organization_id, id)",
+    for schema in [
+        organization_grants(
+            ", FOREIGN KEY (organization_id, resource_id) REFERENCES resources (organization_id, id),
+               FOREIGN KEY (organization_id, resource_id) REFERENCES archives (organization_id, id)",
+        ),
+        // Paired with `organization_id`, the column names organizations through this key.
+        organization_grants(
+            ", FOREIGN KEY (resource_id) REFERENCES resources (id),
+               FOREIGN KEY (resource_id, organization_id) REFERENCES resources (organization_id, id)",
+        ),
+        // Under `MATCH SIMPLE` a row whose `tag` is `NULL` goes unchecked.
+        organization_grants(
+            ", tag TEXT,
+               FOREIGN KEY (resource_id, tag) REFERENCES resource_labels (resource_id, label)",
+        ),
+        // `NOT VALID` leaves the rows predating the key unchecked.
+        format!(
+            "{}
+             ALTER TABLE grants ADD FOREIGN KEY (resource_id, label)
+               REFERENCES resource_labels (resource_id, label) NOT VALID;",
+            organization_grants("")
+        ),
     ] {
-        let refused = refusal_of(
-            &organization_grants(keys),
-            &["authz.reach"],
-            "resources_read",
-        );
+        let refused = refusal_of(&schema, &["authz.reach"], "resources_read");
         assert!(
             refused.contains("column 'resource_id' of 'public.grants' names no row of one table"),
-            "{keys}: {refused}"
+            "{schema}: {refused}"
         );
     }
 }

@@ -25,7 +25,8 @@ use crate::classifier::recognizers::subquery::{
 use crate::classifier::recognizers::{projected_select, set_query, unparenthesize};
 use crate::clock::{ClockOffset, ClockReading, ClockThreshold};
 use crate::generator::db_lookup::{
-    column_kind, resolve_row_identity, row_uniquely_keys, single_identity_column,
+    checks_every_row_setting, column_kind, resolve_row_identity, row_uniquely_keys,
+    single_identity_column,
 };
 use crate::generator::model_bounds::MAX_CONDITIONS;
 use crate::parser::expr::{peel_noting_casts, CastChain};
@@ -1894,12 +1895,14 @@ fn keys_name_rows_of<DB: DatabaseLike>(
 }
 
 /// A reading of keys referencing other tables' keys, holding the tables whose keys it is
-/// passing through, so a cycle of keys ends it, and the table whose rows each key it read
-/// names, so no key is read twice.
+/// passing through, so a cycle of keys ends it, the table whose rows each key it read
+/// names, so no key is read twice, and the columns whose keys it is following into the
+/// columns they reference, so a cycle of such keys ends it too.
 #[derive(Default)]
 struct KeyWalk {
     passing: Vec<TableId>,
     read: Vec<(TableId, TableId)>,
+    following: Vec<(TableId, String)>,
 }
 
 /// [`keys_name_rows_of`] within `walk`.
@@ -2536,13 +2539,14 @@ fn restriction<DB: DatabaseLike>(kept: &Restriction<'_, DB>) -> AttributePredica
 /// key, and `None` where it is neither.
 ///
 /// A key of any width pairing `column` with the referenced table's key column makes every
-/// value one row of that table. A single-column key referencing another column names rows
-/// by something other than their key and refuses, while a wider one pairs `column` with
-/// part of a key, which says nothing of `column` alone. Keys pairing `column` with several
-/// tables' key columns name the rows of the one whose key reaches every other's through
-/// keys, as keys to an ownable and to a resource name the ownable, which is a resource, and
-/// else those of the nearest table every one of their keys reaches, as keys to a camera and
-/// to a geopositioning device name a device.
+/// value one row of that table. A key pairing it with another column makes every value one
+/// of that column's where it checks every row on which `column` is set, so `column` names
+/// the rows that column names. A single-column key refuses where it does not, or where the
+/// column it references names none, while a wider one says nothing of `column` alone
+/// there. Keys pairing `column` with several tables' key columns name the rows of the one
+/// whose key reaches every other's through keys, as keys to an ownable and to a resource
+/// name the ownable, which is a resource, and else those of the nearest table every one of
+/// their keys reaches, as keys to a camera and to a geopositioning device name a device.
 fn rows_named_by<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
@@ -2567,15 +2571,23 @@ fn named_rows<DB: DatabaseLike>(
         else {
             continue;
         };
-        let parent = table_identity(foreign_key.referenced_table(db)?);
+        let referenced_table = foreign_key.referenced_table(db)?;
+        let parent = table_identity(referenced_table);
         let names_key = single_identity_column(&parent, db)
             .is_some_and(|key| key.as_str() == paired.stored_column_name());
-        if !names_key {
+        let named = if names_key {
+            Some(parent)
+        } else if checks_every_row_setting(foreign_key, db, |host| core::ptr::eq(host, column)) {
+            paired_rows((table, column), (referenced_table, paired), db, walk)?
+        } else {
+            None
+        };
+        let Some(parent) = named else {
             if foreign_key.is_composite(db)? {
                 continue;
             }
             return Err(names_no_rows(table, column));
-        }
+        };
         referenced = match referenced {
             Some(held) if held != parent => {
                 if reaches(&held, &parent, db, walk)? {
@@ -2597,6 +2609,35 @@ fn named_rows<DB: DatabaseLike>(
         return Ok(referenced);
     }
     Ok(keyed_table(table, column, db))
+}
+
+/// The table whose rows `paired` names, which a key checked wherever `column` is set pairs
+/// `column` with, `None` where it names no one table's or `walk` is already following a key
+/// of it.
+fn paired_rows<DB: DatabaseLike>(
+    (table, column): (&DB::Table, &DB::Column),
+    (referenced, paired): (&DB::Table, &DB::Column),
+    db: &DB,
+    walk: &mut KeyWalk,
+) -> Result<Option<TableId>, HelperRefusal> {
+    let target = (
+        table_identity(referenced),
+        paired.stored_column_name().into_owned(),
+    );
+    walk.following.push((
+        table_identity(table),
+        column.stored_column_name().into_owned(),
+    ));
+    let named = if walk.following.contains(&target) {
+        Ok(None)
+    } else {
+        named_rows(referenced, paired, db, walk)
+    };
+    walk.following.pop();
+    match named {
+        Err(HelperRefusal::NamesNoRows { .. }) => Ok(None),
+        named => named,
+    }
 }
 
 /// `table`, where `column` is its one key column.
