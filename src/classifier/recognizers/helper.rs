@@ -1477,21 +1477,26 @@ fn declared_helper<DB: DatabaseLike>(
 
 /// The table whose rows `column` of `table` names, compared with the keys `set` returns.
 ///
-/// A column with no foreign key, and not its table's key, names the rows of the one table
-/// the set covers, as membership in a set of that table's keys types it.
+/// A key pairing `column` with a key column is a link the model stores typed by that
+/// table, so it types the comparison, and a single-column key into another column refuses
+/// as in [`rows_named_by`]. A column no such key holds names the rows of the one table the
+/// set covers, as membership in a set of that table's keys types it, since a wider key it
+/// follows into another column only bounds its values, as an organization's own resource
+/// row makes its key a resource's whatever the key into the organization says. Only where
+/// the set covers no one table do those keys type the column.
 fn compared_rows<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
     set: &HelperSet<'_, DB>,
     db: &DB,
 ) -> Result<TableId, HelperRefusal> {
-    match rows_named_by(table, column, db)? {
-        Some(named) => Ok(named),
-        None => set
-            .covered_table()
-            .map(table_identity)
-            .ok_or_else(|| names_no_rows(table, column)),
+    if let Some(keyed) = named_rows(table, column, db, &mut KeyWalk::default(), false)? {
+        return Ok(keyed);
     }
+    if let Some(covered) = set.covered_table() {
+        return Ok(table_identity(covered));
+    }
+    rows_named_by(table, column, db)?.ok_or_else(|| names_no_rows(table, column))
 }
 
 /// The pattern for one call of `function` the request's value `source` is compared with.
@@ -1963,7 +1968,7 @@ fn key_rows<DB: DatabaseLike>(
     else {
         return Ok(None);
     };
-    let named = named_rows(held, key, db, walk)?;
+    let named = named_rows(held, key, db, walk, true)?;
     if let Some(named) = &named {
         walk.read.push((table.clone(), named.clone()));
     }
@@ -2552,15 +2557,17 @@ fn rows_named_by<DB: DatabaseLike>(
     column: &DB::Column,
     db: &DB,
 ) -> Result<Option<TableId>, HelperRefusal> {
-    named_rows(table, column, db, &mut KeyWalk::default())
+    named_rows(table, column, db, &mut KeyWalk::default(), true)
 }
 
-/// [`rows_named_by`] within `walk`.
+/// [`rows_named_by`] within `walk`, following a key into a column other than the key
+/// column it references only where `follow` holds.
 fn named_rows<DB: DatabaseLike>(
     table: &DB::Table,
     column: &DB::Column,
     db: &DB,
     walk: &mut KeyWalk,
+    follow: bool,
 ) -> Result<Option<TableId>, HelperRefusal> {
     let mut referenced: Option<TableId> = None;
     for foreign_key in table.foreign_keys(db)? {
@@ -2577,7 +2584,9 @@ fn named_rows<DB: DatabaseLike>(
             .is_some_and(|key| key.as_str() == paired.stored_column_name());
         let named = if names_key {
             Some(parent)
-        } else if checks_every_row_setting(foreign_key, db, |host| core::ptr::eq(host, column)) {
+        } else if follow
+            && checks_every_row_setting(foreign_key, db, |host| core::ptr::eq(host, column))
+        {
             paired_rows((table, column), (referenced_table, paired), db, walk)?
         } else {
             None
@@ -2631,7 +2640,7 @@ fn paired_rows<DB: DatabaseLike>(
     let named = if walk.following.contains(&target) {
         Ok(None)
     } else {
-        named_rows(referenced, paired, db, walk)
+        named_rows(referenced, paired, db, walk, true)
     };
     walk.following.pop();
     match named {

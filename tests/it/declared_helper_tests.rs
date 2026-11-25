@@ -686,6 +686,30 @@ fn a_grant_column_a_checked_key_pairs_with_a_resource_column_names_resources() {
     }
 }
 
+/// A compared column no key pairs with a key column names the rows of the set it is
+/// compared with, though a checked key pairs it with a column naming organizations, as an
+/// organization's own resource row makes its key a resource's.
+#[test]
+fn a_compared_column_a_checked_key_bounds_names_the_rows_of_its_set() {
+    let dsl = model(
+        &format!(
+            "{}
+             CREATE TABLE resource_parents (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL,
+               FOREIGN KEY (organization_id, id) REFERENCES resources (organization_id, id));
+             ALTER TABLE resource_parents ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY resource_parents_read ON resource_parents FOR SELECT
+               USING (organization_id IN (SELECT authz.reach()));",
+            organization_grants(", FOREIGN KEY (resource_id) REFERENCES resources (id)")
+        ),
+        &["authz.reach"],
+    );
+    assert_eq!(
+        relation_definition(&dsl, "resource_parents", "can_select").as_deref(),
+        Some("reach from resources and acting_app_user from request_gate"),
+        "{dsl}"
+    );
+}
+
 /// A grant column whose keys pair it with the rows of two tables neither of which extends
 /// the other, or whose only composite key leaves rows unchecked, names no one table's rows.
 #[test]
