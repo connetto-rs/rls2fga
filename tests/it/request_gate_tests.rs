@@ -543,13 +543,27 @@ CREATE POLICY bot_read_or_all ON items FOR SELECT USING (
     OR '*' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
     OR 'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ',')));
 CREATE POLICY off_main ON items FOR SELECT USING (current_setting('app.mode', true) <> 'main');
+CREATE POLICY bot_read_on_main ON items FOR SELECT USING (
+    'items:read' = ANY(string_to_array(current_setting('app.bot_list', true), ','))
+    AND current_setting('app.mode', true) = 'main');
+CREATE POLICY no_installation ON items FOR SELECT
+    USING (NULLIF(current_setting('app.installation_id', true), '') IS NULL);
 CREATE POLICY everyone ON items FOR SELECT USING (true);
 CREATE POLICY owned ON items FOR SELECT USING (owner = current_setting('app.user_id', true));
 ";
     let deployment = deployment::caller_deployment_with([
         deployment::delimited_set("app.bot_list", ","),
         deployment::scalar("app.mode"),
+        deployment::scalar("app.installation_id").may_be_unset(),
     ]);
+    let mode = |comparison: RequestComparison| {
+        RequestPredicate::Holds(RequestAtom {
+            request_parameter: "app_mode".to_string(),
+            comparison,
+            value: "main".to_string(),
+            fallback: vec![],
+        })
+    };
     let expected = BTreeMap::from([
         (
             "bot_read".to_string(),
@@ -564,14 +578,22 @@ CREATE POLICY owned ON items FOR SELECT USING (owner = current_setting('app.user
         ),
         (
             "off_main".to_string(),
-            Some(RequestTest::Predicate(RequestPredicate::Holds(
-                RequestAtom {
-                    request_parameter: "app_mode".to_string(),
-                    comparison: RequestComparison::CallerValueUnequals,
-                    value: "main".to_string(),
-                    fallback: vec![],
-                },
+            Some(RequestTest::Predicate(mode(
+                RequestComparison::CallerValueUnequals,
             ))),
+        ),
+        (
+            "bot_read_on_main".to_string(),
+            Some(RequestTest::Predicate(RequestPredicate::All(vec![
+                bot_list_holds("items:read"),
+                mode(RequestComparison::CallerValueEquals),
+            ]))),
+        ),
+        (
+            "no_installation".to_string(),
+            Some(RequestTest::Predicate(RequestPredicate::Omits {
+                request_parameter: "app_installation_id".to_string(),
+            })),
         ),
         ("everyone".to_string(), Some(RequestTest::Constant(true))),
         ("owned".to_string(), None),
