@@ -623,41 +623,6 @@ impl TypePlan {
         relation
     }
 
-    /// `parts`, or a row whose parent through one of `walks` the relation itself holds,
-    /// under the first name free for that rule.
-    ///
-    /// The rule names itself, so each name tried is spelled into its walks before the
-    /// rule held under that name is compared.
-    fn ensure_walk_computed(
-        &mut self,
-        relation: impl Into<String>,
-        mut parts: Vec<UsersetExpr>,
-        walks: Vec<RelationName>,
-    ) -> RelationName {
-        let base = clamp_relation_name(relation.into());
-        let own = parts.len();
-        let named = RelationName::canonicalized(&base);
-        parts.extend(
-            walks
-                .into_iter()
-                .map(|tupleset| UsersetExpr::TupleToUserset {
-                    tupleset,
-                    computed: named.clone(),
-                }),
-        );
-        let mut rule = UsersetExpr::Union(parts);
-        let key = userset_key(&rule);
-        let relation = yield_until_free(&base, &key, |relation| {
-            name_walks(&mut rule, own, relation);
-            self.holds_other(relation, &rule)
-        });
-        name_walks(&mut rule, own, &relation);
-        self.computed_relations
-            .entry(relation.clone())
-            .or_insert(rule);
-        relation
-    }
-
     /// Whether `relation` already names something other than the computed `rule`.
     ///
     /// One name, one rule, or a caller deriving the name reads the wrong definition.
@@ -705,19 +670,6 @@ fn yield_until_free(
         relation = yielded_relation_name(base, key, attempt);
     }
     relation
-}
-
-/// Spell `relation` into the walks of a rule [`TypePlan::ensure_walk_computed`] built,
-/// its children after the first `own`.
-fn name_walks(rule: &mut UsersetExpr, own: usize, relation: &RelationName) {
-    let UsersetExpr::Union(children) = rule else {
-        return;
-    };
-    for child in children.iter_mut().skip(own) {
-        if let UsersetExpr::TupleToUserset { computed, .. } = child {
-            computed.clone_from(relation);
-        }
-    }
 }
 
 /// Choices a deployment makes about the emitted model.

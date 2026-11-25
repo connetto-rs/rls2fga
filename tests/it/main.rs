@@ -54,6 +54,8 @@ mod gated_membership_parity_tests;
 mod generation_edge_case_tests;
 mod generator_tests;
 mod generic_catalog_tests;
+mod helper_walk_edge_parity_tests;
+mod helper_walk_edge_tests;
 mod indirect_membership_tests;
 mod joined_inner_rule_tests;
 mod labelled_helper_tests;
