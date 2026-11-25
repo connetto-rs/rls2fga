@@ -131,6 +131,40 @@ fn a_qualify_filtered_membership_subquery_is_refused() {
     ]);
 }
 
+/// An aggregate returns one row even where no row matches, so `EXISTS` over it holds for
+/// every caller, while a membership relation grants only the members. A call in the select
+/// list or the `ORDER BY` may be such an aggregate.
+#[test]
+fn an_aggregating_exists_subquery_is_refused() {
+    assert_every_spelling_refused(&[
+        (
+            "EXISTS (SELECT count(*) FROM doc_members \
+             WHERE user_id = current_setting('app.user_id', true))",
+            "'count'",
+        ),
+        (
+            "EXISTS (SELECT count(*) FROM doc_members WHERE doc_id = docs.id \
+             AND user_id = current_setting('app.user_id', true))",
+            "'count'",
+        ),
+        (
+            "EXISTS (SELECT array_agg(role) FROM doc_members WHERE doc_id = docs.id \
+             AND user_id = current_setting('app.user_id', true))",
+            "'array_agg'",
+        ),
+        (
+            "EXISTS (SELECT 1 FROM doc_members WHERE doc_id = docs.id \
+             AND user_id = current_setting('app.user_id', true) ORDER BY max(role))",
+            "'max'",
+        ),
+        (
+            "EXISTS (SELECT jsonb_agg(role) FROM doc_members WHERE doc_id = docs.id \
+             AND user_id = current_setting('app.user_id', true))",
+            "'jsonb_agg'",
+        ),
+    ]);
+}
+
 /// `DISTINCT ON` keeps one arbitrary row per key and drops the rest.
 #[test]
 fn a_distinct_on_membership_subquery_is_refused() {

@@ -14,6 +14,7 @@ use sqlparser::ast::{
 };
 
 use super::attribute::conjunct_reads_only_the_row;
+use super::invariant::query_aggregating_call;
 use super::subquery::{
     query_binds_its_own_names, query_locks_its_rows, query_select, select_result_shaping_clause,
     session_zoned_columns, set_limiting_clause, stored_column_names,
@@ -389,8 +390,12 @@ struct Walk {
 }
 
 /// Whether nothing past `FROM` and `WHERE` decides which rows `query` returns.
+///
+/// An aggregate decides them as well, returning one row whether any matches or none does.
 fn reads_every_row(query: &Query) -> bool {
-    set_limiting_clause(query).is_none() && query_locks_its_rows(query).is_none()
+    set_limiting_clause(query).is_none()
+        && query_locks_its_rows(query).is_none()
+        && query_aggregating_call(query).is_none()
 }
 
 /// The table a plain `FROM` entry reads, with the name its columns are qualified by.

@@ -697,7 +697,9 @@ fn scalar_empty_value(query: &Query) -> Option<Expr> {
         }
     }
     // Without an aggregate an empty table yields no row, which a scalar subquery reads as `NULL`.
-    (!contains_aggregate(projection)).then(|| Expr::Value(Value::Null.into()))
+    aggregating_call(projection)
+        .is_none()
+        .then(|| Expr::Value(Value::Null.into()))
 }
 
 /// Whether `query` yields no row when the table it reads is empty.
@@ -708,31 +710,55 @@ pub(super) fn yields_no_row_when_empty(query: &Query) -> bool {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return false;
     };
-    select.having.is_none()
-        && !contains_aggregate(&select.projection)
-        && !contains_aggregate(&query.order_by)
+    select.having.is_none() && query_aggregating_call(query).is_none()
 }
 
-/// Whether `node` calls an aggregate anywhere, which an aggregate-free check would pass.
-fn contains_aggregate(node: &impl Visit) -> bool {
-    struct Aggregates;
+/// The call in a projection of `query` or in its `ORDER BY` that may fold its rows into one.
+pub(super) fn query_aggregating_call(query: &Query) -> Option<String> {
+    fn in_body(body: &SetExpr) -> Option<String> {
+        match body {
+            SetExpr::Select(select) => aggregating_call(&select.projection),
+            SetExpr::SetOperation { left, right, .. } => in_body(left).or_else(|| in_body(right)),
+            SetExpr::Query(query) => query_aggregating_call(query),
+            _ => None,
+        }
+    }
+    in_body(&query.body).or_else(|| aggregating_call(&query.order_by))
+}
+
+/// The first call in `node` that may be an aggregate, by the name it is called with.
+///
+/// An aggregate folds every row into one, and no row into one as well. Only a windowed
+/// call or a builtin [`ROW_PURE_FUNCTIONS`] member is proven to keep the rows apart, so
+/// every other call counts, the aggregates `CREATE AGGREGATE` declares included.
+fn aggregating_call(node: &impl Visit) -> Option<String> {
+    struct Aggregates(Option<String>);
 
     impl Visitor for Aggregates {
         type Break = ();
 
         fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-            if let Some(function) = function_call(expr) {
-                if let Some(name) = builtin_function_name(function) {
-                    if ORDER_FREE_AGGREGATES.contains(&name.as_str()) {
-                        return ControlFlow::Break(());
-                    }
-                }
+            let Some(function) = function_call(expr) else {
+                return ControlFlow::Continue(());
+            };
+            if function.over.is_some() {
+                return ControlFlow::Continue(());
             }
-            ControlFlow::Continue(())
+            let builtin = builtin_function_name(function);
+            if builtin
+                .as_deref()
+                .is_some_and(|name| ROW_PURE_FUNCTIONS.contains(&name))
+            {
+                return ControlFlow::Continue(());
+            }
+            self.0 = Some(builtin.unwrap_or_else(|| function.name.to_string()));
+            ControlFlow::Break(())
         }
     }
 
-    node.visit(&mut Aggregates).is_break()
+    let mut aggregates = Aggregates(None);
+    let _ = node.visit(&mut aggregates);
+    aggregates.0
 }
 
 fn boolean_literal(value: bool) -> Expr {

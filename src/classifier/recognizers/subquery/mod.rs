@@ -1,3 +1,4 @@
+use super::invariant::query_aggregating_call;
 use super::*;
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::DeclaredSource;
@@ -744,7 +745,6 @@ pub(crate) fn projected_select(query: &Query) -> Option<&Select> {
 }
 
 /// Why a subquery cannot be read as the plain set of rows in the table its `FROM` names.
-#[derive(Clone, Copy)]
 pub(super) enum SubqueryRefusal {
     /// A clause thins the rows the subquery returns.
     Shaped(&'static str),
@@ -757,6 +757,9 @@ pub(super) enum SubqueryRefusal {
     /// `ARRAY(subquery)` over an array column holds every row's elements rather than one
     /// value per row.
     FlattensArrays,
+    /// A call that may be an aggregate folds the rows into one row, which `EXISTS` finds
+    /// even where no row matches.
+    Aggregates(String),
 }
 
 impl SubqueryRefusal {
@@ -764,8 +767,8 @@ impl SubqueryRefusal {
     ///
     /// A shaped subquery returns a subset, which pre-computing recovers. A binding is not
     /// a subset at all: the rows may come from anywhere the `WITH` reads. A lock is a
-    /// subset again, but of a set the reader's own update rights decide. All three want
-    /// different advice.
+    /// subset again, but of a set the reader's own update rights decide. An aggregate
+    /// returns a row of its own, matching or not. Each wants different advice.
     fn reason(self) -> String {
         match self {
             Self::Shaped(clause) => format!(
@@ -786,6 +789,12 @@ impl SubqueryRefusal {
                 "ARRAY(subquery) over an array column builds one array of every row's \
                  elements, so = ANY tests each element rather than one value per row, which \
                  no membership relation carries",
+            ),
+            Self::Aggregates(call) => format!(
+                "Subquery calls '{call}', which may aggregate its rows, and an aggregate \
+                 returns one row even where no row matches, so EXISTS holds for every caller \
+                 where a membership relation would grant only the members, select a constant \
+                 such as 1 instead"
             ),
         }
     }
@@ -837,7 +846,8 @@ fn exists_subquery_select(expr: &Expr) -> Option<(&Select, Option<SubqueryRefusa
     let select = query_select(subquery)?;
     let refusal = query_level_refusal(subquery)
         .or_else(|| exists_emptying_limit_clause(subquery).map(SubqueryRefusal::Shaped))
-        .or_else(|| select_result_shaping_clause(select).map(SubqueryRefusal::Shaped));
+        .or_else(|| select_result_shaping_clause(select).map(SubqueryRefusal::Shaped))
+        .or_else(|| query_aggregating_call(subquery).map(SubqueryRefusal::Aggregates));
     Some((select, refusal))
 }
 
