@@ -694,6 +694,7 @@ fn unsafe_exclusion_shapes_stay_below_the_threshold() {
         format!("{OWNER} AND NOT EXISTS (SELECT 1 FROM blocks b JOIN shares s ON s.doc = b.doc WHERE b.doc = docs.id AND b.user_id = current_setting('app.user_id', true))"),
         format!("{OWNER} AND NOT EXISTS (SELECT 1 FROM blocks b WHERE b.doc = docs.id AND b.user_id = current_setting('app.user_id', true) LIMIT 1 OFFSET 1)"),
         format!("{OWNER} AND current_setting('app.user_id', true) NOT IN (SELECT b.user_id FROM blocks b WHERE b.doc = docs.id LIMIT 1)"),
+        format!("{OWNER} AND NOT EXISTS (SELECT count(*) FROM blocks b WHERE b.doc = docs.id AND b.user_id = current_setting('app.user_id', true))"),
     ];
     for clause in clauses {
         let translated = translate(&schema(&clause));

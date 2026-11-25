@@ -696,43 +696,73 @@ fn scalar_empty_value(query: &Query) -> Option<Expr> {
             _ => {}
         }
     }
-    // Without an aggregate an empty table yields no row, which a scalar subquery reads as `NULL`.
-    (!contains_aggregate(projection)).then(|| Expr::Value(Value::Null.into()))
+    // Without such a call an empty table yields no row, which a scalar subquery reads as `NULL`.
+    row_changing_call(projection)
+        .is_none()
+        .then(|| Expr::Value(Value::Null.into()))
 }
 
 /// Whether `query` yields no row when the table it reads is empty.
 ///
 /// An aggregate or a `HAVING` can fold the empty table into one row, so
-/// `EXISTS (SELECT count(*) FROM t)` holds on it.
+/// `EXISTS (SELECT count(*) FROM t)` holds on it. A set-returning call yields no row
+/// there either, and is refused alongside the aggregates it cannot be told from.
 pub(super) fn yields_no_row_when_empty(query: &Query) -> bool {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return false;
     };
-    select.having.is_none()
-        && !contains_aggregate(&select.projection)
-        && !contains_aggregate(&query.order_by)
+    select.having.is_none() && query_row_changing_call(query).is_none()
 }
 
-/// Whether `node` calls an aggregate anywhere, which an aggregate-free check would pass.
-fn contains_aggregate(node: &impl Visit) -> bool {
-    struct Aggregates;
+/// The call in a projection of `query` or in its `ORDER BY` that may return other than
+/// one row for each row it reads.
+pub(super) fn query_row_changing_call(query: &Query) -> Option<String> {
+    fn in_body(body: &SetExpr) -> Option<String> {
+        match body {
+            SetExpr::Select(select) => row_changing_call(&select.projection),
+            SetExpr::SetOperation { left, right, .. } => in_body(left).or_else(|| in_body(right)),
+            SetExpr::Query(query) => query_row_changing_call(query),
+            _ => None,
+        }
+    }
+    in_body(&query.body).or_else(|| row_changing_call(&query.order_by))
+}
 
-    impl Visitor for Aggregates {
+/// The first call in `node` that may return other than one row for each row it reads, by
+/// the name it is called with.
+///
+/// An aggregate folds every row into one, and no row into one as well. A set-returning
+/// function returns its own rows for each row, none included. Only a windowed call or a
+/// builtin [`ROW_PURE_FUNCTIONS`] member is proven to keep one row per row, so every
+/// other call counts, the aggregates `CREATE AGGREGATE` declares included.
+fn row_changing_call(node: &impl Visit) -> Option<String> {
+    struct RowChangingCall(Option<String>);
+
+    impl Visitor for RowChangingCall {
         type Break = ();
 
         fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
-            if let Some(function) = function_call(expr) {
-                if let Some(name) = builtin_function_name(function) {
-                    if ORDER_FREE_AGGREGATES.contains(&name.as_str()) {
-                        return ControlFlow::Break(());
-                    }
-                }
+            let Some(function) = function_call(expr) else {
+                return ControlFlow::Continue(());
+            };
+            if function.over.is_some() {
+                return ControlFlow::Continue(());
             }
-            ControlFlow::Continue(())
+            let builtin = builtin_function_name(function);
+            if builtin
+                .as_deref()
+                .is_some_and(|name| ROW_PURE_FUNCTIONS.contains(&name))
+            {
+                return ControlFlow::Continue(());
+            }
+            self.0 = Some(builtin.unwrap_or_else(|| function.name.to_string()));
+            ControlFlow::Break(())
         }
     }
 
-    node.visit(&mut Aggregates).is_break()
+    let mut found = RowChangingCall(None);
+    let _ = node.visit(&mut found);
+    found.0
 }
 
 fn boolean_literal(value: bool) -> Expr {

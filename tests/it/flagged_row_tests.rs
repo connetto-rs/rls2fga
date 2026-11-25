@@ -342,6 +342,26 @@ fn a_flag_read_through_the_callers_own_policies_is_refused() {
     assert!(reason.contains("row level security"), "{reason}");
 }
 
+/// An aggregate returns one row whether or not the row is archived, so the restrictive
+/// `NOT` hides every row, and reading it as the archived rows would leave the rest readable.
+#[test]
+fn a_flag_read_through_an_aggregate_is_refused() {
+    let reason = refusal_of(
+        &format!(
+            "{}
+             CREATE POLICY archived ON objects AS RESTRICTIVE FOR SELECT
+               USING (NOT authz.is_archived(id));",
+            OBJECTS.replace(
+                "SELECT EXISTS (SELECT 1 FROM",
+                "SELECT EXISTS (SELECT count(*) FROM"
+            )
+        ),
+        &[],
+        "archived",
+    );
+    assert!(reason.contains("'count'"), "{reason}");
+}
+
 /// A strict function returns `NULL` for a `NULL` argument, which `NOT` keeps `NULL`, so
 /// the row is hidden where no tuple flags it.
 #[test]
