@@ -1156,7 +1156,9 @@ fn classify_expr_inner<DB: DatabaseLike>(
         );
     }
 
-    if let Some(classified) = recognize_leaf(expr, db, registry, table, command, state) {
+    if let Some(classified) =
+        recognize_leaf_or_gated(expr, db, registry, table, command, depth, state)
+    {
         return classified;
     }
 
@@ -1216,6 +1218,33 @@ fn classify_expr_inner<DB: DatabaseLike>(
     }
 
     unrecognized(expr, registry)
+}
+
+/// [`recognize_leaf`], or where it refuses an `EXISTS`, the `EXISTS` gated from beside it
+/// by the conjuncts no row of it decides, when that reading translates.
+///
+/// Read only after the refusal, so every conjunct a membership already carries as a
+/// residual keeps that reading.
+fn recognize_leaf_or_gated<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    command: PolicyCommand,
+    depth: u32,
+    state: &ExpansionState,
+) -> Option<ClassifiedExpr> {
+    let leaf = recognize_leaf(expr, db, registry, table, command, state);
+    if leaf
+        .as_ref()
+        .is_some_and(|leaf| !matches!(leaf.pattern, PatternClass::Unknown(_)))
+    {
+        return leaf;
+    }
+    recognizers::exists_gated_beside(expr)
+        .map(|gated| classify_expr_depth(&gated, db, registry, table, command, depth + 1, state))
+        .filter(|beside| beside.confidence > ConfidenceLevel::D)
+        .or(leaf)
 }
 
 /// The pattern a recognizer that never classifies a subexpression reads in `expr`, a

@@ -847,6 +847,67 @@ fn readable_exists_select(expr: &Expr) -> Option<&Select> {
     refusal.is_none().then_some(select)
 }
 
+/// `EXISTS (SELECT ... WHERE kept AND gate)` as `gate AND EXISTS (SELECT ... WHERE kept)`,
+/// for every conjunct `gate` that names no column and reads more than the policy text, so
+/// no row of the subquery decides it.
+///
+/// A gate that is false or `NULL` leaves no row, and the conjunction denies both alike. No
+/// composite is read under `NOT`, so a `NULL` gate never becomes a grant. Only a subquery
+/// read as the plain set of its rows is split, and of those not one that yields a row when
+/// its filter keeps none, through an aggregate, nor one without a `FROM`, whose only row
+/// the gate alone decides.
+///
+/// `None` where no conjunct is such a gate.
+pub(crate) fn exists_gated_beside(expr: &Expr) -> Option<Expr> {
+    let Expr::Exists {
+        subquery,
+        negated: false,
+    } = expr
+    else {
+        return None;
+    };
+    let select = readable_exists_select(expr)?;
+    if select.from.is_empty() || !yields_no_row_when_empty(subquery) {
+        return None;
+    }
+    let mut conjuncts = Vec::new();
+    flatten_and_predicates(select.selection.as_ref()?, &mut conjuncts);
+    let (gates, kept): (Vec<&Expr>, Vec<&Expr>) = conjuncts.into_iter().partition(|conjunct| {
+        names_no_column(conjunct) && !conjunct_reads_only_the_row(conjunct, &[], &[])
+    });
+    let gate = combine_predicates_with_and(gates.into_iter().cloned().collect())?;
+    let mut ungated = subquery.clone();
+    if let SetExpr::Select(select) = ungated.body.as_mut() {
+        select.selection = combine_predicates_with_and(kept.into_iter().cloned().collect());
+    }
+    Some(Expr::BinaryOp {
+        left: Box::new(gate),
+        op: BinaryOperator::And,
+        right: Box::new(Expr::Exists {
+            subquery: ungated,
+            negated: false,
+        }),
+    })
+}
+
+/// Whether `expr` names no column anywhere, its subqueries included.
+fn names_no_column(expr: &Expr) -> bool {
+    struct Columns;
+
+    impl Visitor for Columns {
+        type Break = ();
+
+        fn pre_visit_expr(&mut self, expr: &Expr) -> ControlFlow<()> {
+            match expr {
+                Expr::Identifier(_) | Expr::CompoundIdentifier(_) => ControlFlow::Break(()),
+                _ => ControlFlow::Continue(()),
+            }
+        }
+    }
+
+    expr.visit(&mut Columns).is_continue()
+}
+
 /// The `(tested value, subquery)` of `x IN (SELECT ...)`, `x = ANY (SELECT ...)` or
 /// `x = ANY (ARRAY(SELECT ...))`, paired with the reason the set of tested values cannot be
 /// read plainly, if any.

@@ -14,10 +14,10 @@ use crate::declared_helper_blocklist_tests::{
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_exclusion_tests::EXCLUDING;
 use crate::declared_helper_tests::{
-    caller_and_audiences_only, founded_through_kind, reselected_groups, GranteeArms,
-    ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED, GRANTEES, GROUPS,
-    INSTALLATIONS, INVITATIONS, KIND_RESELECTION, LEVELS, MEMBERSHIP_STATES, ORDERS, OWNER_READS,
-    REQUEST_VALUES, RESOURCES, SIGNED_IN,
+    caller_and_audiences_only, founded_through_kind, platform_operators, reselected_groups,
+    GranteeArms, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED,
+    GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, KIND_RESELECTION, LEVELS, MEMBERSHIP_STATES,
+    ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
@@ -1010,6 +1010,98 @@ async fn an_absent_installation_agrees_with_postgres() {
                 ActionStatement::Select,
                 allowed,
             );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+const OPERATOR: &str = "00000000-0000-0000-0000-0000000000c1";
+const MEMBER: &str = "00000000-0000-0000-0000-0000000000c2";
+const ACTING_INSTALLATION: &str = "00000000-0000-0000-0000-0000000000c3";
+
+/// The installation-gated [`platform_operators`] read by `OPERATOR` and `MEMBER`, each
+/// alone, acting for an installation, and through a pooled connection reading the
+/// installation as `''`, and by a request carrying no caller.
+fn platform_operators_case(loading_from_rows: bool) -> ParityCase {
+    let acting = |subject: &str, caller: &str, installation: Option<&str>| {
+        let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", caller)
+            .acting_for(caller);
+        if let Some(installation) = installation {
+            principal
+                .session
+                .push(("app.installation_id".into(), installation.into()));
+        }
+        principal
+    };
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-platform-operators{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &platform_operators(true),
+        &[
+            &format!(
+                "INSERT INTO platform_operators VALUES ('{OPERATOR}');
+                 INSERT INTO audit_events VALUES ('00000000-0000-0000-0000-0000000000e1');
+                 INSERT INTO docs VALUES ('00000000-0000-0000-0000-0000000000d1'),
+                   ('00000000-0000-0000-0000-0000000000d2');
+                 INSERT INTO doc_members VALUES ('00000000-0000-0000-0000-0000000000d1', '{MEMBER}')"
+            ),
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON audit_events, docs, doc_members TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            acting("operator", OPERATOR, None),
+            acting("acting_operator", OPERATOR, Some(ACTING_INSTALLATION)),
+            acting("pooled_operator", OPERATOR, Some("")),
+            acting("member", MEMBER, None),
+            acting("acting_member", MEMBER, Some(ACTING_INSTALLATION)),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([
+        support::deployment::typed_caller("app.user_id", DataType::Uuid).may_be_unset(),
+        support::deployment::typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    ]);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A test of the acting installation inside an `EXISTS` admits its members only while
+/// the request acts for no installation, the pooled `''` included, for the uncorrelated
+/// operators and the correlated document members alike.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn an_installation_gate_inside_a_membership_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = platform_operators_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, audits, member_doc) in [
+            ("operator", true, false),
+            ("acting_operator", false, false),
+            ("pooled_operator", true, false),
+            ("member", false, true),
+            ("acting_member", false, false),
+            ("anonymous", false, false),
+        ] {
+            for (object, allowed) in [
+                ("audit_events:00000000-0000-0000-0000-0000000000e1", audits),
+                ("docs:00000000-0000-0000-0000-0000000000d1", member_doc),
+                ("docs:00000000-0000-0000-0000-0000000000d2", false),
+            ] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
         }
         assert_agrees(&case, &run);
     }
