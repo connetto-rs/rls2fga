@@ -287,3 +287,126 @@ fn a_blocked_walk_over_edges_no_key_names_is_refused() {
         "{refusal}"
     );
 }
+
+/// `EDGE_CONDITIONS` with a policy on `templates` calling `helper` alone.
+fn templates_calling(schema: &str, helper: &str) -> String {
+    format!(
+        "{schema}
+         ALTER TABLE templates ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY templates_select ON templates FOR SELECT USING (
+           id = ANY (ARRAY(SELECT {helper}())));"
+    )
+}
+
+/// A step kept by its bounds alone holds the walk while they hold, with nothing taken
+/// away.
+#[test]
+fn a_step_bounded_by_the_clock_alone_subtracts_nothing() {
+    let blocked = "\n      AND NOT (step.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))";
+    assert_eq!(EDGE_CONDITIONS.matches(blocked).count(), 1);
+    let sql = templates_calling(
+        &EDGE_CONDITIONS.replace(blocked, ""),
+        "authz.readable_templates",
+    );
+    let dsl = model(&sql, EDGE_HELPERS);
+    let followed = relation_definition(&dsl, "template_steps", "readable_templates_followed")
+        .unwrap_or_else(|| panic!("{dsl}"));
+    assert!(
+        followed.starts_with("readable_templates from parent_template_id and "),
+        "{dsl}"
+    );
+    assert!(!followed.contains(" but not "), "{dsl}");
+}
+
+/// A step whose organization can be `NULL` is hidden from every caller a block names any
+/// organization for, which no subtraction spells, so the walk is refused.
+#[test]
+fn a_walk_excluding_a_nullable_edge_column_is_refused() {
+    let non_null = "  organization_id TEXT NOT NULL REFERENCES organizations (id),\n  kind TEXT NOT NULL, ends_at";
+    assert_eq!(EDGE_CONDITIONS.matches(non_null).count(), 1);
+    let sql = templates_calling(
+        &EDGE_CONDITIONS.replace(
+            non_null,
+            "  organization_id TEXT REFERENCES organizations (id),\n  kind TEXT NOT NULL, ends_at",
+        ),
+        "authz.readable_templates",
+    );
+    let refusal = refusal_of(&sql, EDGE_HELPERS, "templates_select");
+    assert!(
+        refusal.contains(
+            "declared helper 'authz.readable_templates' excludes the set \
+             'authz.blocking_organizations' returns, and the column \
+             'public.template_steps.organization_id' compared with the blocklist must be \
+             provably non-null"
+        ),
+        "{refusal}"
+    );
+}
+
+/// A walk following steps and links, each blocked by organization, holds each edge table
+/// under a relation of its own.
+#[test]
+fn a_walk_over_two_blocked_edge_tables_names_each_followed_relation() {
+    let schema = EDGE_CONDITIONS.replace(
+        "CREATE FUNCTION authz.blocking_organizations()",
+        "CREATE TABLE template_links (id TEXT PRIMARY KEY,
+           source_id TEXT NOT NULL REFERENCES templates (id),
+           target_id TEXT NOT NULL REFERENCES templates (id),
+           organization_id TEXT NOT NULL REFERENCES organizations (id));
+         GRANT SELECT ON template_links TO authz_owner;
+         CREATE FUNCTION authz.linked_templates() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           WITH RECURSIVE linked (id) AS (
+             SELECT g.template_id FROM public.template_grants g
+             WHERE g.user_id = current_setting('app.user_id', true)
+             UNION
+             SELECT child.id FROM linked CROSS JOIN LATERAL (
+               SELECT step.child_template_id FROM public.template_steps step
+               WHERE step.parent_template_id = linked.id
+                 AND NOT (step.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))
+               UNION
+               SELECT link.target_id FROM public.template_links link
+               WHERE link.source_id = linked.id
+                 AND NOT (link.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))
+             ) child (id)
+           )
+           SELECT linked.id FROM linked
+         $$;
+         ALTER FUNCTION authz.linked_templates() OWNER TO authz_owner;
+         CREATE FUNCTION authz.blocking_organizations()",
+    );
+    let helpers: Vec<&str> = EDGE_HELPERS
+        .iter()
+        .copied()
+        .chain(["authz.linked_templates"])
+        .collect();
+    let dsl = model(
+        &templates_calling(&schema, "authz.linked_templates"),
+        &helpers,
+    );
+    let walk = relation_definition(&dsl, "templates", "linked_templates")
+        .unwrap_or_else(|| panic!("{dsl}"));
+    assert_eq!(
+        walked(&walk, &dsl),
+        "linked_templates_followed_1 from template_steps or linked_templates_followed_2 from template_links"
+    );
+    for (edge_type, relation, joined) in [
+        (
+            "template_steps",
+            "linked_templates_followed_1",
+            "parent_template_id",
+        ),
+        ("template_links", "linked_templates_followed_2", "source_id"),
+    ] {
+        assert_eq!(
+            relation_definition(&dsl, edge_type, relation).as_deref(),
+            Some(
+                format!(
+                    "linked_templates from {joined} but not blocking_organizations from organizations"
+                )
+                .as_str()
+            ),
+            "{dsl}"
+        );
+    }
+}
