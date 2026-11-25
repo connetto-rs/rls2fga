@@ -704,7 +704,7 @@ fn scalar_empty_value(query: &Query) -> Option<Expr> {
 ///
 /// An aggregate or a `HAVING` can fold the empty table into one row, so
 /// `EXISTS (SELECT count(*) FROM t)` holds on it.
-fn yields_no_row_when_empty(query: &Query) -> bool {
+pub(super) fn yields_no_row_when_empty(query: &Query) -> bool {
     let SetExpr::Select(select) = query.body.as_ref() else {
         return false;
     };

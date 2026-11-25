@@ -1536,6 +1536,132 @@ fn a_negated_absence_test_is_the_opposite_test() {
     }
 }
 
+const PLATFORM_OPERATORS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE platform_operators (id UUID PRIMARY KEY);
+CREATE TABLE audit_events (id UUID PRIMARY KEY);
+CREATE TABLE docs (id UUID PRIMARY KEY);
+CREATE TABLE doc_members (doc_id UUID NOT NULL REFERENCES docs (id), user_id UUID NOT NULL,
+  PRIMARY KEY (doc_id, user_id));
+GRANT SELECT ON platform_operators TO authz_owner;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.acting_installation_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.installation_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.is_platform_operator() RETURNS BOOLEAN
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT {OPERATOR}
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.acting_installation_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.is_platform_operator() OWNER TO authz_owner;
+ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE docs ENABLE ROW LEVEL SECURITY;
+CREATE POLICY audit_events_read ON audit_events FOR SELECT
+  USING ((SELECT authz.is_platform_operator()));
+CREATE POLICY docs_read ON docs FOR SELECT USING ({MEMBER});
+";
+
+/// [`PLATFORM_OPERATORS`] testing the acting installation inside each `EXISTS` where
+/// `inside`, and beside it otherwise.
+pub(crate) fn platform_operators(inside: bool) -> String {
+    const GATE: &str = "authz.acting_installation_id() IS NULL";
+    let (operator, member) = if inside {
+        (
+            format!(
+                "EXISTS (SELECT 1 FROM public.platform_operators operator \
+                 WHERE operator.id = authz.caller_id() AND {GATE})"
+            ),
+            format!(
+                "EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id \
+                 AND ({GATE}) AND m.user_id = authz.caller_id())"
+            ),
+        )
+    } else {
+        (
+            format!(
+                "{GATE} AND EXISTS (SELECT 1 FROM public.platform_operators operator \
+                 WHERE operator.id = authz.caller_id())"
+            ),
+            format!(
+                "{GATE} AND EXISTS (SELECT 1 FROM doc_members m WHERE m.doc_id = docs.id \
+                 AND m.user_id = authz.caller_id())"
+            ),
+        )
+    };
+    PLATFORM_OPERATORS
+        .replace("{OPERATOR}", &operator)
+        .replace("{MEMBER}", &member)
+}
+
+/// The caller and the installation it acts for, either of which a request may leave unset.
+fn platform_operators_translator() -> Translator {
+    TranslatorBuilder::new(deployment([
+        typed_caller("app.user_id", DataType::Uuid).may_be_unset(),
+        typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    ]))
+    .with_min_confidence(ConfidenceLevel::A)
+    .build()
+}
+
+/// A conjunct of an `EXISTS` naming no column decides whether any row survives, so it
+/// translates as that test beside the `EXISTS`, uncorrelated or correlated alike.
+#[test]
+fn a_request_gate_inside_a_membership_exists_translates_as_the_gate_beside_it() {
+    let translator = platform_operators_translator();
+    let translated = |inside: bool| {
+        let db = db_of(&platform_operators(inside));
+        for policy in translator.classify(&db) {
+            let using = policy
+                .using_classification()
+                .expect("USING should classify");
+            assert_eq!(
+                using.confidence,
+                ConfidenceLevel::A,
+                "{} inside={inside}: {using:?}",
+                policy.name()
+            );
+        }
+        let outputs = translator
+            .translate(&db)
+            .expect("the schema should plan")
+            .outputs()
+            .expect("every clause should translate");
+        let tuples: Vec<String> = outputs
+            .tuple_queries()
+            .iter()
+            .map(|query| query.sql.clone())
+            .collect();
+        (outputs.model(), tuples)
+    };
+    assert_eq!(translated(true), translated(false));
+}
+
+/// An aggregate returns its one row whatever the filter keeps, so `count(*)` exists
+/// whether or not the request carries an installation, and the gate stays where it is.
+#[test]
+fn a_request_gate_under_an_aggregate_stays_inside_the_exists() {
+    let schema =
+        platform_operators(true).replace("SELECT 1 FROM public", "SELECT count(*) FROM public");
+    let classified = platform_operators_translator().classify(&db_of(&schema));
+    let using = classified
+        .iter()
+        .find(|policy| policy.name() == "audit_events_read")
+        .expect("audit_events_read should classify")
+        .using_classification()
+        .expect("USING should classify");
+    assert!(
+        matches!(using.pattern, PatternClass::Unknown(_)),
+        "{using:?}"
+    );
+}
+
 /// A request value behind a helper falls closed where the rows it reads depend on the
 /// request or on the statement time, and so does a grant to everyone kept by the
 /// statement time, a caller gate on rows a request's set admits, a value a request may
