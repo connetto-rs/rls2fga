@@ -2,7 +2,7 @@ use super::invariant::query_row_changing_call;
 use super::*;
 use crate::classifier::expansion::ExpansionState;
 use crate::classifier::function_registry::DeclaredSource;
-use crate::generator::db_lookup::resolve_row_identity;
+use crate::generator::db_lookup::{checks_every_row_setting, resolve_row_identity};
 use crate::parser::names::{lookup_table_id, resolve_table_id, table_identity};
 use crate::parser::sql_parser::DataTypeLike;
 use crate::types::{ColumnName, TableId};
@@ -2132,17 +2132,11 @@ fn checks_every_bridged_row<DB: DatabaseLike>(
     db: &DB,
     beyond_key: &[(ColumnName, ColumnName)],
 ) -> bool {
-    // `NOT VALID` skips the rows predating the key, and `MATCH SIMPLE` any row with a `NULL`.
-    fk.is_validated(db) == Ok(true)
-        && (fk.match_full(db)
-            || fk.host_columns(db).is_ok_and(|mut hosts| {
-                hosts.all(|host| {
-                    host.is_nullable(db) == Ok(false)
-                        || !beyond_key
-                            .iter()
-                            .any(|(outer, _)| outer.as_str() == host.stored_column_name())
-                })
-            }))
+    checks_every_row_setting(fk, db, |host| {
+        !beyond_key
+            .iter()
+            .any(|(outer, _)| outer.as_str() == host.stored_column_name())
+    })
 }
 
 pub(super) fn selection_references_current_user(

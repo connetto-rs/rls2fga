@@ -2,7 +2,8 @@
 use crate::no_std_prelude::*;
 use crate::parser::names::lookup_table_id;
 use crate::parser::sql_parser::{
-    ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, IndexLike, TableIndexLike, TableLike,
+    ColumnCollation, ColumnLike, DataTypeLike, DatabaseLike, ForeignKeyLike, IndexLike,
+    TableIndexLike, TableLike,
 };
 use crate::types::ColumnKind;
 use crate::types::{ColumnName, TableId};
@@ -150,6 +151,24 @@ pub(crate) fn column_is_nullable<DB: DatabaseLike>(
     db: &DB,
 ) -> Option<bool> {
     declared_column(table, column, db).and_then(|column| column.is_nullable(db).ok())
+}
+
+/// Whether `foreign_key` checks every row on which the host columns `set` holds of are not
+/// `NULL`.
+///
+/// `NOT VALID` skips the rows predating the key, and `MATCH SIMPLE` any row with a `NULL` in
+/// a host column, so every other host column has to be `NOT NULL` unless the key is
+/// `MATCH FULL`.
+pub(crate) fn checks_every_row_setting<DB: DatabaseLike>(
+    foreign_key: &DB::ForeignKey,
+    db: &DB,
+    set: impl Fn(&DB::Column) -> bool,
+) -> bool {
+    foreign_key.is_validated(db) == Ok(true)
+        && (foreign_key.match_full(db)
+            || foreign_key.host_columns(db).is_ok_and(|mut hosts| {
+                hosts.all(|host| set(host) || host.is_nullable(db) == Ok(false))
+            }))
 }
 
 /// Whether `PostgreSQL` compares the column's text byte for byte.
