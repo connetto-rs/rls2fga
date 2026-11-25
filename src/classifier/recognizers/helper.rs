@@ -38,7 +38,7 @@ use crate::parser::sql_parser::{
     DatabaseLike, EnumerationKind, ForeignKeyLike, FunctionLike, GrantArm, GrantedTo, HelperArm,
     HelperSet, JoinedRow, ParentArm, Restriction, Returned, RowCap, SettingComparison,
     SettingContent, SettingPresence, SettingValue, TableLike, TimeBound, TimeComparison,
-    UnsetSetting,
+    UnsetSetting, WalkArm,
 };
 use crate::types::{ColumnKind, ColumnName, RequestNormalization, TypeName};
 use sql_traits::errors::{HelperSetError, LookupError};
@@ -240,14 +240,15 @@ pub(crate) enum HelperRefusal {
         /// The grant table.
         table: String,
     },
-    /// Each bound keeping `NULL` doubles the ways a row meets the arm's bounds, each a
-    /// condition of its own, and the arm needs more than an `OpenFGA` model admits.
+    /// Each bound keeping `NULL` doubles the ways a row meets the bounds a grant arm or a
+    /// walk's edge puts on it, each a condition of its own, and the rows need more than an
+    /// `OpenFGA` model admits.
     #[error(
-        "grant table '{table}' keeps NULL in {bounds} clock bounds, which takes more than \
-         the {MAX_CONDITIONS} conditions an OpenFGA model admits"
+        "table '{table}' keeps NULL in {bounds} clock bounds, which takes more than the \
+         {MAX_CONDITIONS} conditions an OpenFGA model admits"
     )]
     TooManyNullBounds {
-        /// The grant table.
+        /// The grant or edge table.
         table: String,
         /// The bounds keeping `NULL`.
         bounds: usize,
@@ -535,8 +536,9 @@ pub(crate) enum HelperRefusal {
         other: String,
     },
     /// A grant arm whose rows are held each as its own object, for the rows it joins or
-    /// anti-joins or for a set a column of it stays outside, reads a table no key names
-    /// one row of.
+    /// anti-joins or for a set a column of it stays outside, or a walk holding each edge
+    /// row as its own object, for a bound or a set its term puts on it, reads a table no
+    /// key names one row of.
     #[error(
         "declared helper '{function}' holds each row of '{table}' as its own object, which \
          no key names one row of"
@@ -544,7 +546,7 @@ pub(crate) enum HelperRefusal {
     JoinedTableUnkeyed {
         /// The helper.
         function: String,
-        /// The table the arm reads.
+        /// The table the arm or the walk reads.
         table: String,
     },
     /// A row blocking a grant arm's rows is told by a value no tuple spells, so a blocking
@@ -1579,7 +1581,11 @@ fn answered_call<'db, DB: DatabaseLike>(
             &values,
             deployment,
             db,
-            &[ArmCondition::Exclusion, ArmCondition::UnsetSetting],
+            &[
+                ArmCondition::Exclusion,
+                ArmCondition::UnsetSetting,
+                ArmCondition::EdgeCondition,
+            ],
         )
         .map_err(|source| HelperRefusal::Unanswered {
             function: name,
@@ -1773,10 +1779,7 @@ fn helper_call_at<DB: DatabaseLike>(
             ),
             HelperArm::Walk(walk) => (
                 table_identity(walk.tree()),
-                HelperSetArm::Walk(HelperWalk {
-                    edges: helper_edges::<DB>(walk.table(), walk.child(), walk.column()),
-                    direction: walk.direction(),
-                }),
+                HelperSetArm::Walk(helper_walk(&name, walk, db, registry)?),
             ),
             // Every arm of the called set is checked against `level` in its own call.
             HelperArm::Called(called) => {
@@ -2006,6 +2009,53 @@ fn helper_edges<DB: DatabaseLike>(
     }
 }
 
+/// The walk `walk` makes, following the edge rows meeting the conditions its term puts on
+/// them.
+///
+/// A condition on an edge row's own columns keeps the edges the walk loads. A bound against
+/// the statement time or a set to stay outside holds each edge row as its own object, so
+/// the edge table needs a key naming one row.
+fn helper_walk<DB: DatabaseLike>(
+    function: &str,
+    walk: &WalkArm<'_, DB>,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<HelperWalk, HelperRefusal> {
+    let edges = helper_edges::<DB>(walk.table(), walk.child(), walk.column());
+    let held = if walk.time_bounds().is_empty() && walk.exclusions().is_empty() {
+        None
+    } else {
+        let identity = resolve_row_identity(&edges.table, db).ok_or_else(|| {
+            HelperRefusal::JoinedTableUnkeyed {
+                function: function.to_string(),
+                table: edges.table.to_string(),
+            }
+        })?;
+        let time_bounds: Vec<_> = walk.time_bounds().iter().map(time_bound).collect();
+        within_condition_limit(&edges.table, &time_bounds)?;
+        let outside = walk
+            .exclusions()
+            .iter()
+            .map(|excluded| {
+                declared_exclusion(function, walk.table(), excluded, db, registry, || {
+                    compared_rows(walk.table(), excluded.column(), excluded.set(), db)
+                })
+            })
+            .collect::<Result<_, _>>()?;
+        Some(HeldEdges {
+            identity,
+            time_bounds,
+            outside,
+        })
+    };
+    Ok(HelperWalk {
+        edges,
+        direction: walk.direction(),
+        predicates: walk.restrictions().iter().map(restriction).collect(),
+        held,
+    })
+}
+
 /// The grant `grant` makes on the object `objects` name, the one row of the level for an
 /// arm of a call and the pair for an arm of a cap, its rows holding each label
 /// `read_labels` reads off them.
@@ -2125,34 +2175,37 @@ fn helper_grant<DB: DatabaseLike>(
             table: grant.table.to_string(),
         });
     }
-    let null_kept = grant
-        .time_bounds
-        .iter()
-        .filter(|bound| bound.keeps_null)
-        .count();
+    within_condition_limit(&grant.table, &grant.time_bounds)?;
+    Ok(grant)
+}
+
+/// Refuses `bounds` on rows of `table` where the ways a row meets them, each a condition
+/// of its own, outnumber what an `OpenFGA` model admits.
+fn within_condition_limit(
+    table: &TableId,
+    bounds: &[HelperTimeBound],
+) -> Result<(), HelperRefusal> {
+    let null_kept = bounds.iter().filter(|bound| bound.keeps_null).count();
     // Each way a row meets the bounds is a condition, unless every bound is one met by
     // `NULL`, which leaves one way comparing nothing with the clock.
-    let all_null = usize::from(null_kept == grant.time_bounds.len());
+    let all_null = usize::from(null_kept == bounds.len());
     let conditions = u32::try_from(null_kept)
         .ok()
         .and_then(|shift| 1_usize.checked_shl(shift))
         .map(|ways| ways - all_null);
     if conditions.is_none_or(|conditions| conditions > MAX_CONDITIONS) {
         return Err(HelperRefusal::TooManyNullBounds {
-            table: grant.table.to_string(),
+            table: table.to_string(),
             bounds: null_kept,
         });
     }
-    Ok(grant)
+    Ok(())
 }
 
 /// The sets `grant`'s rows stay outside, those read on the level's row, where the
 /// compared column is the arm's object, which names that row, or the arm's row is the
 /// level's row, and those read on the pair an arm of a cap returns, where the compared
 /// column is one of the pair's, apart from those read on each held row of the arm.
-///
-/// A set a helper not declared returns, or one a `NULL` on either side of the comparison
-/// would let a row past, is refused, so no row the body leaves out is kept.
 fn outside_sets<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
@@ -2171,46 +2224,19 @@ fn outside_sets<DB: DatabaseLike>(
     let mut on_level = Vec::new();
     let mut on_row = Vec::new();
     for excluded in grant.exclusions() {
-        let called = excluded.function();
-        if !registry.declares_helper(called) {
-            return Err(HelperRefusal::UndeclaredCallee {
-                function: function.to_string(),
-                called: called.target_name().to_string(),
-            });
-        }
         let column = excluded.column();
-        let compared = ColumnName::from_stored(column.stored_column_name());
-        let nullable = |source| HelperRefusal::NullableExclusion {
-            function: function.to_string(),
-            excluded: registry.resolved_target_name(&called.target_name()),
-            source: Box::new(source),
-        };
-        if column.is_nullable(db) != Ok(false) {
-            return Err(nullable(NullableExclusion::Compared {
-                table: table_identity(table).to_string(),
-                column: compared,
-            }));
-        }
         let on_object = object.filter(|(object, _)| same_column::<DB>(object, column));
-        let named = match on_object {
-            Some((_, level)) => level.clone(),
-            None => compared_rows(table, column, excluded.set(), db)?,
-        };
-        let call = helper_call(
-            (called, excluded.arguments(), excluded.set()),
-            &Selection::default(),
-            &compared,
-            &named,
+        let helper = declared_exclusion(
+            function,
+            table,
+            excluded,
             db,
             registry,
+            || match on_object {
+                Some((_, level)) => Ok(level.clone()),
+                None => compared_rows(table, column, excluded.set(), db),
+            },
         )?;
-        if let Some(source) = nullable_projection(&call, db) {
-            return Err(nullable(source));
-        }
-        let helper = DeclaredHelper {
-            column: compared,
-            call,
-        };
         // An arm of a cap returns its pairs on no level, and every row returning a pair
         // holds the same value in each of the pair's columns.
         let on_pair = level.is_none()
@@ -2224,6 +2250,56 @@ fn outside_sets<DB: DatabaseLike>(
         }
     }
     Ok((on_level, on_row))
+}
+
+/// The set a row of `table` stays outside of, read as the rows of the table `named`
+/// answers the set holds.
+///
+/// A set a helper not declared returns, or one a `NULL` on either side of the comparison
+/// would let a row past, is refused, so no row the body leaves out is kept.
+fn declared_exclusion<DB: DatabaseLike>(
+    function: &str,
+    table: &DB::Table,
+    excluded: &sql_traits::structs::ExcludedSet<'_, DB>,
+    db: &DB,
+    registry: &FunctionRegistry,
+    named: impl FnOnce() -> Result<TableId, HelperRefusal>,
+) -> Result<DeclaredHelper, HelperRefusal> {
+    let called = excluded.function();
+    if !registry.declares_helper(called) {
+        return Err(HelperRefusal::UndeclaredCallee {
+            function: function.to_string(),
+            called: called.target_name().to_string(),
+        });
+    }
+    let column = excluded.column();
+    let compared = ColumnName::from_stored(column.stored_column_name());
+    let nullable = |source| HelperRefusal::NullableExclusion {
+        function: function.to_string(),
+        excluded: registry.resolved_target_name(&called.target_name()),
+        source: Box::new(source),
+    };
+    if column.is_nullable(db) != Ok(false) {
+        return Err(nullable(NullableExclusion::Compared {
+            table: table_identity(table).to_string(),
+            column: compared,
+        }));
+    }
+    let call = helper_call(
+        (called, excluded.arguments(), excluded.set()),
+        &Selection::default(),
+        &compared,
+        &named()?,
+        db,
+        registry,
+    )?;
+    if let Some(source) = nullable_projection(&call, db) {
+        return Err(nullable(source));
+    }
+    Ok(DeclaredHelper {
+        column: compared,
+        call,
+    })
 }
 
 /// The declared scalar a grant arm compares a column with, or the value of its own its

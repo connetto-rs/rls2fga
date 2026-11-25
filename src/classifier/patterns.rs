@@ -1009,13 +1009,21 @@ pub struct HelperParent {
     pub call: HelperCall,
 }
 
-/// The recursive term of a `WITH RECURSIVE` body walking a tree of the level's keys.
+/// The recursive term of a `WITH RECURSIVE` body walking a tree, or any graph of edges, of
+/// the level's keys.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperWalk {
-    /// The rows naming the parent of each row of the tree.
+    /// The rows each naming an edge from a child to its parent, any number of them per
+    /// child and per parent.
     pub edges: TreeEdges,
-    /// Which way the walk follows the tree.
+    /// Which way the walk follows the edges.
     pub direction: sql_traits::structs::WalkDirection,
+    /// What the columns of an edge row hold for the walk to follow it, all of it.
+    pub predicates: Vec<AttributePredicate>,
+    /// Each edge row held as its own object, followed only while it meets its bounds
+    /// and stays outside its sets, `None` where the walk follows every edge row meeting
+    /// `predicates`.
+    pub held: Option<HeldEdges>,
 }
 
 impl HelperWalk {
@@ -1028,6 +1036,30 @@ impl HelperWalk {
             sql_traits::structs::WalkDirection::Up => &self.edges.parent_column,
         }
     }
+
+    /// The column of the edges joined with the set, each edge's parent walking down and
+    /// its child walking up.
+    #[must_use]
+    pub fn joined_column(&self) -> &ColumnName {
+        match self.direction {
+            sql_traits::structs::WalkDirection::Down => &self.edges.parent_column,
+            sql_traits::structs::WalkDirection::Up => &self.edges.child_column,
+        }
+    }
+}
+
+/// The conditions a walk reads on each edge row beyond its own columns, which hold the
+/// row as an object of its own.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldEdges {
+    /// The key of the edge table.
+    pub identity: Vec<ColumnName>,
+    /// The bounds an edge row meets against the statement time, all of them, which the
+    /// request completes per check.
+    pub time_bounds: Vec<HelperTimeBound>,
+    /// The sets a column of the edge row has to stay outside, all of them, from
+    /// `NOT (<column> = ANY (ARRAY(SELECT <function>(<arguments>))))`.
+    pub outside: Vec<DeclaredHelper>,
 }
 
 /// P29: a row of `table` its own columns flag, named by `column` of the guarded row or

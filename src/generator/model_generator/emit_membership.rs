@@ -1791,15 +1791,22 @@ fn flag_relation<DB: DatabaseLike>(
             rule => plan.ensure_computed(flag_relation_name(named_after, &key), rule),
         });
     }
-    let mut links = Vec::with_capacity(flag.edges.len());
+    let mut steps = Vec::with_capacity(flag.edges.len());
     for edge in &flag.edges {
         let (link, edge_key) = flag_edge_link(plan, edge, &flagged_type, ctx.db);
         let _ = write!(key, ":{}:{edge_key}", edge_key.len());
-        links.push(link);
+        steps.push(WalkStep::Link(link));
     }
-    let relation =
-        plan.ensure_walk_computed(flag_relation_name(named_after, &key), vec![flagged], links);
-    plan.walk_notes
+    let relation = define_walk(
+        (&flagged_type, Some(&flag.table)),
+        flag_relation_name(named_after, &key),
+        &[flagged],
+        &steps,
+        table_plan,
+        all_types,
+    );
+    helper_level_plan(&flagged_type, Some(&flag.table), table_plan, all_types)
+        .walk_notes
         .entry((
             relation.clone(),
             flag.table.clone(),
@@ -1887,11 +1894,11 @@ fn flag_edge_link<DB: DatabaseLike>(
 /// An arm returning another call's rows is that call's relation, which is defined on the
 /// same level's type.
 ///
-/// A walk arm makes the relation name itself through its tree's parent or child, which
-/// is how `OpenFGA` spells every row below or above one the rest of the call returns. An
-/// arm returning keys of a table whose key references the level's, an organization or a
-/// team among the grantees, holds on the level's row sharing that key, so the walk
-/// starts from every key the call returns, as the recursive term joins all of them.
+/// A walk arm makes the relation name itself through its edges' parent or child, which is
+/// how `OpenFGA` spells every row below or above one the rest of the call returns. An arm
+/// returning keys of a table whose key references the level's, an organization or a team
+/// among the grantees, holds on the level's row sharing that key, so the walk starts from
+/// every key the call returns, as the recursive term joins all of them.
 ///
 /// A call with a selection holds the rows its walk reached, `<call>_reached`, and the
 /// selection's grant parts both.
@@ -1921,8 +1928,14 @@ fn helper_call_relation<DB: DatabaseLike>(
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
                 let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
-                let tupleset =
-                    helper_parent_link(plan, &parent.edges, &call.level, parent_type, ctx.db);
+                let tupleset = helper_parent_link(
+                    plan,
+                    &parent.edges,
+                    &call.level,
+                    parent_type,
+                    &ResidualPredicates::default(),
+                    ctx.db,
+                );
                 parts.push(UsersetExpr::TupleToUserset {
                     tupleset,
                     computed: parents,
@@ -1959,7 +1972,6 @@ fn helper_call_relation<DB: DatabaseLike>(
             Some(combine_union(kept)?)
         }
     };
-    let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
     let name = helper_call_relation_name(&call.function, call.arguments.iter().chain(&call.labels));
     // The walk names the rows it reached, which the selection keeps some of under `name`.
     let (reached_name, kept) = match kept {
@@ -1970,18 +1982,24 @@ fn helper_call_relation<DB: DatabaseLike>(
         ),
     };
     let reached = if walked.is_empty() {
+        let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
         plan.ensure_computed(reached_name, combine_union(parts)?)
     } else {
-        let walks = walked
+        let steps: Vec<WalkStep> = walked
             .iter()
-            .map(|walk| match walk.direction {
-                WalkDirection::Down => {
-                    helper_parent_link(plan, &walk.edges, &call.level, level_type.clone(), ctx.db)
-                }
-                WalkDirection::Up => helper_child_link(plan, &walk.edges, &level_type, ctx.db),
+            .filter_map(|walk| {
+                walk_step(walk, &call.level, &level_type, ctx, table_plan, all_types)
             })
             .collect();
-        let relation = plan.ensure_walk_computed(reached_name, parts, walks);
+        let relation = define_walk(
+            (&level_type, Some(&call.level)),
+            reached_name,
+            &parts,
+            &steps,
+            table_plan,
+            all_types,
+        );
+        let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
         for walk in walked {
             plan.walk_notes
                 .entry((
@@ -1998,6 +2016,7 @@ fn helper_call_relation<DB: DatabaseLike>(
         }
         relation
     };
+    let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
     Some(match kept {
         None => reached,
         Some((name, kept)) => plan.ensure_computed(
@@ -2007,20 +2026,324 @@ fn helper_call_relation<DB: DatabaseLike>(
     })
 }
 
+/// One way a walk adds rows to the set it names.
+enum WalkStep {
+    /// `<walk> from <link>`, the link naming on each row the walk adds the rows it is
+    /// reached from, through every edge the link loads.
+    Link(RelationName),
+    /// Edge rows each held as an object of its own.
+    Followed(FollowedEdges),
+}
+
+/// The edge rows of a walk, each holding the walk's set while the row the walk reaches
+/// it from does and its own conditions hold.
+struct FollowedEdges {
+    /// The type of the edge rows.
+    edge_type: TypeName,
+    /// The table holding them.
+    edge_table: TableId,
+    /// The tupleset naming, on each row the walk adds, the edge rows adding it, `None`
+    /// where each edge row is the row it adds.
+    link: Option<RelationName>,
+    /// The tupleset naming, on each edge row, the row the walk reaches it from, `None`
+    /// where each edge row is that row.
+    source: Option<RelationName>,
+    /// The users the bounds of an edge row keep it for, `None` where it has none.
+    gate: Option<UsersetExpr>,
+    /// The users the sets an edge row stays outside keep it from, `None` where it has
+    /// none.
+    outside: Option<UsersetExpr>,
+}
+
+impl FollowedEdges {
+    /// The relation on each edge row holding the walk `walk` through it.
+    fn rule(&self, walk: &RelationName) -> UsersetExpr {
+        let reached = match &self.source {
+            Some(tupleset) => UsersetExpr::TupleToUserset {
+                tupleset: tupleset.clone(),
+                computed: walk.clone(),
+            },
+            None => UsersetExpr::Computed(walk.clone()),
+        };
+        let kept = match &self.gate {
+            Some(gate) => UsersetExpr::Intersection(vec![reached, gate.clone()]),
+            None => reached,
+        };
+        match &self.outside {
+            Some(outside) => UsersetExpr::Exclusion {
+                base: Box::new(kept),
+                subtract: Box::new(outside.clone()),
+            },
+            None => kept,
+        }
+    }
+
+    /// The walk's own part reading `followed`, the relation [`Self::rule`] defines.
+    fn part(&self, followed: RelationName) -> UsersetExpr {
+        match &self.link {
+            Some(tupleset) => UsersetExpr::TupleToUserset {
+                tupleset: tupleset.clone(),
+                computed: followed,
+            },
+            None => UsersetExpr::Computed(followed),
+        }
+    }
+}
+
+/// How `walk` adds rows of `level` to its call's set, `None` where a condition on its
+/// edges has no spelling, which keeps no edge.
+///
+/// A walk following every edge meeting conditions on the edge's own columns links each
+/// row to the rows it is reached from through the edges meeting them. A walk reading
+/// bounds or sets on an edge holds each edge row as its own object, linked to the row it
+/// adds and to the row it is reached from, so a caller whom one edge's bounds or sets
+/// stop still follows another edge between the same two rows. Where the level holds its
+/// own edges, the edge row is itself the row at its own key's end.
+fn walk_step<DB: DatabaseLike>(
+    walk: &HelperWalk,
+    level: &TableId,
+    level_type: &TypeName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<WalkStep> {
+    let kept = grant_row_conjuncts(&walk.predicates, &[], 0)?;
+    let Some(held) = &walk.held else {
+        let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+        return Some(WalkStep::Link(match walk.direction {
+            WalkDirection::Down => {
+                helper_parent_link(plan, &walk.edges, level, level_type.clone(), &kept, ctx.db)
+            }
+            WalkDirection::Up => helper_child_link(plan, &walk.edges, level_type, &kept, ctx.db),
+        }));
+    };
+    let edge_table = &walk.edges.table;
+    let edge_type = ctx.table_types.resolve(edge_table);
+    let own_row = |column: &ColumnName| {
+        edge_table == level && held.identity.as_slice() == core::slice::from_ref(column)
+    };
+    let link = (!own_row(walk.returned_column())).then(|| {
+        let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+        let edge = EdgeLink {
+            table: edge_table,
+            object_cols: core::slice::from_ref(walk.returned_column()),
+            subject_cols: &held.identity,
+            subject_type: &edge_type,
+            name: stored_relation_name(edge_table.name()),
+        };
+        edge.link(plan, &kept, ctx.db)
+    });
+    let source = (!own_row(walk.joined_column())).then(|| {
+        let plan = helper_level_plan(&edge_type, Some(edge_table), table_plan, all_types);
+        let edge = EdgeLink {
+            table: edge_table,
+            object_cols: &held.identity,
+            subject_cols: core::slice::from_ref(walk.joined_column()),
+            subject_type: level_type,
+            name: walk.joined_column().as_str().to_string(),
+        };
+        // The link to the rows a walk adds keeps the edges, unless each edge row is one.
+        let unkept = ResidualPredicates::default();
+        edge.link(plan, if link.is_some() { &unkept } else { &kept }, ctx.db)
+    });
+    let gate = if held.time_bounds.is_empty() {
+        None
+    } else {
+        // Each edge row holds everyone while it meets its bounds, as a grant arm keeping
+        // its rows by the clock for anyone does.
+        let bounded = HelperGrant {
+            table: edge_table.clone(),
+            object_columns: held.identity.clone(),
+            grantee: HelperGrantee::Anyone,
+            excluded: Vec::new(),
+            carried_caller: None,
+            absent: Vec::new(),
+            rows: GrantRows::Matching {
+                predicates: Vec::new(),
+            },
+            time_bounds: held.time_bounds.clone(),
+            caps: Vec::new(),
+            within: Vec::new(),
+            outside: Vec::new(),
+            held: None,
+        };
+        let parts = helper_grant_parts(
+            &bounded,
+            Some(edge_table),
+            &edge_type,
+            ctx,
+            table_plan,
+            all_types,
+        );
+        Some(combine_union(parts)?)
+    };
+    let mut outside = Vec::with_capacity(held.outside.len());
+    for helper in &held.outside {
+        outside.extend(outside_expr(
+            &helper.call,
+            Some(&helper.column),
+            (edge_table, &edge_type),
+            &mut String::new(),
+            ctx,
+            table_plan,
+            all_types,
+        ));
+    }
+    Some(WalkStep::Followed(FollowedEdges {
+        edge_type,
+        edge_table: edge_table.clone(),
+        link,
+        source,
+        gate,
+        outside: combine_union(outside),
+    }))
+}
+
+/// `parts`, or a row `steps` reach from a row the relation itself holds, defined on
+/// `level_type` under the first name free for that rule, beside the relation each
+/// followed step defines on its edge rows, named after it.
+///
+/// The rule names itself, and so does each edge row's, so each name tried is spelled into
+/// both before they are compared with the rules held under those names.
+fn define_walk(
+    (level_type, level): (&TypeName, Option<&TableId>),
+    name: impl Into<String>,
+    parts: &[UsersetExpr],
+    steps: &[WalkStep],
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> RelationName {
+    let base = clamp_relation_name(name.into());
+    let followed_steps = steps
+        .iter()
+        .filter(|step| matches!(step, WalkStep::Followed(_)))
+        .count();
+    let rules = |walk: &RelationName| {
+        let mut rule = parts.to_vec();
+        let mut followed = Vec::with_capacity(followed_steps);
+        for step in steps {
+            rule.push(match step {
+                WalkStep::Link(tupleset) => UsersetExpr::TupleToUserset {
+                    tupleset: tupleset.clone(),
+                    computed: walk.clone(),
+                },
+                WalkStep::Followed(edges) => {
+                    let suffix = match followed_steps {
+                        1 => String::new(),
+                        _ => format!("_{}", followed.len() + 1),
+                    };
+                    let name = RelationName::canonicalized(clamp_relation_name(format!(
+                        "{walk}_followed{suffix}"
+                    )));
+                    followed.push((edges, name.clone(), edges.rule(walk)));
+                    edges.part(name)
+                }
+            });
+        }
+        (UsersetExpr::Union(rule), followed)
+    };
+    let key = userset_key(&rules(&RelationName::canonicalized(&base)).0);
+    let relation = yield_until_free(&base, &key, |candidate| {
+        let (rule, followed) = rules(candidate);
+        helper_level_plan(level_type, level, table_plan, all_types).holds_other(candidate, &rule)
+            || followed.iter().any(|(edges, name, rule)| {
+                helper_level_plan(
+                    &edges.edge_type,
+                    Some(&edges.edge_table),
+                    table_plan,
+                    all_types,
+                )
+                .holds_other(name, rule)
+            })
+    });
+    let (rule, followed) = rules(&relation);
+    for (edges, name, rule) in followed {
+        helper_level_plan(
+            &edges.edge_type,
+            Some(&edges.edge_table),
+            table_plan,
+            all_types,
+        )
+        .computed_relations
+        .entry(name)
+        .or_insert(rule);
+    }
+    helper_level_plan(level_type, level, table_plan, all_types)
+        .computed_relations
+        .entry(relation.clone())
+        .or_insert(rule);
+    relation
+}
+
+/// The rows of an edge table linking, on the row of `plan`'s type each one's
+/// `object_cols` name, the row of `subject_type` its `subject_cols` name.
+struct EdgeLink<'a> {
+    table: &'a TableId,
+    object_cols: &'a [ColumnName],
+    subject_cols: &'a [ColumnName],
+    subject_type: &'a TypeName,
+    /// The name the tupleset is given where it is free.
+    name: String,
+}
+
+impl EdgeLink<'_> {
+    /// The tupleset the edge rows meeting `kept` fill, with the source loading it.
+    fn link<DB: DatabaseLike>(
+        self,
+        plan: &mut TypePlan,
+        kept: &ResidualPredicates,
+        db: &DB,
+    ) -> RelationName {
+        let mut key = table_source_key("walk_edge", self.table);
+        source_key_columns(&mut key, self.object_cols);
+        source_key_columns(&mut key, self.subject_cols);
+        source_key_part(&mut key, self.subject_type.as_str());
+        edge_rows_key(&mut key, kept);
+        let tupleset = plan.membership_source_relation(
+            &key,
+            self.name,
+            vec![DirectSubject::Type(self.subject_type.clone())],
+        );
+        plan.add_source(TupleSource::ClosureBridge {
+            link_table: self.table.clone(),
+            shared: rows_share_links(self.table, self.object_cols, self.subject_cols, db),
+            object_cols: self.object_cols.to_vec(),
+            subject_cols: self.subject_cols.to_vec(),
+            guarded_type: plan.type_name.clone(),
+            owner_type: self.subject_type.clone(),
+            relation: tupleset.clone(),
+            extra_predicates: kept.clone(),
+        });
+        tupleset
+    }
+}
+
+/// Appends to `key` the edge rows `kept` keeps, nothing where it keeps every one.
+fn edge_rows_key(key: &mut String, kept: &ResidualPredicates) {
+    if let Some(sql) = kept.sql() {
+        source_key_part(key, "kept");
+        source_key_part(key, &sql);
+    }
+}
+
 /// The tupleset naming, on the level's row each edge's child names, the row of
-/// `parent_type` the edge's parent names, with the source loading it.
+/// `parent_type` the edge's parent names, with the source loading it from the edges
+/// meeting `kept`.
 ///
 /// Edges the level keeps on its own rows, each row naming its own parent, load as the
-/// level's parent bridge, and any other edges from their table's rows.
+/// level's parent bridge where every row is an edge, and any other edges from their
+/// table's rows.
 fn helper_parent_link<DB: DatabaseLike>(
     plan: &mut TypePlan,
     edges: &TreeEdges,
     level: &TableId,
     parent_type: TypeName,
+    kept: &ResidualPredicates,
     db: &DB,
 ) -> RelationName {
     if edges.table == *level
         && single_identity_column(level, db).as_ref() == Some(&edges.child_column)
+        && kept.sql().is_none()
     {
         return helper_parent_bridge(plan, level, &edges.parent_column, parent_type);
     }
@@ -2028,6 +2351,7 @@ fn helper_parent_link<DB: DatabaseLike>(
     source_key_part(&mut source_key, edges.child_column.as_str());
     source_key_part(&mut source_key, edges.parent_column.as_str());
     source_key_part(&mut source_key, parent_type.as_str());
+    edge_rows_key(&mut source_key, kept);
     let tupleset = plan.membership_source_relation(
         &source_key,
         parent_type.as_str(),
@@ -2043,7 +2367,7 @@ fn helper_parent_link<DB: DatabaseLike>(
         guarded_type: plan.type_name.clone(),
         owner_type: parent_type,
         relation: tupleset.clone(),
-        extra_predicates: ResidualPredicates::default(),
+        extra_predicates: kept.clone(),
     });
     tupleset
 }
@@ -2071,16 +2395,19 @@ fn helper_parent_bridge(
 }
 
 /// The tupleset naming, on the level's row each edge's parent names, the row of the
-/// level the edge's child names, with the source loading it.
+/// level the edge's child names, with the source loading it from the edges meeting
+/// `kept`.
 fn helper_child_link<DB: DatabaseLike>(
     plan: &mut TypePlan,
     edges: &TreeEdges,
     level_type: &TypeName,
+    kept: &ResidualPredicates,
     db: &DB,
 ) -> RelationName {
     let mut source_key = table_source_key("child_bridge", &edges.table);
     source_key_part(&mut source_key, edges.parent_column.as_str());
     source_key_part(&mut source_key, edges.child_column.as_str());
+    edge_rows_key(&mut source_key, kept);
     let tupleset = plan.membership_source_relation(
         &source_key,
         "child",
@@ -2096,7 +2423,7 @@ fn helper_child_link<DB: DatabaseLike>(
         guarded_type: level_type.clone(),
         owner_type: level_type.clone(),
         relation: tupleset.clone(),
-        extra_predicates: ResidualPredicates::default(),
+        extra_predicates: kept.clone(),
     });
     tupleset
 }
