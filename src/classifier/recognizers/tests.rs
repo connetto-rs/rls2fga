@@ -5414,3 +5414,29 @@ fn a_local_literal_against_an_instant_column_is_left_to_its_threshold() {
         Some(Ok(_))
     ));
 }
+
+/// Each arm of a set operation is searched for a call that changes the row count, and a
+/// `VALUES` arm calls nothing that could.
+#[test]
+fn a_row_changing_call_is_found_in_any_set_operation_arm() {
+    let query_of = |sql: &str| {
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, sql).expect("query should parse");
+        let [Statement::Query(query)] = statements.as_slice() else {
+            panic!("expected one query");
+        };
+        query.clone()
+    };
+    assert_eq!(
+        invariant::query_row_changing_call(&query_of(
+            "SELECT 1 FROM paper_shares UNION VALUES (1)"
+        )),
+        None
+    );
+    assert_eq!(
+        invariant::query_row_changing_call(&query_of(
+            "VALUES (1) UNION SELECT count(*) FROM paper_shares"
+        ))
+        .as_deref(),
+        Some("count")
+    );
+}
