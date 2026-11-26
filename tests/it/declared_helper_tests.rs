@@ -233,7 +233,7 @@ fn an_owner_lacking_select_is_refused_naming_the_table() {
             TranslationNote::ExpressionRefused { policy, reason }
                 if policy == "orders_read"
                     && reason.contains("authz.projects_with")
-                    && reason.contains("lacks SELECT on `project_grants`")
+                    && reason.contains("lacks SELECT on `public.project_grants`")
         )
     });
     assert!(refused, "{notes:#?}");
