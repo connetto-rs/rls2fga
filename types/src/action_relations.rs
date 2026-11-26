@@ -69,6 +69,40 @@ pub enum ActionAnswer {
     /// Some acting role may run the statement on some columns only, so the columns it
     /// touches are asked beside its rows.
     ByColumn(ColumnAnswer),
+    /// Granted where any of these paths grants, each answered on its own rows and columns.
+    ///
+    /// The base table's own policies are one path, and each view running with its owner's
+    /// rights that lets an acting role reach the table's rows is another. A path's
+    /// judgements name the type they are asked on, whose objects are the table's rows
+    /// under the table's own [`ObjectKey`](crate::ObjectKey). Built by
+    /// [`any_of`](Self::any_of), so it holds at least two paths, none of them
+    /// [`Denied`](Self::Denied), [`Unrestricted`](Self::Unrestricted) or another `AnyOf`.
+    AnyOf(Vec<ActionAnswer>),
+}
+
+impl ActionAnswer {
+    /// Granted where any of `paths` grants.
+    ///
+    /// A path granting nobody is dropped, a path granting every acting role makes the
+    /// whole answer [`Unrestricted`](Self::Unrestricted), and nested alternatives are
+    /// flattened. No path left is [`Denied`](Self::Denied), and one path left is that path.
+    #[must_use]
+    pub fn any_of(paths: impl IntoIterator<Item = ActionAnswer>) -> Self {
+        let mut kept = Vec::new();
+        for path in paths {
+            match path {
+                Self::Denied => {}
+                Self::Unrestricted => return Self::Unrestricted,
+                Self::AnyOf(nested) => kept.extend(nested),
+                path => kept.push(path),
+            }
+        }
+        match kept.len() {
+            0 => Self::Denied,
+            1 => kept.swap_remove(0),
+            _ => Self::AnyOf(kept),
+        }
+    }
 }
 
 /// A command `PostgreSQL` grants on single columns.
@@ -398,5 +432,40 @@ mod tests {
         let editor = privileges(Holding::Table, Holding::Absent, held(&["body"]), true);
         assert!(editor.permits(ActionStatement::Delete, &key));
         assert!(editor.permits(ActionStatement::SelectForUpdate, &key));
+    }
+
+    fn judged(relation: &str, type_name: &str) -> ActionAnswer {
+        ActionAnswer::Judged(vec![ActionJudgement::new(
+            RelationName::canonicalized(relation),
+            RowVersion::Existing,
+            TypeName::canonicalized(type_name),
+        )])
+    }
+
+    /// A path granting nobody adds nothing, one granting everyone settles the statement,
+    /// and a lone remaining path is answered as itself.
+    #[test]
+    fn any_of_keeps_only_the_paths_that_can_decide() {
+        let base = judged("can_update", "resources");
+        let moves = judged("can_update", "resource_moves");
+        assert_eq!(
+            ActionAnswer::any_of([ActionAnswer::Denied, ActionAnswer::Denied]),
+            ActionAnswer::Denied
+        );
+        assert_eq!(
+            ActionAnswer::any_of([ActionAnswer::Denied, moves.clone()]),
+            moves
+        );
+        assert_eq!(
+            ActionAnswer::any_of([base.clone(), ActionAnswer::Unrestricted]),
+            ActionAnswer::Unrestricted
+        );
+        let both = ActionAnswer::any_of([base.clone(), moves.clone()]);
+        assert_eq!(both, ActionAnswer::AnyOf(vec![base.clone(), moves.clone()]));
+        let third = judged("can_update", "resource_archive");
+        assert_eq!(
+            ActionAnswer::any_of([both, third.clone()]),
+            ActionAnswer::AnyOf(vec![base, moves, third])
+        );
     }
 }

@@ -171,6 +171,9 @@ impl Model {
     }
 
     /// Ask the emitted answer for `action` on `table` about the rows and columns `probe` names.
+    ///
+    /// An answer with several paths changes the row where any path does, and otherwise
+    /// leaves it alone where any path only filters it.
     pub(super) async fn permits(
         &self,
         table: &str,
@@ -179,10 +182,6 @@ impl Model {
         probe: &RowProbe<'_>,
     ) -> Result<Verdict, ProbeError> {
         let naming = self.naming(table)?;
-        let existing = match probe.existing {
-            Some(row) => Some(naming.render(&JsonRow(row))?.ok_or(ProbeError::Unnamed)?),
-            None => None,
-        };
         let entry = self
             .outputs
             .translation()
@@ -191,45 +190,66 @@ impl Model {
             .find(|entry| entry.type_name == naming.type_name && entry.statement == action)
             .ok_or(ProbeError::NoAnswer(action))?;
         let caller = self.request(caller)?;
-        match &entry.answer {
-            ActionAnswer::ByColumn(columns) => {
-                let rows = self
-                    .rows(&columns.rows, existing.as_deref(), probe, &caller)
-                    .await?;
-                if rows != Verdict::Changed {
-                    return Ok(rows);
-                }
-                for command in &columns.commands {
-                    let touched = probe
-                        .columns
-                        .get(&command.command)
-                        .ok_or(ProbeError::NoColumns(command.command))?;
-                    for column in touched {
-                        if !self
-                            .check(
-                                command.relation(column).as_str(),
-                                &columns.gate,
-                                &caller,
-                                Vec::new(),
-                            )
-                            .await?
-                        {
-                            return Ok(Verdict::Aborted);
-                        }
-                    }
-                }
-                Ok(Verdict::Changed)
+        let ActionAnswer::AnyOf(paths) = &entry.answer else {
+            return self.path(&entry.answer, naming, probe, &caller).await;
+        };
+        let mut verdict = Verdict::Aborted;
+        for path in paths {
+            match self.path(path, naming, probe, &caller).await? {
+                Verdict::Changed => return Ok(Verdict::Changed),
+                Verdict::Skipped => verdict = Verdict::Skipped,
+                Verdict::Aborted => {}
             }
-            answer => self.rows(answer, existing.as_deref(), probe, &caller).await,
         }
+        Ok(verdict)
+    }
+
+    /// Ask one path of an answer about the rows and columns `probe` names.
+    async fn path(
+        &self,
+        answer: &ActionAnswer,
+        naming: &RowNaming,
+        probe: &RowProbe<'_>,
+        caller: &Request,
+    ) -> Result<Verdict, ProbeError> {
+        let ActionAnswer::ByColumn(columns) = answer else {
+            return self.rows(answer, naming, probe, caller).await;
+        };
+        let rows = self.rows(&columns.rows, naming, probe, caller).await?;
+        if rows != Verdict::Changed {
+            return Ok(rows);
+        }
+        for command in &columns.commands {
+            let touched = probe
+                .columns
+                .get(&command.command)
+                .ok_or(ProbeError::NoColumns(command.command))?;
+            for column in touched {
+                if !self
+                    .check(
+                        command.relation(column).as_str(),
+                        &columns.gate,
+                        caller,
+                        Vec::new(),
+                    )
+                    .await?
+                {
+                    return Ok(Verdict::Aborted);
+                }
+            }
+        }
+        Ok(Verdict::Changed)
     }
 
     /// Interpret the answer about the rows without inferring relations. The stored row's
     /// judgements are asked first, since a row they filter is never checked further.
+    ///
+    /// The stored row is named under each judgement's own type by the table's key, since
+    /// a path through a view asks about the table's rows on a type of its own.
     async fn rows(
         &self,
         answer: &ActionAnswer,
-        existing: Option<&str>,
+        naming: &RowNaming,
         probe: &RowProbe<'_>,
         caller: &Request,
     ) -> Result<Verdict, ProbeError> {
@@ -243,9 +263,12 @@ impl Model {
             .iter()
             .partition(|judgement| judgement.version == RowVersion::Existing);
         for judgement in stored {
-            let object = existing.ok_or(ProbeError::NoStoredRow)?;
+            let row = probe.existing.ok_or(ProbeError::NoStoredRow)?;
+            let object = naming
+                .render_as(&judgement.type_name, &JsonRow(row))?
+                .ok_or(ProbeError::Unnamed)?;
             if !self
-                .check(judgement.relation.as_str(), object, caller, Vec::new())
+                .check(judgement.relation.as_str(), &object, caller, Vec::new())
                 .await?
             {
                 return Ok(Verdict::Skipped);

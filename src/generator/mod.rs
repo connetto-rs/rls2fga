@@ -26,3 +26,5 @@ pub mod tuple_generator;
 pub mod well_known;
 // `unrestricted` carries its own module documentation.
 pub(crate) mod unrestricted;
+// `view_paths` carries its own module documentation.
+pub(crate) mod view_paths;

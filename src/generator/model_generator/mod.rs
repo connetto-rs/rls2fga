@@ -24,6 +24,7 @@ use crate::generator::model_bounds::MAX_PARAMETER_NAME_CHARS;
 use crate::generator::notes::SkippedTuples;
 use crate::generator::role_relations::{sorted_role_relation_names, RoleRelationName};
 use crate::generator::tuple_generator::{resolve_bridge_columns, UnboundedColumns};
+use crate::generator::view_paths;
 use crate::generator::well_known::{
     actor_relation, blocked_relation, can_delete_relation, can_insert_relation,
     can_insert_returning_relation, can_select_for_update_relation, can_select_relation,
@@ -67,6 +68,8 @@ mod emit_ownership;
 mod emit_requests;
 /// Emission for the patterns a role decides.
 mod emit_roles;
+/// Each view running with its owner's rights, answered as one more path to its table.
+mod paths;
 /// The type judging the row a write produces.
 mod resulting;
 /// Role-threshold resource-column inference and tuple-source population.
@@ -105,6 +108,8 @@ use emit_requests::{
     emit_request_formula, emit_request_gate, RequestSide,
 };
 use emit_roles::{emit_numeric_threshold, emit_role_name_in_list, OwnerScope};
+pub(crate) use paths::PlannedPath;
+use paths::{fold_path_answers, PathBuild};
 use role_threshold::{populate_role_threshold_sources, RoleThresholdTables};
 use simplify::{
     drop_implied_insert_readback, grants_nothing, inline_synthetic_rule_aliases,
@@ -364,6 +369,10 @@ pub(crate) struct TypePlan {
     /// The stored type whose written rows this type judges, absent for every type that
     /// names stored rows.
     pub resulting_of: Option<TypeName>,
+    /// The type of the table whose statements this type answers as one more path, through
+    /// a view running with its owner's rights, absent for every type naming its own
+    /// table's rows. Its objects are that table's rows under the table's key.
+    pub path_of: Option<TypeName>,
     /// The note each declared helper's walk along this type's edges, or a flagged row's
     /// walk up them, carries, keyed by the relation resolved through it, the table holding
     /// the edges or the flags and the columns read there, and read once pruning has settled
@@ -430,6 +439,7 @@ impl TypePlan {
             column_relations: Vec::new(),
             walk_notes: BTreeMap::new(),
             resulting_of: None,
+            path_of: None,
         }
     }
 
@@ -1002,14 +1012,30 @@ pub(crate) fn build_filtered_schema_plan<DB: DatabaseLike>(
     bounds: &UnboundedColumns,
 ) -> Result<SchemaPlan, PlanningError> {
     let filtered = filter_policies_for_output(policies, min_confidence);
+    let (paths, refusals) = match registry.deployment() {
+        Some(deployment) => {
+            let (paths, refusals) = view_paths::discover(db, deployment);
+            let paths = paths
+                .into_iter()
+                .map(|path| {
+                    let policies = path.policies(db, registry, deployment, min_confidence);
+                    PlannedPath { path, policies }
+                })
+                .collect();
+            (paths, refusals)
+        }
+        None => (Vec::new(), Vec::new()),
+    };
     let mut plan = build_plan_typing(
         &filtered,
+        &paths,
         db,
         registry,
         settings,
         bounds,
         PlanScope::Policies,
     )?;
+    plan.notes.extend(refusals);
     // Every policy, translated or not, since a clause the translation refused denies too
     // and the reader still learns that the database admits more there.
     for policy in policies {
@@ -1049,6 +1075,7 @@ pub(crate) fn build_schema_plan<DB: DatabaseLike>(
     let bounds = UnboundedColumns::resolve(db);
     build_plan_typing(
         policies,
+        &[],
         db,
         registry,
         settings,
@@ -1165,6 +1192,7 @@ fn with_table_plan<R>(
 
 pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     policies: &[ClassifiedPolicy],
+    paths: &[PlannedPath],
     db: &DB,
     registry: &FunctionRegistry,
     settings: &GeneratorSettings,
@@ -1190,7 +1218,12 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
     let declared_permissive = catalog_policies.then(|| declared_permissive_policies(db));
 
     let principals = request_principals(registry, &settings.well_known)?;
-    let table_types = TableTypes::assign(db, scope, &settings.well_known, &principals, &mut notes)?;
+    let mut table_types =
+        TableTypes::assign(db, scope, &settings.well_known, &principals, &mut notes)?;
+    // After every table, so a view whose name a table holds steps aside.
+    for planned in paths {
+        table_types.claim(&planned.path.view, true, &mut notes)?;
+    }
     // One branch per role a request may act as, each reading its own classifications and
     // answering which membership tables it reads once per table.
     let mut branches = if catalog_policies {
@@ -1487,6 +1520,33 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         );
     }
 
+    for planned in paths {
+        let (Some(path_type), Some(table_type)) = (
+            table_types.get(&planned.path.view).cloned(),
+            table_types.get(&planned.path.table).cloned(),
+        ) else {
+            continue;
+        };
+        let mut build = PathBuild {
+            notes: &mut notes,
+            confidence_summary: &mut confidence_summary,
+            db,
+            settings,
+            table_types: &table_types,
+            condition_parameters: &condition_parameters,
+        };
+        let mut held = with_table_plan(
+            &mut all_types,
+            &path_type,
+            &settings.well_known,
+            |plan, other_types| {
+                plan.path_of = Some(table_type);
+                build.plan_path(planned, plan, other_types, &mut branches)
+            },
+        );
+        acting_privileges.append(&mut held);
+    }
+
     // A policy whose table did not resolve may have been the one granting any table
     // bearing that name, and a dump does not record which, so each carries the loss.
     for (type_name, relations) in unresolved_losses {
@@ -1513,6 +1573,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         &settings.well_known.request_gate,
         registry.deployment(),
     );
+    fold_path_answers(&mut answers.entries, &all_types);
     prune_unreferenced_relations(&mut all_types, &answers.answered_locally);
     // After pruning, so only a walk the model still resolves is noted.
     for plan in all_types.values_mut() {
@@ -2470,41 +2531,53 @@ impl TableTypes {
         names.sort();
 
         for (_, identity) in &names {
-            if types.by_identity.contains_key(identity) {
-                continue;
-            }
-
-            let spelling = identity.to_string();
-            let base = canonical_fga_type_name(&spelling);
-            types.refuse_held(&spelling, &base)?;
-            let assigned = match types.owners.get(&base) {
-                Some(prior) => {
-                    let disambiguated = canonical_fga_type_name(&format!(
-                        "{base}_{}",
-                        stable_hex_suffix(&spelling)
-                    ));
-                    types.refuse_held(&spelling, &disambiguated)?;
-                    if matches!(scope, PlanScope::Policies) || forced.as_ref() == Some(identity) {
-                        notes.push(TranslationNote::TypeNameCollision {
-                            spelling: identity.clone(),
-                            prior: prior.identity.clone(),
-                            canonical: base.to_string(),
-                            renamed: disambiguated.to_string(),
-                        });
-                    }
-                    disambiguated
-                }
-                None => base,
-            };
-            types.owners.insert(
-                assigned.clone(),
-                TypeOwner {
-                    identity: identity.clone(),
-                },
-            );
-            types.by_identity.insert(identity.clone(), assigned);
+            let reported =
+                matches!(scope, PlanScope::Policies) || forced.as_ref() == Some(identity);
+            types.claim(identity, reported, notes)?;
         }
         Ok(types)
+    }
+
+    /// Give `identity` its canonical type name, or that name suffixed with a hash of the
+    /// qualified spelling where another relation already holds it, noting the rename when
+    /// `reported`. A relation already named keeps its name.
+    fn claim(
+        &mut self,
+        identity: &TableId,
+        reported: bool,
+        notes: &mut Vec<TranslationNote>,
+    ) -> Result<(), PlanningError> {
+        if self.by_identity.contains_key(identity) {
+            return Ok(());
+        }
+        let spelling = identity.to_string();
+        let base = canonical_fga_type_name(&spelling);
+        self.refuse_held(&spelling, &base)?;
+        let assigned = match self.owners.get(&base) {
+            Some(prior) => {
+                let disambiguated =
+                    canonical_fga_type_name(&format!("{base}_{}", stable_hex_suffix(&spelling)));
+                self.refuse_held(&spelling, &disambiguated)?;
+                if reported {
+                    notes.push(TranslationNote::TypeNameCollision {
+                        spelling: identity.clone(),
+                        prior: prior.identity.clone(),
+                        canonical: base.to_string(),
+                        renamed: disambiguated.to_string(),
+                    });
+                }
+                disambiguated
+            }
+            None => base,
+        };
+        self.owners.insert(
+            assigned.clone(),
+            TypeOwner {
+                identity: identity.clone(),
+            },
+        );
+        self.by_identity.insert(identity.clone(), assigned);
+        Ok(())
     }
 
     /// Type assigned to `table`, or `None` when the scope excludes it.

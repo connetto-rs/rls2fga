@@ -124,7 +124,7 @@ pub(super) enum TargetAnswer {
 /// One statement asked of `row_security`. None reads the row, so each of its gates judges
 /// the statement's own command.
 #[derive(Debug, Clone, Copy)]
-enum Asked {
+pub(super) enum Asked {
     Select,
     Insert,
     Update,
@@ -132,7 +132,7 @@ enum Asked {
 }
 
 /// Each target is fed by the gates of exactly one of these statements.
-const ASKED: [Asked; 4] = [Asked::Select, Asked::Insert, Asked::Update, Asked::Delete];
+pub(super) const ASKED: [Asked; 4] = [Asked::Select, Asked::Insert, Asked::Update, Asked::Delete];
 
 impl Asked {
     /// The statement as `row_security` takes it.
@@ -157,7 +157,7 @@ impl Asked {
     }
 
     /// The targets the statement's gates feed.
-    fn targets(self) -> &'static [ActionTarget] {
+    pub(super) fn targets(self) -> &'static [ActionTarget] {
         match self {
             Self::Select => &[ActionTarget::Select],
             Self::Insert => &[ActionTarget::Insert],
