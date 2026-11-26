@@ -14,7 +14,7 @@ use crate::classifier::patterns::{
     RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
-use crate::types::{ColumnName, TranslationNote};
+use crate::types::TranslationNote;
 
 /// Remove Markdown table control characters and escape pipes.
 fn md_escape(s: &str) -> String {
@@ -176,16 +176,14 @@ fn helper_call_text(call: &crate::classifier::patterns::HelperCall) -> String {
     text
 }
 
-/// The end of `edges` naming each edge's parent, `table.column`, or `table.(a, b)` for
-/// several columns.
+/// The end of `edges` naming each edge's parent, `table.column` for each of its columns.
 fn edge_parent(edges: &crate::classifier::patterns::TreeEdges) -> String {
-    match edges.parent_columns.as_slice() {
-        [column] => format!("{}.{column}", edges.table),
-        columns => {
-            let columns: Vec<&str> = columns.iter().map(ColumnName::as_str).collect();
-            format!("{}.({})", edges.table, columns.join(", "))
-        }
-    }
+    let columns: Vec<String> = edges
+        .parent_columns
+        .iter()
+        .map(|column| format!("{}.{column}", edges.table))
+        .collect();
+    columns.join(" and ")
 }
 
 fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String {

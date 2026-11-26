@@ -1423,6 +1423,39 @@ fn a_walk_over_pairs_keyed_by_two_columns_translates() {
     }
 }
 
+/// A walk over pairs reaches only pairs its seed returns, so a seed keeping a kind the
+/// `CHECK` refuses returns no pair and the policy comparing a row with them denies.
+#[test]
+fn a_walk_over_pairs_from_a_seed_returning_nothing_denies() {
+    let seed = "WHERE grantee.id = (SELECT authz.caller_id()) AND grantee.kind = 'user'
+    UNION
+    SELECT member.team_namespace_id, member.team_id FROM public.team_members member
+    WHERE member.user_id = (SELECT authz.caller_id())
+    UNION";
+    assert!(PAIR_WALK.contains(seed), "the seed to replace is written");
+    let schema = PAIR_WALK
+        .replace(
+            "kind TEXT NOT NULL,",
+            "kind TEXT NOT NULL CHECK (kind IN ('user', 'team')),",
+        )
+        .replace(
+            seed,
+            "WHERE grantee.id = (SELECT authz.caller_id()) AND grantee.kind = 'robot'
+    UNION",
+        );
+    let model = pair_walk_translator()
+        .translate(&db_of(&schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    assert_eq!(
+        relation_definition(&model, "grantees", "can_select").as_deref(),
+        Some("no_access and acting_app_user from request_gate"),
+        "{model}"
+    );
+}
+
 /// The reasons of every refused part of `pattern`.
 fn refusal_reasons(pattern: &PatternClass) -> Vec<String> {
     match pattern {
