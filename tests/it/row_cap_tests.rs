@@ -2,7 +2,7 @@
 
 use rls2fga::classifier::patterns::{PatternClass, UnclassifiedExpr};
 use rls2fga::translator::{Translator, TranslatorBuilder};
-use rls2fga::types::ConfidenceLevel;
+use rls2fga::types::{ConfidenceLevel, TranslationNote};
 use sqlparser::ast::DataType;
 
 use crate::support::deployment::{deployment, principal, typed_caller};
@@ -654,8 +654,8 @@ ALTER FUNCTION authz.installation_resources() OWNER TO authz_owner;
             ),
             "resources_select",
             "declared helper 'authz.owned_resources' is capped by \
-             'authz.installation_resources', which returns pairs through a parent, a walk or \
-             another helper's rows",
+             'authz.installation_resources', which returns pairs through a parent or another \
+             helper's rows",
         ),
         (
             INSTALLATION_CAPS.replace(
@@ -1255,6 +1255,170 @@ fn arms_kept_while_a_setting_is_unset_are_refused_where_the_model_cannot_gate_th
                 "expected {reason}, got {refused}"
             ),
             other => panic!("{policy} should be refused with {reason}, got {other:?}"),
+        }
+    }
+}
+
+pub(crate) const PAIR_WALK: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE grantees (
+  namespace_id UUID NOT NULL, id UUID NOT NULL, kind TEXT NOT NULL,
+  PRIMARY KEY (namespace_id, id)
+);
+CREATE TABLE teams (
+  namespace_id UUID NOT NULL, id UUID NOT NULL, PRIMARY KEY (namespace_id, id),
+  FOREIGN KEY (namespace_id, id) REFERENCES grantees (namespace_id, id)
+);
+CREATE TABLE team_members (
+  team_namespace_id UUID NOT NULL, team_id UUID NOT NULL,
+  user_namespace_id UUID NOT NULL, user_id UUID NOT NULL,
+  PRIMARY KEY (team_namespace_id, team_id, user_namespace_id, user_id),
+  FOREIGN KEY (team_namespace_id, team_id) REFERENCES teams (namespace_id, id),
+  FOREIGN KEY (user_namespace_id, user_id) REFERENCES grantees (namespace_id, id)
+);
+CREATE TABLE team_parents (
+  child_namespace_id UUID NOT NULL, child_id UUID NOT NULL,
+  parent_namespace_id UUID NOT NULL, parent_id UUID NOT NULL,
+  expires_at TIMESTAMPTZ,
+  PRIMARY KEY (child_namespace_id, child_id),
+  FOREIGN KEY (child_namespace_id, child_id) REFERENCES teams (namespace_id, id),
+  FOREIGN KEY (parent_namespace_id, parent_id) REFERENCES teams (namespace_id, id)
+);
+CREATE TABLE resources (id UUID PRIMARY KEY);
+CREATE TABLE team_notes (id UUID PRIMARY KEY, team_id UUID NOT NULL);
+CREATE TABLE grants (
+  resource_id UUID NOT NULL REFERENCES resources (id),
+  grantee_namespace_id UUID NOT NULL, grantee_id UUID NOT NULL,
+  PRIMARY KEY (resource_id, grantee_namespace_id, grantee_id),
+  FOREIGN KEY (grantee_namespace_id, grantee_id) REFERENCES grantees (namespace_id, id)
+);
+GRANT SELECT ON grantees, teams, team_members, team_parents, grants TO authz_owner;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.caller_grantees() RETURNS TABLE (namespace_id UUID, id UUID)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  WITH RECURSIVE reached (namespace_id, id) AS (
+    SELECT grantee.namespace_id, grantee.id FROM public.grantees grantee
+    WHERE grantee.id = (SELECT authz.caller_id()) AND grantee.kind = 'user'
+    UNION
+    SELECT member.team_namespace_id, member.team_id FROM public.team_members member
+    WHERE member.user_id = (SELECT authz.caller_id())
+    UNION
+    SELECT parent.parent_namespace_id, parent.parent_id FROM public.team_parents parent
+    JOIN reached ON (parent.child_namespace_id, parent.child_id) = (reached.namespace_id, reached.id)
+  )
+  SELECT reached.namespace_id, reached.id FROM reached
+$$;
+CREATE FUNCTION authz.granted_resources() RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+  SELECT permission.resource_id FROM public.grants permission
+  WHERE (permission.grantee_namespace_id, permission.grantee_id)
+    IN (SELECT * FROM authz.caller_grantees())
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.caller_grantees() OWNER TO authz_owner;
+ALTER FUNCTION authz.granted_resources() OWNER TO authz_owner;
+ALTER TABLE grantees ENABLE ROW LEVEL SECURITY;
+CREATE POLICY grantees_select ON grantees FOR SELECT
+  USING ((namespace_id, id) IN (SELECT * FROM authz.caller_grantees()));
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+CREATE POLICY resources_select ON resources FOR SELECT
+  USING (id IN (SELECT authz.granted_resources()));
+ALTER TABLE team_notes ENABLE ROW LEVEL SECURITY;
+CREATE POLICY team_notes_select ON team_notes FOR SELECT
+  USING (('0a000000-0000-4000-8000-000000000001'::uuid, team_id)
+    IN (SELECT * FROM authz.caller_grantees()));
+";
+
+pub(crate) const PAIR_WALK_HELPERS: &[&str] = &["authz.caller_grantees", "authz.granted_resources"];
+
+const PAIR_WALK_UP: &str = "SELECT parent.parent_namespace_id, parent.parent_id \
+     FROM public.team_parents parent
+    JOIN reached ON (parent.child_namespace_id, parent.child_id) = (reached.namespace_id, reached.id)";
+
+/// [`PAIR_WALK`] with the recursive term walking up replaced by `term`.
+pub(crate) fn pair_walk(term: &str) -> String {
+    assert!(
+        PAIR_WALK.contains(PAIR_WALK_UP),
+        "the term to replace is written"
+    );
+    PAIR_WALK.replace(PAIR_WALK_UP, term)
+}
+
+/// The caller, which [`PAIR_WALK`] reads through `authz.caller_id()`.
+fn pair_walk_translator() -> Translator {
+    TranslatorBuilder::new(deployment([typed_caller("app.user_id", DataType::Uuid)]))
+        .with_min_confidence(ConfidenceLevel::B)
+        .with_declared_helpers(PAIR_WALK_HELPERS.iter().copied())
+        .build()
+}
+
+/// A helper walking teams by their namespace and id, up or down, compared as rows or column
+/// by column, and following only the edges still live, is read by the policies comparing a
+/// row, or a literal beside a column, with its pairs and by the cap a grant arm compares
+/// with them.
+#[test]
+fn a_walk_over_pairs_keyed_by_two_columns_translates() {
+    let down = "SELECT parent.child_namespace_id, parent.child_id FROM public.team_parents parent
+    JOIN reached ON (parent.parent_namespace_id, parent.parent_id) = (reached.namespace_id, reached.id)";
+    let columnwise = "SELECT parent.parent_namespace_id, parent.parent_id \
+     FROM public.team_parents parent
+    JOIN reached ON parent.child_namespace_id = reached.namespace_id \
+     AND parent.child_id = reached.id";
+    let live = "SELECT parent.parent_namespace_id, parent.parent_id FROM public.team_parents parent
+    JOIN reached ON (parent.child_namespace_id, parent.child_id) = (reached.namespace_id, reached.id)
+    WHERE parent.expires_at IS NULL OR parent.expires_at > now()";
+    for schema in [
+        PAIR_WALK.to_string(),
+        pair_walk(down),
+        pair_walk(columnwise),
+        pair_walk(live),
+    ] {
+        let outputs = pair_walk_translator()
+            .translate(&db_of(&schema))
+            .expect("the schema plans")
+            .outputs()
+            .expect("the schema translates");
+        let report = outputs.report();
+        assert!(
+            report.contains("P30 ((namespace_id, id) in authz.caller_grantees())"),
+            "{report}"
+        );
+        let walks: Vec<Vec<String>> = outputs
+            .notes()
+            .iter()
+            .filter_map(|note| match note {
+                TranslationNote::HelperWalkDepth {
+                    function, columns, ..
+                } if function == "authz.caller_grantees" => {
+                    Some(columns.iter().map(ToString::to_string).collect())
+                }
+                _ => None,
+            })
+            .collect();
+        assert!(!walks.is_empty(), "{schema}");
+        for columns in walks {
+            assert_eq!(columns.len(), 2, "{columns:?}");
+        }
+        for policy in ["grantees_select", "resources_select", "team_notes_select"] {
+            let using = pair_walk_translator()
+                .classify(&db_of(&schema))
+                .into_iter()
+                .find(|classified| classified.name() == policy)
+                .unwrap_or_else(|| panic!("{policy} should classify"))
+                .using_classification()
+                .unwrap_or_else(|| panic!("{policy} USING should classify"))
+                .clone();
+            assert_eq!(
+                using.confidence,
+                ConfidenceLevel::A,
+                "{policy}: {:?}",
+                using.pattern
+            );
         }
     }
 }

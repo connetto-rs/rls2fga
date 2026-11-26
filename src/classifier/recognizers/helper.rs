@@ -314,13 +314,13 @@ pub(crate) enum HelperRefusal {
         /// The helper returning the pairs.
         cap: String,
     },
-    /// A cap returns some of its pairs through a parent, a walk or another helper's rows,
-    /// which no row keys.
+    /// A cap returns some of its pairs through a parent or another helper's rows, which no
+    /// row keys.
     #[error(
-        "{capped} is capped by '{cap}', which returns pairs through a parent, a walk or \
-         another helper's rows, while a pair is read from the row returning it"
+        "{capped} is capped by '{cap}', which returns pairs through a parent or another \
+         helper's rows, while a pair is read from the row returning it"
     )]
-    CapByParentOrWalk {
+    CapByParentOrCalled {
         /// What the cap keeps rows of.
         capped: Capped,
         /// The helper returning the pairs.
@@ -1988,14 +1988,15 @@ fn helper_parent<DB: DatabaseLike>(
             called: called.target_name().to_string(),
         });
     }
-    let edges = helper_edges::<DB>(parent.table(), parent.key(), parent.column());
+    let edges = helper_edges::<DB>(parent.table(), &[parent.key()], &[parent.column()]);
+    let compared = ColumnName::from_stored(parent.column().stored_column_name());
     // Without a foreign key the parent is the table the called set covers.
     let referenced = rows_named_by(parent.table(), parent.column(), db)?
         .unwrap_or_else(|| table_identity(parent.parent_table()));
     let call = helper_call(
         (called, parent.arguments(), parent.set()),
         &Selection::default(),
-        &edges.parent_column,
+        &compared,
         &referenced,
         db,
         registry,
@@ -2004,16 +2005,22 @@ fn helper_parent<DB: DatabaseLike>(
 }
 
 /// The edges the rows of `table` draw, each from the row `child` names to the one
-/// `parent` names.
+/// `parent` names, the two pairing up by position.
 fn helper_edges<DB: DatabaseLike>(
     table: &DB::Table,
-    child: &DB::Column,
-    parent: &DB::Column,
+    child: &[&DB::Column],
+    parent: &[&DB::Column],
 ) -> TreeEdges {
+    let named = |columns: &[&DB::Column]| {
+        columns
+            .iter()
+            .map(|column| ColumnName::from_stored(column.stored_column_name()))
+            .collect()
+    };
     TreeEdges {
         table: table_identity(table),
-        child_column: ColumnName::from_stored(child.stored_column_name()),
-        parent_column: ColumnName::from_stored(parent.stored_column_name()),
+        child_columns: named(child),
+        parent_columns: named(parent),
     }
 }
 
@@ -2029,7 +2036,7 @@ fn helper_walk<DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperWalk, HelperRefusal> {
-    let edges = helper_edges::<DB>(walk.table(), walk.child(), walk.column());
+    let edges = helper_edges::<DB>(walk.table(), walk.child(), walk.parent());
     let held = if walk.time_bounds().is_empty() && walk.exclusions().is_empty() {
         None
     } else {
@@ -3042,7 +3049,8 @@ fn helper_cap<DB: DatabaseLike>(
 }
 
 /// The pairs `called` returns for `arguments`, each read from the arm of `set` returning
-/// it, beside those arms for the checks pairing operands with their columns.
+/// it or from the edge row a walk adds it through, beside the grant arms for the checks
+/// pairing operands with their columns.
 fn helper_pairs<'set, 'db, DB: DatabaseLike>(
     capped: &Capped,
     called: &DB::Function,
@@ -3054,12 +3062,20 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
     let name = registry.resolved_target_name(&called.target_name());
     let mut arms = Vec::with_capacity(set.arms().len());
     let mut rows = Vec::with_capacity(set.arms().len());
+    let mut walked = Vec::new();
     for arm in set.arms() {
-        let HelperArm::Grant(grant) = arm else {
-            return Err(HelperRefusal::CapByParentOrWalk {
-                capped: capped.clone(),
-                cap: name,
-            });
+        let grant = match arm {
+            HelperArm::Grant(grant) => grant,
+            HelperArm::Walk(walk) => {
+                walked.push(walk);
+                continue;
+            }
+            HelperArm::Parent(_) | HelperArm::Called(_) => {
+                return Err(HelperRefusal::CapByParentOrCalled {
+                    capped: capped.clone(),
+                    cap: name,
+                });
+            }
         };
         if let Some(unset) = grant.unset_settings().first() {
             return Err(HelperRefusal::CapKeptWhileUnset {
@@ -3094,11 +3110,26 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
         arms.push(paired_arm);
         rows.push(grant);
     }
+    let paired = CapArms {
+        capped,
+        cap: &name,
+        pairs: &rows,
+    };
+    let mut walks = Vec::with_capacity(walked.len());
+    for walk in walked {
+        // An edge names a pair by the spelling of its values, as the arms' rows do.
+        for (position, (child, parent)) in walk.child().iter().zip(walk.parent()).enumerate() {
+            paired.pairs_alike(walk.table(), child, position, db)?;
+            paired.pairs_alike(walk.table(), parent, position, db)?;
+        }
+        walks.push(helper_walk(&name, walk, db, registry)?);
+    }
     Ok((
         HelperPairs {
             function: name,
             arguments: arguments.iter().map(ToString::to_string).collect(),
             arms,
+            walks,
         },
         rows,
     ))
