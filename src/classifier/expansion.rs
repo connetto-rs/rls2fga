@@ -591,13 +591,22 @@ fn call_body<DB: DatabaseLike>(
     Some(body)
 }
 
-/// Whether `body` is a scalar subquery selecting from a relation.
+/// Whether `body` is a scalar subquery selecting from tables, each named without arguments,
+/// so none of them is a function a call reads.
 fn selects_table_rows(body: &Expr) -> bool {
-    matches!(
-        body,
-        Expr::Subquery(query)
-            if matches!(query.body.as_ref(), SetExpr::Select(select) if !select.from.is_empty())
-    )
+    let Expr::Subquery(query) = body else {
+        return false;
+    };
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return false;
+    };
+    let names_a_table =
+        |relation: &TableFactor| matches!(relation, TableFactor::Table { args: None, .. });
+    !select.from.is_empty()
+        && select.from.iter().all(|from| {
+            names_a_table(&from.relation)
+                && from.joins.iter().all(|join| names_a_table(&join.relation))
+        })
 }
 
 /// The call `expr` makes, bare or as all a scalar subquery projects.
