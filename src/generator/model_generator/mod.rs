@@ -738,6 +738,8 @@ pub(crate) struct SchemaPlan {
     /// Per table a write judges, how a check names the written row and which facts it
     /// carries.
     pub resulting_rows: Vec<crate::types::ResultingRow>,
+    /// Each view running with its owner's rights the model answers, ordered by view.
+    pub view_paths: Vec<crate::types::ViewPath>,
 }
 
 /// Why a translation cannot be planned.
@@ -1014,7 +1016,7 @@ pub(crate) fn build_filtered_schema_plan<DB: DatabaseLike>(
     let filtered = filter_policies_for_output(policies, min_confidence);
     let (paths, refusals) = match registry.deployment() {
         Some(deployment) => {
-            let (paths, refusals) = view_paths::discover(db, deployment);
+            let (paths, refusals) = view_paths::discover(db, deployment)?;
             let paths = paths
                 .into_iter()
                 .map(|path| {
@@ -1520,13 +1522,15 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         );
     }
 
+    let mut view_paths = Vec::new();
     for planned in paths {
-        let (Some(path_type), Some(table_type)) = (
-            table_types.get(&planned.path.view).cloned(),
-            table_types.get(&planned.path.table).cloned(),
-        ) else {
-            continue;
-        };
+        let path_type = table_types.resolve(&planned.path.view);
+        let table_type = table_types.resolve(&planned.path.table);
+        view_paths.push(crate::types::ViewPath {
+            view: planned.path.view.clone(),
+            table: planned.path.table.clone(),
+            type_name: path_type.clone(),
+        });
         let mut build = PathBuild {
             notes: &mut notes,
             confidence_summary: &mut confidence_summary,
@@ -1638,6 +1642,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
             }),
     );
 
+    view_paths.sort_by(|left, right| left.view.cmp(&right.view));
     acting_privileges.sort_by(|left, right| {
         left.type_name
             .as_str()
@@ -1655,6 +1660,7 @@ pub(crate) fn build_plan_typing<DB: DatabaseLike>(
         action_relations: answers.entries,
         acting_privileges,
         resulting_rows,
+        view_paths,
     };
     crate::generator::model_bounds::check(&crate::generator::json_model::json_model_from_plan(
         &plan,
@@ -2540,16 +2546,13 @@ impl TableTypes {
 
     /// Give `identity` its canonical type name, or that name suffixed with a hash of the
     /// qualified spelling where another relation already holds it, noting the rename when
-    /// `reported`. A relation already named keeps its name.
+    /// `reported`.
     fn claim(
         &mut self,
         identity: &TableId,
         reported: bool,
         notes: &mut Vec<TranslationNote>,
     ) -> Result<(), PlanningError> {
-        if self.by_identity.contains_key(identity) {
-            return Ok(());
-        }
         let spelling = identity.to_string();
         let base = canonical_fga_type_name(&spelling);
         self.refuse_held(&spelling, &base)?;

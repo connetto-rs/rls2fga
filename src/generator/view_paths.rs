@@ -30,6 +30,7 @@ use crate::parser::sql_parser::{
     RuleLike, TableLike, TablePrivileges, TriggerLike, ViewLike, WrittenRelation,
 };
 use crate::types::{ColumnName, ConfidenceLevel, Holding, PolicyCommand, TableId, TranslationNote};
+use sql_traits::errors::DeploymentError;
 use sql_traits::structs::PolicyTarget;
 
 /// Why the model cannot follow what a view running with its owner's rights grants.
@@ -90,7 +91,7 @@ impl PathHolding {
 /// One view running with its owner's rights through which an acting role reaches the rows
 /// of one table.
 #[derive(Debug, Clone)]
-pub(crate) struct ViewPath {
+pub(crate) struct OwnerRightsView {
     /// The view, as the catalog names it.
     pub(crate) view: TableId,
     /// The table its statements land on.
@@ -104,7 +105,7 @@ pub(crate) struct ViewPath {
     pub(crate) holdings: BTreeMap<String, PathHolding>,
 }
 
-impl ViewPath {
+impl OwnerRightsView {
     /// The name the view's condition goes by where a note or a report names it.
     pub(crate) fn rule_name(&self) -> String {
         format!("view {}", self.view)
@@ -168,13 +169,15 @@ impl ViewPath {
 ///
 /// A view running with its reader's rights applies the table's policies and privileges to
 /// the reader, so it reaches nothing the table does not grant already.
+///
+/// # Errors
+///
+/// Returns the [`DeploymentError`] of a deployment naming a role the schema lacks.
 pub(crate) fn discover<DB: DatabaseLike>(
     db: &DB,
     deployment: &Deployment,
-) -> (Vec<ViewPath>, Vec<TranslationNote>) {
-    let Ok(resolved) = deployment.resolve(db) else {
-        return (Vec::new(), Vec::new());
-    };
+) -> Result<(Vec<OwnerRightsView>, Vec<TranslationNote>), DeploymentError> {
+    let resolved = deployment.resolve(db)?;
     let acting: Vec<(&str, &DB::Role)> = deployment
         .acting_roles()
         .zip(resolved.acting_roles())
@@ -222,7 +225,7 @@ pub(crate) fn discover<DB: DatabaseLike>(
             }
         }
     }
-    (paths, notes)
+    Ok((paths, notes))
 }
 
 /// `view` as the catalog names it.
@@ -250,7 +253,7 @@ fn view_path<'db, DB: DatabaseLike>(
     identity: &TableId,
     privileges: &[(&str, TablePrivileges<usize>)],
     db: &'db DB,
-) -> Result<Option<ViewPath>, PathRefusal> {
+) -> Result<Option<OwnerRightsView>, PathRefusal> {
     let lookup = |error: sql_traits::errors::LookupError| PathRefusal::Lookup(error.to_string());
     let Some(base) = view.updatable_base(db).map_err(lookup)? else {
         return Err(PathRefusal::NotUpdatable);
@@ -360,7 +363,7 @@ fn view_path<'db, DB: DatabaseLike>(
         });
         rewritten
     });
-    Ok(Some(ViewPath {
+    Ok(Some(OwnerRightsView {
         view: identity.clone(),
         table: table_id,
         condition,

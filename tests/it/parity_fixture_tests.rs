@@ -3,7 +3,7 @@
 use std::fmt::Write as _;
 
 use rls2fga::parity::{replay, Database, ParityError, Probe, Replay};
-use sql_traits::parity::{fixtures, Answer, Case, Engine};
+use sql_traits::parity::{fixtures, Answer, Case, Engine, Shape};
 
 use crate::support::containers::{connect_postgres_with_retry, PG_DB};
 use crate::support::parity::Cluster;
@@ -266,4 +266,96 @@ async fn a_case_its_database_contradicts_is_not_replayed() {
     anonymous.config.callers[0].settings.remove("app.user_id");
     let answered = replayed(&cluster, &anonymous, vec![probe("alice", "docs:1", id)]).await;
     assert!(error_text(&answered.answers[0].answer).contains("does not set app.user_id"));
+}
+
+/// Resources moved through a view running with its owner's rights. The table's own
+/// `UPDATE` path skips the first row and lacks `UPDATE (parent_id)` for the second, so
+/// the view decides every move, and its check option refuses a move to `0`.
+const VIEW_MOVES_SCHEMA: &str = "
+CREATE ROLE app_user NOLOGIN;
+CREATE ROLE authz_writer NOLOGIN BYPASSRLS;
+CREATE TABLE resources (
+  id INTEGER PRIMARY KEY,
+  parent_id INTEGER NOT NULL,
+  archived BOOLEAN NOT NULL DEFAULT FALSE
+);
+ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
+GRANT SELECT, UPDATE (archived) ON resources TO app_user;
+GRANT SELECT, UPDATE (parent_id) ON resources TO authz_writer;
+CREATE POLICY resources_select ON resources FOR SELECT TO app_user USING (parent_id > 0);
+CREATE POLICY resources_update ON resources FOR UPDATE TO app_user
+  USING (parent_id > 1) WITH CHECK (TRUE);
+CREATE VIEW resource_moves WITH (check_option = cascaded) AS
+  SELECT id, parent_id FROM resources WHERE parent_id > 0;
+ALTER VIEW resource_moves OWNER TO authz_writer;
+GRANT SELECT, UPDATE (parent_id) ON resource_moves TO app_user;
+";
+
+const VIEW_MOVES_CALLERS: &str = r#"
+[[tables]]
+name = "resource_moves"
+key = ["id"]
+columns = ["id", "parent_id"]
+
+[[callers]]
+name = "app"
+role = "app_user"
+settings = { "app.user_id" = "app", "app.subjects" = "" }
+
+[[writes]]
+table = "resource_moves"
+shape = "update"
+set = { parent_id = 2 }
+
+[[writes]]
+table = "resource_moves"
+shape = "update"
+set = { parent_id = 0 }
+"#;
+
+/// A statement naming the view is answered by its table's answer under the privileges
+/// held on the view, and the row a move produces is judged even where the check option
+/// refuses it, as `PostgreSQL` answers each statement through the view.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_statement_through_an_owner_rights_view_is_answered_by_its_table() {
+    let cluster = cluster().await;
+    let case = Case::parse(
+        "view_moves",
+        VIEW_MOVES_SCHEMA,
+        "INSERT INTO resources (id, parent_id) VALUES (1, 1), (2, 2);",
+        VIEW_MOVES_CALLERS,
+    )
+    .expect("the case parses");
+    let table = &case.config.tables[0];
+    let read = table.statement(Shape::Select);
+    let mut probes = Vec::new();
+    let mut expected = Vec::new();
+    for (id, parent_id) in [(1, 1), (2, 2)] {
+        let row = format!("resource_moves:{id}");
+        let stored = serde_json::json!({ "id": id, "parent_id": parent_id });
+        probes.push(probe("app", &row, &read));
+        expected.push(Answer::Visible);
+        for (write, answer) in case
+            .config
+            .writes
+            .iter()
+            .zip([Answer::Changed, Answer::Denied])
+        {
+            probes.push(probe(
+                "app",
+                &row,
+                &table.write_statement(write, Some(&stored)),
+            ));
+            expected.push(answer);
+        }
+    }
+    let replayed = replayed(&cluster, &case, probes).await;
+    assert_eq!(replayed.refusal, None);
+    let answers: Vec<Answer> = replayed
+        .answers
+        .into_iter()
+        .map(|answer| answer.answer)
+        .collect();
+    assert_eq!(answers, expected);
 }

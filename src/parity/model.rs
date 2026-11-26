@@ -28,7 +28,7 @@ use crate::json_row::JsonRow;
 use crate::translator::Outputs;
 use crate::types::{
     records_from_row, ActionAnswer, ActionStatement, ColumnCommand, ColumnName,
-    ConditionParameterName, Record, RowNaming, RowVersion,
+    ConditionParameterName, Record, RowNaming, RowVersion, TypeName,
 };
 
 const MAX_TUPLES_PER_WRITE: usize = 100;
@@ -71,6 +71,14 @@ pub(super) struct Model {
     caller_setting: Option<String>,
     /// Every delimited set setting the deployment declares, sent split in each check.
     sets: Vec<SetParameter>,
+}
+
+/// The rows a statement naming one relation reaches, and where its privileges are checked.
+struct Reach<'a> {
+    /// How the translation names the rows, whose type's answers decide the statement.
+    naming: &'a RowNaming,
+    /// The type whose acting privileges `PostgreSQL` checks for the statement.
+    privileges: &'a TypeName,
 }
 
 impl Model {
@@ -149,25 +157,45 @@ impl Model {
         action: ActionStatement,
         columns: &BTreeMap<ColumnCommand, Vec<ColumnName>>,
     ) -> Result<bool, ProbeError> {
-        let naming = self.naming(table)?;
+        let reach = self.reach(table)?;
         let privileges = self
             .outputs
             .translation()
             .acting_privileges()
             .iter()
-            .find(|held| held.type_name == naming.type_name && held.role == caller.role)
+            .find(|held| &held.type_name == reach.privileges && held.role == caller.role)
             .ok_or_else(|| ProbeError::NoPrivileges(caller.role.clone()))?;
         Ok(privileges.permits(action, columns))
     }
 
-    /// How the translation names the rows of `table`.
-    fn naming(&self, table: &str) -> Result<&RowNaming, ProbeError> {
-        self.outputs
-            .translation()
-            .row_naming()
+    /// The rows a statement naming `table` reaches, and where `PostgreSQL` checks its
+    /// privileges.
+    ///
+    /// A view running with its owner's rights reaches the rows of the table it writes,
+    /// answered by that table's answers, while its privileges are checked on the view.
+    fn reach(&self, table: &str) -> Result<Reach<'_>, ProbeError> {
+        let translation = self.outputs.translation();
+        let namings = translation.row_naming();
+        if let Some(naming) = namings.iter().find(|naming| naming.table.name() == table) {
+            return Ok(Reach {
+                naming,
+                privileges: &naming.type_name,
+            });
+        }
+        let unnamed = || ProbeError::NoRowNaming(table.to_owned());
+        let path = translation
+            .view_paths()
             .iter()
-            .find(|naming| naming.table.name() == table)
-            .ok_or_else(|| ProbeError::NoRowNaming(table.to_owned()))
+            .find(|path| path.view.name() == table)
+            .ok_or_else(unnamed)?;
+        let naming = namings
+            .iter()
+            .find(|naming| naming.table == path.table)
+            .ok_or_else(unnamed)?;
+        Ok(Reach {
+            naming,
+            privileges: &path.type_name,
+        })
     }
 
     /// Ask the emitted answer for `action` on `table` about the rows and columns `probe` names.
@@ -181,7 +209,7 @@ impl Model {
         action: ActionStatement,
         probe: &RowProbe<'_>,
     ) -> Result<Verdict, ProbeError> {
-        let naming = self.naming(table)?;
+        let naming = self.reach(table)?.naming;
         let entry = self
             .outputs
             .translation()

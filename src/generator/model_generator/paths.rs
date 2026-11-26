@@ -8,13 +8,13 @@
 use super::branches::{Asked, ASKED};
 use super::*;
 
-use crate::generator::view_paths::{PathHolding, ViewPath};
+use crate::generator::view_paths::{OwnerRightsView, PathHolding};
 use crate::types::{ActingPrivileges, ActionAnswer, ActionRelations, Holding};
 
 /// One view path and the policies its condition acts as, per acting role.
 pub(crate) struct PlannedPath {
     /// The view and what it grants.
-    pub(crate) path: ViewPath,
+    pub(crate) path: OwnerRightsView,
     /// Its condition as permissive policies, kept where they meet the threshold.
     pub(crate) policies: Vec<ClassifiedPolicy>,
 }
@@ -52,25 +52,13 @@ impl<DB: DatabaseLike> PathBuild<'_, DB> {
         let path = &planned.path;
         let notes_before = self.notes.len();
         plan.names_rows_of(&path.table);
-        for cp in &planned.policies {
-            for (reason, targets) in unreadable_clause_targets(cp) {
-                let note = TranslationNote::ExpressionRefused {
-                    policy: cp.name().to_string(),
-                    reason: reason.to_string(),
-                };
-                if !self.notes.contains(&note) {
-                    self.notes.push(note);
-                }
-                mark_narrowed(plan, &targets);
-            }
-        }
         let mut per_target: BTreeMap<ActionTarget, Vec<UsersetExpr>> = BTreeMap::new();
         let mut held = Vec::new();
         for branch in branches.iter_mut() {
-            let Some((role, _)) = branch.role else {
-                continue;
-            };
-            let Some(holding) = path.holdings.get(role) else {
+            let Some((role, holding)) = branch
+                .role
+                .and_then(|(role, _)| Some((role, path.holdings.get(role)?)))
+            else {
                 continue;
             };
             held.push(ActingPrivileges {
@@ -160,18 +148,18 @@ pub(super) fn fold_path_answers(
     entries: &mut Vec<ActionRelations>,
     types: &BTreeMap<TypeName, TypePlan>,
 ) {
-    let path_of = |entry: &ActionRelations| {
-        types
+    let mut own = Vec::new();
+    let mut paths = Vec::new();
+    for entry in entries.drain(..) {
+        match types
             .get(&entry.type_name)
             .and_then(|plan| plan.path_of.clone())
-    };
-    let (paths, mut own): (Vec<ActionRelations>, Vec<ActionRelations>) = entries
-        .drain(..)
-        .partition(|entry| path_of(entry).is_some());
-    for path in paths {
-        let Some(table) = path_of(&path) else {
-            continue;
-        };
+        {
+            Some(table) => paths.push((table, entry)),
+            None => own.push(entry),
+        }
+    }
+    for (table, path) in paths {
         match own
             .iter_mut()
             .find(|entry| entry.type_name == table && entry.statement == path.statement)

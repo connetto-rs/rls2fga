@@ -27,7 +27,7 @@ use crate::output::report::build_report;
 use crate::parser::sql_parser::{DatabaseLike, Deployment};
 use crate::types::{
     ActingPrivileges, ActionRelations, NoteSeverity, Record, RelationShapes, RequestPrincipal,
-    RowNaming, TranslationNote,
+    RowNaming, TranslationNote, ViewPath,
 };
 use crate::types::{ConditionParameterName, ConditionParameterNameError, PolicyReads};
 use sql_values::postgres::{PgTimeZone, PgTimestampTz};
@@ -347,6 +347,18 @@ impl Translation {
     #[must_use]
     pub fn acting_privileges(&self) -> &[ActingPrivileges] {
         &self.plan.acting_privileges
+    }
+
+    /// Each view running with its owner's rights through which a statement reaches a
+    /// table's rows, ordered by view.
+    ///
+    /// A statement naming the view is answered by the table's
+    /// [`Translation::action_relations`] entry and asked about the table's rows under its
+    /// [`Translation::row_naming`], while `PostgreSQL` checks its privileges on the view,
+    /// which [`Translation::acting_privileges`] list under [`ViewPath::type_name`].
+    #[must_use]
+    pub fn view_paths(&self) -> &[ViewPath] {
+        &self.plan.view_paths
     }
 
     /// The principals other than the caller a request may act for, each with the object

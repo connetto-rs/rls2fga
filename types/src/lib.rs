@@ -41,6 +41,7 @@ mod records;
 mod relations;
 mod resulting;
 mod row_naming;
+mod view_path;
 
 pub use action_relations::{
     ActingPrivileges, ActionAnswer, ActionJudgement, ActionRelations, ActionStatement,
@@ -69,6 +70,7 @@ pub use relations::{
 };
 pub use resulting::ResultingRow;
 pub use row_naming::RowNaming;
+pub use view_path::ViewPath;
 
 pub(crate) mod prelude {
     pub(crate) use alloc::{

@@ -14,12 +14,17 @@
 //! A row whose stored row fails a judgement is denied alone, as a `USING` clause skips it.
 //! A row whose stored row passes while the row it would produce, or a column relation,
 //! fails aborts the whole statement, so every row of that statement is denied.
+//!
+//! A statement naming a view running with its owner's rights is answered by the table the
+//! view writes, as [`Translation::view_paths`](crate::translator::Translation::view_paths)
+//! routes it, and the owner's run producing its row writes that table, where the view's
+//! check option cannot refuse the row the model judges.
 
 mod database;
 mod model;
 
 use alloc::{
-    borrow::ToOwned,
+    borrow::{Cow, ToOwned},
     boxed::Box,
     collections::{btree_map::Entry, BTreeMap},
     format,
@@ -44,7 +49,9 @@ use crate::generator::model_generator::PlanningError;
 use crate::generator::tuple_generator::TupleRowError;
 use crate::parser::sql_parser::{parse_schema, SchemaError};
 use crate::translator::TranslatorBuilder;
-use crate::types::{ActionStatement, ColumnCommand, ColumnName, ConfidenceLevel, RecordError};
+use crate::types::{
+    ActionStatement, ColumnCommand, ColumnName, ConfidenceLevel, RecordError, ViewPath,
+};
 
 /// One row a caller's statement reaches, to be answered.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,7 +252,7 @@ pub async fn replay(
         }
         seeded.insert(table.name.as_str(), rows);
     }
-    let statements = statements(case, &seeded, database)?;
+    let statements = statements(case, &seeded, outputs.translation().view_paths(), database)?;
     let mut service = OpenFgaServiceClient::connect(openfga_url.to_owned()).await?;
     let model = Model::create(&mut service, &case.name, deployment, outputs, database).await?;
     let answers = answer(&model, case, &statements, probes).await;
@@ -300,6 +307,7 @@ struct TargetRow<'a> {
 fn statements<'a>(
     case: &'a Case,
     seeded: &'a BTreeMap<&str, Vec<Value>>,
+    view_paths: &[ViewPath],
     database: &mut Database,
 ) -> Result<BTreeMap<String, Statement<'a>>, ParityError> {
     let mut statements = BTreeMap::new();
@@ -337,7 +345,8 @@ fn statements<'a>(
         let rows = seeded
             .get(table.name.as_str())
             .map_or(&[][..], Vec::as_slice);
-        for (statement, reached) in targets(table, write, rows, database)? {
+        let written = written(table, view_paths);
+        for (statement, reached) in targets(table, &written, write, rows, database)? {
             statements.insert(
                 statement,
                 Statement {
@@ -353,10 +362,27 @@ fn statements<'a>(
     Ok(statements)
 }
 
+/// The relation the owner's run of a write on `table` writes, the table a view running
+/// with its owner's rights writes and `table` itself otherwise.
+fn written<'a>(table: &'a Table, view_paths: &[ViewPath]) -> Cow<'a, Table> {
+    match view_paths
+        .iter()
+        .find(|path| path.view.name() == table.name)
+    {
+        Some(path) => Cow::Owned(Table {
+            name: path.table.name().to_owned(),
+            ..table.clone()
+        }),
+        None => Cow::Borrowed(table),
+    }
+}
+
 /// Spell `write` on `table` per seeded row, or once for the table when it names no row,
-/// with the rows each spelling reaches.
+/// with the rows each spelling reaches and the row the owner's run of it on `written`
+/// produces.
 fn targets<'a>(
     table: &Table,
+    written: &Table,
     write: &Write,
     rows: &'a [Value],
     database: &mut Database,
@@ -369,7 +395,7 @@ fn targets<'a>(
                 Vec::from([TargetRow {
                     row: row_name(table, &key),
                     existing: None,
-                    resulting: database.resulting(&table.resulting_statement(write, None))?,
+                    resulting: database.resulting(&written.resulting_statement(write, None))?,
                 }]),
             )]))
         }
@@ -379,7 +405,8 @@ fn targets<'a>(
                 reached.push(TargetRow {
                     row: row_name(table, &row_key(table, row)?),
                     existing: Some(row),
-                    resulting: database.resulting(&table.resulting_statement(write, Some(row)))?,
+                    resulting: database
+                        .resulting(&written.resulting_statement(write, Some(row)))?,
                 });
             }
             Ok(Vec::from([(table.write_statement(write, None), reached)]))
@@ -390,7 +417,7 @@ fn targets<'a>(
                 let resulting = if write.shape == Shape::Delete {
                     None
                 } else {
-                    database.resulting(&table.resulting_statement(write, Some(row)))?
+                    database.resulting(&written.resulting_statement(write, Some(row)))?
                 };
                 Ok((
                     table.write_statement(write, Some(row)),
