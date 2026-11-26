@@ -13,12 +13,12 @@ use core::ops::ControlFlow;
 
 use sqlparser::ast::{
     Expr, Function, FunctionArg, FunctionArgExpr, FunctionArguments, FunctionCalledOnNull,
-    FunctionSecurity, FunctionSetValue, Ident, ObjectName, ObjectNamePart, Query, SetExpr,
-    TableFactor, Value, Visit, VisitMut, Visitor, VisitorMut,
+    FunctionSecurity, FunctionSetValue, Ident, ObjectName, ObjectNamePart, Query, TableFactor,
+    Value, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 use crate::classifier::function_registry::FunctionRegistry;
-use crate::classifier::recognizers::{sole_projection, unparenthesize};
+use crate::classifier::recognizers::{sole_projection, united_selects, unparenthesize};
 use crate::parser::function_analyzer::{
     body_reads_effective_user, body_returned_value, body_single_projection, returned_value_type,
 };
@@ -591,22 +591,23 @@ fn call_body<DB: DatabaseLike>(
     Some(body)
 }
 
-/// Whether `body` is a scalar subquery selecting from tables, each named without arguments,
-/// so none of them is a function a call reads.
+/// Whether `body` is a scalar subquery selecting from tables, or uniting such selects, each
+/// table named without arguments, so none of them is a function a call reads.
 fn selects_table_rows(body: &Expr) -> bool {
     let Expr::Subquery(query) = body else {
         return false;
     };
-    let SetExpr::Select(select) = query.body.as_ref() else {
-        return false;
-    };
     let names_a_table =
         |relation: &TableFactor| matches!(relation, TableFactor::Table { args: None, .. });
-    !select.from.is_empty()
-        && select.from.iter().all(|from| {
-            names_a_table(&from.relation)
-                && from.joins.iter().all(|join| names_a_table(&join.relation))
+    united_selects(&query.body).is_some_and(|selects| {
+        selects.iter().all(|select| {
+            !select.from.is_empty()
+                && select.from.iter().all(|from| {
+                    names_a_table(&from.relation)
+                        && from.joins.iter().all(|join| names_a_table(&join.relation))
+                })
         })
+    })
 }
 
 /// The call `expr` makes, bare or as all a scalar subquery projects.

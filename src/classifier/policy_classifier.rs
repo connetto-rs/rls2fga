@@ -369,6 +369,7 @@ fn guarded_columns(pattern: &PatternClass) -> &[ColumnName] {
         | PatternClass::P4ExistsMembership(ExistsMembership { .. })
         | PatternClass::P31ReferringRows(ReferringRows { .. })
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { .. })
+        | PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues { .. })
         | PatternClass::P1NumericThreshold(NumericThreshold { .. })
         | PatternClass::P2RoleNameInList(RoleNameInList { .. })
         | PatternClass::P7AbacAnd(AbacAnd { .. })
@@ -515,6 +516,20 @@ fn compared_key_refusal<DB: DatabaseLike>(
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { membership, .. }) => {
             membership_refusal(membership, guarded, db)
         }
+        PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues {
+            join_table,
+            pairs,
+            compared,
+            ..
+        }) => compared
+            .iter()
+            .find_map(|compared| check(join_table, &compared.value_column))
+            .or_else(|| {
+                pairs.iter().find_map(|pair| {
+                    check(join_table, &pair.join_column)
+                        .or_else(|| check(guarded, &pair.outer_column))
+                })
+            }),
         PatternClass::MembershipExclusion(MembershipExclusion { subtract, .. }) => {
             subtract.iter().find_map(|excluded| match excluded {
                 ExcludedSet::Membership(membership) => membership_refusal(membership, guarded, db),
@@ -1664,6 +1679,9 @@ fn pattern_short_name(pattern: &PatternClass) -> &'static str {
         PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { .. }) => {
             "membership row naming a value the caller's declared set holds"
         }
+        PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues { .. }) => {
+            "membership row holding values the request carries"
+        }
         PatternClass::P5ParentInheritance(ParentInheritance { .. }) => "parent-inheritance check",
         PatternClass::P31ReferringRows(ReferringRows { .. }) => "referring-rows check",
         PatternClass::P6BooleanFlag(BooleanFlag { .. }) => "boolean-flag check",
@@ -1778,6 +1796,7 @@ fn is_relationship_pattern_for_p7(pattern: &PatternClass) -> bool {
         | PatternClass::P10ConstantBool(ConstantBool { .. })
         | PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { .. })
         | PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { .. })
+        | PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues { .. })
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })
         | PatternClass::P17CallerScalarEqualsConstant(CallerScalarEqualsConstant { .. })

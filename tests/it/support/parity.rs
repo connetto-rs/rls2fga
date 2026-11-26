@@ -250,6 +250,8 @@ pub(crate) struct ParityCase {
     /// Settings the deployment declares beside the suite's callers, as a fixture's
     /// `deployment.json` holds them.
     pub(crate) settings: Vec<SessionSetting>,
+    /// Groups of declared settings every request sets or leaves unset together.
+    pub(crate) set_together: Vec<Vec<String>>,
     /// The access attributes the policies compare, confirmed as `(table, column)` pairs.
     ///
     /// A literal check on an unconfirmed column grades below `A`, so the case confirms the
@@ -317,6 +319,7 @@ impl ParityCase {
             settings: Vec::new(),
             attribute_columns: Vec::new(),
             not_read_directly: Vec::new(),
+            set_together: Vec::new(),
             loading_from_rows: false,
             future: None,
             session_time_zone: None,
@@ -390,6 +393,14 @@ impl ParityCase {
         settings: impl IntoIterator<Item = SessionSetting>,
     ) -> Self {
         self.settings = settings.into_iter().collect();
+        self
+    }
+
+    /// The same case, its deployment declaring that every request sets the settings
+    /// `names` or leaves them all unset.
+    pub(crate) fn with_settings_set_together(mut self, names: &[&str]) -> Self {
+        self.set_together
+            .push(names.iter().map(|name| (*name).to_string()).collect());
         self
     }
 
@@ -1899,9 +1910,16 @@ fn plan_case(
         None => rls2fga::parser::sql_parser::parse_schema(&source),
     }
     .expect("schema should parse");
-    let deployment = super::deployment::caller_deployment_acting_as(
-        &case.acting_roles(),
-        case.settings.iter().cloned(),
+    let deployment = case.set_together.iter().fold(
+        super::deployment::caller_deployment_acting_as(
+            &case.acting_roles(),
+            case.settings.iter().cloned(),
+        ),
+        |deployment, names| {
+            deployment
+                .with_settings_set_together(names)
+                .expect("the case declares every setting it sets together")
+        },
     );
     let (classified, db, registry) = super::classify_db_confirming(
         db,

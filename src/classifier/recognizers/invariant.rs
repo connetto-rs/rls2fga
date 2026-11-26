@@ -735,7 +735,7 @@ pub(super) fn query_row_changing_call(query: &Query) -> Option<String> {
 /// function returns its own rows for each row, none included. Only a windowed call or a
 /// builtin [`ROW_PURE_FUNCTIONS`] member is proven to keep one row per row, so every
 /// other call counts, the aggregates `CREATE AGGREGATE` declares included.
-fn row_changing_call(node: &impl Visit) -> Option<String> {
+pub(super) fn row_changing_call(node: &impl Visit) -> Option<String> {
     struct RowChangingCall(Option<String>);
 
     impl Visitor for RowChangingCall {

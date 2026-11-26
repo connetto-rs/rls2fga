@@ -92,9 +92,9 @@ use branches::{
 use dsl::render_dsl;
 use emit_membership::{
     emit_abac_and, emit_composite, emit_declared_helper, emit_exists_membership, emit_flagged_row,
-    emit_indirect_membership, emit_membership_exclusion, emit_parent_inheritance,
-    emit_referring_rows, emit_request_value_in_helper_set, emit_restrictive_removal,
-    emit_row_in_helper_pairs, emit_uncorrelated_membership, Removal,
+    emit_indirect_membership, emit_membership_exclusion, emit_membership_on_request_values,
+    emit_parent_inheritance, emit_referring_rows, emit_request_value_in_helper_set,
+    emit_restrictive_removal, emit_row_in_helper_pairs, emit_uncorrelated_membership, Removal,
 };
 use emit_ownership::{
     attribute_gate_key, emit_attribute_condition, emit_boolean_flag, emit_constant_bool,
@@ -2786,6 +2786,16 @@ fn translate_pattern<DB: DatabaseLike>(
         PatternClass::P18MembershipInCallerSet(membership_in_caller_set) => {
             emit_membership_in_caller_set(
                 membership_in_caller_set,
+                ctx,
+                table_plan,
+                all_types,
+                notes,
+                readability,
+            )
+        }
+        PatternClass::P32MembershipOnRequestValues(membership) => {
+            emit_membership_on_request_values(
+                membership,
                 ctx,
                 table_plan,
                 all_types,

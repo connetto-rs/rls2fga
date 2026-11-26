@@ -71,9 +71,10 @@ use crate::classifier::patterns::{
     ClassifiedExpr, ClassifiedPolicy, Composite, ConfidenceLevel, ConstantBool,
     ConstantInCallerSet, DirectOwnership, ExistsMembership, ExpandedFunction,
     FallbackScalarEqualsConstant, FallbackScalarInConstantList, FallbackScalarUnequalsConstant,
-    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, NumericThreshold,
-    OwnerExpression, ParentInheritance, PatternClass, ReferringRows, RoleNameInList,
-    RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    JsonbFieldOwnership, MembershipExclusion, MembershipInCallerSet, MembershipOnRequestValues,
+    NumericThreshold, OwnerExpression, ParentInheritance, PatternClass, ReferringRows,
+    RoleNameInList, RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr,
+    UncorrelatedMembership,
 };
 
 /// Which clause of a policy an expression came from.
@@ -311,6 +312,7 @@ where
         // The declared request-scoped shapes nest no expression, so nothing inside them
         // can hold a refusal the oracle has not seen.
         PatternClass::P18MembershipInCallerSet(MembershipInCallerSet { .. })
+        | PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues { .. })
         | PatternClass::P14RowValueInCallerSet(RowValueInCallerSet { .. })
         | PatternClass::P15RowValueEqualsCallerScalar(RowValueEqualsCallerScalar { .. })
         | PatternClass::P16ConstantInCallerSet(ConstantInCallerSet { .. })

@@ -395,6 +395,7 @@ fn term_callers(classified: &ClassifiedExpr) -> Vec<TermCaller> {
             | PatternClass::P16ConstantInCallerSet(_)
             | PatternClass::P17CallerScalarEqualsConstant(_)
             | PatternClass::P27RequestValueInHelperSet(_)
+            | PatternClass::P32MembershipOnRequestValues(_)
             | PatternClass::P28RequestValueAbsent(_)
             | PatternClass::P29FlaggedRow(_)
             | PatternClass::P21CallerScalarUnequalsConstant(_)

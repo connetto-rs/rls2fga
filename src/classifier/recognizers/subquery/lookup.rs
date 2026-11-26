@@ -1,6 +1,6 @@
-//! A value compared with a scalar subquery selecting one column of one table, read as
-//! membership in the rows the subquery selects once the schema proves it selects at most
-//! one.
+//! A value compared with a scalar subquery selecting one column of one table, or uniting
+//! such selects, read as membership in the rows the subquery selects once the schema
+//! proves it selects at most one.
 //!
 //! A scalar subquery hands the comparison its one row, `NULL` where it selects none, and
 //! fails the statement where it selects several. `x = (SELECT k FROM t WHERE p)` therefore
@@ -8,9 +8,11 @@
 //! satisfies `p`, which a unique key of `t` that `p` pins to values no row decides proves.
 
 use super::*;
+use crate::classifier::recognizers::invariant::row_changing_call;
 use crate::parser::names::{lookup_table, stored_ident_name};
 use crate::parser::sql_parser::{ConstraintDeferral, IndexLike, TableIndexLike};
 use sql_traits::utils::normalize_postgres_type;
+use sqlparser::ast::{SetOperator, SetQuantifier};
 
 /// Why a comparison with a lookup is not read as membership in the rows it selects.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -25,6 +27,11 @@ pub(crate) enum LookupRefusal {
          through {clause}, which a membership in those rows does not read"
     )]
     Shaped { clause: &'static str },
+    #[error(
+        "The lookup calls '{call}' in what it orders by, which may return several rows for \
+         the one row its filter selects"
+    )]
+    OrderChangesRowCount { call: String },
     #[error(
         "The lookup reads '{table}', whose inheriting tables a scan of it reads too and may \
          repeat its keys, so it may select more than one row"
@@ -42,6 +49,12 @@ pub(crate) enum LookupRefusal {
     )]
     Overlapping { table: String },
     #[error(
+        "The lookup may select more than one row, since two of the selects it unites can \
+         each select one, and only one of them testing a value for NULL that the other \
+         requires present keeps them apart"
+    )]
+    OverlappingSelects,
+    #[error(
         "The lookup selects '{column}' of type {column_type} and hands it over as \
          {returned}, a cast that may rename the value"
     )]
@@ -53,7 +66,8 @@ pub(crate) enum LookupRefusal {
 }
 
 /// `x = (SELECT k FROM t WHERE p)`, in either operand order, as `x IN (SELECT k FROM t
-/// WHERE p)` where at most one row of `t` satisfies `p`, or why it may select more.
+/// WHERE p)` where at most one row of `t` satisfies `p`, or why it may select more. A
+/// lookup uniting several such selects reads as the disjunction of a membership in each.
 ///
 /// `returned` is the type a function returning the lookup's value declares, which the
 /// selected column must already have.
@@ -66,7 +80,10 @@ pub(crate) enum LookupRefusal {
 /// `IS NULL` where the other tests it `IS NOT NULL` or pins a column to it. Each such value
 /// is read once per statement, since a volatile read could differ between the
 /// alternatives. A request value or a row column is all the comparison translates to, so a
-/// volatile read leaves the membership refused.
+/// volatile read leaves the membership refused. United selects are kept apart alike.
+///
+/// A conjunct of `p` reading no row of `t` decides every row alike, so it stands beside
+/// the membership as a condition of its own.
 pub(crate) fn single_row_lookup<DB: DatabaseLike>(
     expr: &Expr,
     db: &DB,
@@ -89,36 +106,152 @@ pub(crate) fn single_row_lookup<DB: DatabaseLike>(
         }
         _ => return None,
     };
-    let lookup = Lookup::of(query, db)?;
-    Some(
-        lookup
-            .keeps_type(returned, db)
-            .and_then(|()| lookup.proves_one_row(db))
-            .map(|()| Expr::In {
-                expr: value.clone(),
-                target: InTarget::Subquery(query.clone()),
+    let lookups = united_selects(&query.body)?
+        .into_iter()
+        .map(|select| Lookup::of(select, db))
+        .collect::<Option<Vec<_>>>()?;
+    match proves_one_row(query, &lookups, returned, db) {
+        Ok(()) => membership(value, query, &lookups, db).map(Ok),
+        Err(refusal) => Some(Err(refusal)),
+    }
+}
+
+/// The selects `set` unites, itself where it is one.
+pub(crate) fn united_selects(set: &SetExpr) -> Option<Vec<&Select>> {
+    match set {
+        SetExpr::Select(select) => Some(vec![select.as_ref()]),
+        SetExpr::SetOperation {
+            op: SetOperator::Union,
+            set_quantifier: SetQuantifier::All | SetQuantifier::Distinct | SetQuantifier::None,
+            left,
+            right,
+        } => {
+            let mut selects = united_selects(left)?;
+            selects.extend(united_selects(right)?);
+            Some(selects)
+        }
+        _ => None,
+    }
+}
+
+/// Whether `query`, uniting `lookups`, selects at most one row, handing each over as
+/// `returned`, or as the type of the first where it unites several and names no type, which
+/// the union would cast the others to.
+fn proves_one_row<DB: DatabaseLike>(
+    query: &Query,
+    lookups: &[Lookup<'_, '_, DB>],
+    returned: Option<&str>,
+    db: &DB,
+) -> Result<(), LookupRefusal> {
+    if query_binds_its_own_names(query) {
+        return Err(LookupRefusal::BindsItsOwnNames);
+    }
+    if let Some(clause) = set_limiting_clause(query) {
+        return Err(LookupRefusal::Shaped { clause });
+    }
+    if let Some(call) = row_changing_call(&query.order_by) {
+        return Err(LookupRefusal::OrderChangesRowCount { call });
+    }
+    let united = match lookups {
+        [first, _, ..] if returned.is_none() => Some(
+            first
+                .column_type(db)
+                .unwrap_or_else(|| "unknown".to_string()),
+        ),
+        _ => None,
+    };
+    let returned = returned.or(united.as_deref());
+    for lookup in lookups {
+        lookup.keeps_type(returned, db)?;
+        lookup.proves_one_row(db)?;
+    }
+    let facts: Vec<_> = lookups
+        .iter()
+        .map(|lookup| lookup.filter.map(|filter| lookup.nullness(filter, db)))
+        .collect();
+    for (index, fact) in facts.iter().enumerate() {
+        for other in facts.iter().skip(index + 1) {
+            if !apart(fact.as_ref(), other.as_ref()) {
+                return Err(LookupRefusal::OverlappingSelects);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Values reading no row that a filter requires `NULL`, and those it requires present.
+type Nullness<'e> = (Vec<&'e Expr>, Vec<&'e Expr>);
+
+/// Whether one of two filters requires `NULL` a value the other requires present.
+fn apart(one: Option<&Nullness<'_>>, other: Option<&Nullness<'_>>) -> bool {
+    let (Some((absent, present)), Some((other_absent, other_present))) = (one, other) else {
+        return false;
+    };
+    let requires_present =
+        |absent: &[&Expr], present: &[&Expr]| absent.iter().any(|value| present.contains(value));
+    requires_present(absent, other_present) || requires_present(other_absent, present)
+}
+
+/// `value IN` each of the selects `query` unites, any of them, each with the conjuncts of
+/// its filter that read no row of its table standing beside it. `None` for no select.
+fn membership<DB: DatabaseLike>(
+    value: &Expr,
+    query: &Query,
+    lookups: &[Lookup<'_, '_, DB>],
+    db: &DB,
+) -> Option<Expr> {
+    lookups
+        .iter()
+        .map(|lookup| {
+            let (gates, kept): (Vec<&Expr>, Vec<&Expr>) = lookup
+                .filter
+                .map_or_default(|filter| split(filter, BinaryOperator::And))
+                .into_iter()
+                .partition(|conjunct| !lookup.reads_row(conjunct, db));
+            let mut select = lookup.select.clone();
+            select.selection = conjoin(kept.into_iter().cloned());
+            let mut selected = query.clone();
+            selected.body = Box::new(SetExpr::Select(Box::new(select)));
+            selected.order_by = None;
+            let member = Expr::In {
+                expr: Box::new(value.clone()),
+                target: InTarget::Subquery(Box::new(selected)),
                 negated: false,
                 global: false,
-            }),
-    )
+            };
+            conjoin(gates.into_iter().cloned().chain([member.clone()])).unwrap_or(member)
+        })
+        .reduce(|either, or| Expr::BinaryOp {
+            left: Box::new(Expr::Nested(Box::new(either))),
+            op: BinaryOperator::Or,
+            right: Box::new(Expr::Nested(Box::new(or))),
+        })
+}
+
+/// `operands` joined with `AND`, `None` where there is none.
+fn conjoin(operands: impl Iterator<Item = Expr>) -> Option<Expr> {
+    operands.reduce(|left, right| Expr::BinaryOp {
+        left: Box::new(left),
+        op: BinaryOperator::And,
+        right: Box::new(right),
+    })
 }
 
 /// The one table a lookup reads, the name its filter qualifies columns with, the column it
 /// selects, and the filter.
 struct Lookup<'q, 'db, DB: DatabaseLike> {
+    select: &'q Select,
     table: &'db DB::Table,
     qualifier: String,
     selected: String,
     filter: Option<&'q Expr>,
-    binds_names: bool,
     shaping: Option<&'static str>,
 }
 
 impl<'q, 'db, DB: DatabaseLike> Lookup<'q, 'db, DB> {
-    /// The lookup `query` is, where it projects one column of the one table it reads under
-    /// that table's own column names.
-    fn of(query: &'q Query, db: &'db DB) -> Option<Self> {
-        let select = query_select(query)?;
+    /// The lookup `select` is, where it projects one column of the one table it reads
+    /// under that table's own column names.
+    fn of(select: &'q Select, db: &'db DB) -> Option<Self> {
         let [TableWithJoins { relation, joins }] = select.from.as_slice() else {
             return None;
         };
@@ -148,12 +281,12 @@ impl<'q, 'db, DB: DatabaseLike> Lookup<'q, 'db, DB> {
             return None;
         };
         let mut lookup = Self {
+            select,
             table,
             qualifier,
             selected: String::new(),
             filter: select.selection.as_ref(),
-            binds_names: query_binds_its_own_names(query),
-            shaping: set_limiting_clause(query).or_else(|| select_result_shaping_clause(select)),
+            shaping: select_result_shaping_clause(select),
         };
         lookup.selected = lookup.column(projected, db)?;
         Some(lookup)
@@ -163,19 +296,23 @@ impl<'q, 'db, DB: DatabaseLike> Lookup<'q, 'db, DB> {
         self.table.stored_table_name().into_owned()
     }
 
+    /// The normalized type of the selected column.
+    fn column_type(&self, db: &DB) -> Option<String> {
+        self.table
+            .columns(db)
+            .into_iter()
+            .flatten()
+            .find(|column| column.stored_column_name() == self.selected)
+            .map(|column| column.data_type(db).normalized_name(db).into_owned())
+    }
+
     /// Whether handing the selected column over as `returned` keeps its value.
     fn keeps_type(&self, returned: Option<&str>, db: &DB) -> Result<(), LookupRefusal> {
         let Some(returned) = returned else {
             return Ok(());
         };
         let returned = normalize_postgres_type(returned);
-        let column_type = self
-            .table
-            .columns(db)
-            .into_iter()
-            .flatten()
-            .find(|column| column.stored_column_name() == self.selected)
-            .map(|column| column.data_type(db).normalized_name(db).into_owned());
+        let column_type = self.column_type(db);
         if column_type.as_deref() == Some(returned.as_ref()) {
             return Ok(());
         }
@@ -188,9 +325,6 @@ impl<'q, 'db, DB: DatabaseLike> Lookup<'q, 'db, DB> {
 
     /// Whether the lookup selects at most one row.
     fn proves_one_row(&self, db: &DB) -> Result<(), LookupRefusal> {
-        if self.binds_names {
-            return Err(LookupRefusal::BindsItsOwnNames);
-        }
         if let Some(clause) = self.shaping {
             return Err(LookupRefusal::Shaped { clause });
         }

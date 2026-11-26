@@ -617,6 +617,27 @@ pub struct MembershipInCallerSet {
     pub source: DeclaredSource,
 }
 
+/// A membership row whose columns each equal a single value the request carries:
+/// `namespace_id IN (SELECT i.owned_namespace_id FROM app_installations i WHERE
+/// i.namespace_id = current_setting('app.installation_namespace_id')::uuid AND i.id =
+/// current_setting('app.installation_id')::uuid)`.
+///
+/// The row names nobody, so it admits whoever presents the values it holds, the way a
+/// grant arm comparing request values does.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MembershipOnRequestValues {
+    /// Table scanned in the subquery.
+    pub join_table: TableId,
+    /// The equalities linking the scanned table to the guarded table, ordered by the key
+    /// that names the parent object.
+    pub pairs: Vec<MembershipJoinPair>,
+    /// The columns compared with the request, in the order the subquery writes them.
+    pub compared: Vec<ComparedValue>,
+    /// Residual filter such as `revoked_at IS NULL`, structured where a row image alone
+    /// decides it.
+    pub extra_predicates: ResidualPredicates,
+}
+
 /// Membership reached through a closure table sharing the far table's declared owner key.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndirectMembership {
@@ -1284,6 +1305,11 @@ pub enum PatternClass {
     /// key and passes a rule of its own:
     /// `id IN (SELECT i.organization_id FROM invitations i WHERE i.expires_at > now())`.
     P31ReferringRows(ReferringRows),
+    /// P32: A membership row whose columns equal values the request carries, admitting
+    /// whoever presents them:
+    /// `namespace_id IN (SELECT i.owned_namespace_id FROM app_installations i WHERE
+    /// i.id = current_setting('app.installation_id')::uuid)`.
+    P32MembershipOnRequestValues(MembershipOnRequestValues),
     /// A blocklist removed from a positive grant.
     MembershipExclusion(MembershipExclusion),
     /// A call to a declared single-expression `LANGUAGE sql` function, replaced
