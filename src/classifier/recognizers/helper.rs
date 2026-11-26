@@ -204,6 +204,21 @@ pub(crate) enum HelperRefusal {
         /// The principal's type, as the deployment declares it.
         kind: String,
     },
+    /// An arm compares the caller or another principal the request acts for beside another
+    /// comparison with the request, which the tuple naming that subject cannot state.
+    #[error(
+        "declared helper '{function}' compares column '{column}' of '{table}' with the \
+         caller or a principal the request acts for beside another comparison with the \
+         request, which no tuple naming that subject also states"
+    )]
+    SubjectBesideRequestValues {
+        /// The helper.
+        function: String,
+        /// The grant table.
+        table: String,
+        /// The column compared with the caller or the principal.
+        column: String,
+    },
     /// A request value is compared with arms whose rows depend on the request.
     #[error(
         "declared helper '{function}' is compared with the request's value \
@@ -2082,31 +2097,7 @@ fn helper_grant<DB: DatabaseLike>(
     let held = arm_joins(function, grant, held_outside, db)?;
     let table = grant.table();
     let grantee = match grant.granted_to() {
-        GrantedTo::Request(compared) => {
-            let column = ColumnName::from_stored(compared.column().stored_column_name());
-            match compared.value() {
-                value @ SettingValue::Set { .. } => HelperGrantee::RequestValue {
-                    value_column: column,
-                    source: DeclaredSource::whole(compared.setting(), value.clone()),
-                },
-                SettingValue::Scalar(_) => HelperGrantee::RequestValue {
-                    value_column: column,
-                    source: compared_scalar(function, compared, registry)?,
-                },
-                SettingValue::Principal { kind, .. } => HelperGrantee::Principal {
-                    principal_column: column,
-                    principal_type: TypeName::try_from(kind.clone()).map_err(|_| {
-                        HelperRefusal::UnspellablePrincipalType {
-                            function: function.to_string(),
-                            kind: kind.clone(),
-                        }
-                    })?,
-                },
-                SettingValue::Caller(_) => HelperGrantee::Caller {
-                    user_column: column,
-                },
-            }
-        }
+        GrantedTo::Request(compared) => request_grantee(function, table, compared, registry)?,
         GrantedTo::Set(set) => {
             let called = set.function();
             if !registry.declares_helper(called) {
@@ -2185,6 +2176,67 @@ fn helper_grant<DB: DatabaseLike>(
     }
     within_condition_limit(&grant.table, &grant.time_bounds)?;
     Ok(grant)
+}
+
+/// Whom a grant arm's rows admit by the comparisons with the request every one of them
+/// meets, a caller or another principal the request acts for compared alone, or values
+/// and sets the request carries, any number of them.
+///
+/// A tuple names one subject, so the caller or a principal compared beside another
+/// comparison is refused.
+fn request_grantee<DB: DatabaseLike>(
+    function: &str,
+    table: &DB::Table,
+    compared: &[SettingComparison<'_, DB>],
+    registry: &FunctionRegistry,
+) -> Result<HelperGrantee, HelperRefusal> {
+    let column = |compared: &SettingComparison<'_, DB>| {
+        ColumnName::from_stored(compared.column().stored_column_name())
+    };
+    if let [only] = compared {
+        match only.value() {
+            SettingValue::Principal { kind, .. } => {
+                return Ok(HelperGrantee::Principal {
+                    principal_column: column(only),
+                    principal_type: TypeName::try_from(kind.clone()).map_err(|_| {
+                        HelperRefusal::UnspellablePrincipalType {
+                            function: function.to_string(),
+                            kind: kind.clone(),
+                        }
+                    })?,
+                });
+            }
+            SettingValue::Caller(_) => {
+                return Ok(HelperGrantee::Caller {
+                    user_column: column(only),
+                });
+            }
+            SettingValue::Set { .. } | SettingValue::Scalar(_) => {}
+        }
+    }
+    let compared = compared
+        .iter()
+        .map(|compared| {
+            let source = match compared.value() {
+                value @ SettingValue::Set { .. } => {
+                    DeclaredSource::whole(compared.setting(), value.clone())
+                }
+                SettingValue::Scalar(_) => compared_scalar(function, compared, registry)?,
+                SettingValue::Principal { .. } | SettingValue::Caller(_) => {
+                    return Err(HelperRefusal::SubjectBesideRequestValues {
+                        function: function.to_string(),
+                        table: table_identity(table).to_string(),
+                        column: compared.column().stored_column_name().into_owned(),
+                    })
+                }
+            };
+            Ok(ComparedValue {
+                value_column: column(compared),
+                source,
+            })
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(HelperGrantee::RequestValues { compared })
 }
 
 /// Refuses `bounds` on rows of `table` where the ways a row meets them, each a condition
@@ -2479,7 +2531,7 @@ fn excluded_callers(
     }
     if !excluded.is_empty() {
         match grantee {
-            HelperGrantee::RequestValue { .. } => {
+            HelperGrantee::RequestValues { .. } => {
                 return Err(HelperRefusal::ExcludedFromRequestValue {
                     function: function.to_string(),
                 })

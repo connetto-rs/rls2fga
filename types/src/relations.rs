@@ -25,9 +25,10 @@ pub struct RelationShapes {
     /// no round trip is needed to be told no. False for a direct relation, which grants
     /// whatever is written into it.
     pub grants_nobody: bool,
-    /// The comparison with the caller's own value gating every record of this relation,
-    /// whether or not one row decides them. `None` unless one gate source fills it.
-    pub caller_gate: Option<CallerGate>,
+    /// The comparisons with the caller's own values gating every record of this relation,
+    /// every one holding, whether or not one row decides them. Empty unless one gate
+    /// source fills it.
+    pub caller_gates: Vec<CallerGate>,
 }
 
 /// A comparison between a value each record carries and one the caller supplies in every
@@ -75,20 +76,22 @@ pub enum RowDecision {
     Any(Vec<RowDecision>),
     /// A subject every child grants.
     All(Vec<RowDecision>),
-    /// The row settles one side of a comparison the caller's own request value
-    /// completes, so a consumer holding that value decides with no round trip.
+    /// The row settles one side of each comparison the caller's own request values
+    /// complete, so a consumer holding those values decides with no round trip.
     ///
     /// Taking the subjects at face value is a wrong allow: the shapes here yield
-    /// `user:*`, which grants everyone until the comparison is applied.
+    /// `user:*`, which grants everyone until the comparisons are applied.
     RequestGated {
         /// The direct relation whose records carry the row's side. Always on the same
         /// type.
         relation: RelationName,
         /// The shapes filling it, identical to that relation's own entry. Never empty.
         shapes: Vec<RecordDescription>,
-        /// The comparison the caller's value completes, identical to that relation's own
-        /// [`RelationShapes::caller_gate`]. The records' condition reads nothing else.
-        gate: CallerGate,
+        /// The comparisons the caller's values complete, a record granting only where
+        /// every one holds, identical to that relation's own
+        /// [`RelationShapes::caller_gates`]. The records' condition reads nothing else.
+        /// Never empty.
+        gates: Vec<CallerGate>,
     },
     /// Every subject of `subject_type` on a row that yields its link, while the caller's
     /// request satisfies the predicate. The predicate reads no column,

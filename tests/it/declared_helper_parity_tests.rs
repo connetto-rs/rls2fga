@@ -21,6 +21,7 @@ use crate::declared_helper_tests::{
 };
 use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
+use crate::request_value_list_tests::INSTALLATION_PAIRS;
 use crate::row_cap_tests::{
     blocked_caps, nested_caps, scoped_nested_caps, INSTALLATION_CAPS, PERSONAL_RESOURCES,
     POLICY_CAPS,
@@ -1010,6 +1011,108 @@ async fn an_absent_installation_agrees_with_postgres() {
                 ActionStatement::Select,
                 allowed,
             );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+const PAIR_REGISTRY: &str = r#"{
+    "authz.capped_kinds": { "kind": "declared_helper" },
+    "authz.blocking_organizations": { "kind": "declared_helper" }
+}"#;
+
+/// A caller `subject` acting through the installation `namespace` and `id` name.
+fn paired(subject: &str, installation: Option<(&str, &str)>) -> Principal {
+    let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", subject);
+    if let Some((namespace, id)) = installation {
+        principal.session.extend([
+            ("app.installation_namespace_id".into(), namespace.into()),
+            ("app.installation_id".into(), id.into()),
+        ]);
+    }
+    principal
+}
+
+/// `O1` holds a permission for `(na, ix)` on one row, `O2` for `(na, iy)` and `(nb, ix)`
+/// on two. `O3` blocks `(na, ix)`, `O4` blocks `(na, iy)` and `(nb, ix)`, and `O5` blocks
+/// the caller `alice`, each beside a permission for `(na, ix)`.
+fn installation_pairs_case(loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-installation-pairs{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        INSTALLATION_PAIRS,
+        &[
+            "INSERT INTO organizations VALUES ('O1'), ('O2'), ('O3'), ('O4'), ('O5');
+             INSERT INTO installation_permissions VALUES
+               ('O1', 'organization', 'na', 'ix'),
+               ('O2', 'organization', 'na', 'iy'), ('O2', 'organization', 'nb', 'ix'),
+               ('O3', 'organization', 'na', 'ix'), ('O4', 'organization', 'na', 'ix'),
+               ('O5', 'organization', 'na', 'ix');
+             INSERT INTO organization_blocks VALUES
+               ('O3', 'na', 'ix'), ('O4', 'na', 'iy'), ('O4', 'nb', 'ix'),
+               ('O5', 'reserved', 'alice')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON organizations TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            paired("alice", Some(("na", "ix"))),
+            paired("bob", Some(("na", "ix"))),
+            paired("carol", Some(("na", "iy"))),
+            paired("dave", Some(("nb", "iy"))),
+            paired("erin", None),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id"),
+        support::deployment::scalar("app.installation_namespace_id"),
+        support::deployment::scalar("app.installation_id"),
+    ])
+    .with_registry(PAIR_REGISTRY);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// An installation named by a namespace and an identity reaches an organization only
+/// through a row holding both, and is blocked only by such a row, whichever rows hold one
+/// of the two alone.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn an_installation_pair_is_matched_on_one_row_as_postgres_matches_it() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = installation_pairs_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, visible) in [
+            ("alice", [true, false, false, true, false]),
+            ("bob", [true, false, false, true, true]),
+            ("carol", [false, true, false, false, false]),
+            ("dave", [false, false, false, false, false]),
+            ("erin", [false, false, false, false, false]),
+        ] {
+            for (object, allowed) in [
+                "organizations:O1",
+                "organizations:O2",
+                "organizations:O3",
+                "organizations:O4",
+                "organizations:O5",
+            ]
+            .into_iter()
+            .zip(visible)
+            {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
         }
         assert_agrees(&case, &run);
     }

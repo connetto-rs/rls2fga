@@ -1197,27 +1197,31 @@ pub(crate) fn decision_grants(
             .iter()
             .any(|record| record.subject == format!("user:{user}")),
         RowDecision::Everyone { shapes, .. } => !records(shapes)?.is_empty(),
-        RowDecision::RequestGated { shapes, gate, .. } => records(shapes)?.iter().any(|record| {
-            let row_side = &record
+        // A record grants only where every comparison it carries holds.
+        RowDecision::RequestGated { shapes, gates, .. } => records(shapes)?.iter().any(|record| {
+            let carried = &record
                 .context
                 .as_ref()
                 .expect("a gated record carries its context")
-                .values[&gate.context_key];
-            let request_parameter = gate.request_parameter.as_str();
-            // A set keeps its own list parameter the row tests membership in, and a
-            // single value travels in the `settings` map under its parameter name.
-            match gate.comparison {
-                RequestComparison::CallerSetHolds => context[request_parameter]
-                    .as_array()
-                    .is_some_and(|held| held.iter().any(|value| value == row_side.as_str())),
-                RequestComparison::CallerValueEquals => {
-                    context["settings"][request_parameter] == row_side.as_str()
+                .values;
+            gates.iter().all(|gate| {
+                let row_side = &carried[&gate.context_key];
+                let request_parameter = gate.request_parameter.as_str();
+                // A set keeps its own list parameter the row tests membership in, and a
+                // single value travels in the `settings` map under its parameter name.
+                match gate.comparison {
+                    RequestComparison::CallerSetHolds => context[request_parameter]
+                        .as_array()
+                        .is_some_and(|held| held.iter().any(|value| value == row_side.as_str())),
+                    RequestComparison::CallerValueEquals => {
+                        context["settings"][request_parameter] == row_side.as_str()
+                    }
+                    // The absent key reads as `NULL`, which is no inequality either.
+                    RequestComparison::CallerValueUnequals => context["settings"]
+                        .get(request_parameter)
+                        .is_some_and(|caller_side| caller_side != row_side.as_str()),
                 }
-                // The absent key reads as `NULL`, which is no inequality either.
-                RequestComparison::CallerValueUnequals => context["settings"]
-                    .get(request_parameter)
-                    .is_some_and(|caller_side| caller_side != row_side.as_str()),
-            }
+            })
         }),
         RowDecision::Request {
             shapes,

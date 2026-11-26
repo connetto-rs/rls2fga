@@ -668,7 +668,7 @@ mod tests {
             }],
             decision: None,
             grants_nobody: false,
-            caller_gate: None,
+            caller_gates: Vec::new(),
         }
     }
 
