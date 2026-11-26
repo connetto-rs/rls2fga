@@ -323,7 +323,7 @@ pub(crate) enum TupleSource {
     },
 
     /// A share row keyed on its own primary key, gated by a conditional wildcard comparing
-    /// its member value with a request value as `comparison` specifies.
+    /// its member values with request values, every comparison holding on that one row.
     RequestShareGate {
         /// Table whose rows record the grants.
         join_table: TableId,
@@ -334,21 +334,8 @@ pub(crate) enum TupleSource {
         share_type: TypeName,
         relation: RelationName,
         condition: ConditionName,
-        /// Condition parameter the share row supplies.
-        row_parameter: String,
-        /// Column of `join_table` holding the value compared with the request.
-        member_col: ColumnName,
-        /// Condition parameter the caller supplies in every check context.
-        request_parameter: String,
-        /// Session setting the caller's value mirrors, so the contract can name it.
-        setting_key: String,
-        /// The function the policy applies to that setting, whose result the caller
-        /// supplies in its place.
-        normalization: Option<RequestNormalization>,
-        /// Separator the policy splits that setting on, absent for a list source.
-        separator: Option<String>,
-        /// How the member value is compared with the request value.
-        comparison: RequestComparison,
+        /// The comparisons the condition makes, one or more, in the order it makes them.
+        compared: Vec<ShareComparison>,
         /// Residual filter on the share row.
         extra_predicates: ResidualPredicates,
         /// Temporal comparisons composed into the condition: each carries its row column
@@ -491,6 +478,65 @@ pub(crate) enum TupleSource {
     /// Why no tuple query stands here. Rendered as the two comment lines that take
     /// its place in the loader's script.
     Skipped { reason: SkippedTuples },
+}
+
+/// One comparison a share row's condition makes between a column of the row and a value
+/// the caller supplies in every check context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShareComparison {
+    /// Condition parameter the share row supplies.
+    pub row_parameter: String,
+    /// Column of the join table holding the value compared with the request.
+    pub member_col: ColumnName,
+    /// Condition parameter the caller supplies in every check context.
+    pub request_parameter: String,
+    /// Session setting the caller's value mirrors, so the contract can name it.
+    pub setting_key: String,
+    /// The function the policy applies to that setting, whose result the caller supplies
+    /// in its place.
+    pub normalization: Option<RequestNormalization>,
+    /// Separator the policy splits that setting on, absent for a list source.
+    pub separator: Option<String>,
+    /// How the member value is compared with the request value.
+    pub comparison: RequestComparison,
+}
+
+/// The comparisons of a share gate as they identify a rendered query, leaving out the
+/// caller's contract, which only the notes read.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ShareComparisonsKey<'a>(&'a [ShareComparison]);
+
+impl ShareComparisonsKey<'_> {
+    fn parts(&self) -> impl Iterator<Item = (&str, &ColumnName, &str, RequestComparison)> {
+        self.0.iter().map(|compared| {
+            (
+                compared.row_parameter.as_str(),
+                &compared.member_col,
+                compared.request_parameter.as_str(),
+                compared.comparison,
+            )
+        })
+    }
+}
+
+impl PartialEq for ShareComparisonsKey<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.parts().eq(other.parts())
+    }
+}
+
+impl Eq for ShareComparisonsKey<'_> {}
+
+impl PartialOrd for ShareComparisonsKey<'_> {
+    fn partial_cmp(&self, other: &Self) -> Option<core::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for ShareComparisonsKey<'_> {
+    fn cmp(&self, other: &Self) -> core::cmp::Ordering {
+        self.parts().cmp(other.parts())
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -696,12 +742,9 @@ pub(crate) enum TupleSourceKey<'a> {
         share_type: &'a TypeName,
         join_table: &'a TableId,
         identity_cols: &'a [ColumnName],
-        member_col: &'a ColumnName,
         relation: &'a RelationName,
         condition: &'a ConditionName,
-        row_parameter: &'a str,
-        request_parameter: &'a str,
-        comparison: RequestComparison,
+        compared: ShareComparisonsKey<'a>,
         extra_predicates: ResidualSqlKey<'a>,
         temporal_context: &'a [GateContextColumn],
     },
@@ -1171,27 +1214,18 @@ impl TupleSource {
                 join_table,
                 identity_cols,
                 share_type,
-                member_col,
                 relation,
                 condition,
-                row_parameter,
-                request_parameter,
-                comparison,
+                compared,
                 extra_predicates,
                 temporal_context,
-                setting_key: _,
-                normalization: _,
-                separator: _,
             } => TupleSourceKey::RequestShareGate {
                 share_type,
                 join_table,
                 identity_cols,
-                member_col,
                 relation,
                 condition,
-                row_parameter,
-                request_parameter,
-                comparison: *comparison,
+                compared: ShareComparisonsKey(compared),
                 extra_predicates: ResidualSqlKey::of(
                     extra_predicates,
                     Gated::when(!temporal_context.is_empty()),
@@ -1609,13 +1643,15 @@ mod tests {
             share_type: TypeName::canonicalized("shares"),
             relation: owner_user_relation(),
             condition: ConditionName::canonicalized("in_set"),
-            row_parameter: "member".to_string(),
-            member_col: ColumnName::from_stored("viewer"),
-            request_parameter: "subjects".to_string(),
-            setting_key: "app.subjects".to_string(),
-            normalization: None,
-            separator: Some(",".to_string()),
-            comparison: RequestComparison::CallerSetHolds,
+            compared: vec![ShareComparison {
+                row_parameter: "member".to_string(),
+                member_col: ColumnName::from_stored("viewer"),
+                request_parameter: "subjects".to_string(),
+                setting_key: "app.subjects".to_string(),
+                normalization: None,
+                separator: Some(",".to_string()),
+                comparison: RequestComparison::CallerSetHolds,
+            }],
             extra_predicates: ResidualPredicates::new({
                 let mut residual = vec![conjunct("role = 'editor'", false)];
                 if request_conjunct {

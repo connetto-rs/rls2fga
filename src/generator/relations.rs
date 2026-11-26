@@ -65,7 +65,7 @@ pub(crate) fn relation_shapes<'plan, DB: DatabaseLike>(
                 shapes: shapes_filling(&type_plan.type_name, relation, &sources),
                 decision,
                 grants_nobody: relation_grants_nothing(type_plan, relation),
-                caller_gate: relation_caller_gate(type_plan, relation, &sources),
+                caller_gates: relation_caller_gates(type_plan, relation, &sources),
             });
         }
     }
@@ -423,12 +423,12 @@ fn leaf_decision<DB: DatabaseLike>(
         ) {
             return None;
         }
-        let gate = caller_gate(indexed.source)?;
+        let gates = caller_gates(indexed.source);
         let shape = row_shape(indexed.description?)?;
         return Some(RowDecision::RequestGated {
             relation: relation.clone(),
             shapes: vec![owned_shape(type_plan, &shape)],
-            gate,
+            gates,
         });
     }
 
@@ -450,43 +450,44 @@ fn leaf_decision<DB: DatabaseLike>(
     })
 }
 
-/// The gate on the caller's own value of the one source filling `relation`, whatever
-/// decides its records.
-fn relation_caller_gate(
+/// The comparisons with the caller's own values of the one source filling `relation`,
+/// whatever decides its records, none where several sources fill it.
+fn relation_caller_gates(
     type_plan: &TypePlan,
     relation: &RelationName,
     sources: &SourceIndex<'_, '_>,
-) -> Option<CallerGate> {
+) -> Vec<CallerGate> {
     let mut feeding = feeding_once(facts_type(type_plan), relation, sources);
-    let only = feeding.next()?;
-    if feeding.next().is_some() {
-        return None;
+    match (feeding.next(), feeding.next()) {
+        (Some(only), None) => caller_gates(only.source),
+        _ => Vec::new(),
     }
-    caller_gate(only.source)
 }
 
-/// The comparison with the caller's own value `source` gates its records on.
-fn caller_gate(source: &TupleSource) -> Option<CallerGate> {
-    let (TupleSource::SessionAttributeGate {
-        row_parameter,
-        request_parameter,
-        comparison,
-        ..
+/// The comparisons with the caller's own values `source` gates its records on, every one
+/// holding.
+fn caller_gates(source: &TupleSource) -> Vec<CallerGate> {
+    match source {
+        TupleSource::SessionAttributeGate {
+            row_parameter,
+            request_parameter,
+            comparison,
+            ..
+        } => vec![CallerGate {
+            context_key: row_parameter.clone(),
+            request_parameter: request_parameter.clone(),
+            comparison: *comparison,
+        }],
+        TupleSource::RequestShareGate { compared, .. } => compared
+            .iter()
+            .map(|compared| CallerGate {
+                context_key: compared.row_parameter.clone(),
+                request_parameter: compared.request_parameter.clone(),
+                comparison: compared.comparison,
+            })
+            .collect(),
+        _ => Vec::new(),
     }
-    | TupleSource::RequestShareGate {
-        row_parameter,
-        request_parameter,
-        comparison,
-        ..
-    }) = source
-    else {
-        return None;
-    };
-    Some(CallerGate {
-        context_key: row_parameter.clone(),
-        request_parameter: request_parameter.clone(),
-        comparison: *comparison,
-    })
 }
 
 /// Whom one row's record grants, when the row alone settles it.

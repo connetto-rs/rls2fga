@@ -10,7 +10,8 @@ use crate::generator::identity::{
     MAX_SUBJECT_NAME_BYTES,
 };
 use crate::generator::ir::{
-    GranteeSubject, MembershipGate, TupleSource, TupleSourceKey, SINGLETON_OBJECT_KEY,
+    GranteeSubject, MembershipGate, ShareComparison, TupleSource, TupleSourceKey,
+    SINGLETON_OBJECT_KEY,
 };
 use crate::generator::model_generator::{DirectSubject, SchemaPlan};
 pub use crate::generator::notes::SkippedTuples;
@@ -1254,23 +1255,34 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
             join_table,
             identity_cols,
             share_type,
-            member_col,
             relation,
             condition,
-            row_parameter,
+            compared,
             extra_predicates,
             temporal_context,
-            comparison,
-            ..
         } => {
             let join_table_sql = join_table.sql_name();
-            let member_col_sql = quote_sql_identifier(member_col.as_str());
-            let parameter_sql = quote_sql_string_literal(row_parameter);
             let identity_parts = quoted_key_parts(identity_cols);
             let object_sql = typed_name_sql(share_type, identity_parts.iter().map(String::as_str));
             let mut null_cols = identity_parts;
-            if !identity_cols.contains(member_col) {
-                null_cols.push(member_col_sql.clone());
+            // Every member compared with the request, plus every column a clock comparison
+            // carries.
+            let mut context = String::new();
+            let mut members = String::new();
+            for comparison in compared {
+                let member_col_sql = quote_sql_identifier(comparison.member_col.as_str());
+                if !identity_cols.contains(&comparison.member_col)
+                    && !null_cols.contains(&member_col_sql)
+                {
+                    null_cols.push(member_col_sql.clone());
+                }
+                if !context.is_empty() {
+                    context.push_str(", ");
+                    members.push_str(" and ");
+                }
+                let parameter_sql = quote_sql_string_literal(&comparison.row_parameter);
+                let _ = write!(context, "{parameter_sql}, {member_col_sql}::text");
+                let _ = write!(members, "{join_table}.{}", comparison.member_col);
             }
             let null_guards = null_cols
                 .iter()
@@ -1286,8 +1298,6 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 &[],
                 names,
             );
-            // The member compared with the request, plus every column a clock comparison carries.
-            let mut context = format!("{parameter_sql}, {member_col_sql}::text");
             for gate in temporal_context {
                 let column_sql = quote_sql_identifier(gate.column.as_str());
                 let key_sql = quote_sql_string_literal(&gate.parameter);
@@ -1314,15 +1324,20 @@ pub(crate) fn render_tuple_source_inner<DB: DatabaseLike>(
                 || format!("\nWHERE {null_guards}"),
                 |e| format!("\nWHERE {null_guards}\nAND ({e})"),
             );
-            let compared = match comparison {
-                RequestComparison::CallerSetHolds => "Caller-set",
-                RequestComparison::CallerValueEquals | RequestComparison::CallerValueUnequals => {
-                    "Caller-value"
-                }
+            let holds_set = |comparison: &ShareComparison| {
+                matches!(comparison.comparison, RequestComparison::CallerSetHolds)
+            };
+            let compared = match (
+                compared.iter().any(holds_set),
+                compared.iter().all(holds_set),
+            ) {
+                (true, true) => "Caller-set",
+                (false, _) => "Caller-value",
+                (true, false) => "Caller-set and caller-value",
             };
             Some(TupleQuery {
                 comment: format!(
-                    "-- {compared} share on {share_type} carrying {join_table}.{member_col}, \
+                    "-- {compared} share on {share_type} carrying {members}, \
                      evaluated by condition {condition}"
                 ),
                 sql: format!(

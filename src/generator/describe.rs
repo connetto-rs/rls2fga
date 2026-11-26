@@ -858,20 +858,29 @@ pub(crate) fn describe_tuple_source<DB: DatabaseLike>(
             join_table,
             identity_cols,
             share_type,
-            member_col,
             relation,
             condition,
-            row_parameter,
+            compared,
             extra_predicates,
             temporal_context,
-            ..
         } => {
-            let mut entries = vec![RecordContextEntry {
-                key: row_parameter.clone(),
-                value: value_column(join_table, member_col, db),
-                rendering: ContextRendering::SqlText,
-            }];
-            let mut guards = vec![not_null(join_table, member_col, db)];
+            let mut entries = Vec::with_capacity(compared.len() + temporal_context.len());
+            let mut guards = Vec::with_capacity(compared.len());
+            for (index, comparison) in compared.iter().enumerate() {
+                entries.push(RecordContextEntry {
+                    key: comparison.row_parameter.clone(),
+                    value: value_column(join_table, &comparison.member_col, db),
+                    rendering: ContextRendering::SqlText,
+                });
+                // Two comparisons may read one column, which needs one guard.
+                if compared
+                    .iter()
+                    .take(index)
+                    .all(|earlier| earlier.member_col != comparison.member_col)
+                {
+                    guards.push(not_null(join_table, &comparison.member_col, db));
+                }
+            }
             if temporal_context.is_empty() {
                 let Some(residual) = residual_guards(join_table, extra_predicates, db) else {
                     let predicate = extra_predicates.sql().unwrap_or_default();

@@ -662,13 +662,13 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
     grant
         .object_columns
         .iter()
-        .chain(grant.grantee.compared_column())
+        .chain(grant.grantee.compared_columns())
         .find_map(|column| key_collation_refusal(&grant.table, column, db))
         .or_else(|| match &grant.grantee {
             HelperGrantee::Set { call, .. } => helper_call_refusal(call, db),
             HelperGrantee::Caller { .. }
             | HelperGrantee::Principal { .. }
-            | HelperGrantee::RequestValue { .. }
+            | HelperGrantee::RequestValues { .. }
             | HelperGrantee::Anyone => None,
         })
         .or_else(|| {

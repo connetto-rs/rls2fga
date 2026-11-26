@@ -795,10 +795,10 @@ pub struct HelperJoin {
 }
 
 impl HelperGrant {
-    /// The columns keying one tuple of the arm's relations, its object, the column naming
-    /// its grantee where one does and, for a relation per role, its role.
+    /// The columns keying one tuple of the arm's relations, its object, the columns naming
+    /// its grantee where any do and, for a relation per role, its role.
     pub(crate) fn tuple_key(&self) -> Vec<&ColumnName> {
-        self.tuple_key_naming(self.grantee.compared_column())
+        self.tuple_key_naming(self.grantee.compared_columns())
     }
 
     /// The columns keying one tuple of the arm's relations naming the grantee `grantee`
@@ -806,7 +806,7 @@ impl HelperGrant {
     /// them.
     pub(crate) fn tuple_key_naming<'a>(
         &'a self,
-        grantee: Option<&'a ColumnName>,
+        grantee: impl IntoIterator<Item = &'a ColumnName>,
     ) -> Vec<&'a ColumnName> {
         let mut key: Vec<&ColumnName> = self.object_columns.iter().chain(grantee).collect();
         if let GrantRows::Roles { column, .. } = &self.rows {
@@ -934,14 +934,12 @@ pub enum HelperGrantee {
         /// Column holding the caller.
         user_column: ColumnName,
     },
-    /// `<value column> = <value>` or `<value column> = ANY (<set>)`, each row admitting
-    /// whoever presents its value as the value the request carries or in the set it
-    /// carries.
-    RequestValue {
-        /// Column whose value the request has to present.
-        value_column: ColumnName,
-        /// The declared value or set, carrying the parameter the caller supplies.
-        source: DeclaredSource,
+    /// `<value column> = <value>` or `<value column> = ANY (<set>)`, one comparison or
+    /// more, each row admitting whoever presents its values as the values the request
+    /// carries or among the sets it carries, every comparison holding on that one row.
+    RequestValues {
+        /// The comparisons, in the order the condition writes them.
+        compared: Vec<ComparedValue>,
     },
     /// `<principal column> = current_setting(<principal>)`, each row admitting whoever
     /// acts for the principal of the declared type it names, such as the installation a
@@ -965,21 +963,32 @@ pub enum HelperGrantee {
 }
 
 impl HelperGrantee {
-    /// The grant table's column compared with the caller, with another principal the
-    /// request acts for, with a value or set the request carries or with the grantees a
-    /// set holds, `None` for an arm naming nobody.
-    #[must_use]
-    pub fn compared_column(&self) -> Option<&ColumnName> {
-        match self {
-            Self::Caller { user_column } => Some(user_column),
+    /// The grant table's columns compared with the caller, with another principal the
+    /// request acts for, with values or sets the request carries or with the grantees a
+    /// set holds, none for an arm naming nobody.
+    pub fn compared_columns(&self) -> impl Iterator<Item = &ColumnName> {
+        let (named, compared) = match self {
+            Self::Caller { user_column } => (Some(user_column), [].as_slice()),
             Self::Principal {
                 principal_column, ..
-            } => Some(principal_column),
-            Self::RequestValue { value_column, .. } => Some(value_column),
-            Self::Set { grantee_column, .. } => Some(grantee_column),
-            Self::Anyone => None,
-        }
+            } => (Some(principal_column), [].as_slice()),
+            Self::RequestValues { compared } => (None, compared.as_slice()),
+            Self::Set { grantee_column, .. } => (Some(grantee_column), [].as_slice()),
+            Self::Anyone => (None, [].as_slice()),
+        };
+        named
+            .into_iter()
+            .chain(compared.iter().map(|compared| &compared.value_column))
     }
+}
+
+/// A grant table's column compared with a value or a set the request carries.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComparedValue {
+    /// Column whose value the request has to present.
+    pub value_column: ColumnName,
+    /// The declared value or set, carrying the parameter the caller supplies.
+    pub source: DeclaredSource,
 }
 
 /// Which grant rows a grant arm keeps.

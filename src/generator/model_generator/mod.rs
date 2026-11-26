@@ -18,7 +18,7 @@ use crate::generator::db_lookup::{
 };
 use crate::generator::identity::MAX_OBJECT_NAME_CHARS;
 use crate::generator::ir::{
-    GateContextColumn, GranteeSubject, MembershipGate, PrincipalInfo, TupleSource,
+    GateContextColumn, GranteeSubject, MembershipGate, PrincipalInfo, ShareComparison, TupleSource,
 };
 use crate::generator::model_bounds::MAX_PARAMETER_NAME_CHARS;
 use crate::generator::notes::SkippedTuples;
@@ -1961,17 +1961,8 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
     let mut contracts: BTreeSet<Contract> = BTreeSet::new();
     for source in &plan.table_tuple_sources {
         match source {
-            // A row column gate, or a share row's, states either a set or a value, by its
-            // comparison.
+            // A row column gate states either a set or a value, by its comparison.
             TupleSource::SessionAttributeGate {
-                request_parameter,
-                setting_key,
-                normalization,
-                separator,
-                comparison,
-                ..
-            }
-            | TupleSource::RequestShareGate {
                 request_parameter,
                 setting_key,
                 normalization,
@@ -1986,6 +1977,18 @@ fn note_request_contracts(plan: &TypePlan, notes: &mut Vec<TranslationNote>) {
                     matches!(comparison, RequestComparison::CallerSetHolds),
                     *normalization,
                 ));
+            }
+            // A share row's gate states one for each comparison it makes.
+            TupleSource::RequestShareGate { compared, .. } => {
+                contracts.extend(compared.iter().map(|compared| {
+                    (
+                        compared.request_parameter.clone(),
+                        Some(compared.setting_key.clone()),
+                        compared.separator.clone(),
+                        matches!(compared.comparison, RequestComparison::CallerSetHolds),
+                        compared.normalization,
+                    )
+                }));
             }
             TupleSource::RequestGateEntry { atom, .. } => {
                 contracts.insert((

@@ -1575,12 +1575,12 @@ enum Leaf<'a> {
         relation: &'a str,
         shapes: &'a [RecordDescription],
     },
-    /// The row settles one side of a comparison the caller's own value completes, so the
-    /// subject is a wildcard and the context is what stops it granting everyone.
+    /// The row settles one side of each comparison the caller's own values complete, so
+    /// the subject is a wildcard and the context is what stops it granting everyone.
     Gated {
         relation: &'a str,
         shapes: &'a [RecordDescription],
-        gate: &'a CallerGate,
+        gates: &'a [CallerGate],
     },
 }
 
@@ -1616,11 +1616,11 @@ fn recipe_leaves(decision: &RowDecision) -> Vec<Leaf<'_>> {
         RowDecision::RequestGated {
             relation,
             shapes,
-            gate,
+            gates,
         } => vec![Leaf::Gated {
             relation: relation.as_str(),
             shapes: shapes.as_slice(),
-            gate,
+            gates,
         }],
         RowDecision::Any(children) | RowDecision::All(children) => {
             children.iter().flat_map(recipe_leaves).collect()
@@ -1913,7 +1913,7 @@ fn every_leaf_of_every_recipe_names_a_user_from_the_objects_own_row() {
                         // thing standing between it and granting everyone. Losing the
                         // context or naming it differently from the recipe is a wrong
                         // allow no DSL assertion can see.
-                        Leaf::Gated { gate, .. } => {
+                        Leaf::Gated { gates, .. } => {
                             assert_eq!(
                                 template.subject_key.part(),
                                 &ValueSource::Literal("*".to_string()),
@@ -1929,30 +1929,37 @@ fn every_leaf_of_every_recipe_names_a_user_from_the_objects_own_row() {
                                 )
                             });
                             assert!(
-                                context
-                                    .entries
-                                    .iter()
-                                    .any(|entry| entry.key == gate.context_key),
-                                "{fixture}: gated leaf {}#{relation} fills a different \
-                                 parameter from the one the recipe names",
+                                !gates.is_empty(),
+                                "{fixture}: gated leaf {}#{relation} names no comparison",
                                 reported.type_name
                             );
-                            assert!(
-                                !gate.request_parameter.is_empty(),
-                                "{fixture}: gated leaf {}#{relation} names no parameter for \
-                                 the caller to supply",
-                                reported.type_name
-                            );
+                            for gate in *gates {
+                                assert!(
+                                    context
+                                        .entries
+                                        .iter()
+                                        .any(|entry| entry.key == gate.context_key),
+                                    "{fixture}: gated leaf {}#{relation} fills a different \
+                                     parameter from the one the recipe names",
+                                    reported.type_name
+                                );
+                                assert!(
+                                    !gate.request_parameter.is_empty(),
+                                    "{fixture}: gated leaf {}#{relation} names no parameter \
+                                     for the caller to supply",
+                                    reported.type_name
+                                );
+                            }
                             assert_eq!(
                                 entry(
                                     planned.translation().relations(),
                                     reported.type_name.as_str(),
                                     relation
                                 )
-                                .caller_gate
-                                .as_ref(),
-                                Some(*gate),
-                                "{fixture}: gated leaf {}#{relation} names a gate its own \
+                                .caller_gates
+                                .as_slice(),
+                                *gates,
+                                "{fixture}: gated leaf {}#{relation} names gates its own \
                                  relation does not report",
                                 reported.type_name
                             );
@@ -3063,8 +3070,8 @@ fn a_keyed_share_names_its_grantee_key_whatever_decides_its_records() {
             "{derived}: no row decides a relation whose condition reads more than the row"
         );
         assert_eq!(
-            gate.caller_gate.as_ref(),
-            Some(&expected),
+            gate.caller_gates.as_slice(),
+            core::slice::from_ref(&expected),
             "{derived}: the gate names the key its records carry the grantee under"
         );
     }

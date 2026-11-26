@@ -29,7 +29,7 @@ parity = ["client", "std", "sql-traits/parity-fixtures", "dep:diesel", "dep:url"
 [dependencies]
 rls2fga-types = { path = "types", default-features = false }
 sqlparser = { version = "0.64", default-features = false, features = ["serde", "visitor"] }
-sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "upstream/recursive-pair-walk", default-features = false }
+sql-traits = { git = "https://github.com/connetto-rs/sql-traits", branch = "main", default-features = false }
 serde = { version = "1", default-features = false, features = ["derive", "alloc"] }
 serde_json = { version = "1", default-features = false, features = ["alloc", "arbitrary_precision"] }
 # Only the model write calls it, behind `client`.
