@@ -2119,6 +2119,12 @@ fn a_reselection_comparing_the_caller_under_a_nondeterministic_collation_is_refu
     );
 }
 
+/// `columns` as a walk note lists them.
+fn columns_text(columns: &[ColumnName]) -> String {
+    let names: Vec<&str> = columns.iter().map(ColumnName::as_str).collect();
+    names.join(", ")
+}
+
 /// `OpenFGA` resolves a walk only so deep, and the schema cannot say how deep the tree
 /// goes, so each walk the model resolves is noted once, however many clauses call it.
 #[test]
@@ -2136,12 +2142,12 @@ fn each_walk_is_noted_once_with_the_depth_openfga_resolves() {
             TranslationNote::HelperWalkDepth {
                 function,
                 table,
-                column,
+                columns,
                 relation,
             } => Some((
                 function.clone(),
                 table.to_string(),
-                column.to_string(),
+                columns_text(columns),
                 relation.to_string(),
             )),
             _ => None,
@@ -3965,9 +3971,9 @@ fn each_edge_table_a_walk_reads_is_noted() {
             TranslationNote::HelperWalkDepth {
                 function,
                 table,
-                column,
+                columns,
                 ..
-            } => Some((function.clone(), table.to_string(), column.to_string())),
+            } => Some((function.clone(), table.to_string(), columns_text(columns))),
             _ => None,
         })
         .collect();

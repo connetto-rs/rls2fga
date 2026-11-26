@@ -821,14 +821,10 @@ pub(crate) fn nullable_projection<DB: DatabaseLike>(
     for arm in &call.arms {
         let (returned_from, returned) = match arm {
             HelperSetArm::Grant(grant) => (&grant.table, grant.object_columns.as_slice()),
-            HelperSetArm::Parent(parent) => (
-                &parent.edges.table,
-                core::slice::from_ref(&parent.edges.child_column),
-            ),
-            HelperSetArm::Walk(walk) => (
-                &walk.edges.table,
-                core::slice::from_ref(walk.returned_column()),
-            ),
+            HelperSetArm::Parent(parent) => {
+                (&parent.edges.table, parent.edges.child_columns.as_slice())
+            }
+            HelperSetArm::Walk(walk) => (&walk.edges.table, walk.returned_columns()),
             HelperSetArm::Called(called) => match nullable_projection(called, db) {
                 Some(refusal) => return Some(refusal),
                 None => continue,

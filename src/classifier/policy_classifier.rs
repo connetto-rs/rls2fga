@@ -473,12 +473,7 @@ fn compared_key_refusal<DB: DatabaseLike>(
         PatternClass::P30RowInHelperPairs(RowInHelperPairs { columns, pairs, .. }) => columns
             .iter()
             .find_map(|(_, column)| check(guarded, column))
-            .or_else(|| {
-                pairs
-                    .arms
-                    .iter()
-                    .find_map(|arm| helper_grant_refusal(arm, db))
-            }),
+            .or_else(|| helper_pairs_refusal(pairs, db)),
         PatternClass::P1NumericThreshold(NumericThreshold {
             function_name,
             resource_column,
@@ -721,21 +716,34 @@ fn helper_grant_refusal<DB: DatabaseLike>(grant: &HelperGrant, db: &DB) -> Optio
                 own.iter()
                     .chain(held.iter().map(|(_, column)| column))
                     .find_map(|column| key_collation_refusal(table, column, db))
-                    .or_else(|| {
-                        cap.pairs
-                            .arms
-                            .iter()
-                            .find_map(|arm| helper_grant_refusal(arm, db))
-                    })
+                    .or_else(|| helper_pairs_refusal(&cap.pairs, db))
             })
+        })
+}
+
+/// Why a column the rows returning `pairs` name a pair by, or an edge column a walk adding
+/// pairs follows, cannot be compared in `OpenFGA`.
+fn helper_pairs_refusal<DB: DatabaseLike>(pairs: &HelperPairs, db: &DB) -> Option<String> {
+    pairs
+        .arms
+        .iter()
+        .find_map(|arm| helper_grant_refusal(arm, db))
+        .or_else(|| {
+            pairs
+                .walks
+                .iter()
+                .find_map(|walk| tree_edges_refusal(&walk.edges, db))
         })
 }
 
 /// Why either end of the edges a declared helper's parent or walk arm reads, or an edge a
 /// flagged row's walk follows, cannot be compared in `OpenFGA`.
 fn tree_edges_refusal<DB: DatabaseLike>(edges: &TreeEdges, db: &DB) -> Option<String> {
-    key_collation_refusal(&edges.table, &edges.child_column, db)
-        .or_else(|| key_collation_refusal(&edges.table, &edges.parent_column, db))
+    edges
+        .child_columns
+        .iter()
+        .chain(&edges.parent_columns)
+        .find_map(|column| key_collation_refusal(&edges.table, column, db))
 }
 
 /// Why the guarded row's column the flags `pattern` tests start from, a flagged table's key,

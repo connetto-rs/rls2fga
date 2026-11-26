@@ -23,8 +23,8 @@ use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::request_value_list_tests::INSTALLATION_PAIRS;
 use crate::row_cap_tests::{
-    blocked_caps, nested_caps, scoped_nested_caps, INSTALLATION_CAPS, PERSONAL_RESOURCES,
-    POLICY_CAPS,
+    blocked_caps, nested_caps, pair_walk, scoped_nested_caps, INSTALLATION_CAPS, PAIR_WALK,
+    PERSONAL_RESOURCES, POLICY_CAPS,
 };
 use crate::support;
 use crate::support::parity::{
@@ -3248,5 +3248,187 @@ async fn a_helper_excluding_another_helpers_set_agrees_with_postgres() {
         expect("alice", "doc_notes:P1", true);
         expect("anonymous", "owned_notes:P2", false);
         assert_agrees(&case, &run);
+    }
+}
+
+const PAIR_WALK_HELPERS: &str = r#"{
+    "authz.caller_grantees": { "kind": "declared_helper" },
+    "authz.granted_resources": { "kind": "declared_helper" }
+}"#;
+
+const NAMESPACES: [&str; 2] = [
+    "0a000000-0000-4000-8000-000000000001",
+    "0a000000-0000-4000-8000-000000000002",
+];
+
+const LOCAL_TEAMS: [&str; 3] = [
+    "07000000-0000-4000-8000-000000000001",
+    "07000000-0000-4000-8000-000000000002",
+    "07000000-0000-4000-8000-000000000003",
+];
+
+const PAIR_WALKERS: [&str; 2] = [
+    "0b000000-0000-4000-8000-000000000001",
+    "0b000000-0000-4000-8000-000000000002",
+];
+
+/// The resource granted to the grantee at `namespace` and `local`, a team's local id or a
+/// user's, which [`pair_walk_case`] seeds.
+fn pair_resource(namespace: usize, local: usize) -> String {
+    format!("0c000000-0000-4000-8000-0000000000{namespace}{local}")
+}
+
+/// Every local team id exists in both namespaces. The first walker is a member of the
+/// first team of the first namespace and the second of the second team of the second.
+/// In the first namespace the first team's parent is the second and the second's parent,
+/// an edge expired yesterday, the first. In the second the second team's parent is the
+/// third and the third's the first. Every grantee has a resource granted to it, so a walk
+/// following an edge of the other namespace that shares a local id grants a resource
+/// `PostgreSQL` denies.
+fn pair_walk_case(name: &str, schema: &str, loading_from_rows: bool) -> ParityCase {
+    let [first, second] = NAMESPACES;
+    let mut seed = String::new();
+    for (index, walker) in PAIR_WALKERS.iter().enumerate() {
+        let _ = write!(
+            seed,
+            "INSERT INTO grantees VALUES ('{first}', '{walker}', 'user');
+             INSERT INTO resources VALUES ('{resource}');
+             INSERT INTO grants VALUES ('{resource}', '{first}', '{walker}');",
+            resource = pair_resource(0, index + 4),
+        );
+    }
+    for (namespace_index, namespace) in NAMESPACES.iter().enumerate() {
+        for (team_index, team) in LOCAL_TEAMS.iter().enumerate() {
+            let _ = write!(
+                seed,
+                "INSERT INTO grantees VALUES ('{namespace}', '{team}', 'team');
+                 INSERT INTO teams VALUES ('{namespace}', '{team}');
+                 INSERT INTO resources VALUES ('{resource}');
+                 INSERT INTO grants VALUES ('{resource}', '{namespace}', '{team}');",
+                resource = pair_resource(namespace_index + 1, team_index + 1),
+            );
+        }
+    }
+    let [t1, t2, t3] = LOCAL_TEAMS;
+    for (team_index, team) in LOCAL_TEAMS.iter().enumerate() {
+        let _ = write!(
+            seed,
+            "INSERT INTO team_notes VALUES ('{}', '{team}');",
+            team_note(team_index + 1)
+        );
+    }
+    let [u, v] = PAIR_WALKERS;
+    let _ = write!(
+        seed,
+        "INSERT INTO team_members VALUES
+           ('{first}', '{t1}', '{first}', '{u}'), ('{second}', '{t2}', '{first}', '{v}');
+         INSERT INTO team_parents VALUES
+           ('{first}', '{t1}', '{first}', '{t2}', NULL),
+           ('{first}', '{t2}', '{first}', '{t1}', now() - interval '1 day'),
+           ('{second}', '{t2}', '{second}', '{t3}', NULL),
+           ('{second}', '{t3}', '{second}', '{t1}', NULL);"
+    );
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-pair-walk-{name}{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        schema,
+        &[
+            &seed,
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON grantees, resources, team_notes TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        PAIR_WALKERS
+            .iter()
+            .map(|walker| caller(walker).with_clock())
+            .chain([Principal::as_role("anonymous", "app_reader")])
+            .collect(),
+    )
+    .with_settings([support::deployment::typed_caller(
+        "app.user_id",
+        DataType::Uuid,
+    )])
+    .with_registry(PAIR_WALK_HELPERS);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// The note on the team at `local` of the first namespace, which [`pair_walk_case`] seeds.
+fn team_note(local: usize) -> String {
+    format!("0d000000-0000-4000-8000-00000000000{local}")
+}
+
+/// A walk over the teams a caller reaches, each named by its namespace and its local id,
+/// follows only the edges whose two columns both name a team reached, up, down, and down
+/// only along the edges not yet expired, so a team of another namespace sharing a local id
+/// is never reached, neither by the grantees and resources nor by the notes naming a team
+/// of the first namespace by its local id alone.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_walk_over_namespaced_pairs_agrees_with_postgres() {
+    let down = "SELECT parent.child_namespace_id, parent.child_id FROM public.team_parents parent
+    JOIN reached ON (parent.parent_namespace_id, parent.parent_id) = (reached.namespace_id, reached.id)";
+    let down_live =
+        format!("{down}\n    WHERE parent.expires_at IS NULL OR parent.expires_at > now()");
+    // The resources each walker reads, by the namespace and local id granted: the user's
+    // own at namespace 0, then each team.
+    let cases = [
+        (
+            "up",
+            PAIR_WALK.to_string(),
+            [
+                vec![(0, 4), (1, 1), (1, 2)],
+                vec![(0, 5), (2, 1), (2, 2), (2, 3)],
+            ],
+        ),
+        (
+            "down",
+            pair_walk(down),
+            [vec![(0, 4), (1, 1), (1, 2)], vec![(0, 5), (2, 2)]],
+        ),
+        (
+            "down-live",
+            pair_walk(&down_live),
+            [vec![(0, 4), (1, 1)], vec![(0, 5), (2, 2)]],
+        ),
+    ];
+    let cluster = Cluster::start().await;
+    for (name, schema, readable) in cases {
+        for loading_from_rows in [false, true] {
+            let case = pair_walk_case(name, &schema, loading_from_rows);
+            let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+            for (walker, readable) in PAIR_WALKERS.iter().zip(&readable) {
+                for namespace in 0..=2 {
+                    for local in 1..=5 {
+                        if (namespace == 0) != (local > 3) {
+                            continue;
+                        }
+                        assert_postgres(
+                            &case,
+                            &run,
+                            walker,
+                            &format!("resources:{}", pair_resource(namespace, local)),
+                            ActionStatement::Select,
+                            readable.contains(&(namespace, local)),
+                        );
+                    }
+                }
+                for local in 1..=3 {
+                    assert_postgres(
+                        &case,
+                        &run,
+                        walker,
+                        &format!("team_notes:{}", team_note(local)),
+                        ActionStatement::Select,
+                        readable.contains(&(1, local)),
+                    );
+                }
+            }
+            assert_agrees(&case, &run);
+        }
     }
 }
