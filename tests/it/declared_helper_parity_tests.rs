@@ -1118,6 +1118,122 @@ async fn an_installation_pair_is_matched_on_one_row_as_postgres_matches_it() {
     }
 }
 
+/// A capped helper matching the installation's namespace against a set the request
+/// carries and its identity against one value.
+const NAMESPACE_SET_PAIRS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE organizations (id TEXT PRIMARY KEY);
+CREATE TABLE installation_permissions (
+  organization_id TEXT NOT NULL REFERENCES organizations(id),
+  kind TEXT NOT NULL,
+  installation_namespace_id TEXT NOT NULL,
+  installation_id TEXT NOT NULL,
+  PRIMARY KEY (organization_id, kind, installation_namespace_id, installation_id)
+);
+GRANT SELECT ON installation_permissions TO authz_owner;
+CREATE FUNCTION authz.capped_kinds() RETURNS TABLE (organization_id TEXT, kind TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT permission.organization_id, permission.kind
+  FROM public.installation_permissions permission
+  WHERE permission.installation_namespace_id = ANY (
+      pg_catalog.string_to_array(current_setting('app.installation_namespaces', true), ','))
+    AND permission.installation_id = current_setting('app.installation_id', true)
+$$;
+ALTER FUNCTION authz.capped_kinds() OWNER TO authz_owner;
+ALTER TABLE organizations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY visible ON organizations FOR SELECT
+USING ((id, 'organization') IN (SELECT * FROM authz.capped_kinds()));
+";
+
+/// `O1` holds a permission for `(na, ix)`, `O2` for `(na, iy)` and `(nb, ix)` on two
+/// rows, and `O3` for `(nc, ix)`. The request context carries the namespace set as a list,
+/// empty where the caller set none.
+fn namespace_set_pairs_case(loading_from_rows: bool) -> ParityCase {
+    let acting = |subject: &str, installation: Option<(&[&str], &str)>| {
+        let namespaces = installation.map_or(&[][..], |(namespaces, _)| namespaces);
+        let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", subject)
+            .with_context(serde_json::json!({ "app_installation_namespaces": namespaces }));
+        if let Some((namespaces, id)) = installation {
+            principal.session.extend([
+                ("app.installation_namespaces".into(), namespaces.join(",")),
+                ("app.installation_id".into(), id.into()),
+            ]);
+        }
+        principal
+    };
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-namespace-set-pairs{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        NAMESPACE_SET_PAIRS,
+        &[
+            "INSERT INTO organizations VALUES ('O1'), ('O2'), ('O3');
+             INSERT INTO installation_permissions VALUES
+               ('O1', 'organization', 'na', 'ix'),
+               ('O2', 'organization', 'na', 'iy'), ('O2', 'organization', 'nb', 'ix'),
+               ('O3', 'organization', 'nc', 'ix')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON organizations TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            acting("both_namespaces", Some((&["na", "nb"], "ix"))),
+            acting("first_namespace", Some((&["na"], "iy"))),
+            acting("split_pair", Some((&["nb"], "iy"))),
+            acting("third_namespace", Some((&["nc", "na"], "ix"))),
+            acting("no_installation", None),
+        ],
+    )
+    .with_settings([
+        support::deployment::caller("app.user_id"),
+        support::deployment::delimited_set("app.installation_namespaces", ","),
+        support::deployment::scalar("app.installation_id"),
+    ])
+    .with_registry(r#"{ "authz.capped_kinds": { "kind": "declared_helper" } }"#);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A namespace drawn from a set and an identity compared with one value hold together on
+/// one row, so `O2`, holding the namespace `nb` and the identity `iy` only on different
+/// rows, stays hidden from a request presenting that pair.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_namespace_set_beside_an_identity_value_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = namespace_set_pairs_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, visible) in [
+            ("both_namespaces", [true, true, false]),
+            ("first_namespace", [false, true, false]),
+            ("split_pair", [false, false, false]),
+            ("third_namespace", [true, false, true]),
+            ("no_installation", [false, false, false]),
+        ] {
+            for (object, allowed) in ["organizations:O1", "organizations:O2", "organizations:O3"]
+                .into_iter()
+                .zip(visible)
+            {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
 const OPERATOR: &str = "00000000-0000-0000-0000-0000000000c1";
 const MEMBER: &str = "00000000-0000-0000-0000-0000000000c2";
 const ACTING_INSTALLATION: &str = "00000000-0000-0000-0000-0000000000c3";
