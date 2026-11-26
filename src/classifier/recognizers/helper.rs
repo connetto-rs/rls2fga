@@ -806,7 +806,7 @@ fn row_in_helper_pairs<DB: DatabaseLike>(
             arms.pairs_alike(guarded, column, position, db)?;
             columns.push((position, name));
         } else {
-            let value = paired_literal(operand, &declared)
+            let value = paired_literal(operand, &declared.name(db))
                 .ok_or_else(|| arms.operand(operand.to_string()))?;
             literals.push((position, value));
         }
@@ -892,7 +892,8 @@ fn row_in_labelled_rows<DB: DatabaseLike>(
             })?;
             choices.push((position, Some(column), labels));
         } else {
-            let Some(AttributeLiteral::Text(label)) = paired_literal(operand, &declared) else {
+            let Some(AttributeLiteral::Text(label)) = paired_literal(operand, &declared.name(db))
+            else {
                 return Err(operand_refusal(operand));
             };
             choices.push((position, None, vec![label]));
