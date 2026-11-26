@@ -500,10 +500,15 @@ pub(crate) struct BodySettingRead {
 /// The `current_setting` read a whole body returns, bare or wrapped in `NULLIF(_, '')`,
 /// either way optionally lowered by `lower`, so a call to the function is that read.
 pub(crate) fn body_setting_read(body: &str) -> Option<BodySettingRead> {
-    let expr = body_single_projection(body)?;
-    let (normalization, value) = match lowered_value(&expr) {
+    setting_read_of(&body_single_projection(body)?)
+}
+
+/// The `current_setting` read `expr` is, bare or wrapped in `NULLIF(_, '')`, either way
+/// optionally lowered by `lower`.
+pub(crate) fn setting_read_of(expr: &Expr) -> Option<BodySettingRead> {
+    let (normalization, value) = match lowered_value(expr) {
         Some((casts, argument)) => (Some((RequestNormalization::Lower, casts)), argument),
-        None => (None, &expr),
+        None => (None, expr),
     };
     let (casts, read, skips_empty) = emptied_read(value)?;
     Some(BodySettingRead {

@@ -9,8 +9,8 @@ use crate::types::{ColumnName, TableId};
 use alloc::collections::BTreeSet;
 use core::ops::ControlFlow;
 use sqlparser::ast::{
-    Distinct, GroupByExpr, Ident, JoinOperator, LimitClause, Query, SetExpr, TableAlias,
-    TableInheritance, TableWithJoins, Visit, VisitMut, Visitor, VisitorMut,
+    Distinct, GroupByExpr, Ident, JoinOperator, LimitClause, ObjectName, Query, SetExpr,
+    TableAlias, TableInheritance, TableWithJoins, Visit, VisitMut, Visitor, VisitorMut,
 };
 
 mod indirect;
@@ -734,14 +734,54 @@ pub(super) fn set_limiting_clause(query: &Query) -> Option<&'static str> {
 /// and a scalar subquery returning no row is NULL. `ORDER BY`, `DISTINCT` and a `WITH`
 /// binding cannot drop the single row, so they are left alone.
 pub(crate) fn projected_select(query: &Query) -> Option<&Select> {
+    unnarrowed_select(query).filter(|select| select.from.is_empty())
+}
+
+/// The `Select` a query projects over what a call in its `FROM` returns, with the call and
+/// the alias the `FROM` names it by, when nothing narrows the rows and the call passes no
+/// argument.
+///
+/// A call to a function returning no set hands its `FROM` one row, so the projection is
+/// the value of that row. Whether the function returns a set is the caller's to settle. An
+/// alias renaming the columns, `WITH ORDINALITY` and a join each change the row, so they
+/// are refused.
+pub(crate) fn projected_call_select(query: &Query) -> Option<(&Select, &ObjectName, &Ident)> {
+    if query_binds_its_own_names(query) {
+        return None;
+    }
+    let select = unnarrowed_select(query)?;
+    let [TableWithJoins { relation, joins }] = select.from.as_slice() else {
+        return None;
+    };
+    let TableFactor::Table {
+        name,
+        alias,
+        args: Some(args),
+        with_ordinality: false,
+        ..
+    } = relation
+    else {
+        return None;
+    };
+    if !joins.is_empty() || !args.args.is_empty() || args.settings.is_some() {
+        return None;
+    }
+    let qualifier = match alias {
+        Some(TableAlias { name, columns, .. }) if columns.is_empty() => name,
+        Some(_) => return None,
+        None => name.0.last()?.as_ident()?,
+    };
+    Some((select, name, qualifier))
+}
+
+/// The single `Select` a query's body is when no limit, filter or grouping narrows the
+/// rows its `FROM` gives.
+fn unnarrowed_select(query: &Query) -> Option<&Select> {
     if set_limiting_clause(query).is_some() {
         return None;
     }
     let select = query_select(query)?;
-    (select.from.is_empty()
-        && select.selection.is_none()
-        && select_result_shaping_clause(select).is_none())
-    .then_some(select)
+    (select.selection.is_none() && select_result_shaping_clause(select).is_none()).then_some(select)
 }
 
 /// Why a subquery cannot be read as the plain set of rows in the table its `FROM` names.

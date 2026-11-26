@@ -974,7 +974,8 @@ fn parenthesis_peeling_has_a_single_source_of_truth() {
 
 /// Every plain cast peel goes through the shared peeler.
 ///
-/// Three readers inspect the cast type before recursing or in place of it.
+/// Three readers inspect the cast type before recursing or in place of it, and one builds
+/// the conversion `PL/pgSQL` applies to a value assigned to an output parameter.
 #[test]
 fn every_cast_peel_routes_through_the_shared_peeler() {
     let own_peels = fns_whose_body(|body| {
@@ -987,6 +988,7 @@ fn every_cast_peel_routes_through_the_shared_peeler() {
         "peel_noting_casts",
         "conjunct_reads_only_the_row",
         "literal_uses_session_against_zoned_column",
+        "assigned_value",
     ];
     let unexpected: Vec<&String> = own_peels
         .iter()
@@ -1007,7 +1009,7 @@ fn every_cast_peel_routes_through_the_shared_peeler() {
     }
     assert!(
         unexpected.is_empty(),
-        "a cast is peeled outside the four readers: {unexpected:#?}"
+        "a cast is peeled outside the named readers: {unexpected:#?}"
     );
 }
 

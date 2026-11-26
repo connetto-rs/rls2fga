@@ -2,6 +2,7 @@
 use crate::no_std_prelude::*;
 use alloc::collections::{BTreeMap, BTreeSet};
 
+use crate::classifier::function_outputs::{projected_output_read, OutputReadRefusal};
 use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
@@ -406,6 +407,15 @@ impl core::borrow::Borrow<str> for FunctionKey {
     }
 }
 
+/// Why the schema's `LANGUAGE sql` body of a function reads as no semantic.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum UnreadBody {
+    /// The body has no shape a semantic is read from.
+    Unrecognized,
+    /// The body selects what a function returns, which reads as no declared setting.
+    Output(OutputReadRefusal),
+}
+
 /// Registry of known function semantics, loaded from JSON or analyzed from bodies.
 #[derive(Debug, Clone)]
 pub struct FunctionRegistry {
@@ -425,8 +435,9 @@ pub struct FunctionRegistry {
     renamed_accessors: BTreeMap<FunctionKey, String>,
     /// Functions whose whole body is a role keyword, so a call names the role it does.
     role_keyword_accessors: BTreeMap<FunctionKey, RoleKeyword>,
-    /// Functions the schema gives a `LANGUAGE sql` body that reads as no semantic above.
-    unread_bodies: BTreeSet<FunctionKey>,
+    /// Functions the schema gives a `LANGUAGE sql` body that reads as no semantic above,
+    /// with why.
+    unread_bodies: BTreeMap<FunctionKey, UnreadBody>,
     /// The type each function the schema defines returns, lower case, a set returning
     /// one by its element type. A literal compared with a call is coerced into it.
     return_types: BTreeMap<FunctionKey, String>,
@@ -454,7 +465,7 @@ impl FunctionRegistry {
             owner_bound_accessors: BTreeMap::new(),
             renamed_accessors: BTreeMap::new(),
             role_keyword_accessors: BTreeMap::new(),
-            unread_bodies: BTreeSet::new(),
+            unread_bodies: BTreeMap::new(),
             return_types: BTreeMap::new(),
             deployment: None,
             sources: DeclaredSources::default(),
@@ -492,11 +503,12 @@ impl FunctionRegistry {
         self.role_keyword_accessors.get(resolved.as_str()).copied()
     }
 
-    /// Whether the schema gives the function `name` a body no semantic reads.
-    pub(crate) fn has_unread_body(&self, name: &str) -> bool {
+    /// Why the schema's `LANGUAGE sql` body of the function `name` reads as no semantic,
+    /// or `None` where it reads as one or the schema gives it no such body.
+    pub(crate) fn unread_body(&self, name: &str) -> Option<&UnreadBody> {
         let key = FunctionKey::parse(name);
         let resolved = self.function_resolution.get(&key).unwrap_or(&key);
-        self.unread_bodies.contains(resolved.as_str())
+        self.unread_bodies.get(resolved.as_str())
     }
 
     /// The type a call to the function `name` returns, a set returning one by its element
@@ -784,17 +796,20 @@ impl FunctionRegistry {
     /// Read a body that is no role keyword. A wrapper around one declared setting, bare or
     /// through `NULLIF(_, '')`, either way optionally under a normalization the
     /// deployment can carry, is that read, a body reading the caller through a cast that
-    /// can rename it is noted with the reason, and any other `LANGUAGE sql` body is
-    /// recorded as read by nothing. A built-in arrives with an empty body, since the
-    /// server provides it, so it is never recorded.
-    fn read_setting_body(
+    /// can rename it is noted with the reason, a body selecting what a PL/pgSQL function
+    /// returns is the read that function's outputs hold under `deployment`, and any other
+    /// `LANGUAGE sql` body is recorded as read by nothing. A built-in arrives with an
+    /// empty body, since the server provides it, so it is never recorded.
+    fn read_setting_body<DB: DatabaseLike>(
         &mut self,
-        target: &TargetName<'_>,
-        target_key: FunctionKey,
+        db: &DB,
+        deployment: &Deployment,
+        function: &DB::Function,
         body: &str,
         return_type: &str,
         language: &str,
     ) {
+        let target = &function.target_name();
         // A wrapper around a declared source is that read, so the inline and the wrapped
         // spelling reach one declaration and cannot disagree.
         if let Some(semantic) = body_setting_read(body).and_then(|read| self.declared_reader(read))
@@ -804,9 +819,22 @@ impl FunctionRegistry {
             self.register_target_if_absent(target, &FunctionSemantic::SettingFallback { sources });
         } else if let Some(reason) = renamed_caller_body(body, return_type, language, &self.sources)
         {
+            let target_key = self.target_key(target);
             self.renamed_accessors.entry(target_key).or_insert(reason);
         } else if language == "sql" && !body.trim().is_empty() {
-            self.unread_bodies.insert(target_key);
+            let unread = match projected_output_read(db, function, body, deployment) {
+                Some(Ok(read)) => match self.declared_reader(read) {
+                    Some(semantic) => {
+                        self.register_target_if_absent(target, &semantic);
+                        return;
+                    }
+                    None => UnreadBody::Unrecognized,
+                },
+                Some(Err(refusal)) => UnreadBody::Output(refusal),
+                None => UnreadBody::Unrecognized,
+            };
+            let target_key = self.target_key(target);
+            self.unread_bodies.entry(target_key).or_insert(unread);
         }
     }
 
@@ -906,7 +934,14 @@ impl FunctionRegistry {
                             .or_insert(keyword);
                     }
                     None => {
-                        self.read_setting_body(&target, target_key, body, &return_type, &language);
+                        self.read_setting_body(
+                            db,
+                            deployment,
+                            function,
+                            body,
+                            &return_type,
+                            &language,
+                        );
                     }
                 }
             }
@@ -1243,7 +1278,7 @@ CREATE FUNCTION shouted() RETURNS TEXT LANGUAGE sql STABLE
             "shouted",
         ] {
             assert!(
-                registry.has_unread_body(name),
+                registry.unread_body(name).is_some(),
                 "{name}: {:?}",
                 registry.get(name)
             );
