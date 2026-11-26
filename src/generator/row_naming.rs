@@ -72,6 +72,9 @@ pub(crate) fn row_naming<DB: DatabaseLike>(plan: &SchemaPlan, db: &DB) -> Vec<Ro
     let mut entries: Vec<RowNaming> = plan
         .types
         .iter()
+        // A path through a view names the table's rows on a type of its own, which only
+        // its judgements ask about, so the table keeps the one name it is keyed by.
+        .filter(|type_plan| type_plan.path_of.is_none())
         .filter_map(|type_plan| {
             let table = type_plan.source_table.as_ref()?;
             let key = row_key(type_plan, db)?;
@@ -85,6 +88,7 @@ pub(crate) fn row_naming<DB: DatabaseLike>(plan: &SchemaPlan, db: &DB) -> Vec<Ro
     let planned: BTreeMap<TableId, &TypePlan> = plan
         .types
         .iter()
+        .filter(|type_plan| type_plan.path_of.is_none())
         .filter_map(|type_plan| Some((type_plan.source_table.clone()?, type_plan)))
         .collect();
     entries.extend(db.tables().filter_map(|table| {

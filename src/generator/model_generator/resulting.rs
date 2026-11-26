@@ -51,14 +51,14 @@ pub(super) fn add_resulting_types<DB: DatabaseLike>(
 ) -> Vec<ResultingRow> {
     let mut judged: BTreeMap<TypeName, BTreeSet<RelationName>> = BTreeMap::new();
     for entry in entries.iter() {
-        for judgement in judgements(&entry.answer) {
+        visit_judgements(&entry.answer, &mut |judgement| {
             if judgement.version == RowVersion::Resulting {
                 judged
-                    .entry(entry.type_name.clone())
+                    .entry(judgement.type_name.clone())
                     .or_default()
                     .insert(judgement.relation.clone());
             }
-        }
+        });
     }
     let placed = place_direct_relations(all_types, &judged, bounds, db);
 
@@ -112,14 +112,13 @@ pub(super) fn add_resulting_types<DB: DatabaseLike>(
     }
 
     for entry in entries.iter_mut() {
-        let Some(type_name) = renamed.get(&entry.type_name) else {
-            continue;
-        };
-        for judgement in judgements_mut(&mut entry.answer) {
+        visit_judgements_mut(&mut entry.answer, &mut |judgement| {
             if judgement.version == RowVersion::Resulting {
-                judgement.type_name = type_name.clone();
+                if let Some(type_name) = renamed.get(&judgement.type_name) {
+                    judgement.type_name = type_name.clone();
+                }
             }
-        }
+        });
     }
     rows
 }
@@ -227,20 +226,25 @@ fn place_source(
     }
 }
 
-/// The judgements an answer asks, through the rows answer of a column answer.
-fn judgements(answer: &ActionAnswer) -> &[ActionJudgement] {
+/// Visit every judgement an answer asks, through the rows of a column answer and every
+/// path of an alternative.
+fn visit_judgements(answer: &ActionAnswer, visit: &mut impl FnMut(&ActionJudgement)) {
     match answer {
-        ActionAnswer::Judged(judgements) => judgements,
-        ActionAnswer::ByColumn(column) => judgements(&column.rows),
-        _ => &[],
+        ActionAnswer::Judged(judgements) => judgements.iter().for_each(visit),
+        ActionAnswer::ByColumn(column) => visit_judgements(&column.rows, visit),
+        ActionAnswer::AnyOf(paths) => paths.iter().for_each(|path| visit_judgements(path, visit)),
+        _ => {}
     }
 }
 
-fn judgements_mut(answer: &mut ActionAnswer) -> &mut [ActionJudgement] {
+fn visit_judgements_mut(answer: &mut ActionAnswer, visit: &mut impl FnMut(&mut ActionJudgement)) {
     match answer {
-        ActionAnswer::Judged(judgements) => judgements,
-        ActionAnswer::ByColumn(column) => judgements_mut(&mut column.rows),
-        _ => &mut [],
+        ActionAnswer::Judged(judgements) => judgements.iter_mut().for_each(visit),
+        ActionAnswer::ByColumn(column) => visit_judgements_mut(&mut column.rows, visit),
+        ActionAnswer::AnyOf(paths) => paths
+            .iter_mut()
+            .for_each(|path| visit_judgements_mut(path, visit)),
+        _ => {}
     }
 }
 

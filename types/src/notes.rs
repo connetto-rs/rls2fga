@@ -288,6 +288,17 @@ pub enum TranslationNote {
         /// Why the answer cannot be settled.
         reason: String,
     },
+    /// A view running with its owner's rights lets an acting role reach rows in a way the
+    /// model cannot follow, so the model denies what the view grants.
+    OwnerRightsViewRefused {
+        /// The view.
+        #[serde(with = "table_id_as_str")]
+        view: TableId,
+        /// The acting role holding a privilege on it.
+        role: String,
+        /// What the model cannot follow, as a clause.
+        reason: String,
+    },
     /// An acting role row security exempts from a table's policies, so it reads and
     /// writes every row.
     ActingRoleExempt {
@@ -589,7 +600,8 @@ impl TranslationNote {
             | Self::FunctionMissingMetadata { .. }
             | Self::RowsCannotBeNamed { .. }
             | Self::BridgeColumnMissing { .. }
-            | Self::RowSecurityRefused { .. } => NoteSeverity::Unhandled,
+            | Self::RowSecurityRefused { .. }
+            | Self::OwnerRightsViewRefused { .. } => NoteSeverity::Unhandled,
             Self::PartitionReadDirectlyIsUnfiltered { .. } => NoteSeverity::Exempt,
             Self::CoveringPoliciesBelowThreshold { .. } | Self::ClauseBelowThreshold { .. } => {
                 NoteSeverity::BelowThreshold
@@ -665,7 +677,10 @@ impl TranslationNote {
             }
             | Self::ResultingRowFactUnreadable {
                 table: spelling, ..
-            } => Cow::Owned(spelling.to_string()),
+            }
+            | Self::OwnerRightsViewRefused { view: spelling, .. } => {
+                Cow::Owned(spelling.to_string())
+            }
             Self::ClauseBelowThreshold { policy, .. }
             | Self::UnresolvedPolicyTable { policy, .. }
             | Self::RestrictiveAttributeRefused { policy }
@@ -787,6 +802,11 @@ impl fmt::Display for TranslationNote {
                 "Row security on '{table}' acting as '{role}' cannot be settled ({reason}), so \
                  the model denies {} to that role",
                 commands.join(", "),
+            ),
+            Self::OwnerRightsViewRefused { view, role, reason } => write!(
+                f,
+                "View '{view}' runs with its owner's rights and acting role '{role}' holds a \
+                 privilege on it, but {reason}, so the model denies what the view grants"
             ),
             Self::ActingRoleExempt {
                 table,

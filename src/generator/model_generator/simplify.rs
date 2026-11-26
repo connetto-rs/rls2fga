@@ -725,6 +725,7 @@ mod tests {
             action_relations: Vec::new(),
             acting_privileges: Vec::new(),
             resulting_rows: Vec::new(),
+            view_paths: Vec::new(),
         }
     }
 

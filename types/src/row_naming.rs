@@ -33,4 +33,15 @@ impl RowNaming {
     pub fn render<R: RowValues + ?Sized>(&self, row: &R) -> Result<Option<String>, RecordError> {
         self.key.render(&self.type_name, row)
     }
+
+    /// Render this row as an object of `type_name`, the type a path of an
+    /// [`ActionAnswer::AnyOf`](crate::ActionAnswer::AnyOf) judgement names, whose objects
+    /// are this table's rows under this same key.
+    pub fn render_as<R: RowValues + ?Sized>(
+        &self,
+        type_name: &TypeName,
+        row: &R,
+    ) -> Result<Option<String>, RecordError> {
+        self.key.render(type_name, row)
+    }
 }

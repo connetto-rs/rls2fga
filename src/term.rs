@@ -177,6 +177,7 @@ pub fn describe_membership_term<DB: DatabaseLike>(
     };
     let plan = build_plan_typing(
         &filter_policies_for_output(&[policy], min_confidence),
+        &[],
         db,
         &registry,
         &settings,

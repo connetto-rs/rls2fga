@@ -28,7 +28,7 @@ use crate::json_row::JsonRow;
 use crate::translator::Outputs;
 use crate::types::{
     records_from_row, ActionAnswer, ActionStatement, ColumnCommand, ColumnName,
-    ConditionParameterName, Record, RowNaming, RowVersion,
+    ConditionParameterName, Record, RowNaming, RowVersion, TypeName,
 };
 
 const MAX_TUPLES_PER_WRITE: usize = 100;
@@ -71,6 +71,14 @@ pub(super) struct Model {
     caller_setting: Option<String>,
     /// Every delimited set setting the deployment declares, sent split in each check.
     sets: Vec<SetParameter>,
+}
+
+/// The rows a statement naming one relation reaches, and where its privileges are checked.
+struct Reach<'a> {
+    /// How the translation names the rows, whose type's answers decide the statement.
+    naming: &'a RowNaming,
+    /// The type whose acting privileges `PostgreSQL` checks for the statement.
+    privileges: &'a TypeName,
 }
 
 impl Model {
@@ -149,28 +157,51 @@ impl Model {
         action: ActionStatement,
         columns: &BTreeMap<ColumnCommand, Vec<ColumnName>>,
     ) -> Result<bool, ProbeError> {
-        let naming = self.naming(table)?;
+        let reach = self.reach(table)?;
         let privileges = self
             .outputs
             .translation()
             .acting_privileges()
             .iter()
-            .find(|held| held.type_name == naming.type_name && held.role == caller.role)
+            .find(|held| &held.type_name == reach.privileges && held.role == caller.role)
             .ok_or_else(|| ProbeError::NoPrivileges(caller.role.clone()))?;
         Ok(privileges.permits(action, columns))
     }
 
-    /// How the translation names the rows of `table`.
-    fn naming(&self, table: &str) -> Result<&RowNaming, ProbeError> {
-        self.outputs
-            .translation()
-            .row_naming()
+    /// The rows a statement naming `table` reaches, and where `PostgreSQL` checks its
+    /// privileges.
+    ///
+    /// A view running with its owner's rights reaches the rows of the table it writes,
+    /// answered by that table's answers, while its privileges are checked on the view.
+    fn reach(&self, table: &str) -> Result<Reach<'_>, ProbeError> {
+        let translation = self.outputs.translation();
+        let namings = translation.row_naming();
+        if let Some(naming) = namings.iter().find(|naming| naming.table.name() == table) {
+            return Ok(Reach {
+                naming,
+                privileges: &naming.type_name,
+            });
+        }
+        let unnamed = || ProbeError::NoRowNaming(table.to_owned());
+        let path = translation
+            .view_paths()
             .iter()
-            .find(|naming| naming.table.name() == table)
-            .ok_or_else(|| ProbeError::NoRowNaming(table.to_owned()))
+            .find(|path| path.view.name() == table)
+            .ok_or_else(unnamed)?;
+        let naming = namings
+            .iter()
+            .find(|naming| naming.table == path.table)
+            .ok_or_else(unnamed)?;
+        Ok(Reach {
+            naming,
+            privileges: &path.type_name,
+        })
     }
 
     /// Ask the emitted answer for `action` on `table` about the rows and columns `probe` names.
+    ///
+    /// An answer with several paths changes the row where any path does, and otherwise
+    /// leaves it alone where any path only filters it.
     pub(super) async fn permits(
         &self,
         table: &str,
@@ -178,11 +209,7 @@ impl Model {
         action: ActionStatement,
         probe: &RowProbe<'_>,
     ) -> Result<Verdict, ProbeError> {
-        let naming = self.naming(table)?;
-        let existing = match probe.existing {
-            Some(row) => Some(naming.render(&JsonRow(row))?.ok_or(ProbeError::Unnamed)?),
-            None => None,
-        };
+        let naming = self.reach(table)?.naming;
         let entry = self
             .outputs
             .translation()
@@ -191,45 +218,66 @@ impl Model {
             .find(|entry| entry.type_name == naming.type_name && entry.statement == action)
             .ok_or(ProbeError::NoAnswer(action))?;
         let caller = self.request(caller)?;
-        match &entry.answer {
-            ActionAnswer::ByColumn(columns) => {
-                let rows = self
-                    .rows(&columns.rows, existing.as_deref(), probe, &caller)
-                    .await?;
-                if rows != Verdict::Changed {
-                    return Ok(rows);
-                }
-                for command in &columns.commands {
-                    let touched = probe
-                        .columns
-                        .get(&command.command)
-                        .ok_or(ProbeError::NoColumns(command.command))?;
-                    for column in touched {
-                        if !self
-                            .check(
-                                command.relation(column).as_str(),
-                                &columns.gate,
-                                &caller,
-                                Vec::new(),
-                            )
-                            .await?
-                        {
-                            return Ok(Verdict::Aborted);
-                        }
-                    }
-                }
-                Ok(Verdict::Changed)
+        let ActionAnswer::AnyOf(paths) = &entry.answer else {
+            return self.path(&entry.answer, naming, probe, &caller).await;
+        };
+        let mut verdict = Verdict::Aborted;
+        for path in paths {
+            match self.path(path, naming, probe, &caller).await? {
+                Verdict::Changed => return Ok(Verdict::Changed),
+                Verdict::Skipped => verdict = Verdict::Skipped,
+                Verdict::Aborted => {}
             }
-            answer => self.rows(answer, existing.as_deref(), probe, &caller).await,
         }
+        Ok(verdict)
+    }
+
+    /// Ask one path of an answer about the rows and columns `probe` names.
+    async fn path(
+        &self,
+        answer: &ActionAnswer,
+        naming: &RowNaming,
+        probe: &RowProbe<'_>,
+        caller: &Request,
+    ) -> Result<Verdict, ProbeError> {
+        let ActionAnswer::ByColumn(columns) = answer else {
+            return self.rows(answer, naming, probe, caller).await;
+        };
+        let rows = self.rows(&columns.rows, naming, probe, caller).await?;
+        if rows != Verdict::Changed {
+            return Ok(rows);
+        }
+        for command in &columns.commands {
+            let touched = probe
+                .columns
+                .get(&command.command)
+                .ok_or(ProbeError::NoColumns(command.command))?;
+            for column in touched {
+                if !self
+                    .check(
+                        command.relation(column).as_str(),
+                        &columns.gate,
+                        caller,
+                        Vec::new(),
+                    )
+                    .await?
+                {
+                    return Ok(Verdict::Aborted);
+                }
+            }
+        }
+        Ok(Verdict::Changed)
     }
 
     /// Interpret the answer about the rows without inferring relations. The stored row's
     /// judgements are asked first, since a row they filter is never checked further.
+    ///
+    /// The stored row is named under each judgement's own type by the table's key, since
+    /// a path through a view asks about the table's rows on a type of its own.
     async fn rows(
         &self,
         answer: &ActionAnswer,
-        existing: Option<&str>,
+        naming: &RowNaming,
         probe: &RowProbe<'_>,
         caller: &Request,
     ) -> Result<Verdict, ProbeError> {
@@ -243,9 +291,12 @@ impl Model {
             .iter()
             .partition(|judgement| judgement.version == RowVersion::Existing);
         for judgement in stored {
-            let object = existing.ok_or(ProbeError::NoStoredRow)?;
+            let row = probe.existing.ok_or(ProbeError::NoStoredRow)?;
+            let object = naming
+                .render_as(&judgement.type_name, &JsonRow(row))?
+                .ok_or(ProbeError::Unnamed)?;
             if !self
-                .check(judgement.relation.as_str(), object, caller, Vec::new())
+                .check(judgement.relation.as_str(), &object, caller, Vec::new())
                 .await?
             {
                 return Ok(Verdict::Skipped);
