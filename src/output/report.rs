@@ -14,7 +14,7 @@ use crate::classifier::patterns::{
     RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
-use crate::types::TranslationNote;
+use crate::types::{ColumnName, TranslationNote};
 
 /// Remove Markdown table control characters and escape pipes.
 fn md_escape(s: &str) -> String {
@@ -174,6 +174,18 @@ fn helper_call_text(call: &crate::classifier::patterns::HelperCall) -> String {
         let _ = write!(text, " at {}", call.labels.join(", "));
     }
     text
+}
+
+/// The end of `edges` naming each edge's parent, `table.column`, or `table.(a, b)` for
+/// several columns.
+fn edge_parent(edges: &crate::classifier::patterns::TreeEdges) -> String {
+    match edges.parent_columns.as_slice() {
+        [column] => format!("{}.{column}", edges.table),
+        columns => {
+            let columns: Vec<&str> = columns.iter().map(ColumnName::as_str).collect();
+            format!("{}.({})", edges.table, columns.join(", "))
+        }
+    }
 }
 
 fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String {
@@ -444,11 +456,7 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         }) => {
             let mut rendered = format!("P29 ({table} flagged at {column}");
             for step in steps {
-                let _ = write!(
-                    rendered,
-                    " one edge up through {}.{}",
-                    step.table, step.parent_column
-                );
+                let _ = write!(rendered, " one edge up through {}", edge_parent(step));
             }
             if !edges.is_empty() {
                 rendered.push_str(" or above it through ");
@@ -456,7 +464,7 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                     if at != 0 {
                         rendered.push_str(", ");
                     }
-                    let _ = write!(rendered, "{}.{}", edge.table, edge.parent_column);
+                    rendered.push_str(&edge_parent(edge));
                 }
             }
             rendered.push(')');

@@ -176,10 +176,10 @@ pub(crate) fn recognize_flagged_row<DB: DatabaseLike>(
         }));
     }
     let compared = core::iter::once((&guarded, &column)).chain(edges.iter().flat_map(|edge| {
-        [
-            (&edge.table, &edge.child_column),
-            (&edge.table, &edge.parent_column),
-        ]
+        edge.child_columns
+            .iter()
+            .chain(&edge.parent_columns)
+            .map(|compared| (&edge.table, compared))
     }));
     for (table, compared) in compared {
         if column_kind(table, compared.as_str(), db) != key_kind {
@@ -353,8 +353,8 @@ impl ParentFlag {
         let mut steps = Vec::with_capacity(flagged.steps.len() + 1);
         steps.push(TreeEdges {
             table: self.edge.clone(),
-            child_column: self.child_column.clone(),
-            parent_column: flagged.column,
+            child_columns: vec![self.child_column.clone()],
+            parent_columns: vec![flagged.column],
         });
         steps.extend(flagged.steps);
         Ok(FlaggedRow {
@@ -894,8 +894,8 @@ fn edge_of<DB: DatabaseLike>(
     (table_has_column(db, &written, &child) && table_has_column(db, &written, &parent)).then(|| {
         TreeEdges {
             table,
-            child_column: ColumnName::from_stored(child),
-            parent_column: ColumnName::from_stored(parent),
+            child_columns: vec![ColumnName::from_stored(child)],
+            parent_columns: vec![ColumnName::from_stored(parent)],
         }
     })
 }

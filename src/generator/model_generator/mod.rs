@@ -366,9 +366,9 @@ pub(crate) struct TypePlan {
     pub resulting_of: Option<TypeName>,
     /// The note each declared helper's walk along this type's edges, or a flagged row's
     /// walk up them, carries, keyed by the relation resolved through it, the table holding
-    /// the edges or the flags and the column read there, and read once pruning has settled
+    /// the edges or the flags and the columns read there, and read once pruning has settled
     /// which relations survive.
-    walk_notes: BTreeMap<(RelationName, TableId, ColumnName), TranslationNote>,
+    walk_notes: BTreeMap<(RelationName, TableId, Vec<ColumnName>), TranslationNote>,
 }
 
 /// Subjects the generator's own structural relations hold, or `None` when the

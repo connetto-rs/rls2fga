@@ -845,6 +845,10 @@ pub struct HelperPairs {
     /// The rows returning the pairs, each keyed by its columns in the order the helper
     /// returns them, none where the helper returns nothing.
     pub arms: Vec<HelperGrant>,
+    /// The recursive terms adding to the pairs `arms` return the pairs next to them, each
+    /// edge naming its child and its parent by columns in the order the helper returns
+    /// them.
+    pub walks: Vec<HelperWalk>,
 }
 
 /// `(<operands>) IN (SELECT * FROM <function>(<arguments>))` in a policy clause, keeping a
@@ -1011,7 +1015,7 @@ pub struct HelperParent {
 }
 
 /// The recursive term of a `WITH RECURSIVE` body walking a tree, or any graph of edges, of
-/// the level's keys.
+/// the level's keys, or of the pairs a helper returning `TABLE (...)` returns.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperWalk {
     /// The rows each naming an edge from a child to its parent, any number of them per
@@ -1028,23 +1032,23 @@ pub struct HelperWalk {
 }
 
 impl HelperWalk {
-    /// The column of the edges whose values the walk adds to the set, each edge's child
+    /// The columns of the edges whose values the walk adds to the set, each edge's child
     /// walking down and its parent walking up.
     #[must_use]
-    pub fn returned_column(&self) -> &ColumnName {
+    pub fn returned_columns(&self) -> &[ColumnName] {
         match self.direction {
-            sql_traits::structs::WalkDirection::Down => &self.edges.child_column,
-            sql_traits::structs::WalkDirection::Up => &self.edges.parent_column,
+            sql_traits::structs::WalkDirection::Down => &self.edges.child_columns,
+            sql_traits::structs::WalkDirection::Up => &self.edges.parent_columns,
         }
     }
 
-    /// The column of the edges joined with the set, each edge's parent walking down and
+    /// The columns of the edges joined with the set, each edge's parent walking down and
     /// its child walking up.
     #[must_use]
-    pub fn joined_column(&self) -> &ColumnName {
+    pub fn joined_columns(&self) -> &[ColumnName] {
         match self.direction {
-            sql_traits::structs::WalkDirection::Down => &self.edges.parent_column,
-            sql_traits::structs::WalkDirection::Up => &self.edges.child_column,
+            sql_traits::structs::WalkDirection::Down => &self.edges.parent_columns,
+            sql_traits::structs::WalkDirection::Up => &self.edges.child_columns,
         }
     }
 }
@@ -1092,15 +1096,18 @@ pub struct FlaggedRow {
 
 /// The rows linking a row of a tree to its parent, each naming a child and its parent by
 /// their keys, the tree's own rows where each names its own parent, or an edge table's.
+///
+/// A key of several columns names a row by all of them, so the columns naming the child and
+/// the ones naming the parent pair up by position, each holding the same column of the key.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TreeEdges {
     /// The table holding the edges.
     pub table: TableId,
-    /// Column of `table` naming each edge's child, the table's key where the table is
+    /// Columns of `table` naming each edge's child, the table's key where the table is
     /// the tree itself.
-    pub child_column: ColumnName,
-    /// Column of `table` naming each edge's parent.
-    pub parent_column: ColumnName,
+    pub child_columns: Vec<ColumnName>,
+    /// Columns of `table` naming each edge's parent.
+    pub parent_columns: Vec<ColumnName>,
 }
 
 /// Sets subtracted from a positive grant.

@@ -418,7 +418,7 @@ pub enum TranslationNote {
         /// Characters the key may render, once encoded, before the row is left out.
         budget: usize,
     },
-    /// A declared helper walks a tree along the parent column of a table holding its
+    /// A declared helper walks a tree along the parent columns of a table holding its
     /// edges, the tree itself or an edge table, down to every row below or up to every
     /// row above, which `PostgreSQL` follows to any depth and `OpenFGA` resolves only as
     /// deep as its `resolveNodeLimit` allows.
@@ -431,8 +431,8 @@ pub enum TranslationNote {
         /// The table holding the edges it walks.
         #[serde(with = "table_id_as_str")]
         table: TableId,
-        /// The column naming each edge's parent.
-        column: ColumnName,
+        /// The columns naming each edge's parent, one per column of the tree's key.
+        columns: Vec<ColumnName>,
         /// The relation resolved once per parent or child.
         relation: RelationName,
     },
@@ -898,16 +898,20 @@ impl fmt::Display for TranslationNote {
             Self::HelperWalkDepth {
                 function,
                 table,
-                column,
+                columns,
                 relation,
-            } => write!(
-                f,
-                "Declared helper '{function}' walks '{table}' down '{column}', which OpenFGA \
-                 resolves as '{relation}' once per parent and only as deep as its \
-                 resolveNodeLimit allows, 25 by default. A row further below the one granted \
-                 fails the check where PostgreSQL grants it, so keep the tree shallower or \
-                 raise the limit."
-            ),
+            } => {
+                let columns: Vec<&str> = columns.iter().map(ColumnName::as_str).collect();
+                write!(
+                    f,
+                    "Declared helper '{function}' walks '{table}' down '{}', which OpenFGA \
+                     resolves as '{relation}' once per parent and only as deep as its \
+                     resolveNodeLimit allows, 25 by default. A row further below the one \
+                     granted fails the check where PostgreSQL grants it, so keep the tree \
+                     shallower or raise the limit.",
+                    columns.join(", ")
+                )
+            }
             Self::FlagWalkDepth { table, relation } => write!(
                 f,
                 "A flag on '{table}' is inherited down its edges as '{relation}', which \
