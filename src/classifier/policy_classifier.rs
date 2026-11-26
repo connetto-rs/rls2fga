@@ -1164,68 +1164,182 @@ fn classify_expr_inner<DB: DatabaseLike>(
         );
     }
 
+    let leaf = match recognize_leaf_or_gated(expr, db, registry, table, command, depth, state) {
+        Some(classified) if !matches!(classified.pattern, PatternClass::Unknown(_)) => {
+            return classified
+        }
+        leaf => leaf,
+    };
     if let Some(classified) =
-        recognize_leaf_or_gated(expr, db, registry, table, command, depth, state)
+        classify_compared_lookup(expr, db, registry, table, command, depth, state)
     {
         return classified;
     }
+    if let Some(leaf) = leaf {
+        return leaf;
+    }
 
-    // A call naming a declared function expands to that function's body, so the
-    // documented workaround for policy self-recursion translates. After every
-    // recognizer, so a registered semantic keeps its handling, and before the
-    // blame below, which is where such a call fell until now.
-    if let Some(expansion) = expansion::expand_function_call(expr, db, registry, table, state) {
-        return match expansion {
-            expansion::Expansion::Refused { reason } => unknown_d(expr, reason),
-            expansion::Expansion::Body {
-                function,
-                identity,
-                reads_bypass_rls,
-                presence_columns,
-                expr: body,
-            } => {
-                state.enter(identity);
-                if reads_bypass_rls {
-                    state.enter_owner_read();
-                }
-                let inner = match prepare_clause(&body, registry) {
-                    Ok(lowered) => classify_expr_depth(
-                        &lowered,
-                        db,
-                        registry,
-                        table,
-                        command,
-                        depth + 1,
-                        state,
-                    ),
-                    Err(refused) => unknown_d(&body, refused.to_string()),
-                };
-                if reads_bypass_rls {
-                    state.leave_owner_read();
-                }
-                state.leave();
-                if let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &inner.pattern {
-                    unknown_d(
-                        expr,
-                        format!("The body of '{function}' does not translate: {reason}"),
-                    )
-                } else {
-                    let confidence = inner.confidence;
-                    ClassifiedExpr {
-                        pattern: PatternClass::ExpandedFunction(ExpandedFunction {
-                            function,
-                            reads_bypass_rls,
-                            presence_columns,
-                            inner: Box::new(inner),
-                        }),
-                        confidence,
-                    }
-                }
-            }
-        };
+    // After every recognizer, so a registered semantic keeps its handling.
+    if let Some(expansion) = expansion::expand_function_call(
+        expr,
+        db,
+        registry,
+        table,
+        state,
+        expansion::CallPosition::Clause,
+    ) {
+        return classify_expansion(
+            expr, expansion, Ok, db, registry, table, command, depth, state,
+        );
     }
 
     unrecognized(expr, registry)
+}
+
+/// A value compared with a lookup, written inline or as a call whose body is one, read as
+/// membership in the rows the lookup selects, or why it is not.
+///
+/// `None` where `expr` compares no lookup.
+fn classify_compared_lookup<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    command: PolicyCommand,
+    depth: u32,
+    state: &ExpansionState,
+) -> Option<ClassifiedExpr> {
+    if let Some(lookup) = recognizers::single_row_lookup(expr, db, None) {
+        return Some(match lookup {
+            Ok(membership) => {
+                classify_expr_depth(&membership, db, registry, table, command, depth + 1, state)
+            }
+            Err(refusal) => unknown_d(expr, refusal.to_string()),
+        });
+    }
+    let Expr::BinaryOp {
+        left,
+        op: BinaryOperator::Eq,
+        right,
+    } = expr
+    else {
+        return None;
+    };
+    let compared = |side: &Expr| {
+        expansion::expand_function_call(
+            side,
+            db,
+            registry,
+            table,
+            state,
+            expansion::CallPosition::Compared,
+        )
+    };
+    let (expansion, call_on_left) = compared(left)
+        .map(|expansion| (expansion, true))
+        .or_else(|| compared(right).map(|expansion| (expansion, false)))?;
+    let returned = match &expansion {
+        expansion::Expansion::Body { returned, .. } => returned.clone(),
+        expansion::Expansion::Refused { .. } => None,
+    };
+    // Proven here, since the rebuilt comparison no longer names the call's return type.
+    let membership = |body: Expr| {
+        let returned = returned.ok_or_else(|| {
+            "The function declares no return type, so the value a call hands over is unknown"
+                .to_string()
+        })?;
+        let (left, right) = if call_on_left {
+            (Box::new(body), right.clone())
+        } else {
+            (left.clone(), Box::new(body))
+        };
+        let comparison = Expr::BinaryOp {
+            left,
+            op: BinaryOperator::Eq,
+            right,
+        };
+        recognizers::single_row_lookup(&comparison, db, Some(&returned))
+            .ok_or_else(|| {
+                "The lookup selects no single column of one table under that table's own \
+                 column names, so the row it returns is not proven the only one"
+                    .to_string()
+            })?
+            .map_err(|refusal| refusal.to_string())
+    };
+    Some(classify_expansion(
+        expr, expansion, membership, db, registry, table, command, depth, state,
+    ))
+}
+
+/// The clause a call in `expr` expands to, `placed` around the called body, classified
+/// under the identity and owner read of the function, or why it does not translate.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "db, registry, table and state are four separate borrows the recursion threads through"
+)]
+fn classify_expansion<DB: DatabaseLike>(
+    expr: &Expr,
+    expansion: expansion::Expansion,
+    placed: impl FnOnce(Expr) -> Result<Expr, String>,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+    command: PolicyCommand,
+    depth: u32,
+    state: &ExpansionState,
+) -> ClassifiedExpr {
+    match expansion {
+        expansion::Expansion::Refused { reason } => unknown_d(expr, reason),
+        expansion::Expansion::Body {
+            function,
+            identity,
+            reads_bypass_rls,
+            presence_columns,
+            expr: body,
+            ..
+        } => {
+            let body = match placed(*body) {
+                Ok(body) => body,
+                Err(reason) => {
+                    return unknown_d(
+                        expr,
+                        format!("The body of '{function}' does not translate: {reason}"),
+                    )
+                }
+            };
+            state.enter(identity);
+            if reads_bypass_rls {
+                state.enter_owner_read();
+            }
+            let inner = match prepare_clause(&body, registry) {
+                Ok(lowered) => {
+                    classify_expr_depth(&lowered, db, registry, table, command, depth + 1, state)
+                }
+                Err(refused) => unknown_d(&body, refused.to_string()),
+            };
+            if reads_bypass_rls {
+                state.leave_owner_read();
+            }
+            state.leave();
+            if let PatternClass::Unknown(UnclassifiedExpr { reason, .. }) = &inner.pattern {
+                unknown_d(
+                    expr,
+                    format!("The body of '{function}' does not translate: {reason}"),
+                )
+            } else {
+                let confidence = inner.confidence;
+                ClassifiedExpr {
+                    pattern: PatternClass::ExpandedFunction(ExpandedFunction {
+                        function,
+                        reads_bypass_rls,
+                        presence_columns,
+                        inner: Box::new(inner),
+                    }),
+                    confidence,
+                }
+            }
+        }
+    }
 }
 
 /// [`recognize_leaf`], or where it refuses an `EXISTS`, the `EXISTS` gated from beside it

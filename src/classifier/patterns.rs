@@ -543,7 +543,8 @@ pub struct CallerScalarInConstantList {
 
 /// The request leaves a declared single value it may leave unset absent, so no row takes
 /// part: `NULLIF(current_setting('app.installation_id', true), '') IS NULL`, or carries
-/// it where negated, as `IS NOT NULL` does.
+/// it where negated, as `IS NOT NULL` does. The value may be the caller, whose absence is
+/// a request carrying no caller.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RequestValueAbsent {
     /// The declared source, carrying the parameter the caller supplies.

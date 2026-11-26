@@ -509,7 +509,7 @@ fn scalar_in_constant_list(expr: &Expr, registry: &FunctionRegistry) -> Option<C
 }
 
 /// `<NULLIF read> IS NULL`, the request leaving a value it may leave unset absent, and
-/// `IS NOT NULL`, the request carrying it.
+/// `IS NOT NULL`, the request carrying it, the caller among those values.
 ///
 /// Only the wrapped read is an absence the request states, since [`nullif_read`] reads
 /// both unset readings as `NULL`, while the bare read is `''` in one of them. A cast that
@@ -520,7 +520,7 @@ fn absence_test(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedEx
         Expr::IsNotNull(tested) => (tested, true),
         _ => return None,
     };
-    let (source, casts) = nullif_read(tested, registry)?;
+    let (source, casts) = emptied_read_of(tested, registry, tells_presence)?;
     if casts.renaming(Some(&source.canonical_type())).is_some() {
         return None;
     }
@@ -531,6 +531,11 @@ fn absence_test(expr: &Expr, registry: &FunctionRegistry) -> Option<ClassifiedEx
         }),
         confidence: grade(source),
     })
+}
+
+/// Whether a check tells a request carrying `source` from one leaving it unset.
+fn tells_presence(source: &DeclaredSource) -> bool {
+    source.is_scalar() || source.is_caller()
 }
 
 /// Why every `IS NULL` and `IS NOT NULL` in `expr` that tests a declared single value
@@ -560,7 +565,7 @@ fn absence_refusal(tested: &Expr, registry: &FunctionRegistry) -> Option<String>
     if let Some(EmptiedRead { key, path, casts }) = emptied_setting_read(tested, registry) {
         let source = registry
             .declared_source(&key, &path)
-            .filter(|source| source.is_scalar())?;
+            .filter(|source| tells_presence(source))?;
         return if !path.is_empty() {
             Some(format!(
                 "NULLIF hides a field of setting '{key}' holding '', which a request may \
@@ -582,7 +587,7 @@ fn absence_refusal(tested: &Expr, registry: &FunctionRegistry) -> Option<String>
                 })
         };
     }
-    let (source, _) = bare_declared_read(tested, registry)?;
+    let (source, _) = bare_read_of(tested, registry, tells_presence)?;
     let key = source.setting_key();
     Some(if !source.path().is_empty() {
         format!("A field of setting '{key}' tested for NULL has no translation")
@@ -1074,6 +1079,15 @@ pub(super) fn bare_declared_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<(&'r DeclaredSource, CastChain)> {
+    bare_read_of(expr, registry, DeclaredSource::is_scalar)
+}
+
+/// The read no `NULLIF` wraps of a source `accepts` admits.
+fn bare_read_of<'r>(
+    expr: &Expr,
+    registry: &'r FunctionRegistry,
+    accepts: fn(&DeclaredSource) -> bool,
+) -> Option<(&'r DeclaredSource, CastChain)> {
     let AccessorRead {
         root,
         path,
@@ -1082,7 +1096,7 @@ pub(super) fn bare_declared_read<'r>(
     let key = setting_key_read_by(root, registry)?;
     let source = registry
         .declared_source(&key, &path)
-        .filter(|source| source.is_scalar())?;
+        .filter(|source| accepts(source))?;
     if path.is_empty() {
         casts.extend(call_result(root, registry));
     }
@@ -1104,13 +1118,22 @@ pub(super) fn nullif_read<'r>(
     expr: &Expr,
     registry: &'r FunctionRegistry,
 ) -> Option<(&'r DeclaredSource, CastChain)> {
+    emptied_read_of(expr, registry, DeclaredSource::is_scalar)
+}
+
+/// [`nullif_read`] of a source `accepts` admits.
+fn emptied_read_of<'r>(
+    expr: &Expr,
+    registry: &'r FunctionRegistry,
+    accepts: fn(&DeclaredSource) -> bool,
+) -> Option<(&'r DeclaredSource, CastChain)> {
     let EmptiedRead { key, path, casts } = emptied_setting_read(expr, registry)?;
     if !path.is_empty() {
         return None;
     }
     let source = registry
         .declared_source(&key, &[])
-        .filter(|source| source.is_scalar() && source.may_be_unset())?;
+        .filter(|source| accepts(source) && source.may_be_unset())?;
     Some((source, casts))
 }
 
@@ -1197,7 +1220,8 @@ pub(super) fn setting_key_read_by(root: &Expr, registry: &FunctionRegistry) -> O
 /// The `current_setting` key a node reads, written inline or as a call to a function
 /// whose whole body reads it, and whether that body wraps the read in `NULLIF(_, '')`. A
 /// function applying a normalization to the read returns another value than the
-/// setting's, which [`normalized_accessor_read`] reads.
+/// setting's, which [`normalized_accessor_read`] reads. A caller accessor counts only
+/// where its body wraps the read.
 fn setting_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<(String, bool)> {
     if let Some(key) = current_setting_literal_key(root) {
         return Some((key, false));
@@ -1205,7 +1229,11 @@ fn setting_read_by(root: &Expr, registry: &FunctionRegistry) -> Option<(String, 
     let Expr::Function(function) = root else {
         return None;
     };
-    match registry.get(&function.name.to_string())? {
+    let name = function.name.to_string();
+    if let Some(key) = registry.emptied_caller_read(&name) {
+        return Some((key.to_string(), true));
+    }
+    match registry.get(&name)? {
         FunctionSemantic::SettingReader {
             key,
             skips_empty,

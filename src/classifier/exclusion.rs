@@ -385,14 +385,20 @@ fn collect_conjuncts<DB: DatabaseLike>(
                     reads_bypass_rls,
                     expr: body,
                     ..
-                }) = expansion::expand_function_call(expr, db, registry, table, state).filter(
-                    |expansion| match expansion {
-                        expansion::Expansion::Body {
-                            presence_columns, ..
-                        } => nullable_column(db, table, presence_columns).is_none(),
-                        expansion::Expansion::Refused { .. } => true,
-                    },
-                ) {
+                }) = expansion::expand_function_call(
+                    expr,
+                    db,
+                    registry,
+                    table,
+                    state,
+                    expansion::CallPosition::Clause,
+                )
+                .filter(|expansion| match expansion {
+                    expansion::Expansion::Body {
+                        presence_columns, ..
+                    } => nullable_column(db, table, presence_columns).is_none(),
+                    expansion::Expansion::Refused { .. } => true,
+                }) {
                     state.enter(identity);
                     if reads_bypass_rls {
                         state.enter_owner_read();
@@ -651,7 +657,15 @@ fn classify_flag<DB: DatabaseLike>(
         reads_bypass_rls,
         presence_columns,
         expr: body,
-    }) = expansion::expand_function_call(positive, db, registry, table, state)
+        ..
+    }) = expansion::expand_function_call(
+        positive,
+        db,
+        registry,
+        table,
+        state,
+        expansion::CallPosition::Clause,
+    )
     else {
         return None;
     };

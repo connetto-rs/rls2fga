@@ -14,9 +14,11 @@ use sqlparser::ast::{
 };
 
 mod indirect;
+mod lookup;
 mod referring;
 pub(crate) use indirect::owner_key_of;
 pub use indirect::recognize_p19_indirect_membership;
+pub(crate) use lookup::single_row_lookup;
 pub(crate) use referring::diagnose_p31_referring_rows;
 pub use referring::recognize_p31_referring_rows;
 

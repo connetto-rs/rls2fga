@@ -94,6 +94,8 @@ mod resulting_type_tests;
 mod role_accessor_tests;
 mod role_keyword_tests;
 mod row_cap_tests;
+mod row_lookup_parity_tests;
+mod row_lookup_tests;
 mod row_naming_tests;
 mod row_security_tests;
 mod security_definer_tests;

@@ -7,7 +7,8 @@ use crate::classifier::recognizers::row_valued_set;
 use crate::parser::expr::cast_type_name;
 use crate::parser::function_analyzer::{
     body_role_keyword, body_setting_fallback, body_setting_read, body_single_projection,
-    normalize_setting_key, renamed_caller_body, BodySettingRead, FunctionSemantic,
+    normalize_setting_key, renamed_caller_body, returned_value_type, BodySettingRead,
+    FunctionSemantic,
 };
 use crate::parser::names::{resolve_table_id, stored_relation_name, RoleKeyword};
 use crate::parser::sql_parser::{
@@ -438,6 +439,10 @@ pub struct FunctionRegistry {
     /// Functions the schema gives a `LANGUAGE sql` body that reads as no semantic above,
     /// with why.
     unread_bodies: BTreeMap<FunctionKey, UnreadBody>,
+    /// Caller accessors whose body wraps the caller setting it reads in `NULLIF(_, '')`,
+    /// each with that setting, so a call is `NULL` exactly where the request carries no
+    /// caller.
+    emptied_caller_reads: BTreeMap<FunctionKey, String>,
     /// The type each function the schema defines returns, lower case, a set returning
     /// one by its element type. A literal compared with a call is coerced into it.
     return_types: BTreeMap<FunctionKey, String>,
@@ -466,6 +471,7 @@ impl FunctionRegistry {
             renamed_accessors: BTreeMap::new(),
             role_keyword_accessors: BTreeMap::new(),
             unread_bodies: BTreeMap::new(),
+            emptied_caller_reads: BTreeMap::new(),
             return_types: BTreeMap::new(),
             deployment: None,
             sources: DeclaredSources::default(),
@@ -509,6 +515,15 @@ impl FunctionRegistry {
         let key = FunctionKey::parse(name);
         let resolved = self.function_resolution.get(&key).unwrap_or(&key);
         self.unread_bodies.get(resolved.as_str())
+    }
+
+    /// The caller setting the accessor `name` reads through `NULLIF(_, '')`.
+    pub(crate) fn emptied_caller_read(&self, name: &str) -> Option<&str> {
+        let key = FunctionKey::parse(name);
+        let resolved = self.function_resolution.get(&key).unwrap_or(&key);
+        self.emptied_caller_reads
+            .get(resolved.as_str())
+            .map(String::as_str)
     }
 
     /// The type a call to the function `name` returns, a set returning one by its element
@@ -880,12 +895,10 @@ impl FunctionRegistry {
         for function in db.functions() {
             let target = function.target_name();
             if let Some(returned) = function.return_type_name(db) {
-                let returned = returned.to_ascii_lowercase();
-                let element = returned.strip_prefix("setof ").unwrap_or(&returned);
                 let target_key = self.target_key(&target);
                 self.return_types
                     .entry(target_key)
-                    .or_insert_with(|| element.trim().to_string());
+                    .or_insert_with(|| returned_value_type(&returned));
             }
             if matches!(
                 self.get_target(&target),
@@ -916,6 +929,19 @@ impl FunctionRegistry {
                 &self.sources,
             ) {
                 self.register_target_if_absent(&target, &semantic);
+                if let Some(read) = body_setting_read(body).filter(|read| {
+                    read.skips_empty
+                        && read.normalization.is_none()
+                        && matches!(
+                            self.get_target(&target),
+                            Some(FunctionSemantic::CurrentUserAccessor { .. })
+                        )
+                }) {
+                    let target_key = self.target_key(&target);
+                    self.emptied_caller_reads
+                        .entry(target_key)
+                        .or_insert_with(|| normalize_setting_key(&read.key));
+                }
             } else if self.get_target(&target).is_none() {
                 let target_key = self.target_key(&target);
                 match body_role_keyword(body, &return_type, &language) {

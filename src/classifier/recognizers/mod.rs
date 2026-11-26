@@ -75,6 +75,7 @@ pub(crate) use subquery::exists_gated_beside;
 pub(crate) use subquery::owner_key_of;
 pub use subquery::recognize_p19_indirect_membership;
 pub(crate) use subquery::session_zoned_columns;
+pub(crate) use subquery::single_row_lookup;
 pub(crate) use subquery::{
     diagnose_p31_referring_rows, diagnose_p4_membership_ambiguity,
     diagnose_p5_parent_inheritance_ambiguity,
