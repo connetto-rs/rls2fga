@@ -15,7 +15,7 @@ use sql_traits::errors::ReturnedValuesError;
 use sql_traits::structs::{ReturnedOutput, ReturnedValue};
 use sqlparser::ast::{
     visit_expressions, visit_expressions_mut, ArgMode, CaseWhen, CastKind, DataType, Expr,
-    InTarget, SelectItem, SetExpr, Statement, Value,
+    InTarget, ObjectName, ObjectNamePart, SelectItem, Statement, Value,
 };
 use sqlparser::dialect::PostgreSqlDialect;
 use sqlparser::parser::Parser;
@@ -141,8 +141,8 @@ pub(crate) fn projected_output_read<DB: DatabaseLike>(
 struct ProjectedCall {
     /// The projected expression.
     projection: Expr,
-    /// The called function's name, each part as `PostgreSQL` stores it.
-    call: Vec<String>,
+    /// The called function's name as written.
+    call: ObjectName,
     /// The name the projection reaches the call's columns by, as `PostgreSQL` stores it.
     qualifier: String,
 }
@@ -150,37 +150,22 @@ struct ProjectedCall {
 /// The expression `body` projects over the one row of a call in its `FROM` passing no
 /// argument, when it is one query projecting one expression and nothing narrows the row.
 fn projected_call(body: &str) -> Option<ProjectedCall> {
-    let mut statements = Parser::parse_sql(&PostgreSqlDialect {}, body).ok()?;
-    let [Statement::Query(query)] = statements.as_mut_slice() else {
+    let statements = Parser::parse_sql(&PostgreSqlDialect {}, body).ok()?;
+    let [Statement::Query(query)] = statements.as_slice() else {
         return None;
     };
-    let (select, name, qualifier) = projected_call_select(query)?;
-    if !matches!(
-        select.projection.as_slice(),
-        [SelectItem::UnnamedExpr(_) | SelectItem::ExprWithAlias { .. }]
-    ) {
-        return None;
-    }
-    let call = name
-        .0
-        .iter()
-        .map(|part| Some(stored_ident_name(part.as_ident()?).into_owned()))
-        .collect::<Option<Vec<String>>>()?;
-    let qualifier = stored_ident_name(qualifier).into_owned();
-    let SetExpr::Select(select) = query.body.as_mut() else {
-        return None;
-    };
-    let (SelectItem::UnnamedExpr(projection)
+    let (select, call, qualifier) = projected_call_select(query)?;
+    let [SelectItem::UnnamedExpr(projection)
     | SelectItem::ExprWithAlias {
         expr: projection, ..
-    }) = select.projection.pop()?
+    }] = select.projection.as_slice()
     else {
         return None;
     };
     Some(ProjectedCall {
-        projection,
-        call,
-        qualifier,
+        projection: projection.clone(),
+        call: call.clone(),
+        qualifier: stored_ident_name(qualifier).into_owned(),
     })
 }
 
@@ -189,9 +174,9 @@ fn projected_call(body: &str) -> Option<ProjectedCall> {
 fn called_function<'db, DB: DatabaseLike>(
     db: &'db DB,
     function: &DB::Function,
-    call: &[String],
+    call: &ObjectName,
 ) -> Option<&'db DB::Function> {
-    let (name, schema) = match call {
+    let (name, schema) = match call.0.as_slice() {
         [name] => (name, None),
         [schema, name] => (name, Some(schema)),
         _ => return None,
@@ -203,15 +188,22 @@ fn called_function<'db, DB: DatabaseLike>(
         .filter(|candidate| {
             let target = candidate.target_name();
             candidate.accepts_argument_count(0)
-                && stored_identifier(target.name(), target.name_is_quoted()) == name.as_str()
+                && stored_part(name)
+                    == Some(stored_identifier(target.name(), target.name_is_quoted()))
                 && schema.is_none_or(|schema| {
                     target.schema().is_some_and(|written| {
-                        stored_identifier(written, target.schema_is_quoted()) == schema.as_str()
+                        stored_part(schema)
+                            == Some(stored_identifier(written, target.schema_is_quoted()))
                     })
                 })
         });
     let called = matching.next()?;
     matching.next().is_none().then_some(called)
+}
+
+/// The name `PostgreSQL` stores for `part`, when it is an identifier.
+fn stored_part(part: &ObjectNamePart) -> Option<alloc::borrow::Cow<'_, str>> {
+    part.as_ident().map(stored_ident_name)
 }
 
 /// What a called function's outputs hold, with the type each converts its value to.

@@ -149,11 +149,7 @@ fn a_pair_not_declared_set_together_is_refused_naming_the_validator() {
 /// namespace output still equals the namespace read only where the two are set together.
 #[test]
 fn a_guarded_output_needs_the_pair_set_together() {
-    let assigned = VALIDATOR
-        .split_once("\n  IF")
-        .map(|(assignments, _)| assignments)
-        .expect("the validator assigns before it tests");
-    let policies = classified(pair(false), &schema(assigned, ""));
+    let policies = classified(pair(false), &schema(assigned(), ""));
     assert_eq!(
         using_of(&policies, "local_wrapped"),
         using_of(&policies, "local_inline")
@@ -198,4 +194,120 @@ fn a_set_returning_validator_is_not_read() {
         reason.contains("whose outputs are not read (`acting_installation` returns a set)"),
         "{reason}"
     );
+}
+
+/// `schema` with the local accessor's body replaced by `body`.
+fn local_body(validator: &str, body: &str) -> String {
+    schema(validator, "").replace("SELECT id FROM authz.acting_installation()", body)
+}
+
+/// The validator's assignments without its raise.
+fn assigned() -> &'static str {
+    VALIDATOR
+        .split_once("\n  IF")
+        .map(|(assignments, _)| assignments)
+        .expect("the validator assigns before it tests")
+}
+
+/// The alias a `FROM` gives the call, and the call left unqualified where the accessor's
+/// `search_path` reaches its schema, read as the same output.
+#[test]
+fn an_aliased_or_unqualified_call_reads_the_same_output() {
+    let aliased = classified(
+        pair(true),
+        &local_body(
+            VALIDATOR,
+            "SELECT identity.id FROM authz.acting_installation() AS identity",
+        ),
+    );
+    let unqualified = classified(
+        pair(true),
+        &schema(VALIDATOR, "").replace(
+            "pg_temp AS $$\n  SELECT id FROM authz.acting_installation()",
+            "pg_temp, authz AS $$\n  SELECT id FROM acting_installation()",
+        ),
+    );
+    for policies in [aliased, unqualified] {
+        let wrapped = using_of(&policies, "local_wrapped");
+        assert_eq!(wrapped.confidence, ConfidenceLevel::A, "{wrapped:?}");
+        assert_eq!(wrapped, using_of(&policies, "local_inline"));
+    }
+}
+
+/// A body that is not one output of one call's row, or whose output is no setting read,
+/// reads as no semantic.
+#[test]
+fn a_body_reading_other_than_one_output_is_unread() {
+    for body in [
+        "SELECT id, namespace_id FROM authz.acting_installation()",
+        "SELECT id FROM elsewhere.authz.acting_installation()",
+        "SELECT (SELECT id) FROM authz.acting_installation()",
+        "SELECT elsewhere.id FROM authz.acting_installation()",
+        "SELECT missing FROM authz.acting_installation()",
+        "SELECT COALESCE(id, namespace_id) FROM authz.acting_installation()",
+        "SELECT CASE WHEN id IS NULL THEN namespace_id END FROM authz.acting_installation()",
+        "SELECT id FROM objects",
+        "SELECT id FROM authz.acting_installation() CROSS JOIN objects",
+        "SELECT i FROM authz.acting_installation() AS identity(n, i)",
+    ] {
+        let policies = classified(pair(true), &local_body(VALIDATOR, body));
+        let reason = refusal(&policies, "local_wrapped");
+        assert!(
+            reason.contains("is neither a role keyword nor one declared setting"),
+            "{body}: {reason}"
+        );
+    }
+}
+
+/// An output no assignment reaches holds `NULL`, and one reading an undeclared setting
+/// holds a value the deployment does not carry, so neither is a declared read.
+#[test]
+fn an_output_holding_no_declared_read_is_unread() {
+    let unassigned = assigned()
+        .split_once("\n  id :=")
+        .map(|(namespace, _)| namespace)
+        .expect("the validator assigns the local half last");
+    let undeclared = schema(
+        &assigned().replace(
+            "app.installation_id', true), '')::UUID",
+            "app.undeclared_id', true), '')",
+        ),
+        "",
+    )
+    .replace("OUT id UUID", "OUT id TEXT");
+    for schema in [schema(unassigned, ""), undeclared] {
+        let policies = classified(pair(false), &schema);
+        let reason = refusal(&policies, "local_wrapped");
+        assert!(
+            reason.contains("is neither a role keyword nor one declared setting"),
+            "{schema}: {reason}"
+        );
+    }
+}
+
+/// An output given by one of several assignments, or by a write other than an
+/// assignment of an expression, holds no one read, and the refusal says which.
+#[test]
+fn an_output_with_no_one_assignment_is_refused_naming_it() {
+    let several = format!(
+        "{}\n  IF namespace_id IS NULL THEN\n    id := NULL;\n  END IF;",
+        assigned()
+    );
+    let copied = format!("{}\n  id := namespace_id;", assigned());
+    for (validator, expected) in [
+        (several.as_str(), "which several assignments give"),
+        (
+            copied.as_str(),
+            "which no assignment of an expression gives",
+        ),
+    ] {
+        let policies = classified(pair(false), &schema(validator, ""));
+        let reason = refusal(&policies, "local_wrapped");
+        assert!(
+            reason.contains(&format!(
+                "selects 'id' of 'authz.acting_installation', {expected}"
+            )),
+            "{validator}: {reason}"
+        );
+    }
 }
