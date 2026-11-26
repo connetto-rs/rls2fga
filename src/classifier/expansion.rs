@@ -18,8 +18,10 @@ use sqlparser::ast::{
 };
 
 use crate::classifier::function_registry::FunctionRegistry;
-use crate::classifier::recognizers::{sole_projection, unparenthesize};
-use crate::parser::function_analyzer::{body_reads_effective_user, body_single_projection};
+use crate::classifier::recognizers::{sole_projection, united_selects, unparenthesize};
+use crate::parser::function_analyzer::{
+    body_reads_effective_user, body_returned_value, body_single_projection, returned_value_type,
+};
 use crate::parser::names::{
     lookup_table, stored_ident_name, stored_identifier, stored_relation_name, table_has_column,
     unquote_identifier,
@@ -136,6 +138,8 @@ pub(crate) enum Expansion {
         presence_columns: Vec<ColumnName>,
         /// The body with the call-site arguments substituted.
         expr: Box<Expr>,
+        /// The type the expanded declaration returns, each row's for a set, lower case.
+        returned: Option<String>,
     },
     /// The call names a declared function the expansion cannot prove, so the
     /// clause falls closed with this reason.
@@ -145,18 +149,33 @@ pub(crate) enum Expansion {
     },
 }
 
-/// Expand `expr` when it is a call to a declared, unregistered,
-/// single-expression `LANGUAGE sql` function, bare or as the whole projection of a
-/// scalar subquery that keeps its one row.
+/// Where a call to a declared function stands, which decides the body it expands to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallPosition {
+    /// The whole clause, so the body is one boolean expression.
+    Clause,
+    /// One side of a comparison, so the call is the value its body returns, which is
+    /// expanded only where the body selects rows of a table.
+    Compared,
+}
+
+/// Expand `expr` when it is a call to a declared, unregistered `LANGUAGE sql` function,
+/// bare or as the whole projection of a scalar subquery that keeps its one row.
+///
+/// At [`CallPosition::Clause`] the body is a single expression. At
+/// [`CallPosition::Compared`] it is a query selecting rows of a table, which expands to
+/// that query as a scalar subquery.
 ///
 /// `None` means the expression is not such a call, and the caller's ordinary
-/// blame path stands.
+/// blame path stands. At [`CallPosition::Compared`] that includes every call whose body
+/// selects no table.
 pub(crate) fn expand_function_call<DB: DatabaseLike>(
     expr: &Expr,
     db: &DB,
     registry: &FunctionRegistry,
     table: &str,
     state: &ExpansionState,
+    position: CallPosition,
 ) -> Option<Expansion> {
     let func = called_function(expr)?;
     // A window, filter or parameterized call is not the plain boolean call this
@@ -206,13 +225,14 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
         .filter(|declared| declared.argument_names(db).count() == call_args.len())
         .collect();
     let function = match candidates.as_slice() {
+        [only] => *only,
+        _ if position == CallPosition::Compared => return None,
         [] => {
             return Some(refused(format!(
                 "Function '{function_name}' is declared with a different argument count \
                  than this call passes, so the call is not the declared body"
             )))
         }
-        [only] => *only,
         _ => {
             return Some(refused(format!(
                 "More than one declaration of '{function_name}' matches this call, so \
@@ -220,6 +240,7 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
             )))
         }
     };
+    let body = call_body(function, db, &function_name, position)?;
 
     if state.expanding(&terminal) {
         return Some(refused(format!(
@@ -233,50 +254,9 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
              so the remainder is not translated"
         )));
     }
-
-    match function.stored_language().as_deref() {
-        Some("sql") => {}
-        Some(_) => {
-            let language = function.language().unwrap_or("unknown");
-            return Some(refused(format!(
-                "Function '{function_name}' is LANGUAGE {language}, and only a \
-                 single-expression LANGUAGE sql body expands"
-            )));
-        }
-        None => {
-            return Some(refused(format!(
-                "Function '{function_name}' declares no language, and only a \
-                 single-expression LANGUAGE sql body expands"
-            )))
-        }
-    }
-
-    let parsed = match function.body_expression(db) {
-        Ok(parsed) => parsed,
-        Err(error) => {
-            return Some(refused(format!(
-                "The body of '{function_name}' does not parse back ({error}), so the call \
-                 is not expanded"
-            )))
-        }
-    };
-    let (mut body, string_body) = match (parsed, function.body()) {
-        (Some(parsed), _) => (parsed.into_owned(), false),
-        (None, Some(text)) => match body_single_projection(text) {
-            Some(projected) => (projected, true),
-            None => {
-                return Some(refused(format!(
-                    "Function '{function_name}' has no single-expression SELECT body, \
-                     so the call is not expanded"
-                )))
-            }
-        },
-        (None, None) => {
-            return Some(refused(format!(
-                "Function '{function_name}' has no readable body, so the call is not \
-                 expanded"
-            )))
-        }
+    let (mut body, string_body) = match body {
+        Ok(body) => body,
+        Err(reason) => return Some(refused(reason.to_string())),
     };
     let bound = bound_names(&body);
     if let Some(name) = bound.iter().find(|name| {
@@ -504,6 +484,12 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
         )));
     }
     if has_null_literal {
+        if position == CallPosition::Compared {
+            return Some(refused(format!(
+                "Function '{function_name}' is STRICT and this call passes NULL, so it \
+                 returns NULL and the comparison never holds"
+            )));
+        }
         substituted = Expr::Value(Value::Boolean(false).into());
         presence_columns.clear();
     }
@@ -514,6 +500,9 @@ pub(crate) fn expand_function_call<DB: DatabaseLike>(
         reads_bypass_rls,
         presence_columns,
         expr: Box::new(substituted),
+        returned: function
+            .return_type_name(db)
+            .map(|declared| returned_value_type(&declared)),
     })
 }
 
@@ -521,12 +510,112 @@ fn refused(reason: String) -> Expansion {
     Expansion::Refused { reason }
 }
 
+/// Why the body of a declared function is not read as the value a call to it returns.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum BodyRefusal {
+    #[error(
+        "Function '{function}' is LANGUAGE {language}, and only a single-expression \
+         LANGUAGE sql body expands"
+    )]
+    Language { function: String, language: String },
+    #[error(
+        "Function '{function}' declares no language, and only a single-expression \
+         LANGUAGE sql body expands"
+    )]
+    NoLanguage { function: String },
+    #[error("The body of '{function}' does not parse back ({error}), so the call is not expanded")]
+    Unparsable { function: String, error: String },
+    #[error(
+        "Function '{function}' has no single-expression SELECT body, so the call is not \
+         expanded"
+    )]
+    NoSingleExpression { function: String },
+    #[error("Function '{function}' has no readable body, so the call is not expanded")]
+    Unreadable { function: String },
+}
+
+/// The body a call at `position` expands to, and whether it was read from the body's text
+/// rather than bound at creation.
+///
+/// `None` where a compared call's body selects no table, which leaves the call to the
+/// blame the comparison already earns.
+fn call_body<DB: DatabaseLike>(
+    function: &DB::Function,
+    db: &DB,
+    function_name: &str,
+    position: CallPosition,
+) -> Option<Result<(Expr, bool), BodyRefusal>> {
+    let compared = position == CallPosition::Compared;
+    let function_name = || function_name.to_string();
+    match function.stored_language().as_deref() {
+        Some("sql") => {}
+        _ if compared => return None,
+        Some(_) => {
+            return Some(Err(BodyRefusal::Language {
+                function: function_name(),
+                language: function.language().unwrap_or("unknown").to_string(),
+            }))
+        }
+        None => {
+            return Some(Err(BodyRefusal::NoLanguage {
+                function: function_name(),
+            }))
+        }
+    }
+    let body = match (function.body_expression(db), function.body()) {
+        (Err(error), _) => Err(BodyRefusal::Unparsable {
+            function: function_name(),
+            error: error.to_string(),
+        }),
+        (Ok(Some(parsed)), _) => Ok((parsed.into_owned(), false)),
+        (Ok(None), Some(text)) => if compared {
+            body_returned_value(text)
+        } else {
+            body_single_projection(text)
+        }
+        .map(|body| (body, true))
+        .ok_or_else(|| BodyRefusal::NoSingleExpression {
+            function: function_name(),
+        }),
+        (Ok(None), None) => Err(BodyRefusal::Unreadable {
+            function: function_name(),
+        }),
+    };
+    if compared
+        && !body
+            .as_ref()
+            .is_ok_and(|(body, _)| selects_table_rows(body))
+    {
+        return None;
+    }
+    Some(body)
+}
+
+/// Whether `body` is a scalar subquery selecting from tables, or uniting such selects, each
+/// table named without arguments, so none of them is a function a call reads.
+fn selects_table_rows(body: &Expr) -> bool {
+    let Expr::Subquery(query) = body else {
+        return false;
+    };
+    let names_a_table =
+        |relation: &TableFactor| matches!(relation, TableFactor::Table { args: None, .. });
+    united_selects(&query.body).is_some_and(|selects| {
+        selects.iter().all(|select| {
+            !select.from.is_empty()
+                && select.from.iter().all(|from| {
+                    names_a_table(&from.relation)
+                        && from.joins.iter().all(|join| names_a_table(&join.relation))
+                })
+        })
+    })
+}
+
 /// The call `expr` makes, bare or as all a scalar subquery projects.
 ///
 /// `(SELECT f(...))` with nothing that can drop its one row is the value of the call, and
 /// is how a policy has `PostgreSQL` run a call reading no row column once per statement
 /// rather than once per row. A subquery that can return no row is `NULL` instead.
-fn called_function(expr: &Expr) -> Option<&Function> {
+pub(crate) fn called_function(expr: &Expr) -> Option<&Function> {
     match expr {
         Expr::Function(function) => Some(function),
         Expr::Subquery(query) => called_function(unparenthesize(sole_projection(query)?)),

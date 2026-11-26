@@ -4028,6 +4028,104 @@ impl RequestShares<'_> {
     }
 }
 
+/// A membership row whose columns equal values the request carries, admitting whoever
+/// presents every value one row of the guarded object holds.
+///
+/// Each row is an object of the table's share type, gated on its own values, and linked
+/// from the object its key names, so two rows of one object union through the link
+/// rather than collide on one tuple.
+pub(crate) fn emit_membership_on_request_values<DB: DatabaseLike>(
+    membership: &MembershipOnRequestValues,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+    notes: &mut Vec<TranslationNote>,
+    readability: &mut BTreeMap<TableId, TableReadability>,
+) -> UsersetExpr {
+    let MembershipOnRequestValues {
+        join_table,
+        pairs,
+        compared,
+        extra_predicates,
+    } = membership;
+    // The subquery reads `join_table` as the caller, so its own RLS decides which rows
+    // count, and no column of it holds the caller.
+    let check = MembershipRead {
+        caller_column: None,
+        residual: extra_predicates,
+    };
+    let Some(read_scope) = noted_membership_read_scope(join_table, check, ctx, readability, notes)
+    else {
+        return deny_expr(table_plan);
+    };
+    let Some(parent) = MembershipParent::resolve(pairs, join_table, ctx, table_plan, notes) else {
+        return deny_expr(table_plan);
+    };
+    let compared: Vec<_> = compared
+        .iter()
+        .map(|compared| (&compared.value_column, &compared.source))
+        .collect();
+    let share = RequestShares {
+        table: join_table,
+        compared: &compared,
+    };
+    let groups = vec![(
+        conditional_gate_relation_name(ctx.policy_name).to_string(),
+        extra_predicates.clone(),
+    )];
+    let Some((identity_cols, share_type, gates)) = share.gates(groups, ctx, table_plan, all_types)
+    else {
+        return deny_expr(table_plan);
+    };
+    // The one group keeps no gate where a clock comparison sits beside a condition the
+    // request cannot complete.
+    let Ok([gate]) = <[RelationName; 1]>::try_from(gates) else {
+        notes.push(TranslationNote::ExpressionRefused {
+            policy: ctx.policy_name.to_string(),
+            reason: format!(
+                "the rows of '{join_table}' are kept by a clock comparison beside a \
+                 condition the row alone does not decide, which no gate on its values can \
+                 carry"
+            ),
+        });
+        return deny_expr(table_plan);
+    };
+    announce_residual(
+        extra_predicates,
+        extra_predicates.has_requests(),
+        ctx.policy_name,
+        notes,
+    );
+    let rows = ShareRows {
+        join_table,
+        identity_cols: &identity_cols,
+        fk_cols: &parent.fk_cols(),
+        share_type: &share_type,
+    };
+    let membership = if parent.is_self(table_plan) {
+        let link = link_share_rows(table_plan, &rows);
+        share_reach(link, gate)
+    } else {
+        let tupleset = parent.bridge_from(table_plan, ctx.source_table);
+        let parent_plan = parent.plan(all_types, &ctx.settings.well_known);
+        let link = link_share_rows(parent_plan, &rows);
+        UsersetExpr::TupleToUserset {
+            tupleset,
+            computed: parent_plan.ensure_computed(gate.to_string(), share_reach(link, gate)),
+        }
+    };
+    apply_membership_read_scope(
+        membership,
+        join_table,
+        extra_predicates,
+        &read_scope,
+        ctx,
+        table_plan,
+        all_types,
+        notes,
+    )
+}
+
 /// Gate rows on the request's value being one a declared helper returns.
 ///
 /// The helper returns the same rows to every caller, so the clause has one truth value

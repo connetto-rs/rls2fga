@@ -70,6 +70,8 @@ mod openfga_integration_tests;
 #[cfg(feature = "client")]
 mod openfga_semantic_tests;
 mod output_formatter_tests;
+mod owned_namespace_parity_tests;
+mod owned_namespace_tests;
 mod owner_expression_tests;
 #[cfg(feature = "parity")]
 mod parity_fixture_tests;
@@ -94,6 +96,8 @@ mod resulting_type_tests;
 mod role_accessor_tests;
 mod role_keyword_tests;
 mod row_cap_tests;
+mod row_lookup_parity_tests;
+mod row_lookup_tests;
 mod row_naming_tests;
 mod row_security_tests;
 mod security_definer_tests;

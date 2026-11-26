@@ -14,9 +14,11 @@ use sqlparser::ast::{
 };
 
 mod indirect;
+mod lookup;
 mod referring;
 pub(crate) use indirect::owner_key_of;
 pub use indirect::recognize_p19_indirect_membership;
+pub(crate) use lookup::{single_row_lookup, united_selects};
 pub(crate) use referring::diagnose_p31_referring_rows;
 pub use referring::recognize_p31_referring_rows;
 
@@ -1318,6 +1320,32 @@ fn classify_membership_select<DB: DatabaseLike>(
             }),
             confidence: ConfidenceLevel::A,
         }),
+        MembershipSelectAnalysis::Unique {
+            join_table,
+            columns:
+                MembershipColumns {
+                    pairs,
+                    member_match: MemberMatch::RequestValues(compared),
+                    extra_predicates,
+                    ..
+                },
+        } => {
+            // A field taken out of a declared document is indirection, which caps at B.
+            let confidence = compared
+                .iter()
+                .map(|compared| session::grade(&compared.source))
+                .min()
+                .unwrap_or(ConfidenceLevel::A);
+            Some(ClassifiedExpr {
+                pattern: PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues {
+                    join_table: resolve_table_id(db, &join_table)?,
+                    pairs,
+                    compared,
+                    extra_predicates,
+                }),
+                confidence,
+            })
+        }
         MembershipSelectAnalysis::Uncorrelated {
             member_table,
             user_column,
@@ -1586,6 +1614,7 @@ fn analyze_uncorrelated_membership<DB: DatabaseLike>(
             // widening of that entry condition cannot turn grant keys into users, and
             // pinned by `an_uncorrelated_subquery_testing_a_declared_set_is_refused`.
             MembershipEqAnalysis::UserColumn(..)
+            | MembershipEqAnalysis::RequestValue(_)
             | MembershipEqAnalysis::FkCandidate { .. }
             | MembershipEqAnalysis::OuterCorrelation => return None,
             MembershipEqAnalysis::NotRelevant => {}
@@ -2377,6 +2406,8 @@ pub(super) enum MemberMatch {
         /// Separator the policy splits the setting on.
         separator: Option<String>,
     },
+    /// The columns hold values the request carries, each compared with one of them.
+    RequestValues(Vec<ComparedValue>),
 }
 
 /// The columns one membership subquery names, once the analysis has read every predicate.
@@ -2384,7 +2415,8 @@ struct MembershipColumns {
     /// The equalities linking the scanned table to the guarded table, as accumulated.
     /// [`resolve_membership_pairing`] is what orders them and refuses an unkeyed set.
     pairs: Vec<MembershipJoinPair>,
-    /// Column of the scanned table naming who the row admits.
+    /// Column of the scanned table naming who the row admits, the first one compared for
+    /// a row keyed by request values.
     user_column: ColumnName,
     member_match: MemberMatch,
     extra_predicates: ResidualPredicates,
@@ -2396,6 +2428,9 @@ type ColumnRef = (Option<String>, ColumnName);
 enum MembershipEqAnalysis {
     NotRelevant,
     UserColumn(ColumnName, MemberMatch),
+    /// A column of the scanned table equal to one value the request carries, other than
+    /// the caller or another principal.
+    RequestValue(ComparedValue),
     /// A correlation between a column of the scanned table and another reference, which
     /// reaches the guarded row directly or through the subquery's other equalities.
     FkCandidate {
@@ -2540,6 +2575,35 @@ fn analyze_membership_eq_predicate(
             return MembershipEqAnalysis::UserColumn(col, MemberMatch::Caller);
         }
     }
+    for (column, value) in [(&left_col, right.as_ref()), (&right_col, left.as_ref())] {
+        let Some((qualifier, column)) = column else {
+            continue;
+        };
+        if !is_join_column_ref(
+            qualifier.as_deref(),
+            column.as_str(),
+            join_table,
+            join_alias,
+            join_cols,
+        ) {
+            continue;
+        }
+        // A bare read of a value a request may leave unset reads `''` once a
+        // transaction-local value has ended, which a request omitting the value never
+        // matches in the model, so only the read `NULLIF` wraps compares it.
+        if let Some((source, _)) =
+            session::declared_scalar(value, registry).filter(|(source, _)| {
+                source.is_scalar()
+                    && source.principal_kind().is_none()
+                    && (!source.may_be_unset() || session::nullif_read(value, registry).is_some())
+            })
+        {
+            return MembershipEqAnalysis::RequestValue(ComparedValue {
+                value_column: column.clone(),
+                source: source.into_owned(),
+            });
+        }
+    }
 
     let (Some((left_qual, left_name)), Some((right_qual, right_name))) = (left_col, right_col)
     else {
@@ -2649,6 +2713,14 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
         .and_then(|db| lookup_table(db, join_table).map(|table| session_zoned_columns(table, db)))
         .unwrap_or_default();
 
+    // A row naming the caller keeps a comparison with a request value as a residual
+    // filter, and only a row naming nobody is keyed by the values the request carries.
+    let names_caller = analyzed_predicates
+        .selection
+        .iter()
+        .chain(&analyzed_predicates.joins)
+        .any(|analyzed| matches!(analyzed.analysis, MembershipEqAnalysis::UserColumn(..)));
+    let mut request_values: Vec<ComparedValue> = Vec::new();
     // JOIN predicates provide correlation but do not enter the generated filter.
 
     // Process WHERE predicates (with extras).
@@ -2661,6 +2733,13 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
                 }
                 continue;
             }
+            MembershipEqAnalysis::RequestValue(compared) if !names_caller => {
+                if !request_values.contains(compared) {
+                    request_values.push(compared.clone());
+                }
+                continue;
+            }
+            MembershipEqAnalysis::RequestValue(_) | MembershipEqAnalysis::NotRelevant => {}
             MembershipEqAnalysis::FkCandidate {
                 join_column,
                 correlated: reference,
@@ -2681,7 +2760,6 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
                 // the membership table and cannot carry that filter.
                 return None;
             }
-            MembershipEqAnalysis::NotRelevant => {}
         }
 
         // Scope validation: reject predicates that reference columns from
@@ -2736,11 +2814,30 @@ fn extract_membership_columns_with_analysis<DB: DatabaseLike>(
                 }
                 fk_col_is_explicit = true;
             }
-            MembershipEqAnalysis::OuterCorrelation | MembershipEqAnalysis::NotRelevant => {}
+            MembershipEqAnalysis::RequestValue(_)
+            | MembershipEqAnalysis::OuterCorrelation
+            | MembershipEqAnalysis::NotRelevant => {}
         }
     }
 
-    let (user_column, member_match) = user_col?;
+    // The tuple query reads no JOIN, so a request value compared there would be dropped
+    // from a row naming nobody.
+    if !names_caller
+        && analyzed_predicates
+            .joins
+            .iter()
+            .any(|analyzed| matches!(analyzed.analysis, MembershipEqAnalysis::RequestValue(_)))
+    {
+        return None;
+    }
+    let first_compared = request_values
+        .first()
+        .map(|compared| compared.value_column.clone());
+    let (user_column, member_match) = match (user_col, first_compared) {
+        (Some(member), None) => member,
+        (None, Some(first)) => (first, MemberMatch::RequestValues(request_values)),
+        _ => return None,
+    };
     if correlated.is_empty() {
         return None;
     }

@@ -235,7 +235,7 @@ fn an_aliased_or_unqualified_call_reads_the_same_output() {
 }
 
 /// A body that is not one output of one call's row, or whose output is no setting read,
-/// reads as no semantic.
+/// reads as no semantic. One selecting a table is a lookup, refused for what it reads.
 #[test]
 fn a_body_reading_other_than_one_output_is_unread() {
     for body in [
@@ -246,7 +246,6 @@ fn a_body_reading_other_than_one_output_is_unread() {
         "SELECT missing FROM authz.acting_installation()",
         "SELECT COALESCE(id, namespace_id) FROM authz.acting_installation()",
         "SELECT CASE WHEN id IS NULL THEN namespace_id END FROM authz.acting_installation()",
-        "SELECT id FROM objects",
         "SELECT id FROM authz.acting_installation() CROSS JOIN objects",
         "SELECT i FROM authz.acting_installation() AS identity(n, i)",
     ] {
@@ -257,6 +256,9 @@ fn a_body_reading_other_than_one_output_is_unread() {
             "{body}: {reason}"
         );
     }
+    let policies = classified(pair(true), &local_body(VALIDATOR, "SELECT id FROM objects"));
+    let reason = refusal(&policies, "local_wrapped");
+    assert!(reason.contains("table 'objects'"), "{reason}");
 }
 
 /// An output no assignment reaches holds `NULL`, and one reading an undeclared setting

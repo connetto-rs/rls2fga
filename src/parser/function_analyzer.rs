@@ -466,6 +466,33 @@ pub(crate) fn body_single_projection(body: &str) -> Option<Expr> {
     }
 }
 
+/// The value a one-statement `SELECT` body returns, its single expression where
+/// [`body_single_projection`] reads one and else the whole query as a scalar subquery.
+///
+/// A function returning one value hands back the first row of the query, and a scalar
+/// subquery the only row, so the two agree only on a query selecting at most one row,
+/// which whoever reads the subquery has to prove.
+pub(crate) fn body_returned_value(body: &str) -> Option<Expr> {
+    body_single_projection(body).or_else(|| {
+        let statements = Parser::parse_sql(&PostgreSqlDialect {}, body).ok()?;
+        let [Statement::Query(query)] = <[Statement; 1]>::try_from(statements).ok()? else {
+            return None;
+        };
+        Some(Expr::Subquery(query))
+    })
+}
+
+/// The type each value a function declared to return `declared` hands over has, lower
+/// case, a set's element for a set returning one.
+pub(crate) fn returned_value_type(declared: &str) -> String {
+    let declared = declared.to_ascii_lowercase();
+    declared
+        .strip_prefix("setof ")
+        .unwrap_or(&declared)
+        .trim()
+        .to_string()
+}
+
 /// The caller read a whole body makes, when the body has the shape of an accessor.
 fn body_caller_read_of(
     body: &str,

@@ -9,9 +9,10 @@ use crate::classifier::patterns::{
     ConstantInCallerSet, DeclaredHelper, DirectOwnership, ExcludedSet, ExistsMembership,
     ExpandedFunction, FallbackScalarEqualsConstant, FallbackScalarInConstantList,
     FallbackScalarUnequalsConstant, FlaggedRow, JsonbFieldOwnership, MembershipExclusion,
-    MembershipInCallerSet, NumericThreshold, OwnerExpression, ParentInheritance, PolicyMode,
-    ReferringRows, RequestValueAbsent, RequestValueInHelperSet, RoleNameInList, RowInHelperPairs,
-    RowValueEqualsCallerScalar, RowValueInCallerSet, UnclassifiedExpr, UncorrelatedMembership,
+    MembershipInCallerSet, MembershipOnRequestValues, NumericThreshold, OwnerExpression,
+    ParentInheritance, PolicyMode, ReferringRows, RequestValueAbsent, RequestValueInHelperSet,
+    RoleNameInList, RowInHelperPairs, RowValueEqualsCallerScalar, RowValueInCallerSet,
+    UnclassifiedExpr, UncorrelatedMembership,
 };
 use crate::generator::tuple_generator::{render_attribute_literal, render_attribute_test};
 use crate::types::TranslationNote;
@@ -217,6 +218,20 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         }
         PatternClass::P4ExistsMembership(ExistsMembership { join_table, .. }) => {
             format!("P4 (EXISTS {join_table})")
+        }
+        PatternClass::P32MembershipOnRequestValues(MembershipOnRequestValues {
+            join_table,
+            compared,
+            ..
+        }) => {
+            let columns: Vec<&str> = compared
+                .iter()
+                .map(|compared| compared.value_column.as_str())
+                .collect();
+            format!(
+                "P32 (EXISTS {join_table} on request values in {})",
+                columns.join(", ")
+            )
         }
         PatternClass::P19IndirectMembership(membership) => {
             format!("P19 (membership through {})", membership.link_table)
