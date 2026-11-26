@@ -104,5 +104,6 @@ mod translation_object_tests;
 mod translator_builder_tests;
 mod tuple_row_tests;
 mod unset_setting_tests;
+mod validated_pair_accessor_tests;
 mod web_examples_tests;
 mod zoned_literal_tests;

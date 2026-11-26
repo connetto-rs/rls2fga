@@ -4,6 +4,8 @@ pub mod function_registry;
 pub(crate) mod constant_fold;
 // `exclusion` documents itself in the file.
 pub(crate) mod exclusion;
+// `function_outputs` documents itself in the file.
+pub(crate) mod function_outputs;
 // `expansion` documents itself in the file.
 pub mod expansion;
 // `oracle` documents itself in the file. A second doc here would merge with it and

@@ -5,7 +5,7 @@ use sqlparser::ast::{
     UnaryOperator, Value,
 };
 
-use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
+use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry, UnreadBody};
 use crate::classifier::patterns::*;
 use crate::classifier::role_keywords::role_name;
 pub use crate::parser::expr::extract_column_name;
@@ -73,13 +73,13 @@ pub(crate) use session::{
 };
 pub(crate) use subquery::exists_gated_beside;
 pub(crate) use subquery::owner_key_of;
-pub(crate) use subquery::projected_select;
 pub use subquery::recognize_p19_indirect_membership;
 pub(crate) use subquery::session_zoned_columns;
 pub(crate) use subquery::{
     diagnose_p31_referring_rows, diagnose_p4_membership_ambiguity,
     diagnose_p5_parent_inheritance_ambiguity,
 };
+pub(crate) use subquery::{projected_call_select, projected_select};
 pub use subquery::{
     recognize_p31_referring_rows, recognize_p4, recognize_p4_in_subquery, recognize_p5,
 };
@@ -713,9 +713,10 @@ pub(crate) fn called_function_names(expr: &Expr, registry: &FunctionRegistry) ->
 
 /// Why each call in `expr` to a function no body reads does not translate, in source
 /// order, deduplicated. A declared role accessor is read by its body, so one the schema
-/// does not define is refused for that, and a body the schema gives is blamed for being
-/// neither a role keyword nor one declared setting, which is all a call compared with a
-/// value is read as.
+/// does not define is refused for that, a body selecting what a function returns names why
+/// that output reads as no declared setting, and any other body the schema gives is blamed
+/// for being neither a role keyword nor one declared setting, which is all a call compared
+/// with a value is read as.
 pub(crate) fn unread_function_calls(expr: &Expr, registry: &FunctionRegistry) -> Vec<String> {
     let mut reasons: Vec<String> = Vec::new();
     let _ = sqlparser::ast::visit_expressions(expr, |node| {
@@ -726,14 +727,18 @@ pub(crate) fn unread_function_calls(expr: &Expr, registry: &FunctionRegistry) ->
                     "'{name}' is declared a role accessor, which is read by its body, and \
                      the schema does not define it"
                 ))
-            } else if registry.has_unread_body(&name) {
-                Some(format!(
-                    "The body of '{name}' is neither a role keyword nor one declared \
-                     setting nor a fallback across them, which is all a call compared \
-                     with a value is read as"
-                ))
             } else {
-                None
+                match registry.unread_body(&name) {
+                    Some(UnreadBody::Output(refusal)) => {
+                        Some(format!("The body of '{name}' {refusal}"))
+                    }
+                    Some(UnreadBody::Unrecognized) => Some(format!(
+                        "The body of '{name}' is neither a role keyword nor one declared \
+                         setting nor a fallback across them, which is all a call compared \
+                         with a value is read as"
+                    )),
+                    None => None,
+                }
             };
             if let Some(reason) = reason.filter(|reason| !reasons.contains(reason)) {
                 reasons.push(reason);
