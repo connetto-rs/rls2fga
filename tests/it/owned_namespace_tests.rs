@@ -6,8 +6,9 @@ use rls2fga::classifier::patterns::{
     BoolOp, ClassifiedExpr, Composite, ExpandedFunction, MembershipOnRequestValues, PatternClass,
     RequestValueAbsent, UnclassifiedExpr,
 };
+use rls2fga::generator::tuple_generator::format_tuples;
 use rls2fga::parser::sql_parser::{Deployment, SessionSetting, SettingValue};
-use rls2fga::translator::TranslatorBuilder;
+use rls2fga::translator::{Outputs, TranslatorBuilder};
 use rls2fga::types::{ConfidenceLevel, TranslationNote};
 use sqlparser::ast::DataType;
 
@@ -421,5 +422,176 @@ CREATE POLICY objects_read ON objects FOR SELECT TO app USING (
         )),
         "{:?}",
         outputs.notes()
+    );
+}
+
+/// A comparison written twice compares one value once.
+#[test]
+fn a_request_comparison_written_twice_is_compared_once() {
+    let classified = classified(&schema(
+        "SELECT NULL::uuid",
+        &format!(
+            "namespace_id IN ({INSTALLATIONS} AND i.id = (SELECT authz.acting_installation_id()))"
+        ),
+    ));
+    assert_eq!(
+        installation_membership(&classified.pattern),
+        Some(vec![
+            ("namespace_id", "app.installation_namespace_id"),
+            ("id", "app.installation_id"),
+        ]),
+        "{classified:?}"
+    );
+}
+
+/// The rows a tuple query reads carry no `JOIN`, so a request value compared in one would
+/// drop out of the gate.
+#[test]
+fn a_request_value_compared_in_a_join_is_refused() {
+    let classified = classified(&schema(
+        "SELECT NULL::uuid",
+        "namespace_id IN (SELECT i.owned_namespace_id FROM public.app_installations i \
+         JOIN public.namespaces ns ON ns.id = i.owned_namespace_id \
+         AND i.id = (SELECT authz.acting_installation_id()) \
+         WHERE i.namespace_id = (SELECT authz.acting_installation_namespace_id()))",
+    ));
+    assert_eq!(classified.confidence, ConfidenceLevel::D, "{classified:?}");
+}
+
+/// Negation has no tuple to stand on, and the refusal names the membership it negates.
+#[test]
+fn a_negated_request_value_membership_is_refused_by_name() {
+    let classified = classified(&schema(
+        "SELECT NULL::uuid",
+        &format!("NOT (namespace_id IN ({INSTALLATIONS}))"),
+    ));
+    assert!(
+        refusal(&classified).contains("membership row holding values the request carries"),
+        "{classified:?}"
+    );
+}
+
+/// The schema translated under the installation pair, gaps kept.
+fn translated(sql: &str) -> Outputs {
+    TranslatorBuilder::new(installation_pair())
+        .build()
+        .translate(&db(sql))
+        .expect("translation should plan")
+        .outputs_accepting_gaps()
+}
+
+/// `schema` with the request-value membership as the insert check on `objects`.
+fn installation_check() -> String {
+    schema(
+        "SELECT NULL::uuid",
+        &format!("namespace_id IN ({INSTALLATIONS})"),
+    )
+}
+
+/// The report names the scanned table and the columns the request's values key.
+#[test]
+fn the_report_names_a_request_value_membership() {
+    let report = translated(&installation_check()).report();
+    assert!(
+        report.contains("P32 (EXISTS")
+            && report.contains("app_installations on request values in namespace_id, id)"),
+        "{report}"
+    );
+}
+
+/// The subquery reads the membership table as the caller, so a table whose row security
+/// shows the role no row admits nobody.
+#[test]
+fn a_request_value_membership_the_role_reads_no_row_of_admits_nobody() {
+    let outputs = translated(&format!(
+        "{}ALTER TABLE app_installations ENABLE ROW LEVEL SECURITY;\n",
+        installation_check()
+    ));
+    assert!(
+        outputs.notes().iter().any(|note| matches!(
+            note,
+            TranslationNote::MembershipTableGrantsNoReads { join_table, .. }
+                if join_table.name() == "app_installations"
+        )),
+        "{:?}",
+        outputs.notes()
+    );
+}
+
+/// A guarded row nothing identifies cannot be linked to the namespace its shares reach, so
+/// the check admits nobody and says why.
+#[test]
+fn a_request_value_membership_over_rows_nothing_identifies_writes_no_bridge() {
+    let sql = installation_check().replace(
+        "  id UUID NOT NULL,\n  PRIMARY KEY (namespace_id, id)\n);",
+        "  id UUID NOT NULL\n);",
+    );
+    let outputs = translated(&sql);
+    let tuples = format_tuples(outputs.tuple_queries());
+    assert!(
+        tuples.contains("skipped public.objects to namespaces bridge"),
+        "{tuples}"
+    );
+    let model = outputs.model();
+    assert_eq!(
+        relation(&model, "objects", "can_insert"),
+        "no_access",
+        "{model}"
+    );
+}
+
+/// The definition of `relation` on `type_name` in `model`.
+fn relation<'m>(model: &'m str, type_name: &str, relation: &str) -> &'m str {
+    let (_, declared) = model
+        .split_once(&format!("type {type_name}\n"))
+        .expect("the model declares the type");
+    let prefix = format!("define {relation}: ");
+    declared
+        .lines()
+        .take_while(|line| !line.starts_with("type "))
+        .find_map(|line| line.trim().strip_prefix(prefix.as_str()))
+        .expect("the type defines the relation")
+}
+
+/// Each share is a row of the membership table, so a table nothing identifies a row of
+/// writes no share.
+#[test]
+fn a_request_value_membership_in_rows_nothing_identifies_writes_no_share() {
+    let sql = installation_check();
+    let (head, installations) = sql
+        .split_once("CREATE TABLE app_installations")
+        .expect("the schema declares app_installations");
+    let installations = installations.replacen(" UNIQUE,", ",", 1).replacen(
+        "  PRIMARY KEY (namespace_id, id),\n",
+        "",
+        1,
+    );
+    let tuples = format_tuples(
+        translated(&format!(
+            "{head}CREATE TABLE app_installations{installations}"
+        ))
+        .tuple_queries(),
+    );
+    assert!(
+        tuples.contains("skipped request value shares for"),
+        "{tuples}"
+    );
+}
+
+/// A membership naming the guarded row's own key reaches the shares from that row.
+#[test]
+fn a_request_value_membership_keyed_by_the_guarded_row_reaches_its_shares() {
+    let sql = format!(
+        "{}ALTER TABLE namespaces ENABLE ROW LEVEL SECURITY;
+CREATE POLICY namespaces_read ON namespaces FOR SELECT TO app USING (id IN ({INSTALLATIONS}));
+",
+        installation_check()
+    );
+    let model = translated(&sql).model();
+    let can_select = relation(&model, "namespaces", "can_select");
+    assert!(
+        can_select.starts_with("gate_namespaces_read_")
+            && can_select.contains(" from app_installations_share and "),
+        "{model}"
     );
 }

@@ -4077,8 +4077,9 @@ pub(crate) fn emit_membership_on_request_values<DB: DatabaseLike>(
     else {
         return deny_expr(table_plan);
     };
-    // A residual whose clock comparison the request cannot complete keeps no gate.
-    if gates.is_empty() {
+    // The one group keeps no gate where a clock comparison sits beside a condition the
+    // request cannot complete.
+    let Ok([gate]) = <[RelationName; 1]>::try_from(gates) else {
         notes.push(TranslationNote::ExpressionRefused {
             policy: ctx.policy_name.to_string(),
             reason: format!(
@@ -4088,7 +4089,7 @@ pub(crate) fn emit_membership_on_request_values<DB: DatabaseLike>(
             ),
         });
         return deny_expr(table_plan);
-    }
+    };
     announce_residual(
         extra_predicates,
         extra_predicates.has_requests(),
@@ -4101,27 +4102,17 @@ pub(crate) fn emit_membership_on_request_values<DB: DatabaseLike>(
         fk_cols: &parent.fk_cols(),
         share_type: &share_type,
     };
-    let parts: Vec<UsersetExpr> = if parent.is_self(table_plan) {
+    let membership = if parent.is_self(table_plan) {
         let link = link_share_rows(table_plan, &rows);
-        gates
-            .into_iter()
-            .map(|gate| share_reach(link.clone(), gate))
-            .collect()
+        share_reach(link, gate)
     } else {
         let tupleset = parent.bridge_from(table_plan, ctx.source_table);
         let parent_plan = parent.plan(all_types, &ctx.settings.well_known);
         let link = link_share_rows(parent_plan, &rows);
-        gates
-            .into_iter()
-            .map(|gate| UsersetExpr::TupleToUserset {
-                tupleset: tupleset.clone(),
-                computed: parent_plan
-                    .ensure_computed(gate.to_string(), share_reach(link.clone(), gate)),
-            })
-            .collect()
-    };
-    let Some(membership) = combine_union(parts) else {
-        return deny_expr(table_plan);
+        UsersetExpr::TupleToUserset {
+            tupleset,
+            computed: parent_plan.ensure_computed(gate.to_string(), share_reach(link, gate)),
+        }
     };
     apply_membership_read_scope(
         membership,

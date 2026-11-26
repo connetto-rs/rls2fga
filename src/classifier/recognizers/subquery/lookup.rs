@@ -161,17 +161,14 @@ fn proves_one_row<DB: DatabaseLike>(
         _ => None,
     };
     let returned = returned.or(united.as_deref());
+    let mut facts = Vec::with_capacity(lookups.len());
     for lookup in lookups {
         lookup.keeps_type(returned, db)?;
-        lookup.proves_one_row(db)?;
+        facts.push(lookup.nullness(lookup.proves_one_row(db)?, db));
     }
-    let facts: Vec<_> = lookups
-        .iter()
-        .map(|lookup| lookup.filter.map(|filter| lookup.nullness(filter, db)))
-        .collect();
     for (index, fact) in facts.iter().enumerate() {
         for other in facts.iter().skip(index + 1) {
-            if !apart(fact.as_ref(), other.as_ref()) {
+            if !apart(fact, other) {
                 return Err(LookupRefusal::OverlappingSelects);
             }
         }
@@ -183,10 +180,7 @@ fn proves_one_row<DB: DatabaseLike>(
 type Nullness<'e> = (Vec<&'e Expr>, Vec<&'e Expr>);
 
 /// Whether one of two filters requires `NULL` a value the other requires present.
-fn apart(one: Option<&Nullness<'_>>, other: Option<&Nullness<'_>>) -> bool {
-    let (Some((absent, present)), Some((other_absent, other_present))) = (one, other) else {
-        return false;
-    };
+fn apart((absent, present): &Nullness<'_>, (other_absent, other_present): &Nullness<'_>) -> bool {
     let requires_present =
         |absent: &[&Expr], present: &[&Expr]| absent.iter().any(|value| present.contains(value));
     requires_present(absent, other_present) || requires_present(other_absent, present)
@@ -323,8 +317,8 @@ impl<'q, 'db, DB: DatabaseLike> Lookup<'q, 'db, DB> {
         })
     }
 
-    /// Whether the lookup selects at most one row.
-    fn proves_one_row(&self, db: &DB) -> Result<(), LookupRefusal> {
+    /// The filter proving the lookup selects at most one row.
+    fn proves_one_row(&self, db: &DB) -> Result<&'q Expr, LookupRefusal> {
         if let Some(clause) = self.shaping {
             return Err(LookupRefusal::Shaped { clause });
         }
@@ -340,12 +334,10 @@ impl<'q, 'db, DB: DatabaseLike> Lookup<'q, 'db, DB> {
                 table: self.table_name(),
             });
         }
-        match self.filter {
-            Some(filter) => self.selects_one_row(filter, db),
-            None => Err(LookupRefusal::NoKey {
-                table: self.table_name(),
-            }),
-        }
+        let filter = self.filter.ok_or_else(|| LookupRefusal::NoKey {
+            table: self.table_name(),
+        })?;
+        self.selects_one_row(filter, db).map(|()| filter)
     }
 
     /// Whether at most one row satisfies `filter`, because its conjuncts pin a unique key
