@@ -146,7 +146,7 @@ impl Asked {
     }
 
     /// Where this command is held.
-    fn holding<C: ColumnLike>(self, privileges: &TablePrivileges<'_, C>) -> Holding {
+    fn holding<C: ColumnLike>(self, privileges: &TablePrivileges<&C>) -> Holding {
         match self {
             Self::Select => column_holding(&privileges.select),
             Self::Insert => column_holding(&privileges.insert),
@@ -184,7 +184,7 @@ fn commands_of(targets: &BTreeSet<ActionTarget>) -> Vec<String> {
 }
 
 /// One column privilege's holding.
-fn column_holding<C: ColumnLike>(privilege: &ColumnPrivilege<'_, C>) -> Holding {
+fn column_holding<C: ColumnLike>(privilege: &ColumnPrivilege<&C>) -> Holding {
     match privilege {
         ColumnPrivilege::Table => Holding::Table,
         ColumnPrivilege::Columns(columns) if !columns.is_empty() => Holding::Columns(
