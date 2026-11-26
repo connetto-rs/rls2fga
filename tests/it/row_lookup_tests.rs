@@ -4,8 +4,8 @@
 
 use rls2fga::classifier::function_registry::FunctionRegistry;
 use rls2fga::classifier::patterns::{
-    ClassifiedExpr, ExpandedFunction, ParentInheritance, PatternClass, RequestValueAbsent,
-    UnclassifiedExpr,
+    ClassifiedExpr, ConstantBool, ExpandedFunction, ParentInheritance, PatternClass,
+    RequestValueAbsent, UnclassifiedExpr,
 };
 use rls2fga::parser::sql_parser::{Deployment, SessionSetting};
 use rls2fga::translator::TranslatorBuilder;
@@ -481,4 +481,26 @@ fn a_check_calling_a_body_it_cannot_read_names_why() {
         let classified = classified(&schema);
         assert!(refusal(&classified).contains(reason), "{classified:?}");
     }
+}
+
+/// A `STRICT` function called with `NULL` returns `NULL` without running its body, so a
+/// whole check calling it admits no row even where the body would hold.
+#[test]
+fn a_check_calling_a_strict_function_with_null_admits_no_row() {
+    let schema = schema("SELECT NULL::uuid", "authz.allowed(NULL)").replace(
+        "ALTER TABLE objects ENABLE ROW LEVEL SECURITY;",
+        "CREATE FUNCTION authz.allowed(owner UUID) RETURNS BOOLEAN LANGUAGE sql STABLE STRICT \
+         AS $$ SELECT owner IS NULL $$;\nALTER TABLE objects ENABLE ROW LEVEL SECURITY;",
+    );
+    let classified = classified(&schema);
+    let PatternClass::ExpandedFunction(ExpandedFunction { inner, .. }) = &classified.pattern else {
+        panic!("expected the call expanded, got {classified:?}");
+    };
+    assert!(
+        matches!(
+            inner.pattern,
+            PatternClass::P10ConstantBool(ConstantBool { value: false })
+        ),
+        "{classified:?}"
+    );
 }
