@@ -67,7 +67,7 @@ async fn every_fixture_agrees_with_postgres() {
         }
         cases += 1;
     }
-    assert_eq!(cases, 26, "every embedded case is replayed");
+    assert_eq!(cases, 27, "every embedded case is replayed");
     assert!(
         report.is_empty(),
         "discrepancies from the fixtures:\n{report}"
