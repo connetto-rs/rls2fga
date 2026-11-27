@@ -892,15 +892,6 @@ fn policy_caps_with_no_pair_relation_are_refused() {
             "Subquery reads the rows function 'authz.capped_kinds' returns",
         ),
         (
-            POLICY_CAPS.replace(
-                star,
-                "(organization_id, kind) NOT IN (SELECT * FROM authz.capped_kinds('writer'))",
-            ),
-            POLICY_CAP_HELPERS,
-            "projects_capped",
-            "NOT IN (subquery) cannot be represented as static OpenFGA membership tuples",
-        ),
-        (
             POLICY_CAPS.replacen(
                 "kind authz.resource_kind NOT NULL\n);\nCREATE TABLE reports",
                 "kind TEXT NOT NULL\n);\nCREATE TABLE reports",
@@ -949,7 +940,7 @@ fn policy_caps_with_no_pair_relation_are_refused() {
             ),
             POLICY_CAP_HELPERS,
             "projects_capped",
-            "NOT applied to row among a declared helper's pairs",
+            "a blocklist exclusion requires a positive grant",
         ),
         (
             POLICY_CAPS.replace(
@@ -1193,7 +1184,7 @@ fn an_arm_kept_while_a_setting_is_unset_translates() {
 }
 
 /// An arm kept while a setting is unset, read where the request's absence does not decide
-/// the setting, or returning a cap's pairs, is refused naming why.
+/// the setting, is refused naming why.
 #[test]
 fn arms_kept_while_a_setting_is_unset_are_refused_where_the_model_cannot_gate_them() {
     let unset = "authz.acting_installation_id() IS NULL";
@@ -1233,17 +1224,6 @@ fn arms_kept_while_a_setting_is_unset_are_refused_where_the_model_cannot_gate_th
                  value a request may leave unset"
             ),
         ),
-        (
-            INSTALLATION_CAPS.replace(
-                "AND permission.max_role >= min_role",
-                "AND permission.max_role >= min_role AND authz.caller_id() IS NULL",
-            ),
-            "organizations_select",
-            "declared helper 'authz.member_organizations' is capped by 'authz.capped_kinds', \
-             whose rows are kept only where setting 'app.user_id' reads NULL, which no pair \
-             object reads"
-                .to_owned(),
-        ),
     ] {
         let using = using_of(&schema, PERSONAL_HELPERS, policy);
         assert_eq!(using.confidence, ConfidenceLevel::D, "{reason}");
@@ -1257,6 +1237,176 @@ fn arms_kept_while_a_setting_is_unset_are_refused_where_the_model_cannot_gate_th
             other => panic!("{policy} should be refused with {reason}, got {other:?}"),
         }
     }
+}
+
+pub(crate) const FOUNDED_PAIRS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE organizations (
+  namespace_id UUID NOT NULL, id UUID NOT NULL, created_by_id UUID NOT NULL,
+  founded_at TIMESTAMPTZ, PRIMARY KEY (namespace_id, id)
+);
+CREATE TABLE organization_notes (
+  id UUID PRIMARY KEY, organization_namespace_id UUID NOT NULL, organization_id UUID NOT NULL,
+  FOREIGN KEY (organization_namespace_id, organization_id)
+    REFERENCES organizations (namespace_id, id)
+);
+ALTER TABLE organization_notes ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON organizations TO authz_owner;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.acting_installation_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.installation_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.founded_organizations() RETURNS TABLE (namespace_id UUID, id UUID)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT organization.namespace_id, organization.id FROM public.organizations organization
+  WHERE organization.created_by_id = (SELECT authz.caller_id())
+    AND organization.founded_at IS NULL
+    AND (SELECT authz.acting_installation_id()) IS NULL
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.acting_installation_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.founded_organizations() OWNER TO authz_owner;
+CREATE POLICY organization_notes_founded ON organization_notes FOR SELECT
+  USING ((organization_namespace_id, organization_id)
+    IN (SELECT * FROM authz.founded_organizations()));
+";
+
+pub(crate) const FOUNDED_HELPERS: &[&str] = &["authz.founded_organizations"];
+
+/// A row compared with the pairs of a helper whose arm keeps its rows only while no
+/// installation acts reaches pairs gated on the installation's absence.
+#[test]
+fn a_pair_membership_kept_while_a_setting_is_unset_gates_its_pairs() {
+    let using = using_of(FOUNDED_PAIRS, FOUNDED_HELPERS, "organization_notes_founded");
+    assert_eq!(using.confidence, ConfidenceLevel::A, "{:?}", using.pattern);
+    let model = installation_translator(FOUNDED_HELPERS)
+        .translate(&db_of(FOUNDED_PAIRS))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    let pair = "founded_organizations_pair";
+    let held = relation_definition(&model, pair, "founded_organizations")
+        .unwrap_or_else(|| panic!("{pair} holds founded_organizations in\n{model}"));
+    let gated = relation_definition(&model, pair, &held)
+        .unwrap_or_else(|| panic!("{pair} holds {held} in\n{model}"));
+    assert!(
+        gated.contains(" and app_installation_id_absent"),
+        "{held}: {gated}"
+    );
+}
+
+/// A pair arm kept while a setting is unset, read where the request's absence does not
+/// decide the setting, is refused naming why.
+#[test]
+fn a_pair_arm_kept_while_a_setting_reads_bare_is_refused() {
+    let schema = FOUNDED_PAIRS.replace(
+        "(SELECT authz.acting_installation_id()) IS NULL",
+        "current_setting('app.installation_id', true)::uuid IS NULL",
+    );
+    let using = using_of(&schema, FOUNDED_HELPERS, "organization_notes_founded");
+    assert_eq!(using.confidence, ConfidenceLevel::D, "{:?}", using.pattern);
+    let reason = "declared helper 'authz.founded_organizations' keeps an arm's rows only where \
+                  setting 'app.installation_id' reads NULL, but reads it without NULLIF(..., '')";
+    let refused = refusal_reasons(&using.pattern);
+    assert!(
+        refused.iter().any(|refused| refused.contains(reason)),
+        "expected {reason}, got {refused:?}"
+    );
+}
+
+pub(crate) const ADMINISTERED_TEAMS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE organizations (namespace_id UUID NOT NULL, id UUID NOT NULL,
+  PRIMARY KEY (namespace_id, id));
+CREATE TABLE memberships (
+  organization_namespace_id UUID NOT NULL, organization_id UUID NOT NULL,
+  user_namespace_id UUID NOT NULL, user_id UUID NOT NULL,
+  state TEXT NOT NULL CHECK (state IN ('active', 'deactivated')),
+  PRIMARY KEY (organization_namespace_id, organization_id, user_namespace_id, user_id),
+  FOREIGN KEY (organization_namespace_id, organization_id)
+    REFERENCES organizations (namespace_id, id)
+);
+CREATE TABLE teams (
+  namespace_id UUID NOT NULL, id UUID NOT NULL,
+  organization_namespace_id UUID NOT NULL, organization_id UUID NOT NULL,
+  PRIMARY KEY (namespace_id, id),
+  FOREIGN KEY (organization_namespace_id, organization_id)
+    REFERENCES organizations (namespace_id, id)
+);
+CREATE TABLE team_members (
+  team_namespace_id UUID NOT NULL, team_id UUID NOT NULL,
+  organization_namespace_id UUID NOT NULL, organization_id UUID NOT NULL,
+  user_namespace_id UUID NOT NULL, user_id UUID NOT NULL,
+  team_role TEXT NOT NULL CHECK (team_role IN ('admin', 'member')),
+  PRIMARY KEY (team_namespace_id, team_id, user_namespace_id, user_id),
+  FOREIGN KEY (team_namespace_id, team_id) REFERENCES teams (namespace_id, id),
+  FOREIGN KEY (organization_namespace_id, organization_id, user_namespace_id, user_id)
+    REFERENCES memberships (organization_namespace_id, organization_id, user_namespace_id, user_id)
+);
+CREATE TABLE team_notes (
+  id UUID PRIMARY KEY, team_namespace_id UUID NOT NULL, team_id UUID NOT NULL,
+  FOREIGN KEY (team_namespace_id, team_id) REFERENCES teams (namespace_id, id)
+);
+ALTER TABLE team_notes ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON memberships, team_members TO authz_owner;
+CREATE FUNCTION authz.caller_id() RETURNS UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
+$$;
+CREATE FUNCTION authz.administered_teams() RETURNS TABLE (namespace_id UUID, id UUID)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT member.team_namespace_id, member.team_id FROM public.team_members member
+  JOIN public.memberships membership
+    ON membership.organization_namespace_id = member.organization_namespace_id
+      AND membership.organization_id = member.organization_id
+      AND membership.user_namespace_id = member.user_namespace_id
+      AND membership.user_id = member.user_id
+  WHERE member.user_namespace_id = '0a000000-0000-4000-8000-000000000001'
+    AND member.user_id = (SELECT authz.caller_id())
+    AND member.team_role = 'admin' AND membership.state = 'active'
+$$;
+ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
+ALTER FUNCTION authz.administered_teams() OWNER TO authz_owner;
+CREATE POLICY team_notes_administered ON team_notes FOR SELECT
+  USING ((team_namespace_id, team_id) IN (SELECT * FROM authz.administered_teams()));
+";
+
+pub(crate) const ADMINISTERED_HELPERS: &[&str] = &["authz.administered_teams"];
+
+/// An arm returning pairs from the rows that name a joined row meeting the join holds each
+/// of its rows as its own object, which holds the grant while its joined row meets the
+/// join, and each pair links to the rows returning it.
+#[test]
+fn a_joined_arm_returning_pairs_holds_them_through_its_rows() {
+    let using = using_of(
+        ADMINISTERED_TEAMS,
+        ADMINISTERED_HELPERS,
+        "team_notes_administered",
+    );
+    assert_eq!(using.confidence, ConfidenceLevel::A, "{:?}", using.pattern);
+    let model = installation_translator(ADMINISTERED_HELPERS)
+        .translate(&db_of(ADMINISTERED_TEAMS))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    assert_eq!(
+        relation_definition(&model, "administered_teams_pair", "administered_teams").as_deref(),
+        Some("team_members_with_memberships from team_members"),
+        "{model}"
+    );
+    let held = relation_definition(&model, "team_members", "team_members_with_memberships")
+        .unwrap_or_else(|| panic!("team_members holds its joined grant in\n{model}"));
+    assert!(held.ends_with(" from memberships"), "{held}");
 }
 
 pub(crate) const PAIR_WALK: &str = "

@@ -519,3 +519,160 @@ fn a_restrictive_or_of_blocklists_subtracts_their_intersection() {
         "{dsl}"
     );
 }
+
+pub(crate) const PAIR_BLOCKS: &str = "
+CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
+CREATE SCHEMA authz;
+GRANT USAGE ON SCHEMA authz TO authz_owner;
+CREATE TABLE organizations (namespace_id TEXT NOT NULL, id TEXT NOT NULL,
+  PRIMARY KEY (namespace_id, id));
+CREATE TABLE memberships (
+  organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  PRIMARY KEY (organization_namespace_id, organization_id, user_id),
+  FOREIGN KEY (organization_namespace_id, organization_id)
+    REFERENCES organizations (namespace_id, id)
+);
+CREATE TABLE organization_blocks (
+  organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+  principal_id TEXT NOT NULL,
+  PRIMARY KEY (organization_namespace_id, organization_id, principal_id),
+  FOREIGN KEY (organization_namespace_id, organization_id)
+    REFERENCES organizations (namespace_id, id)
+);
+GRANT SELECT ON organization_blocks TO authz_owner;
+CREATE FUNCTION authz.blocking_organizations() RETURNS TABLE (namespace_id TEXT, id TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT b.organization_namespace_id, b.organization_id FROM public.organization_blocks b
+  WHERE b.principal_id = current_setting('app.user_id', true)
+$$;
+ALTER FUNCTION authz.blocking_organizations() OWNER TO authz_owner;
+ALTER TABLE memberships ENABLE ROW LEVEL SECURITY;
+CREATE POLICY memberships_own ON memberships FOR ALL
+  USING (user_id = current_setting('app.user_id', true))
+  WITH CHECK (user_id = current_setting('app.user_id', true));
+";
+
+pub(crate) const PAIR_BLOCK_HELPERS: &[&str] = &["authz.blocking_organizations"];
+
+/// [`PAIR_BLOCKS`] with a restrictive policy on `memberships` keeping the rows `using`
+/// holds.
+pub(crate) fn pair_restricted(using: &str) -> String {
+    format!(
+        "{PAIR_BLOCKS}
+         CREATE POLICY memberships_unblocked ON memberships AS RESTRICTIVE FOR ALL
+           USING ({using}) WITH CHECK ({using});"
+    )
+}
+
+pub(crate) const PAIR_EXCLUDED: &str = "NOT ((organization_namespace_id, organization_id) \
+     IN (SELECT * FROM authz.blocking_organizations()))";
+
+/// A row whose columns name a pair the helper returns is taken away from every command the
+/// restrictive policy covers, and the report names the pair.
+#[test]
+fn a_restrictive_pair_exclusion_subtracts_the_helpers_pairs() {
+    let sql = pair_restricted(PAIR_EXCLUDED);
+    assert_eq!(
+        using_of(&sql, PAIR_BLOCK_HELPERS, "memberships_unblocked").confidence,
+        ConfidenceLevel::A
+    );
+    let outputs = translator(ConfidenceLevel::B, PAIR_BLOCK_HELPERS)
+        .translate(&db_of(&sql))
+        .expect("the schema should plan")
+        .outputs()
+        .expect("every clause should translate");
+    let dsl = outputs.model();
+    let definitions = relation_definitions(&dsl, "memberships");
+    for relation in [
+        "can_select",
+        "can_insert",
+        "can_update_without_reading",
+        "can_delete",
+    ] {
+        let (_, definition) = definitions
+            .iter()
+            .find(|(name, _)| name == relation)
+            .unwrap_or_else(|| panic!("{relation} should be defined: {dsl}"));
+        assert!(
+            definition.contains("user but not blocking_organizations from "),
+            "{relation}: {definition}"
+        );
+    }
+    let report = outputs.report();
+    let named = "restrictive blocklist (organization_namespace_id, organization_id) in \
+                 authz.blocking_organizations()";
+    assert!(report.contains(named), "{named}: {report}");
+}
+
+#[test]
+fn every_spelling_of_pair_exclusion_reads_alike() {
+    let written = model_of_pairs(&pair_restricted(PAIR_EXCLUDED));
+    for spelling in [
+        "NOT ((organization_namespace_id, organization_id) \
+         = ANY (SELECT * FROM authz.blocking_organizations()))",
+        "(memberships.organization_namespace_id, memberships.organization_id) \
+         NOT IN (SELECT * FROM authz.blocking_organizations())",
+        "(organization_namespace_id, organization_id) \
+         <> ALL (SELECT b.namespace_id, b.id FROM authz.blocking_organizations() b)",
+    ] {
+        assert_eq!(
+            model_of_pairs(&pair_restricted(spelling)),
+            written,
+            "`{spelling}`"
+        );
+    }
+}
+
+/// A permissive grant beside a pair exclusion keeps the granted rows outside the pairs.
+#[test]
+fn a_permissive_grant_minus_a_pair_exclusion_subtracts_its_pairs() {
+    let dsl = model_of_pairs(&PAIR_BLOCKS.replace(
+        "USING (user_id = current_setting('app.user_id', true))",
+        &format!("USING (user_id = current_setting('app.user_id', true) AND {PAIR_EXCLUDED})"),
+    ));
+    let selected = relation_definition(&dsl, "memberships", "can_select")
+        .unwrap_or_else(|| panic!("memberships defines can_select: {dsl}"));
+    assert!(
+        selected.starts_with("(user but not blocking_organizations from "),
+        "{selected}"
+    );
+}
+
+/// A column of the compared row or of the pairs the helper returns that may hold `NULL`
+/// leaves the comparison `NULL`, which hides the row where no tuple names it.
+#[test]
+fn a_pair_exclusion_with_a_nullable_side_is_refused() {
+    for (sql, column) in [
+        (
+            pair_restricted(PAIR_EXCLUDED).replace(
+                "  organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,\n  \
+                 user_id TEXT NOT NULL,\n  PRIMARY KEY (organization_namespace_id, \
+                 organization_id, user_id),",
+                "  organization_namespace_id TEXT NOT NULL, organization_id TEXT,\n  \
+                 user_id TEXT NOT NULL,",
+            ),
+            "'memberships.organization_id'",
+        ),
+        (
+            pair_restricted(PAIR_EXCLUDED).replace(
+                "  organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,\n  \
+                 principal_id TEXT NOT NULL,\n  PRIMARY KEY (organization_namespace_id, \
+                 organization_id, principal_id),",
+                "  organization_namespace_id TEXT, organization_id TEXT NOT NULL,\n  \
+                 principal_id TEXT NOT NULL,",
+            ),
+            "organization_blocks.organization_namespace_id",
+        ),
+    ] {
+        let reason = refusal_of(&sql, PAIR_BLOCK_HELPERS, "memberships_unblocked");
+        assert!(
+            reason.contains(column) && reason.contains("provably non-null"),
+            "{column}: {reason}"
+        );
+    }
+}
+
+fn model_of_pairs(sql: &str) -> String {
+    crate::declared_helper_tests::model(sql, PAIR_BLOCK_HELPERS)
+}

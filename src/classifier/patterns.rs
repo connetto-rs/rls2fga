@@ -1184,6 +1184,10 @@ pub enum ExcludedSet {
     /// `NOT (project_id = ANY (ARRAY(SELECT authz.blocked_projects())))`, with the
     /// column and every value the helper can return proven non-null.
     Helper(DeclaredHelper),
+    /// The rows whose operands name a pair a declared helper returning `TABLE (...)`
+    /// returns, `NOT ((org_ns, org_id) IN (SELECT * FROM authz.blocked_orgs()))`, with every
+    /// compared column and every column the helper returns proven non-null.
+    Pairs(RowInHelperPairs),
     /// The rows a [`FlaggedRow`] flags for every caller alike, `NOT authz.is_archived(id)`,
     /// classified as the positive test, through the calls it expanded, or the union of
     /// several where an `OR` joins them.
@@ -1407,7 +1411,7 @@ pub fn exclusion_confidence(
         .iter()
         .filter_map(|excluded| match excluded {
             ExcludedSet::Flag(flag) => Some(flag.confidence),
-            ExcludedSet::Membership(_) | ExcludedSet::Helper(_) => None,
+            ExcludedSet::Membership(_) | ExcludedSet::Helper(_) | ExcludedSet::Pairs(_) => None,
         })
         .fold(
             base.map_or(ConfidenceLevel::A, |base| base.confidence),
