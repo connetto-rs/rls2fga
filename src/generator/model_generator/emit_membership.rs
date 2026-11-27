@@ -1189,10 +1189,10 @@ fn emit_blocked_set<DB: DatabaseLike>(
                 )?
             }
             ExcludedSet::Pairs(pattern) => {
-                if pattern.pairs.arms.is_empty() {
+                let Some(holder) = pairs_holder(&pattern.pairs, ctx, table_plan, all_types) else {
                     continue;
-                }
-                emit_row_in_helper_pairs(pattern, ctx, table_plan, all_types)
+                };
+                rows_reaching_pairs(pattern, holder, ctx, table_plan, all_types)
             }
             ExcludedSet::Flag(flag) => translate_pattern(
                 &flag.pattern,
@@ -1676,6 +1676,20 @@ pub(crate) fn emit_row_in_helper_pairs<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> UsersetExpr {
+    let Some(holder) = pairs_holder(&pattern.pairs, ctx, table_plan, all_types) else {
+        return deny_expr(table_plan);
+    };
+    rows_reaching_pairs(pattern, holder, ctx, table_plan, all_types)
+}
+
+/// The guarded rows whose columns name a pair `holder` holds whoever the pair is returned to.
+fn rows_reaching_pairs<DB: DatabaseLike>(
+    pattern: &RowInHelperPairs,
+    holder: RelationName,
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> UsersetExpr {
     let RowInHelperPairs {
         columns,
         literals,
@@ -1684,9 +1698,6 @@ pub(crate) fn emit_row_in_helper_pairs<DB: DatabaseLike>(
     let source_table = ctx.source_table;
     let Some(identity) = resolve_row_identity(source_table, ctx.db) else {
         skip_source_without_row_identity(table_plan, source_table, "helper pair links", ctx.db);
-        return deny_expr(table_plan);
-    };
-    let Some(holder) = pairs_holder(pairs, ctx, table_plan, all_types) else {
         return deny_expr(table_plan);
     };
     let reach = CapReach::Rows {

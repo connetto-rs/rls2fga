@@ -673,6 +673,20 @@ fn a_pair_exclusion_with_a_nullable_side_is_refused() {
     }
 }
 
+/// `NOT ((x, y) IN (<no row>))` holds for every row, so a call returning no row, here a
+/// reason the `CHECK` never admits, takes nothing away from the grant.
+#[test]
+fn a_pair_exclusion_returning_no_row_keeps_every_granted_row() {
+    let reasoned = reasoned_blocks(&pair_restricted(
+        "NOT ((organization_namespace_id, organization_id) \
+         IN (SELECT * FROM authz.blocking_organizations('ban')))",
+    ));
+    assert_eq!(
+        relation_definition(&model_of_pairs(&reasoned), "memberships", "can_select"),
+        relation_definition(&model_of_pairs(PAIR_BLOCKS), "memberships", "can_select"),
+    );
+}
+
 /// The exclusion every arm of [`arm_pair_blocks`] writes on its row `m` or `n`.
 pub(crate) const ARM_PAIR_EXCLUDED: &str = "NOT (({row}.organization_namespace_id, \
      {row}.organization_id) IN (SELECT * FROM authz.blocking_organizations()))";

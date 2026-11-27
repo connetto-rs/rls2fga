@@ -1239,20 +1239,23 @@ const OPERATOR: &str = "00000000-0000-0000-0000-0000000000c1";
 const MEMBER: &str = "00000000-0000-0000-0000-0000000000c2";
 const ACTING_INSTALLATION: &str = "00000000-0000-0000-0000-0000000000c3";
 
+/// A request as `subject` carrying the caller `caller`, through `installation` where it
+/// names one, the empty string standing for a pooled connection that once carried one.
+fn calling(subject: &str, caller: &str, installation: Option<&str>) -> Principal {
+    let mut principal =
+        Principal::with_setting(subject, "app_reader", "app.user_id", caller).acting_for(caller);
+    if let Some(installation) = installation {
+        principal
+            .session
+            .push(("app.installation_id".into(), installation.into()));
+    }
+    principal
+}
+
 /// The installation-gated [`platform_operators`] read by `OPERATOR` and `MEMBER`, each
 /// alone, acting for an installation, and through a pooled connection reading the
 /// installation as `''`, and by a request carrying no caller.
 fn platform_operators_case(loading_from_rows: bool) -> ParityCase {
-    let acting = |subject: &str, caller: &str, installation: Option<&str>| {
-        let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", caller)
-            .acting_for(caller);
-        if let Some(installation) = installation {
-            principal
-                .session
-                .push(("app.installation_id".into(), installation.into()));
-        }
-        principal
-    };
     let mut case = ParityCase::reading(
         &format!(
             "declared-helper-platform-operators{}",
@@ -1274,11 +1277,11 @@ fn platform_operators_case(loading_from_rows: bool) -> ParityCase {
              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
         ],
         vec![
-            acting("operator", OPERATOR, None),
-            acting("acting_operator", OPERATOR, Some(ACTING_INSTALLATION)),
-            acting("pooled_operator", OPERATOR, Some("")),
-            acting("member", MEMBER, None),
-            acting("acting_member", MEMBER, Some(ACTING_INSTALLATION)),
+            calling("operator", OPERATOR, None),
+            calling("acting_operator", OPERATOR, Some(ACTING_INSTALLATION)),
+            calling("pooled_operator", OPERATOR, Some("")),
+            calling("member", MEMBER, None),
+            calling("acting_member", MEMBER, Some(ACTING_INSTALLATION)),
             Principal::as_role("anonymous", "app_reader"),
         ],
     )
@@ -3711,16 +3714,6 @@ fn founded_note(local: u8) -> String {
 /// founded, and `(OTHER_NAMESPACE, 1)`, not yet founded, each holding one note.
 fn founded_pairs_case(loading_from_rows: bool) -> ParityCase {
     let organization = |local: u8| format!("00000000-0000-0000-0000-00000000000{local}");
-    let acting = |subject: &str, caller: &str, installation: Option<&str>| {
-        let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", caller)
-            .acting_for(caller);
-        if let Some(installation) = installation {
-            principal
-                .session
-                .push(("app.installation_id".into(), installation.into()));
-        }
-        principal
-    };
     let mut case = ParityCase::reading(
         &format!(
             "declared-helper-founded-pairs{}",
@@ -3750,10 +3743,10 @@ fn founded_pairs_case(loading_from_rows: bool) -> ParityCase {
              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
         ],
         vec![
-            acting("founder", FOUNDER, None),
-            acting("pooled_founder", FOUNDER, Some("")),
-            acting("installed_founder", FOUNDER, Some(ACTING_INSTALLATION)),
-            acting("stranger", MEMBER, None),
+            calling("founder", FOUNDER, None),
+            calling("pooled_founder", FOUNDER, Some("")),
+            calling("installed_founder", FOUNDER, Some(ACTING_INSTALLATION)),
+            calling("stranger", MEMBER, None),
         ],
     )
     .with_settings([
@@ -3845,10 +3838,8 @@ fn administered_teams_case(loading_from_rows: bool) -> ParityCase {
              GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
         ],
         vec![
-            Principal::with_setting("operator", "app_reader", "app.user_id", OPERATOR)
-                .acting_for(OPERATOR),
-            Principal::with_setting("member", "app_reader", "app.user_id", MEMBER)
-                .acting_for(MEMBER),
+            calling("operator", OPERATOR, None),
+            calling("member", MEMBER, None),
             Principal::as_role("anonymous", "app_reader"),
         ],
     )

@@ -1624,6 +1624,42 @@ fn a_walk_over_pairs_skipping_excluded_parents_subtracts_them_from_each_edge() {
     );
 }
 
+/// A pair exclusion over a walk is read where every column the walk returns is `NOT NULL`,
+/// and refused naming the column where one may hold `NULL`.
+#[test]
+fn a_pair_exclusion_over_a_walk_needs_its_returned_columns_non_null() {
+    let excluding = |schema: &str| {
+        let schema = format!(
+            "{schema}ALTER TABLE grants ENABLE ROW LEVEL SECURITY;
+             CREATE POLICY grants_unreached ON grants AS RESTRICTIVE FOR SELECT
+               USING (NOT ((grantee_namespace_id, grantee_id)
+                 IN (SELECT * FROM authz.caller_grantees())));"
+        );
+        pair_walk_translator()
+            .classify(&db_of(&schema))
+            .into_iter()
+            .find(|classified| classified.name() == "grants_unreached")
+            .expect("grants_unreached should classify")
+            .using_classification()
+            .expect("grants_unreached USING should classify")
+            .clone()
+    };
+    let read = excluding(PAIR_WALK);
+    assert_eq!(read.confidence, ConfidenceLevel::A, "{:?}", read.pattern);
+    let nullable = excluding(&PAIR_WALK.replace(
+        "  parent_namespace_id UUID NOT NULL, parent_id UUID NOT NULL,",
+        "  parent_namespace_id UUID, parent_id UUID NOT NULL,",
+    ));
+    let refused = refusal_reasons(&nullable.pattern);
+    assert!(
+        refused.iter().any(|refused| {
+            refused.contains("team_parents.parent_namespace_id")
+                && refused.contains("provably non-null")
+        }),
+        "{refused:?}"
+    );
+}
+
 /// A walk over pairs reaches only pairs its seed returns, so a seed keeping a kind the
 /// `CHECK` refuses returns no pair and the policy comparing a row with them denies.
 #[test]
