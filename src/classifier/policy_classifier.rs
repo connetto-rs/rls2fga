@@ -471,10 +471,7 @@ fn compared_key_refusal<DB: DatabaseLike>(
         PatternClass::P20DeclaredHelper(DeclaredHelper { column, call }) => {
             check(guarded, column).or_else(|| helper_call_refusal(call, db))
         }
-        PatternClass::P30RowInHelperPairs(RowInHelperPairs { columns, pairs, .. }) => columns
-            .iter()
-            .find_map(|(_, column)| check(guarded, column))
-            .or_else(|| helper_pairs_refusal(pairs, db)),
+        PatternClass::P30RowInHelperPairs(pairs) => row_in_pairs_refusal(pairs, guarded, db),
         PatternClass::P1NumericThreshold(NumericThreshold {
             function_name,
             resource_column,
@@ -536,6 +533,7 @@ fn compared_key_refusal<DB: DatabaseLike>(
                 ExcludedSet::Helper(DeclaredHelper { column, call }) => {
                     check(guarded, column).or_else(|| helper_call_refusal(call, db))
                 }
+                ExcludedSet::Pairs(pairs) => row_in_pairs_refusal(pairs, guarded, db),
                 ExcludedSet::Flag(flag) => flags_refusal(&flag.pattern, guarded, db),
             })
         }
@@ -649,6 +647,20 @@ fn membership_refusal<DB: DatabaseLike>(
                 .or_else(|| key_collation_refusal(outer, &pair.outer_column, db))
         })
     })
+}
+
+/// Why a column a row compared with a declared helper's pairs reads from `guarded`, or a row
+/// the pairs are read from, cannot be compared in `OpenFGA`.
+fn row_in_pairs_refusal<DB: DatabaseLike>(
+    pattern: &RowInHelperPairs,
+    guarded: &TableId,
+    db: &DB,
+) -> Option<String> {
+    pattern
+        .columns
+        .iter()
+        .find_map(|(_, column)| key_collation_refusal(guarded, column, db))
+        .or_else(|| helper_pairs_refusal(&pattern.pairs, db))
 }
 
 /// Why a grant row or a parent link a declared helper's call reads, or a grant arm of its

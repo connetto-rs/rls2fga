@@ -352,20 +352,6 @@ pub(crate) enum HelperRefusal {
         /// The helper returning the pairs.
         cap: String,
     },
-    /// The rows returning a cap's pairs are kept only while the request leaves a setting
-    /// unset.
-    #[error(
-        "{capped} is capped by '{cap}', whose rows are kept only where setting '{setting}' \
-         reads NULL, which no pair object reads"
-    )]
-    CapKeptWhileUnset {
-        /// What the cap keeps rows of.
-        capped: Capped,
-        /// The helper returning the pairs.
-        cap: String,
-        /// The setting the cap's rows require unset.
-        setting: String,
-    },
     /// A cap is lifted by a read the request's absence does not decide.
     #[error(
         "declared helper '{function}' lifts its cap where setting '{setting}' reads NULL, \
@@ -616,9 +602,6 @@ pub(crate) enum UnsetCallerGateRefusal {
          for an unset caller keeps the arm's rows, or raises where the read is cast"
     )]
     ReadBare,
-    /// The gate sits on an arm returning the pairs of a cap, which no request gate reaches.
-    #[error("but gates an arm of a cap, whose pairs no request gate reaches")]
-    CapArm,
 }
 
 /// What a cap keeps rows of, as its refusals name it.
@@ -696,6 +679,33 @@ pub(crate) fn recognize_excluded_helper<DB: DatabaseLike>(
     helper_compared_with(compared, query, db, registry, table)
 }
 
+/// Recognize the rows whose operands name no pair a declared helper `h` returning `TABLE
+/// (...)` returns, written `NOT ((<operands>) IN (SELECT * FROM h(...)))`, `(<operands>) NOT
+/// IN (SELECT * FROM h(...))` or `(<operands>) <> ALL (SELECT * FROM h(...))`, as the pairs
+/// they exclude, the subquery naming each column `h` returns in order in place of `*` or not.
+///
+/// `None` where the expression has another shape or reads no declared helper.
+pub(crate) fn recognize_excluded_pairs<DB: DatabaseLike>(
+    expr: &Expr,
+    db: &DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> Option<Result<RowInHelperPairs, HelperRefusal>> {
+    let (compared, query) = excluded_set_operands(expr)?;
+    Some(
+        compared_pairs(compared, query, db, registry, table)?.and_then(|read| {
+            let (values, set) = answered_call(read.function, read.arguments, db, registry)?;
+            row_in_helper_pairs(
+                read.operands,
+                (read.function, &values, &set),
+                (table, read.guarded),
+                db,
+                registry,
+            )
+        }),
+    )
+}
+
 /// Recognize `(<operands>) IN (SELECT * FROM h(...))` and `(<operands>) = ANY (SELECT *
 /// FROM h(...))` for a declared helper `h` returning `TABLE (...)`, the subquery naming
 /// each column `h` returns in order in place of `*` or not.
@@ -708,6 +718,48 @@ pub(crate) fn recognize_row_in_helper_pairs<DB: DatabaseLike>(
     table: &str,
 ) -> Option<ClassifiedExpr> {
     let (compared, query) = helper_set_operands(expr)?;
+    let classified = compared_pairs(compared, query, db, registry, table)?.and_then(|read| {
+        row_in_helper_rows(
+            read.operands,
+            read.function,
+            read.arguments,
+            (table, read.guarded),
+            db,
+            registry,
+        )
+    });
+    Some(classified.unwrap_or_else(|refusal| ClassifiedExpr {
+        pattern: PatternClass::Unknown(UnclassifiedExpr {
+            sql_text: expr.to_string(),
+            reason: refusal.to_string(),
+        }),
+        confidence: ConfidenceLevel::D,
+    }))
+}
+
+/// A row of the guarded table compared with the rows one call of a declared helper
+/// returning `TABLE (...)` returns.
+struct ComparedPairs<'e, 'db, DB: DatabaseLike> {
+    /// The row's operands, as many as the helper returns columns.
+    operands: &'e [Expr],
+    /// The helper called.
+    function: &'db DB::Function,
+    /// The call's arguments.
+    arguments: &'e [FunctionArg],
+    /// The guarded table.
+    guarded: &'db DB::Table,
+}
+
+/// `compared`, a row, compared with the rows of the one call `query` reads every column of,
+/// `None` where either has another shape, and refused where another declaration takes as
+/// many arguments.
+fn compared_pairs<'e, 'db, DB: DatabaseLike>(
+    compared: &'e Expr,
+    query: &'e Query,
+    db: &'db DB,
+    registry: &FunctionRegistry,
+    table: &str,
+) -> Option<Result<ComparedPairs<'e, 'db, DB>, HelperRefusal>> {
     let Expr::Tuple(operands) = compared else {
         return None;
     };
@@ -717,27 +769,18 @@ pub(crate) fn recognize_row_in_helper_pairs<DB: DatabaseLike>(
         return None;
     }
     let guarded = lookup_table(db, table)?;
-    let classified = if overloaded {
+    Some(if overloaded {
         Err(HelperRefusal::Overloaded {
             function: function.target_name().to_string(),
         })
     } else {
-        row_in_helper_rows(
+        Ok(ComparedPairs {
             operands,
             function,
             arguments,
-            (table, guarded),
-            db,
-            registry,
-        )
-    };
-    Some(classified.unwrap_or_else(|refusal| ClassifiedExpr {
-        pattern: PatternClass::Unknown(UnclassifiedExpr {
-            sql_text: expr.to_string(),
-            reason: refusal.to_string(),
-        }),
-        confidence: ConfidenceLevel::D,
-    }))
+            guarded,
+        })
+    })
 }
 
 /// `operands` of `table` compared with the rows one call of `function` returns, as the
@@ -1546,7 +1589,7 @@ fn request_value_in_helper_set<DB: DatabaseLike>(
         };
         bounded_by_no_time(&name, grant)?;
         uncapped(&name, grant)?;
-        unjoined(&name, grant, &[])?;
+        unjoined(&name, grant)?;
         let column = granted_column(&name, grant)?;
         arms.push(HelperValues {
             table: table_identity(grant.table()),
@@ -2917,23 +2960,31 @@ fn uncapped<DB: DatabaseLike>(
     }
 }
 
-/// Refuses an arm keeping only the rows that name a joined row meeting the join, that no
-/// row of another table blocks, or that stay outside another helper's set compared on a
-/// column other than those of `carried`, read where no link from the arm's own row
-/// reaches the other table's row or the set.
+/// Refuses an arm keeping only the rows that name a joined row meeting the join, or that
+/// [`unblocked`] refuses.
 fn unjoined<DB: DatabaseLike>(
+    function: &str,
+    grant: &GrantArm<'_, DB>,
+) -> Result<(), HelperRefusal> {
+    if let Some(joined) = grant.joined_rows().first() {
+        return Err(HelperRefusal::Joined {
+            function: function.to_string(),
+            table: table_identity(grant.table()).to_string(),
+            joined: table_identity(joined.table()).to_string(),
+        });
+    }
+    unblocked(function, grant, &[])
+}
+
+/// Refuses an arm keeping only the rows that no row of another table blocks, or that stay
+/// outside another helper's set compared on a column other than those of `carried`, read
+/// where no link from the arm's own row reaches the other table's row or the set.
+fn unblocked<DB: DatabaseLike>(
     function: &str,
     grant: &GrantArm<'_, DB>,
     carried: &[&DB::Column],
 ) -> Result<(), HelperRefusal> {
     let table = || table_identity(grant.table()).to_string();
-    if let Some(joined) = grant.joined_rows().first() {
-        return Err(HelperRefusal::Joined {
-            function: function.to_string(),
-            table: table(),
-            joined: table_identity(joined.table()).to_string(),
-        });
-    }
     if let Some(anti_join) = grant.anti_joins().first() {
         return Err(HelperRefusal::AntiJoined {
             function: function.to_string(),
@@ -3190,8 +3241,9 @@ fn paired_cap<'db, DB: DatabaseLike, L>(
 }
 
 /// The pairs `called` returns for `arguments`, each read from the arm of `set` returning
-/// it or from the edge row a walk adds it through, beside the grant arms for the checks
-/// pairing operands with their columns.
+/// it, through each of the arm's rows where the arm joins them, or from the edge row a walk
+/// adds it through, beside the grant arms for the checks pairing operands with their
+/// columns.
 fn helper_pairs<'set, 'db, DB: DatabaseLike>(
     capped: &Capped,
     called: &DB::Function,
@@ -3218,13 +3270,6 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 });
             }
         };
-        if let Some(unset) = grant.unset_settings().first() {
-            return Err(HelperRefusal::CapKeptWhileUnset {
-                capped: capped.clone(),
-                cap: name,
-                setting: unset.setting().name().to_string(),
-            });
-        }
         let Some(columns) = grant
             .returned()
             .iter()
@@ -3239,16 +3284,15 @@ fn helper_pairs<'set, 'db, DB: DatabaseLike>(
                 cap: name,
             });
         };
-        unjoined(&name, grant, &columns)?;
-        let paired_arm = helper_grant(&name, grant, (&columns, Vec::new()), None, db, registry)?;
-        if let Some(caller) = &paired_arm.carried_caller {
-            return Err(HelperRefusal::GateOnUnsetCaller {
-                function: name,
-                setting: caller.setting_key().to_string(),
-                reason: UnsetCallerGateRefusal::CapArm,
-            });
-        }
-        arms.push(paired_arm);
+        unblocked(&name, grant, &columns)?;
+        arms.push(helper_grant(
+            &name,
+            grant,
+            (&columns, Vec::new()),
+            None,
+            db,
+            registry,
+        )?);
         rows.push(grant);
     }
     let paired = CapArms {

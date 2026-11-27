@@ -177,6 +177,32 @@ fn helper_call_text(call: &crate::classifier::patterns::HelperCall) -> String {
     text
 }
 
+/// The row `pattern` compares, each operand in place, and the call returning its pairs.
+fn row_in_pairs_text(pattern: &RowInHelperPairs) -> String {
+    let RowInHelperPairs {
+        columns,
+        literals,
+        pairs,
+    } = pattern;
+    let mut operands: Vec<(usize, String)> = columns
+        .iter()
+        .map(|(at, column)| (*at, column.as_str().to_string()))
+        .chain(
+            literals
+                .iter()
+                .filter_map(|(at, value)| Some((*at, render_attribute_literal(value)?))),
+        )
+        .collect();
+    operands.sort_unstable_by_key(|(at, _)| *at);
+    let operands: Vec<String> = operands.into_iter().map(|(_, operand)| operand).collect();
+    format!(
+        "({}) in {}({})",
+        operands.join(", "),
+        pairs.function,
+        pairs.arguments.join(", ")
+    )
+}
+
 /// The end of `edges` naming each edge's parent, `table.column` for each of its columns.
 fn edge_parent(edges: &crate::classifier::patterns::TreeEdges) -> String {
     let columns: Vec<String> = edges
@@ -239,28 +265,8 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
         PatternClass::P20DeclaredHelper(DeclaredHelper { column, call }) => {
             format!("P20 ({column} in {})", helper_call_text(call))
         }
-        PatternClass::P30RowInHelperPairs(RowInHelperPairs {
-            columns,
-            literals,
-            pairs,
-        }) => {
-            let mut operands: Vec<(usize, String)> = columns
-                .iter()
-                .map(|(at, column)| (*at, column.as_str().to_string()))
-                .chain(
-                    literals
-                        .iter()
-                        .filter_map(|(at, value)| Some((*at, render_attribute_literal(value)?))),
-                )
-                .collect();
-            operands.sort_unstable_by_key(|(at, _)| *at);
-            let operands: Vec<String> = operands.into_iter().map(|(_, operand)| operand).collect();
-            format!(
-                "P30 (({}) in {}({}))",
-                operands.join(", "),
-                pairs.function,
-                pairs.arguments.join(", ")
-            )
+        PatternClass::P30RowInHelperPairs(pattern) => {
+            format!("P30 ({})", row_in_pairs_text(pattern))
         }
         PatternClass::P27RequestValueInHelperSet(RequestValueInHelperSet {
             source,
@@ -452,6 +458,9 @@ fn format_pattern(pattern: &crate::classifier::patterns::PatternClass) -> String
                     }
                     ExcludedSet::Helper(DeclaredHelper { column, call }) => {
                         write!(rendered, "{column} in {}", helper_call_text(call))
+                    }
+                    ExcludedSet::Pairs(pattern) => {
+                        write!(rendered, "{}", row_in_pairs_text(pattern))
                     }
                     ExcludedSet::Flag(flag) => {
                         write!(rendered, "{}", format_pattern(&flag.pattern))

@@ -9,13 +9,14 @@ use rls2fga::types::ActionStatement;
 use sqlparser::ast::DataType;
 
 use crate::declared_helper_blocklist_tests::{
-    blocked_units, BLOCKS, DOCS_UNBLOCKED, PROJECTS_UNBLOCKED, UNITS_RESELECTED,
+    blocked_units, pair_restricted, BLOCKS, DOCS_UNBLOCKED, PAIR_EXCLUDED, PROJECTS_UNBLOCKED,
+    UNITS_RESELECTED,
 };
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_exclusion_tests::EXCLUDING;
 use crate::declared_helper_tests::{
     caller_and_audiences_only, founded_through_kind, platform_operators, reselected_groups,
-    GranteeArms, ABSENT_INSTALLATION, AUDIENCES, EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED,
+    GranteeArms, ABSENT_INSTALLATION, AUDIENCES, CAPS, EDGE_FOLDERS, EXPIRING, EXTENSIONS, FOUNDED,
     GRANTEES, GROUPS, INSTALLATIONS, INVITATIONS, KIND_RESELECTION, LEVELS, MEMBERSHIP_STATES,
     ORDERS, OWNER_READS, REQUEST_VALUES, RESOURCES, SIGNED_IN,
 };
@@ -23,8 +24,8 @@ use crate::labelled_helper_tests::SHARES;
 use crate::request_principal_tests::{principal_blocks, CALLER_OR_INSTALLATION};
 use crate::request_value_list_tests::INSTALLATION_PAIRS;
 use crate::row_cap_tests::{
-    blocked_caps, nested_caps, pair_walk, scoped_nested_caps, INSTALLATION_CAPS, PAIR_WALK,
-    PERSONAL_RESOURCES, POLICY_CAPS,
+    blocked_caps, nested_caps, pair_walk, scoped_nested_caps, ADMINISTERED_TEAMS, FOUNDED_PAIRS,
+    INSTALLATION_CAPS, PAIR_WALK, PERSONAL_RESOURCES, POLICY_CAPS,
 };
 use crate::support;
 use crate::support::parity::{
@@ -3546,5 +3547,340 @@ async fn a_walk_over_namespaced_pairs_agrees_with_postgres() {
             }
             assert_agrees(&case, &run);
         }
+    }
+}
+
+/// `alice` belongs to `(na, O1)`, `(na, O2)` and `(nb, O1)` and is blocked by `(na, O1)`
+/// alone, and `bob` belongs to `(na, O1)` unblocked.
+fn pair_blocks_case(loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-pair-blocks{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &pair_restricted(PAIR_EXCLUDED),
+        &[
+            "INSERT INTO organizations VALUES ('na', 'O1'), ('na', 'O2'), ('nb', 'O1');
+             INSERT INTO memberships VALUES ('na', 'O1', 'alice'), ('na', 'O2', 'alice'),
+               ('nb', 'O1', 'alice'), ('na', 'O1', 'bob');
+             INSERT INTO organization_blocks VALUES ('na', 'O1', 'alice')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT, INSERT, UPDATE ON memberships TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .updating("memberships", "user_id = user_id")
+    .unobservable(
+        "memberships",
+        "memberships_unblocked",
+        ClauseKind::Check,
+        Side::Denies,
+        "An insert probe mints a fresh namespace, which no block names, and an update keeps \
+         the row's pair, which USING already decides",
+    )
+    .with_registry(r#"{ "authz.blocking_organizations": { "kind": "declared_helper" } }"#);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A blocked pair hides only the membership naming both its columns, never one sharing
+/// its namespace or its identity alone, nor another caller's membership of it.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_pair_excluded_from_a_helpers_pairs_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = pair_blocks_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, object, allowed) in [
+            ("alice", "memberships:na|O1|alice", false),
+            ("alice", "memberships:na|O2|alice", true),
+            ("alice", "memberships:nb|O1|alice", true),
+            ("bob", "memberships:na|O1|bob", true),
+            ("anonymous", "memberships:na|O1|bob", false),
+        ] {
+            assert_postgres(
+                &case,
+                &run,
+                subject,
+                object,
+                ActionStatement::Select,
+                allowed,
+            );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+const FOUNDER: &str = "00000000-0000-0000-0000-0000000000f1";
+const FOUNDED_NAMESPACE: &str = "00000000-0000-0000-0000-0000000000a1";
+const OTHER_NAMESPACE: &str = "00000000-0000-0000-0000-0000000000a2";
+
+/// The note numbered `local`.
+fn founded_note(local: u8) -> String {
+    format!("00000000-0000-0000-0000-0000000000b{local}")
+}
+
+/// `FOUNDER` created `(FOUNDED_NAMESPACE, 1)`, not yet founded, `(FOUNDED_NAMESPACE, 2)`,
+/// founded, and `(OTHER_NAMESPACE, 1)`, not yet founded, each holding one note.
+fn founded_pairs_case(loading_from_rows: bool) -> ParityCase {
+    let organization = |local: u8| format!("00000000-0000-0000-0000-00000000000{local}");
+    let acting = |subject: &str, caller: &str, installation: Option<&str>| {
+        let mut principal = Principal::with_setting(subject, "app_reader", "app.user_id", caller)
+            .acting_for(caller);
+        if let Some(installation) = installation {
+            principal
+                .session
+                .push(("app.installation_id".into(), installation.into()));
+        }
+        principal
+    };
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-founded-pairs{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        FOUNDED_PAIRS,
+        &[
+            &format!(
+                "INSERT INTO organizations VALUES
+                   ('{FOUNDED_NAMESPACE}', '{first}', '{FOUNDER}', NULL),
+                   ('{FOUNDED_NAMESPACE}', '{second}', '{FOUNDER}', now()),
+                   ('{OTHER_NAMESPACE}', '{first}', '{FOUNDER}', NULL);
+                 INSERT INTO organization_notes VALUES
+                   ('{note1}', '{FOUNDED_NAMESPACE}', '{first}'),
+                   ('{note2}', '{FOUNDED_NAMESPACE}', '{second}'),
+                   ('{note3}', '{OTHER_NAMESPACE}', '{first}')",
+                first = organization(1),
+                second = organization(2),
+                note1 = founded_note(1),
+                note2 = founded_note(2),
+                note3 = founded_note(3),
+            ),
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON organization_notes TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            acting("founder", FOUNDER, None),
+            acting("pooled_founder", FOUNDER, Some("")),
+            acting("installed_founder", FOUNDER, Some(ACTING_INSTALLATION)),
+            acting("stranger", MEMBER, None),
+        ],
+    )
+    .with_settings([
+        support::deployment::typed_caller("app.user_id", DataType::Uuid),
+        support::deployment::typed_scalar("app.installation_id", DataType::Uuid).may_be_unset(),
+    ])
+    .with_registry(r#"{ "authz.founded_organizations": { "kind": "declared_helper" } }"#);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// The founder reads the notes of every organization not yet founded, in either namespace,
+/// while no installation acts, a pooled connection reading the installation as `''`
+/// included, and none while one acts.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_pair_membership_kept_while_a_setting_is_unset_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = founded_pairs_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, visible) in [
+            ("founder", [true, false, true]),
+            ("pooled_founder", [true, false, true]),
+            ("installed_founder", [false, false, false]),
+            ("stranger", [false, false, false]),
+        ] {
+            for (local, allowed) in (1..=3).zip(visible) {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("organization_notes:{}", founded_note(local)),
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+const ADMINISTERED_USER_NAMESPACE: &str = "0a000000-0000-4000-8000-000000000001";
+
+/// The note on team `local`.
+fn team_admin_note(local: u8) -> String {
+    format!("00000000-0000-0000-0000-0000000000d{local}")
+}
+
+/// `OPERATOR`, an active member, administers team 1 and is a plain member of team 2.
+/// `MEMBER`, deactivated, administers team 1.
+fn administered_teams_case(loading_from_rows: bool) -> ParityCase {
+    let team = |local: u8| format!("00000000-0000-0000-0000-0000000000e{local}");
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-administered-teams{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        ADMINISTERED_TEAMS,
+        &[
+            &format!(
+                "INSERT INTO organizations VALUES ('{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}');
+                 INSERT INTO memberships VALUES
+                   ('{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}', '{users}', '{OPERATOR}', 'active'),
+                   ('{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}', '{users}', '{MEMBER}', 'deactivated');
+                 INSERT INTO teams VALUES
+                   ('{OTHER_NAMESPACE}', '{team1}', '{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}'),
+                   ('{OTHER_NAMESPACE}', '{team2}', '{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}');
+                 INSERT INTO team_members VALUES
+                   ('{OTHER_NAMESPACE}', '{team1}', '{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}',
+                    '{users}', '{OPERATOR}', 'admin'),
+                   ('{OTHER_NAMESPACE}', '{team2}', '{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}',
+                    '{users}', '{OPERATOR}', 'member'),
+                   ('{OTHER_NAMESPACE}', '{team1}', '{FOUNDED_NAMESPACE}', '{FOUNDED_NAMESPACE}',
+                    '{users}', '{MEMBER}', 'admin');
+                 INSERT INTO team_notes VALUES
+                   ('{note1}', '{OTHER_NAMESPACE}', '{team1}'),
+                   ('{note2}', '{OTHER_NAMESPACE}', '{team2}')",
+                users = ADMINISTERED_USER_NAMESPACE,
+                team1 = team(1),
+                team2 = team(2),
+                note1 = team_admin_note(1),
+                note2 = team_admin_note(2),
+            ),
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON team_notes TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            Principal::with_setting("operator", "app_reader", "app.user_id", OPERATOR)
+                .acting_for(OPERATOR),
+            Principal::with_setting("member", "app_reader", "app.user_id", MEMBER)
+                .acting_for(MEMBER),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::typed_caller(
+        "app.user_id",
+        DataType::Uuid,
+    )])
+    .with_registry(r#"{ "authz.administered_teams": { "kind": "declared_helper" } }"#);
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// An admin reads the notes of the teams administered while the joined membership stays
+/// active, so a deactivated member's admin row grants nothing.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_joined_arm_returning_pairs_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = administered_teams_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, visible) in [
+            ("operator", [true, false]),
+            ("member", [false, false]),
+            ("anonymous", [false, false]),
+        ] {
+            for (local, allowed) in (1..=2).zip(visible) {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("team_notes:{}", team_admin_note(local)),
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+/// [`CAPS`] with `authz.capped_kinds` keeping its pairs only while the request carries a
+/// caller. `r1` is of an approved kind and `r2` of none.
+fn caller_gated_caps_case(loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-caller-gated-caps{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!(
+            "{}CREATE POLICY resources_read ON resources FOR SELECT \
+             USING (id IN (SELECT authz.capped_resources()));",
+            CAPS.replace(
+                "FROM public.approved_kinds approved",
+                "FROM public.approved_kinds approved \
+                 WHERE NULLIF(current_setting('app.user_id', true), '') IS NOT NULL",
+            )
+        ),
+        &[
+            "INSERT INTO approved_kinds VALUES ('O1', 'doc');
+             INSERT INTO resources VALUES ('r1', 'O1', 'doc', 'alice'),
+               ('r2', 'O1', 'sheet', 'alice')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON resources TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            Principal::with_setting("pooled", "app_reader", "app.user_id", ""),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id").may_be_unset()])
+    .with_registry(
+        r#"{
+            "authz.capped_kinds": { "kind": "declared_helper" },
+            "authz.capped_resources": { "kind": "declared_helper" }
+        }"#,
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A request carrying a caller reads the resources of an approved kind, and one carrying
+/// none, or reading the caller as `''` on a pooled connection, reads none.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_cap_arm_gated_on_a_caller_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = caller_gated_caps_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, visible) in [
+            ("alice", [true, false]),
+            ("pooled", [false, false]),
+            ("anonymous", [false, false]),
+        ] {
+            for (object, allowed) in ["resources:r1", "resources:r2"].into_iter().zip(visible) {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    object,
+                    ActionStatement::Select,
+                    allowed,
+                );
+            }
+        }
+        assert_agrees(&case, &run);
     }
 }

@@ -2396,8 +2396,7 @@ fn using_refusal(translator: &Translator, sql: &str, policy: &str) -> String {
 }
 
 /// A gate whose read keeps rows for a request carrying no caller, or raises for one, is
-/// refused with the reason, as is one on an arm of a cap, whose pairs no request gate
-/// reaches.
+/// refused with the reason.
 #[test]
 fn a_gate_on_a_caller_that_may_be_unset_is_refused_where_the_model_cannot_state_it() {
     for (gate, reason) in [
@@ -2415,25 +2414,40 @@ fn a_gate_on_a_caller_that_may_be_unset_is_refused_where_the_model_cannot_state_
         assert!(refused.contains("app.user_id"), "{gate}: {refused}");
         assert!(refused.contains(reason), "{gate}: {refused}");
     }
+}
+
+/// An arm of a cap kept only while the request carries a caller it may leave unset gates
+/// the pairs it returns on the caller's presence.
+#[test]
+fn a_cap_arm_gated_on_a_caller_gates_its_pairs() {
     let capped = CAPS.replace(
         "FROM public.approved_kinds approved",
         "FROM public.approved_kinds approved \
          WHERE NULLIF(current_setting('app.user_id', true), '') IS NOT NULL",
     );
+    let sql = format!(
+        "{capped}CREATE POLICY resources_read ON resources FOR SELECT \
+         USING (id IN (SELECT authz.capped_resources()));"
+    );
     let translator = TranslatorBuilder::new(deployment([caller("app.user_id").may_be_unset()]))
         .with_min_confidence(ConfidenceLevel::B)
         .with_declared_helpers(["authz.capped_kinds", "authz.capped_resources"])
         .build();
-    let refused = using_refusal(
-        &translator,
-        &format!(
-            "{capped}CREATE POLICY resources_read ON resources FOR SELECT \
-             USING (id IN (SELECT authz.capped_resources()));"
-        ),
-        "resources_read",
+    let dsl = translator
+        .translate(&db_of(&sql))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    let pair = "capped_kinds_pair";
+    let held = relation_definition(&dsl, pair, "capped_kinds")
+        .unwrap_or_else(|| panic!("{pair} holds capped_kinds in\n{dsl}"));
+    let gated = relation_definition(&dsl, pair, &held)
+        .unwrap_or_else(|| panic!("{pair} holds {held} in\n{dsl}"));
+    assert!(
+        held.ends_with("_carrying_caller") && gated.contains(" from request_gate"),
+        "{held}: {gated}"
     );
-    assert!(refused.contains("app.user_id"), "{refused}");
-    assert!(refused.contains("arm of a cap"), "{refused}");
 }
 
 /// The request's grantees, one `grantee_id` per grant naming a user, an organization's
@@ -3280,7 +3294,7 @@ fn an_audience_role_spelled_as_a_number_is_named_after_its_table() {
 
 /// Resources capped to the organization and kind pairs a table approves, the cap read
 /// through a helper returning `TABLE (organization_id, kind)`.
-const CAPS: &str = "
+pub(crate) const CAPS: &str = "
 CREATE ROLE authz_owner NOLOGIN BYPASSRLS;
 CREATE SCHEMA authz;
 GRANT USAGE ON SCHEMA authz TO authz_owner;
@@ -3622,9 +3636,8 @@ ALTER FUNCTION authz.crossed_unblocked_teams() OWNER TO authz_owner;
 ";
 
 /// A joined or blocking row is refused where no link from the arm's own row reaches it,
-/// which holds for a request value compared with the helper, an arm returning a cap's
-/// pairs, columns other than the other table's key, a clock bound on the joined row, and
-/// an arm table no key names one row of.
+/// which holds for a request value compared with the helper, columns other than the other
+/// table's key, a clock bound on the joined row, and an arm table no key names one row of.
 #[test]
 fn a_join_no_row_link_reaches_is_refused() {
     let translator = membership_states_translator(&[
@@ -3638,11 +3651,6 @@ fn a_join_no_row_link_reaches_is_refused() {
             "current_setting('app.team_id', true) IN (SELECT authz.active_teams())",
             "declared helper 'authz.active_teams' keeps the rows of 'public.team_members' only \
              where they name a row of 'public.memberships' meeting the join",
-        ),
-        (
-            "id IN (SELECT authz.staffed_teams())",
-            "declared helper 'authz.active_team_pairs' keeps the rows of 'public.team_members' \
-             only where they name a row of 'public.memberships' meeting the join",
         ),
         (
             "id IN (SELECT authz.loosely_unblocked_teams())",
@@ -3687,6 +3695,30 @@ fn a_join_no_row_link_reaches_is_refused() {
             other => panic!("{using} should be refused, got {other:?}"),
         }
     }
+}
+
+/// A cap returning its pairs from the rows that name an active membership holds each pair
+/// through those rows, each holding its grant while its membership meets the join.
+#[test]
+fn a_cap_returning_pairs_through_a_join_holds_them_through_its_rows() {
+    let sql = format!(
+        "{MEMBERSHIP_STATES}CREATE POLICY teams_read ON teams FOR SELECT \
+         USING (id IN (SELECT authz.staffed_teams()));"
+    );
+    let dsl = membership_states_translator(&[])
+        .translate(&db_of(&sql))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model();
+    assert_eq!(
+        relation_definition(&dsl, "active_team_pairs_pair", "active_team_pairs").as_deref(),
+        Some("team_members_with_memberships from team_members"),
+        "{dsl}"
+    );
+    let held = relation_definition(&dsl, "team_members", "team_members_with_memberships")
+        .unwrap_or_else(|| panic!("team_members holds its joined grant\n{dsl}"));
+    assert!(held.ends_with(" from memberships"), "{held}");
 }
 
 /// connetto's folder tree, its edges kept in `folder_parents` keyed on the child, and the

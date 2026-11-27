@@ -1188,6 +1188,12 @@ fn emit_blocked_set<DB: DatabaseLike>(
                     ctx,
                 )?
             }
+            ExcludedSet::Pairs(pattern) => {
+                if pattern.pairs.arms.is_empty() {
+                    continue;
+                }
+                emit_row_in_helper_pairs(pattern, ctx, table_plan, all_types)
+            }
             ExcludedSet::Flag(flag) => translate_pattern(
                 &flag.pattern,
                 ctx,
@@ -2754,6 +2760,26 @@ fn request_gated_grant_parts<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
     let parts = capped_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
+    request_gated(
+        grant,
+        parts,
+        (GatedObjects::Rows(level), level_type),
+        ctx,
+        table_plan,
+        all_types,
+    )
+}
+
+/// `parts`, the objects a grant arm returns, kept only while the request carries the caller
+/// the arm's gate requires and leaves absent every value the arm requires unset.
+fn request_gated<DB: DatabaseLike>(
+    grant: &HelperGrant,
+    parts: Vec<UsersetExpr>,
+    (objects, level_type): (GatedObjects<'_>, &TypeName),
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Vec<UsersetExpr> {
     if grant.carried_caller.is_none() && grant.absent.is_empty() {
         return parts;
     }
@@ -2772,17 +2798,11 @@ fn request_gated_grant_parts<DB: DatabaseLike>(
         required.push(RequestFormula::Presence(PresenceAtom::new(source, false)));
     }
     let required = RequestFormula::join(BoolOp::And, required);
-    let Some(gate) = level_request_gate(
-        &required,
-        GatedObjects::Rows(level),
-        level_type,
-        ctx,
-        table_plan,
-        all_types,
-    ) else {
+    let Some(gate) = level_request_gate(&required, objects, level_type, ctx, table_plan, all_types)
+    else {
         return Vec::new();
     };
-    let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+    let plan = helper_level_plan(level_type, objects.level(), table_plan, all_types);
     vec![UsersetExpr::Computed(plan.ensure_computed(
         name,
         UsersetExpr::Intersection(vec![granted, gate]),
@@ -3334,8 +3354,9 @@ fn pairs_holder<DB: DatabaseLike>(
     ))
 }
 
-/// The pairs an arm of a cap returns, as [`kept_grant_parts`] reads them, less those whose
-/// column a set the arm stays outside of holds.
+/// The pairs an arm of a cap returns, as [`kept_grant_parts`] reads them, kept only while
+/// the request carries the caller the arm's gate requires and leaves absent every value
+/// the arm requires unset, less those whose column a set the arm stays outside of holds.
 ///
 /// Every row returning a pair holds the same value in each of the pair's columns, so each
 /// pair links to the row of the excluded set's level that column names, loaded from the
@@ -3348,6 +3369,11 @@ fn pair_grant_parts<DB: DatabaseLike>(
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Vec<UsersetExpr> {
     let parts = kept_grant_parts(arm, None, pair_type, ctx, table_plan, all_types);
+    let objects = GatedObjects::NamedBy {
+        table: &arm.table,
+        columns: &arm.object_columns,
+    };
+    let parts = request_gated(arm, parts, (objects, pair_type), ctx, table_plan, all_types);
     if arm.outside.is_empty() || parts.is_empty() {
         return parts;
     }

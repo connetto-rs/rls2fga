@@ -60,8 +60,8 @@ pub(crate) use casts::{compared_cast_reason, renaming_casts, renaming_reason};
 pub(crate) use containment::contained_keys_as_memberships;
 pub(crate) use flag::{recognize_flagged_row, recognize_parent_flag, FlagRefusal, ParentFlag};
 pub(crate) use helper::{
-    recognize_declared_helper, recognize_excluded_helper, recognize_row_in_helper_pairs,
-    HelperRefusal,
+    recognize_declared_helper, recognize_excluded_helper, recognize_excluded_pairs,
+    recognize_row_in_helper_pairs, HelperRefusal,
 };
 use invariant::yields_no_row_when_empty;
 pub(crate) use invariant::{residual_relations, MembershipScope};

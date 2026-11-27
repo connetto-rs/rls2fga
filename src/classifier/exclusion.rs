@@ -9,12 +9,13 @@ use crate::classifier::function_registry::FunctionRegistry;
 use crate::classifier::patterns::{
     composite_confidence, exclusion_confidence, flagged_rows, BoolOp, ClassifiedExpr, Composite,
     ConfidenceLevel, ConstantBool, DeclaredHelper, ExcludedSet, ExistsMembership, ExpandedFunction,
-    HelperCall, HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
+    HelperCall, HelperPairs, HelperSetArm, MembershipExclusion, PatternClass, PolicyCommand,
+    RowInHelperPairs,
 };
 use crate::classifier::recognizers::{
     diagnose_p4_membership_ambiguity, is_current_user_expr, recognize_excluded_helper,
-    recognize_flagged_row, recognize_p4, recognize_p4_in_subquery, recognize_parent_flag,
-    renaming_casts, unparenthesize, FlagRefusal, HelperRefusal, ParentFlag,
+    recognize_excluded_pairs, recognize_flagged_row, recognize_p4, recognize_p4_in_subquery,
+    recognize_parent_flag, renaming_casts, unparenthesize, FlagRefusal, HelperRefusal, ParentFlag,
 };
 use crate::classifier::role_keywords::prepare_clause;
 use crate::parser::names::{lookup_table, lookup_table_id, table_identity};
@@ -467,6 +468,9 @@ fn exclusion_conjunct<DB: DatabaseLike>(
     state: &ExpansionState,
 ) -> Result<Option<ExcludedSet>, ExclusionError> {
     let conjunct = unparenthesize(conjunct);
+    if let Some(pairs) = recognize_excluded_pairs(conjunct, db, registry, table) {
+        return excluded_pairs(pairs?, db, table).map(|pairs| Some(ExcludedSet::Pairs(pairs)));
+    }
     if let Some(helper) = recognize_excluded_helper(conjunct, db, registry, table) {
         return excluded_helper(helper?, db, table).map(|helper| Some(ExcludedSet::Helper(helper)));
     }
@@ -810,6 +814,52 @@ fn excluded_helper<DB: DatabaseLike>(
         return Err(refusal.into());
     }
     Ok(helper)
+}
+
+/// `pairs` as a set to subtract, refused where `PostgreSQL` would compare a `NULL`, as
+/// [`excluded_helper`] refuses it for one column, on every column of the compared row and
+/// of the pairs.
+///
+/// `NOT ((x, y) IN (s))` is `NULL` where a column of the row is `NULL` and `s` holds a pair
+/// matching the others, and where `s` holds a pair with a `NULL` matching the row's other
+/// values but none holding them all.
+fn excluded_pairs<DB: DatabaseLike>(
+    mut pairs: RowInHelperPairs,
+    db: &DB,
+    table: &str,
+) -> Result<RowInHelperPairs, ExclusionError> {
+    let guarded = lookup_table(db, table);
+    let nullable = pairs.columns.iter().position(|(_, column)| {
+        !guarded.is_some_and(|guarded| declared_not_null(db, guarded, column.as_str()))
+    });
+    if let Some(at) = nullable {
+        let (_, column) = pairs.columns.swap_remove(at);
+        return Err(NullableExclusion::Compared {
+            table: table.to_string(),
+            column,
+        }
+        .into());
+    }
+    if let Some(refusal) = nullable_pairs(&pairs.pairs, db) {
+        return Err(refusal.into());
+    }
+    Ok(pairs)
+}
+
+/// The first column an arm or a walk of `pairs` returns without a proof it holds no `NULL`,
+/// as [`nullable_projection`] reads a call's.
+fn nullable_pairs<DB: DatabaseLike>(pairs: &HelperPairs, db: &DB) -> Option<NullableExclusion> {
+    pairs
+        .arms
+        .iter()
+        .map(|arm| (&arm.table, arm.object_columns.as_slice()))
+        .chain(
+            pairs
+                .walks
+                .iter()
+                .map(|walk| (&walk.edges.table, walk.returned_columns())),
+        )
+        .find_map(|(returned_from, returned)| unproven_projection(returned_from, returned, db))
 }
 
 /// The first column an arm of `call`, or of a call it reads, returns without a proof it
