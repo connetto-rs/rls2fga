@@ -47,7 +47,7 @@ CREATE TABLE resource_grants (
 CREATE TABLE resource_shortcuts (
   id UUID PRIMARY KEY,
   parent_id UUID NOT NULL REFERENCES resources (id),
-  target_id UUID NOT NULL REFERENCES resources (id),
+  target_id UUID NOT NULL UNIQUE REFERENCES resources (id),
   organization_id UUID NOT NULL,
   kind authz.resource_kind NOT NULL
 );
@@ -222,8 +222,8 @@ fn a_capped_parent_arm_holds_each_child_through_its_cap() {
     assert!(children.contains("capped_kinds_writer"), "{dsl}");
 }
 
-/// A parent arm over an edge table of its own holds each edge row through its cap, and
-/// returns the row the edge names only while one edge row naming it is kept.
+/// A parent arm over an edge table holding each child's parent holds each edge row through
+/// its cap, returning the child it names only while the cap keeps the edge row.
 #[test]
 fn a_capped_parent_arm_over_an_edge_table_holds_each_edge_row() {
     let dsl = capped_model();
@@ -237,11 +237,7 @@ fn a_capped_parent_arm_over_an_edge_table_holds_each_edge_row() {
     let (reached, capped) = shortcut
         .split_once(" and ")
         .unwrap_or_else(|| panic!("{dsl}"));
-    assert_eq!(
-        relation_definition(&dsl, "resource_shortcuts", reached).as_deref(),
-        Some("[resources#reached_resources_writer]"),
-        "{dsl}"
-    );
+    assert_eq!(reached, "reached_resources_writer from parent_id", "{dsl}");
     assert!(
         capped.contains("capped_kinds_writer from capped_kinds_writer_pair"),
         "{dsl}"
