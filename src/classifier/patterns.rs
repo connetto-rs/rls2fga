@@ -1036,13 +1036,19 @@ pub enum GrantRows {
     },
 }
 
-/// `SELECT <child> FROM <table> WHERE <parent> IN (SELECT <call>)`.
+/// `SELECT <child> FROM <table> WHERE <parent> IN (SELECT <call>) [AND <conditions>]`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HelperParent {
     /// The rows naming the parent of each row the arm returns.
     pub edges: TreeEdges,
     /// The call returning the parents.
     pub call: HelperCall,
+    /// What the columns of a row hold for the arm to return it, all of it.
+    pub predicates: Vec<AttributePredicate>,
+    /// Each row held as its own object, returned only while it meets its bounds, stays
+    /// outside its sets and meets its caps, `None` where the arm returns every row meeting
+    /// `predicates`.
+    pub held: Option<HeldEdges>,
 }
 
 /// The recursive term of a `WITH RECURSIVE` body walking a tree, or any graph of edges, of
@@ -1056,9 +1062,9 @@ pub struct HelperWalk {
     pub direction: sql_traits::structs::WalkDirection,
     /// What the columns of an edge row hold for the walk to follow it, all of it.
     pub predicates: Vec<AttributePredicate>,
-    /// Each edge row held as its own object, followed only while it meets its bounds
-    /// and stays outside its sets, `None` where the walk follows every edge row meeting
-    /// `predicates`.
+    /// Each edge row held as its own object, followed only while it meets its bounds,
+    /// stays outside its sets and meets its caps, `None` where the walk follows every edge
+    /// row meeting `predicates`.
     pub held: Option<HeldEdges>,
 }
 
@@ -1084,8 +1090,8 @@ impl HelperWalk {
     }
 }
 
-/// The conditions a walk reads on each edge row beyond its own columns, which hold the
-/// row as an object of its own.
+/// The conditions a walk reads on each edge row, or a parent arm on each row it returns,
+/// beyond its own columns, which hold the row as an object of its own.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeldEdges {
     /// The key of the edge table.
@@ -1096,6 +1102,23 @@ pub struct HeldEdges {
     /// The sets a column of the edge row has to stay outside, all of them, from
     /// `NOT (<column> = ANY (ARRAY(SELECT <function>(<arguments>))))`.
     pub outside: Vec<DeclaredHelper>,
+    /// The caps an edge row meets, all of them, each read on the edge row itself.
+    pub caps: Vec<EdgeCap>,
+}
+
+/// `[<lift> IS NULL OR] (<operands>) IN (SELECT * FROM <function>(<arguments>))` on an edge
+/// row, its column operands columns of the edge row itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeCap {
+    /// The pairs the cap keeps edge rows by.
+    pub pairs: HelperPairs,
+    /// Each column operand beside its position.
+    pub columns: Vec<(usize, ColumnName)>,
+    /// Each literal operand beside its position.
+    pub literals: Vec<(usize, AttributeLiteral)>,
+    /// The declared single value whose absence lifts the cap, `None` where it holds for
+    /// every request.
+    pub lift: Option<DeclaredSource>,
 }
 
 /// P29: a row of `table` its own columns flag, named by `column` of the guarded row or

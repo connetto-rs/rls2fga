@@ -1931,19 +1931,14 @@ fn helper_call_relation<DB: DatabaseLike>(
                     continue;
                 };
                 let parent_type = ctx.table_types.resolve(&parent.call.level);
-                let plan = helper_level_plan(&level_type, Some(&call.level), table_plan, all_types);
-                let tupleset = helper_parent_link(
-                    plan,
-                    &parent.edges,
-                    Some(&call.level),
-                    parent_type,
-                    &ResidualPredicates::default(),
-                    ctx.db,
-                );
-                parts.push(UsersetExpr::TupleToUserset {
-                    tupleset,
-                    computed: parents,
-                });
+                parts.extend(parent_part(
+                    parent,
+                    (parents, &parent_type),
+                    (&call.level, &level_type),
+                    ctx,
+                    table_plan,
+                    all_types,
+                ));
             }
             HelperSetArm::Walk(walk) => walked.push(walk),
             HelperSetArm::Called(called) => {
@@ -2068,7 +2063,7 @@ struct FollowedEdges {
     /// The tupleset naming, on each edge row, the row the walk reaches it from, `None`
     /// where each edge row is that row.
     source: Option<RelationName>,
-    /// The users the bounds of an edge row keep it for, `None` where it has none.
+    /// The users the bounds and caps of an edge row keep it for, `None` where it has none.
     gate: Option<UsersetExpr>,
     /// The users the sets an edge row stays outside keep it from, `None` where it has
     /// none.
@@ -2115,10 +2110,8 @@ impl FollowedEdges {
 ///
 /// A walk following every edge meeting conditions on the edge's own columns links each
 /// row to the rows it is reached from through the edges meeting them. A walk reading
-/// bounds or sets on an edge holds each edge row as its own object, linked to the row it
-/// adds and to the row it is reached from, so a caller whom one edge's bounds or sets
-/// stop still follows another edge between the same two rows. Where the level holds its
-/// own edges, the edge row is itself the row at its own key's end.
+/// bounds, sets or caps on an edge holds each edge row as its own object, as
+/// [`HeldStep::followed`] reads it.
 fn walk_step<DB: DatabaseLike>(
     walk: &HelperWalk,
     level: Option<&TableId>,
@@ -2137,85 +2130,210 @@ fn walk_step<DB: DatabaseLike>(
             WalkDirection::Up => helper_child_link(plan, &walk.edges, level_type, &kept, ctx.db),
         }));
     };
-    let edge_table = &walk.edges.table;
-    let edge_type = ctx.table_types.resolve(edge_table);
-    let own_row =
-        |columns: &[ColumnName]| level == Some(edge_table) && held.identity.as_slice() == columns;
-    let link = (!own_row(walk.returned_columns())).then(|| {
-        let plan = helper_level_plan(level_type, level, table_plan, all_types);
-        let edge = EdgeLink {
-            table: edge_table,
-            object_cols: walk.returned_columns(),
-            subject_cols: &held.identity,
-            subject_type: &edge_type,
-            name: stored_relation_name(edge_table.name()),
-        };
-        edge.link(plan, &kept, ctx.db)
-    });
-    let source = (!own_row(walk.joined_columns())).then(|| {
-        let plan = helper_level_plan(&edge_type, Some(edge_table), table_plan, all_types);
-        let edge = EdgeLink {
-            table: edge_table,
-            object_cols: &held.identity,
-            subject_cols: walk.joined_columns(),
-            subject_type: level_type,
-            name: column_names_joined(walk.joined_columns()),
-        };
-        // The link to the rows a walk adds keeps the edges, unless each edge row is one.
-        let unkept = ResidualPredicates::default();
-        edge.link(plan, if link.is_some() { &unkept } else { &kept }, ctx.db)
-    });
-    let gate = if held.time_bounds.is_empty() {
-        None
-    } else {
-        // Each edge row holds everyone while it meets its bounds, as a grant arm keeping
-        // its rows by the clock for anyone does.
-        let bounded = HelperGrant {
-            table: edge_table.clone(),
-            object_columns: held.identity.clone(),
-            grantee: HelperGrantee::Anyone,
-            excluded: Vec::new(),
-            carried_caller: None,
-            absent: Vec::new(),
-            rows: GrantRows::Matching {
-                predicates: Vec::new(),
-            },
-            time_bounds: held.time_bounds.clone(),
-            caps: Vec::new(),
-            within: Vec::new(),
-            outside: Vec::new(),
-            held: None,
-        };
-        let parts = helper_grant_parts(
-            &bounded,
-            Some(edge_table),
-            &edge_type,
-            ctx,
-            table_plan,
-            all_types,
-        );
-        Some(combine_union(parts)?)
+    let step = HeldStep {
+        edges: &walk.edges,
+        held,
+        kept: &kept,
+        returned: walk.returned_columns(),
+        joined: walk.joined_columns(),
     };
-    let mut outside = Vec::with_capacity(held.outside.len());
-    for helper in &held.outside {
-        outside.extend(outside_expr(
-            &helper.call,
-            Some(&helper.column),
-            (edge_table, &edge_type),
-            &mut String::new(),
-            ctx,
-            table_plan,
-            all_types,
-        ));
+    step.followed(
+        (level, level_type),
+        (level, level_type),
+        ctx,
+        table_plan,
+        all_types,
+    )
+    .map(WalkStep::Followed)
+}
+
+/// The rows of `level` a parent arm returns, those whose parent holds `parents`, a relation
+/// of `parent_type`, through the rows meeting the arm's conditions, `None` where a
+/// condition has no spelling, which keeps no row.
+///
+/// An arm reading bounds, sets or caps on its rows holds each as its own object, as
+/// [`HeldStep::followed`] reads it, the rule read on the level's row itself where each row
+/// is the level's row and on the arm's row, linked from the level's, otherwise.
+fn parent_part<DB: DatabaseLike>(
+    parent: &HelperParent,
+    (parents, parent_type): (RelationName, &TypeName),
+    (level, level_type): (&TableId, &TypeName),
+    ctx: &PatternCtx<'_, DB>,
+    table_plan: &mut TypePlan,
+    all_types: &mut BTreeMap<TypeName, TypePlan>,
+) -> Option<UsersetExpr> {
+    let kept = grant_row_conjuncts(&parent.predicates, &[], 0)?;
+    let Some(held) = &parent.held else {
+        let plan = helper_level_plan(level_type, Some(level), table_plan, all_types);
+        let tupleset = helper_parent_link(
+            plan,
+            &parent.edges,
+            Some(level),
+            parent_type.clone(),
+            &kept,
+            ctx.db,
+        );
+        return Some(UsersetExpr::TupleToUserset {
+            tupleset,
+            computed: parents,
+        });
+    };
+    let step = HeldStep {
+        edges: &parent.edges,
+        held,
+        kept: &kept,
+        returned: &parent.edges.child_columns,
+        joined: &parent.edges.parent_columns,
+    };
+    let followed = step.followed(
+        (Some(level), level_type),
+        (Some(&parent.call.level), parent_type),
+        ctx,
+        table_plan,
+        all_types,
+    )?;
+    let rule = followed.rule(&parents);
+    if followed.link.is_none() {
+        return Some(rule);
     }
-    Some(WalkStep::Followed(FollowedEdges {
-        edge_type,
-        edge_table: edge_table.clone(),
-        link,
-        source,
-        gate,
-        outside: combine_union(outside),
-    }))
+    let plan = helper_level_plan(
+        &followed.edge_type,
+        Some(&followed.edge_table),
+        table_plan,
+        all_types,
+    );
+    let returned = plan.ensure_computed(format!("{parents}_followed"), rule);
+    Some(followed.part(returned))
+}
+
+/// Rows of an edge table each held as an object of its own, adding the row their
+/// `returned` columns name to a set while the row their `joined` columns name holds the
+/// set they are read from.
+struct HeldStep<'a> {
+    /// The edges the rows draw.
+    edges: &'a TreeEdges,
+    /// What holds each row as its own object.
+    held: &'a HeldEdges,
+    /// What the columns of a row hold for it to count.
+    kept: &'a ResidualPredicates,
+    /// The columns naming the row each edge row adds.
+    returned: &'a [ColumnName],
+    /// The columns naming the row each edge row is reached from.
+    joined: &'a [ColumnName],
+}
+
+impl HeldStep<'_> {
+    /// The edge rows adding rows of `level` from rows of `source`, each linked to the row
+    /// it adds and to the row it is reached from, `None` where a condition on them has no
+    /// spelling, which keeps no edge.
+    ///
+    /// A caller whom one edge row's bounds, sets or caps stop still follows another edge
+    /// row between the same two rows. Where a table holds its own edges, the edge row is
+    /// itself the row at its own key's end.
+    fn followed<DB: DatabaseLike>(
+        &self,
+        (level, level_type): (Option<&TableId>, &TypeName),
+        (source, source_type): (Option<&TableId>, &TypeName),
+        ctx: &PatternCtx<'_, DB>,
+        table_plan: &mut TypePlan,
+        all_types: &mut BTreeMap<TypeName, TypePlan>,
+    ) -> Option<FollowedEdges> {
+        let held = self.held;
+        let edge_table = &self.edges.table;
+        let edge_type = ctx.table_types.resolve(edge_table);
+        let own_row = |table: Option<&TableId>, columns: &[ColumnName]| {
+            table == Some(edge_table) && held.identity.as_slice() == columns
+        };
+        let link = (!own_row(level, self.returned)).then(|| {
+            let plan = helper_level_plan(level_type, level, table_plan, all_types);
+            let edge = EdgeLink {
+                table: edge_table,
+                object_cols: self.returned,
+                subject_cols: &held.identity,
+                subject_type: &edge_type,
+                name: stored_relation_name(edge_table.name()),
+            };
+            edge.link(plan, self.kept, ctx.db)
+        });
+        let source = (!own_row(source, self.joined)).then(|| {
+            let plan = helper_level_plan(&edge_type, Some(edge_table), table_plan, all_types);
+            let edge = EdgeLink {
+                table: edge_table,
+                object_cols: &held.identity,
+                subject_cols: self.joined,
+                subject_type: source_type,
+                name: column_names_joined(self.joined),
+            };
+            // The link to the rows a walk adds keeps the edges, unless each edge row is one.
+            let unkept = ResidualPredicates::default();
+            edge.link(
+                plan,
+                if link.is_some() { &unkept } else { self.kept },
+                ctx.db,
+            )
+        });
+        let mut gates = Vec::with_capacity(held.caps.len() + 1);
+        if !held.time_bounds.is_empty() {
+            // Each edge row holds everyone while it meets its bounds, as a grant arm keeping
+            // its rows by the clock for anyone does.
+            let bounded = HelperGrant {
+                table: edge_table.clone(),
+                object_columns: held.identity.clone(),
+                grantee: HelperGrantee::Anyone,
+                excluded: Vec::new(),
+                carried_caller: None,
+                absent: Vec::new(),
+                rows: GrantRows::Matching {
+                    predicates: Vec::new(),
+                },
+                time_bounds: held.time_bounds.clone(),
+                caps: Vec::new(),
+                within: Vec::new(),
+                outside: Vec::new(),
+                held: None,
+            };
+            let parts = helper_grant_parts(
+                &bounded,
+                Some(edge_table),
+                &edge_type,
+                ctx,
+                table_plan,
+                all_types,
+            );
+            gates.push(combine_union(parts)?);
+        }
+        for cap in &held.caps {
+            gates.push(cap_expr(
+                (&cap.pairs, cap.lift.as_ref()),
+                held_reach(edge_table, &held.identity, &cap.columns, &cap.literals),
+                GatedObjects::Rows(edge_table),
+                &edge_type,
+                ctx,
+                table_plan,
+                all_types,
+            )?);
+        }
+        let mut outside = Vec::with_capacity(held.outside.len());
+        for helper in &held.outside {
+            outside.extend(outside_expr(
+                &helper.call,
+                Some(&helper.column),
+                (edge_table, &edge_type),
+                &mut String::new(),
+                ctx,
+                table_plan,
+                all_types,
+            ));
+        }
+        Some(FollowedEdges {
+            edge_type,
+            edge_table: edge_table.clone(),
+            link,
+            source,
+            gate: combine_intersection(gates),
+            outside: combine_union(outside),
+        })
+    }
 }
 
 /// `parts`, or a row `steps` reach from a row the relation itself holds, defined on
@@ -2811,8 +2929,15 @@ fn kept_grant_parts<DB: DatabaseLike>(
             // A cap needing more of a row than the level's row names holds its rows.
             CapLink::Held { .. } => return Vec::new(),
         };
-        let Some(capped) = cap_expr(cap, reach, objects, level_type, ctx, table_plan, all_types)
-        else {
+        let Some(capped) = cap_expr(
+            (&cap.pairs, cap.lift.as_ref()),
+            reach,
+            objects,
+            level_type,
+            ctx,
+            table_plan,
+            all_types,
+        ) else {
             return Vec::new();
         };
         name.push_str("_within_");
@@ -3034,17 +3159,10 @@ fn held_cap_expr<DB: DatabaseLike>(
     else {
         return None;
     };
-    let reach = |table, keys| CapReach::Rows {
-        table,
-        keys,
-        positions: columns.iter().map(|(position, _)| *position).collect(),
-        columns: columns.iter().map(|(_, column)| column.clone()).collect(),
-        literals,
-    };
     let CapReader::Joined(row) = reader else {
         return cap_expr(
-            cap,
-            reach(&grant.table, &held.identity),
+            (&cap.pairs, cap.lift.as_ref()),
+            held_reach(&grant.table, &held.identity, columns, literals),
             GatedObjects::Rows(&grant.table),
             row_type,
             ctx,
@@ -3055,8 +3173,8 @@ fn held_cap_expr<DB: DatabaseLike>(
     let joined = held.joined.get(*row)?;
     let joined_type = ctx.table_types.resolve(&joined.table);
     let capped = cap_expr(
-        cap,
-        reach(&joined.table, &joined.identity),
+        (&cap.pairs, cap.lift.as_ref()),
+        held_reach(&joined.table, &joined.identity, columns, literals),
         GatedObjects::Rows(&joined.table),
         &joined_type,
         ctx,
@@ -3073,6 +3191,23 @@ fn held_cap_expr<DB: DatabaseLike>(
         tupleset: joined_row_link(grant, held, joined, &joined_type, row_plan),
         computed: within,
     })
+}
+
+/// How each row of `table` keyed by `keys` reaches the pair its `columns` hold at their
+/// positions beside `literals` at theirs.
+fn held_reach<'a>(
+    table: &'a TableId,
+    keys: &'a [ColumnName],
+    columns: &[(usize, ColumnName)],
+    literals: &'a [(usize, AttributeLiteral)],
+) -> CapReach<'a> {
+    CapReach::Rows {
+        table,
+        keys,
+        positions: columns.iter().map(|(position, _)| *position).collect(),
+        columns: columns.iter().map(|(_, column)| column.clone()).collect(),
+        literals,
+    }
 }
 
 /// How each object of the type a cap is read on reaches the pairs its operands name.
@@ -3094,13 +3229,14 @@ enum CapReach<'a> {
     },
 }
 
-/// The objects of `level_type` `cap` keeps, `None` where it keeps none.
+/// The objects of `level_type` a cap returning `pairs`, lifted while the request leaves
+/// `lift` absent, keeps, `None` where it keeps none.
 ///
 /// Each object of `level_type`, named as `objects` names it, links to the pairs the cap's
 /// operands name as `reach` reads them, and while the request leaves the lifting value
 /// absent, every object is kept.
 fn cap_expr<DB: DatabaseLike>(
-    cap: &HelperCap,
+    (pairs, lift): (&HelperPairs, Option<&DeclaredSource>),
     reach: CapReach<'_>,
     objects: GatedObjects<'_>,
     level_type: &TypeName,
@@ -3108,9 +3244,9 @@ fn cap_expr<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<UsersetExpr> {
-    let holder = pairs_holder(&cap.pairs, ctx, table_plan, all_types);
+    let holder = pairs_holder(pairs, ctx, table_plan, all_types);
     let mut kept = Vec::with_capacity(2);
-    if let Some(lift) = &cap.lift {
+    if let Some(lift) = lift {
         let absent = RequestFormula::Presence(PresenceAtom::new(lift, false));
         kept.extend(level_request_gate(
             &absent, objects, level_type, ctx, table_plan, all_types,
@@ -3118,7 +3254,7 @@ fn cap_expr<DB: DatabaseLike>(
     }
     if let Some(holder) = holder {
         kept.push(reached_pairs(
-            (&cap.pairs, holder),
+            (pairs, holder),
             reach,
             (objects.level(), level_type),
             ctx,

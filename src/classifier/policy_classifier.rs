@@ -659,8 +659,9 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
         .find_map(|arm| match arm {
             HelperSetArm::Grant(grant) => helper_grant_refusal(grant, db),
             HelperSetArm::Parent(parent) => tree_edges_refusal(&parent.edges, db)
+                .or_else(|| held_edges_refusal(&parent.edges.table, parent.held.as_ref(), db))
                 .or_else(|| helper_call_refusal(&parent.call, db)),
-            HelperSetArm::Walk(walk) => tree_edges_refusal(&walk.edges, db),
+            HelperSetArm::Walk(walk) => helper_walk_refusal(walk, db),
             HelperSetArm::Called(called) => helper_call_refusal(called, db),
         })
         .or_else(|| {
@@ -668,6 +669,36 @@ fn helper_call_refusal<DB: DatabaseLike>(call: &HelperCall, db: &DB) -> Option<S
                 .iter()
                 .flatten()
                 .find_map(|grant| helper_grant_refusal(grant, db))
+        })
+}
+
+/// Why either end of the edges `walk` follows, or a column its held edge rows are kept by,
+/// cannot be compared in `OpenFGA`.
+fn helper_walk_refusal<DB: DatabaseLike>(walk: &HelperWalk, db: &DB) -> Option<String> {
+    tree_edges_refusal(&walk.edges, db)
+        .or_else(|| held_edges_refusal(&walk.edges.table, walk.held.as_ref(), db))
+}
+
+/// Why a column of `table` a held edge row stays outside a set by or its caps pair, or a
+/// column the set or the pairs are read by, cannot be compared in `OpenFGA`.
+fn held_edges_refusal<DB: DatabaseLike>(
+    table: &TableId,
+    held: Option<&HeldEdges>,
+    db: &DB,
+) -> Option<String> {
+    let held = held?;
+    held.outside
+        .iter()
+        .find_map(|DeclaredHelper { column, call }| {
+            key_collation_refusal(table, column, db).or_else(|| helper_call_refusal(call, db))
+        })
+        .or_else(|| {
+            held.caps.iter().find_map(|cap| {
+                cap.columns
+                    .iter()
+                    .find_map(|(_, column)| key_collation_refusal(table, column, db))
+                    .or_else(|| helper_pairs_refusal(&cap.pairs, db))
+            })
         })
 }
 
@@ -747,7 +778,7 @@ fn helper_pairs_refusal<DB: DatabaseLike>(pairs: &HelperPairs, db: &DB) -> Optio
             pairs
                 .walks
                 .iter()
-                .find_map(|walk| tree_edges_refusal(&walk.edges, db))
+                .find_map(|walk| helper_walk_refusal(walk, db))
         })
 }
 
