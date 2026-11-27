@@ -1102,8 +1102,23 @@ pub struct HeldEdges {
     /// The sets a column of the edge row has to stay outside, all of them, from
     /// `NOT (<column> = ANY (ARRAY(SELECT <function>(<arguments>))))`.
     pub outside: Vec<DeclaredHelper>,
-    /// The caps an edge row meets, all of them, each linked from the edge row itself.
-    pub caps: Vec<HelperCap>,
+    /// The caps an edge row meets, all of them, each read on the edge row itself.
+    pub caps: Vec<EdgeCap>,
+}
+
+/// `[<lift> IS NULL OR] (<operands>) IN (SELECT * FROM <function>(<arguments>))` on an edge
+/// row, its column operands columns of the edge row itself.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EdgeCap {
+    /// The pairs the cap keeps edge rows by.
+    pub pairs: HelperPairs,
+    /// Each column operand beside its position.
+    pub columns: Vec<(usize, ColumnName)>,
+    /// Each literal operand beside its position.
+    pub literals: Vec<(usize, AttributeLiteral)>,
+    /// The declared single value whose absence lifts the cap, `None` where it holds for
+    /// every request.
+    pub lift: Option<DeclaredSource>,
 }
 
 /// P29: a row of `table` its own columns flag, named by `column` of the guarded row or

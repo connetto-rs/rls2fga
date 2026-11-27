@@ -694,11 +694,7 @@ fn held_edges_refusal<DB: DatabaseLike>(
         })
         .or_else(|| {
             held.caps.iter().find_map(|cap| {
-                let columns: &[(usize, ColumnName)] = match &cap.link {
-                    CapLink::Held { columns, .. } => columns,
-                    CapLink::Row { .. } | CapLink::Pair { .. } => &[],
-                };
-                columns
+                cap.columns
                     .iter()
                     .find_map(|(_, column)| key_collation_refusal(table, column, db))
                     .or_else(|| helper_pairs_refusal(&cap.pairs, db))

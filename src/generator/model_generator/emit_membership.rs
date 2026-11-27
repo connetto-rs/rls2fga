@@ -2303,9 +2303,11 @@ impl HeldStep<'_> {
             gates.push(combine_union(parts)?);
         }
         for cap in &held.caps {
-            gates.push(row_cap_expr(
-                cap,
-                (edge_table, &held.identity, &edge_type),
+            gates.push(cap_expr(
+                (&cap.pairs, cap.lift.as_ref()),
+                held_reach(edge_table, &held.identity, &cap.columns, &cap.literals),
+                GatedObjects::Rows(edge_table),
+                &edge_type,
                 ctx,
                 table_plan,
                 all_types,
@@ -2927,8 +2929,15 @@ fn kept_grant_parts<DB: DatabaseLike>(
             // A cap needing more of a row than the level's row names holds its rows.
             CapLink::Held { .. } => return Vec::new(),
         };
-        let Some(capped) = cap_expr(cap, reach, objects, level_type, ctx, table_plan, all_types)
-        else {
+        let Some(capped) = cap_expr(
+            (&cap.pairs, cap.lift.as_ref()),
+            reach,
+            objects,
+            level_type,
+            ctx,
+            table_plan,
+            all_types,
+        ) else {
             return Vec::new();
         };
         name.push_str("_within_");
@@ -3151,9 +3160,11 @@ fn held_cap_expr<DB: DatabaseLike>(
         return None;
     };
     let CapReader::Joined(row) = reader else {
-        return row_cap_expr(
-            cap,
-            (&grant.table, &held.identity, row_type),
+        return cap_expr(
+            (&cap.pairs, cap.lift.as_ref()),
+            held_reach(&grant.table, &held.identity, columns, literals),
+            GatedObjects::Rows(&grant.table),
+            row_type,
             ctx,
             table_plan,
             all_types,
@@ -3162,7 +3173,7 @@ fn held_cap_expr<DB: DatabaseLike>(
     let joined = held.joined.get(*row)?;
     let joined_type = ctx.table_types.resolve(&joined.table);
     let capped = cap_expr(
-        cap,
+        (&cap.pairs, cap.lift.as_ref()),
         held_reach(&joined.table, &joined.identity, columns, literals),
         GatedObjects::Rows(&joined.table),
         &joined_type,
@@ -3180,35 +3191,6 @@ fn held_cap_expr<DB: DatabaseLike>(
         tupleset: joined_row_link(grant, held, joined, &joined_type, row_plan),
         computed: within,
     })
-}
-
-/// The rows of `table`, each an object of `row_type` keyed by `identity`, that `cap` keeps
-/// by the operand columns of the row itself, `None` where it keeps none or reads its
-/// operands off another row.
-fn row_cap_expr<DB: DatabaseLike>(
-    cap: &HelperCap,
-    (table, identity, row_type): (&TableId, &[ColumnName], &TypeName),
-    ctx: &PatternCtx<'_, DB>,
-    table_plan: &mut TypePlan,
-    all_types: &mut BTreeMap<TypeName, TypePlan>,
-) -> Option<UsersetExpr> {
-    let CapLink::Held {
-        reader: CapReader::Arm,
-        columns,
-        literals,
-    } = &cap.link
-    else {
-        return None;
-    };
-    cap_expr(
-        cap,
-        held_reach(table, identity, columns, literals),
-        GatedObjects::Rows(table),
-        row_type,
-        ctx,
-        table_plan,
-        all_types,
-    )
 }
 
 /// How each row of `table` keyed by `keys` reaches the pair its `columns` hold at their
@@ -3247,13 +3229,14 @@ enum CapReach<'a> {
     },
 }
 
-/// The objects of `level_type` `cap` keeps, `None` where it keeps none.
+/// The objects of `level_type` a cap returning `pairs`, lifted while the request leaves
+/// `lift` absent, keeps, `None` where it keeps none.
 ///
 /// Each object of `level_type`, named as `objects` names it, links to the pairs the cap's
 /// operands name as `reach` reads them, and while the request leaves the lifting value
 /// absent, every object is kept.
 fn cap_expr<DB: DatabaseLike>(
-    cap: &HelperCap,
+    (pairs, lift): (&HelperPairs, Option<&DeclaredSource>),
     reach: CapReach<'_>,
     objects: GatedObjects<'_>,
     level_type: &TypeName,
@@ -3261,9 +3244,9 @@ fn cap_expr<DB: DatabaseLike>(
     table_plan: &mut TypePlan,
     all_types: &mut BTreeMap<TypeName, TypePlan>,
 ) -> Option<UsersetExpr> {
-    let holder = pairs_holder(&cap.pairs, ctx, table_plan, all_types);
+    let holder = pairs_holder(pairs, ctx, table_plan, all_types);
     let mut kept = Vec::with_capacity(2);
-    if let Some(lift) = &cap.lift {
+    if let Some(lift) = lift {
         let absent = RequestFormula::Presence(PresenceAtom::new(lift, false));
         kept.extend(level_request_gate(
             &absent, objects, level_type, ctx, table_plan, all_types,
@@ -3271,7 +3254,7 @@ fn cap_expr<DB: DatabaseLike>(
     }
     if let Some(holder) = holder {
         kept.push(reached_pairs(
-            (&cap.pairs, holder),
+            (pairs, holder),
             reach,
             (objects.level(), level_type),
             ctx,

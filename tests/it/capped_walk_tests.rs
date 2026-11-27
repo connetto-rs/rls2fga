@@ -44,13 +44,22 @@ CREATE TABLE resource_grants (
   user_id UUID NOT NULL,
   PRIMARY KEY (resource_id, user_id)
 );
+CREATE TABLE resource_shortcuts (
+  id UUID PRIMARY KEY,
+  parent_id UUID NOT NULL REFERENCES resources (id),
+  target_id UUID NOT NULL REFERENCES resources (id),
+  organization_id UUID NOT NULL,
+  kind authz.resource_kind NOT NULL
+);
 CREATE TABLE notes (id UUID PRIMARY KEY, resource_id UUID NOT NULL REFERENCES resources (id));
 CREATE TABLE tasks (id UUID PRIMARY KEY, resource_id UUID NOT NULL REFERENCES resources (id));
+CREATE TABLE files (id UUID PRIMARY KEY, resource_id UUID NOT NULL REFERENCES resources (id));
 ALTER TABLE resources ENABLE ROW LEVEL SECURITY;
 ALTER TABLE notes ENABLE ROW LEVEL SECURITY;
 ALTER TABLE tasks ENABLE ROW LEVEL SECURITY;
-GRANT SELECT ON organization_blocks, installation_permissions, resources, resource_grants
-  TO authz_owner;
+ALTER TABLE files ENABLE ROW LEVEL SECURITY;
+GRANT SELECT ON organization_blocks, installation_permissions, resources, resource_grants,
+  resource_shortcuts TO authz_owner;
 CREATE FUNCTION authz.caller_id() RETURNS UUID
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
   SELECT NULLIF(current_setting('app.user_id', true), '')::uuid
@@ -97,6 +106,13 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
     AND (child.archived_at IS NULL OR child.archived_at > now())
     AND NOT (child.organization_id = ANY (ARRAY(SELECT authz.blocking_organizations())))
 $$;
+CREATE FUNCTION authz.shortcut_targets(min_role authz.role) RETURNS SETOF UUID
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+  SELECT shortcut.target_id FROM public.resource_shortcuts shortcut
+  WHERE shortcut.parent_id IN (SELECT authz.reached_resources(min_role))
+    AND (authz.acting_installation_id() IS NULL
+      OR (shortcut.organization_id, shortcut.kind) IN (SELECT * FROM authz.capped_kinds(min_role)))
+$$;
 ALTER FUNCTION authz.caller_id() OWNER TO authz_owner;
 ALTER FUNCTION authz.acting_installation_id() OWNER TO authz_owner;
 ALTER FUNCTION authz.capped_kinds(authz.role) OWNER TO authz_owner;
@@ -104,12 +120,15 @@ ALTER FUNCTION authz.blocking_organizations() OWNER TO authz_owner;
 ALTER FUNCTION authz.reached_resources(authz.role) OWNER TO authz_owner;
 ALTER FUNCTION authz.capped_children(authz.role) OWNER TO authz_owner;
 ALTER FUNCTION authz.open_projects() OWNER TO authz_owner;
+ALTER FUNCTION authz.shortcut_targets(authz.role) OWNER TO authz_owner;
 CREATE POLICY resources_select ON resources FOR SELECT
   USING (id = ANY (ARRAY(SELECT authz.reached_resources('reader'))));
 CREATE POLICY notes_select ON notes FOR SELECT
   USING (resource_id IN (SELECT authz.capped_children('writer')));
 CREATE POLICY tasks_select ON tasks FOR SELECT
   USING (resource_id IN (SELECT authz.open_projects()));
+CREATE POLICY files_select ON files FOR SELECT
+  USING (resource_id IN (SELECT authz.shortcut_targets('writer')));
 ";
 
 pub(crate) const CAPPED_WALK_HELPERS: &[&str] = &[
@@ -118,11 +137,12 @@ pub(crate) const CAPPED_WALK_HELPERS: &[&str] = &[
     "authz.reached_resources",
     "authz.capped_children",
     "authz.open_projects",
+    "authz.shortcut_targets",
 ];
 
-/// The `USING` classification of `policy` in `schema`.
-fn using_of(schema: &str, policy: &str) -> ClassifiedExpr {
-    installation_translator(CAPPED_WALK_HELPERS)
+/// The `USING` classification of `policy` in `schema`, `helpers` declared.
+fn using_with(schema: &str, helpers: &[&str], policy: &str) -> ClassifiedExpr {
+    installation_translator(helpers)
         .classify(&db_of(schema))
         .into_iter()
         .find(|classified| classified.name() == policy)
@@ -130,6 +150,11 @@ fn using_of(schema: &str, policy: &str) -> ClassifiedExpr {
         .using_classification()
         .unwrap_or_else(|| panic!("{policy} USING should classify"))
         .clone()
+}
+
+/// The `USING` classification of `policy` in `schema`.
+fn using_of(schema: &str, policy: &str) -> ClassifiedExpr {
+    using_with(schema, CAPPED_WALK_HELPERS, policy)
 }
 
 /// The model [`CAPPED_WALKS`] translates to.
@@ -145,7 +170,12 @@ fn capped_model() -> String {
 
 #[test]
 fn caps_on_walk_steps_and_parent_rows_translate() {
-    for policy in ["resources_select", "notes_select", "tasks_select"] {
+    for policy in [
+        "resources_select",
+        "notes_select",
+        "tasks_select",
+        "files_select",
+    ] {
         let using = using_of(CAPPED_WALKS, policy);
         assert_eq!(
             using.confidence,
@@ -190,6 +220,52 @@ fn a_capped_parent_arm_holds_each_child_through_its_cap() {
         "{dsl}"
     );
     assert!(children.contains("capped_kinds_writer"), "{dsl}");
+}
+
+/// A parent arm over an edge table of its own holds each edge row through its cap, and
+/// returns the row the edge names only while one edge row naming it is kept.
+#[test]
+fn a_capped_parent_arm_over_an_edge_table_holds_each_edge_row() {
+    let dsl = capped_model();
+    let targets = relation_definition(&dsl, "resources", "shortcut_targets_writer")
+        .unwrap_or_else(|| panic!("{dsl}"));
+    let held = targets
+        .strip_suffix(" from resource_shortcuts")
+        .unwrap_or_else(|| panic!("{dsl}"));
+    let shortcut =
+        relation_definition(&dsl, "resource_shortcuts", held).unwrap_or_else(|| panic!("{dsl}"));
+    let (reached, capped) = shortcut
+        .split_once(" and ")
+        .unwrap_or_else(|| panic!("{dsl}"));
+    assert_eq!(
+        relation_definition(&dsl, "resource_shortcuts", reached).as_deref(),
+        Some("[resources#reached_resources_writer]"),
+        "{dsl}"
+    );
+    assert!(
+        capped.contains("capped_kinds_writer from capped_kinds_writer_pair"),
+        "{dsl}"
+    );
+}
+
+/// A walk step capped by a helper never declared is refused.
+#[test]
+fn a_walk_step_capped_by_an_undeclared_helper_is_refused() {
+    let helpers: Vec<&str> = CAPPED_WALK_HELPERS
+        .iter()
+        .copied()
+        .filter(|helper| *helper != "authz.capped_kinds")
+        .collect();
+    let using = using_with(CAPPED_WALKS, &helpers, "resources_select");
+    assert_eq!(using.confidence, ConfidenceLevel::D, "{:?}", using.pattern);
+    let refusal = format!("{:?}", using.pattern);
+    assert!(
+        refusal.contains(
+            "declared helper 'authz.reached_resources' calls 'authz.capped_kinds', \
+             which is not declared"
+        ),
+        "{refusal}"
+    );
 }
 
 /// A capped step needs a key naming one row of its edge table to hold each edge.

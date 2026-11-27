@@ -2120,7 +2120,7 @@ fn held_edges<DB: DatabaseLike>(
         .collect::<Result<_, _>>()?;
     let caps = caps
         .iter()
-        .map(|cap| helper_cap(function, (table, &[]), cap, db, registry))
+        .map(|cap| edge_cap(function, table, cap, db, registry))
         .collect::<Result<_, _>>()?;
     Ok(Some(HeldEdges {
         identity,
@@ -3119,6 +3119,43 @@ fn helper_cap<'db, DB: DatabaseLike>(
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperCap, HelperRefusal> {
+    let (pairs, link, lift) = paired_cap(function, (table, joined), cap, db, registry, |paired| {
+        paired.held_link(cap.operands(), db)
+    })?;
+    Ok(HelperCap { pairs, link, lift })
+}
+
+/// The cap `cap` puts on the edge rows of `table`, its operands read on each edge row.
+fn edge_cap<DB: DatabaseLike>(
+    function: &str,
+    table: &DB::Table,
+    cap: &RowCap<'_, DB>,
+    db: &DB,
+    registry: &FunctionRegistry,
+) -> Result<EdgeCap, HelperRefusal> {
+    let (pairs, (columns, literals), lift) =
+        paired_cap(function, (table, &[]), cap, db, registry, |paired| {
+            let operands = paired.operands(cap.operands(), db)?;
+            Ok((operands.own(), operands.literals))
+        })?;
+    Ok(EdgeCap {
+        pairs,
+        columns,
+        literals,
+        lift,
+    })
+}
+
+/// The pairs `cap` on the rows of `table` keeps them by, each row's pair as `link` reads
+/// it, and the value whose absence lifts the cap.
+fn paired_cap<'db, DB: DatabaseLike, L>(
+    function: &str,
+    (table, joined): (&DB::Table, &[JoinedRow<'db, DB>]),
+    cap: &RowCap<'db, DB>,
+    db: &DB,
+    registry: &FunctionRegistry,
+    link: impl FnOnce(&PairedCap<'_, 'db, DB>) -> Result<L, HelperRefusal>,
+) -> Result<(HelperPairs, L, Option<DeclaredSource>), HelperRefusal> {
     let called = cap.function();
     if !registry.declares_helper(called) {
         return Err(HelperRefusal::UndeclaredCallee {
@@ -3138,7 +3175,7 @@ fn helper_cap<'db, DB: DatabaseLike>(
             pairs: &rows,
         },
     };
-    let link = paired.held_link(cap.operands(), db)?;
+    let link = link(&paired)?;
     let lift = cap
         .lift()
         .map(|lift| {
@@ -3149,7 +3186,7 @@ fn helper_cap<'db, DB: DatabaseLike>(
             })
         })
         .transpose()?;
-    Ok(HelperCap { pairs, link, lift })
+    Ok((pairs, link, lift))
 }
 
 /// The pairs `called` returns for `arguments`, each read from the arm of `set` returning
@@ -3390,6 +3427,29 @@ struct HeldOperand<'a, 'db, DB: DatabaseLike> {
     own: Option<&'db DB::Column>,
 }
 
+/// A cap's operands, columns and literals apart.
+struct HeldOperands<'a, 'db, DB: DatabaseLike> {
+    /// The column operands.
+    columns: Vec<HeldOperand<'a, 'db, DB>>,
+    /// Each literal operand beside its position.
+    literals: Vec<(usize, AttributeLiteral)>,
+}
+
+impl<DB: DatabaseLike> HeldOperands<'_, '_, DB> {
+    /// Each column operand the held row holds itself, beside its position.
+    fn own(&self) -> Vec<(usize, ColumnName)> {
+        self.columns
+            .iter()
+            .filter_map(|operand| {
+                Some((
+                    operand.position,
+                    ColumnName::from_stored(operand.own?.stored_column_name()),
+                ))
+            })
+            .collect()
+    }
+}
+
 /// The arms returning a cap's pairs, for the refusals naming them.
 struct CapArms<'a, 'db, DB: DatabaseLike> {
     /// What the cap keeps rows of.
@@ -3412,18 +3472,15 @@ struct PairedCap<'a, 'db, DB: DatabaseLike> {
     arms: CapArms<'a, 'db, DB>,
 }
 
-impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
-    /// The row naming the pair each held row reaches through `operands`.
-    ///
-    /// That is the held row itself where every column operand is one of its columns or a
-    /// joined row's column its join equates with one, and otherwise the one joined row every
-    /// column operand is read from or equated with.
-    fn held_link(
+impl<'a, 'db, DB: DatabaseLike> PairedCap<'a, 'db, DB> {
+    /// The column operands of `operands`, each read off the held row or a row it joins,
+    /// beside the literal ones, refused where no column names the pair.
+    fn operands(
         &self,
-        operands: &[CapOperand<'_, DB>],
+        operands: &[CapOperand<'db, DB>],
         db: &DB,
-    ) -> Result<CapLink, HelperRefusal> {
-        let mut columns: Vec<HeldOperand<'_, '_, DB>> = Vec::with_capacity(operands.len());
+    ) -> Result<HeldOperands<'a, 'db, DB>, HelperRefusal> {
+        let mut columns: Vec<HeldOperand<'a, 'db, DB>> = Vec::with_capacity(operands.len());
         let mut literals = Vec::new();
         for (position, operand) in operands.iter().enumerate() {
             match operand {
@@ -3472,7 +3529,21 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
                 cap: self.arms.cap.to_string(),
             });
         }
-        let reader = columns.iter().find_map(|operand| match operand {
+        Ok(HeldOperands { columns, literals })
+    }
+
+    /// The row naming the pair each held row reaches through `operands`.
+    ///
+    /// That is the held row itself where every column operand is one of its columns or a
+    /// joined row's column its join equates with one, and otherwise the one joined row every
+    /// column operand is read from or equated with.
+    fn held_link(
+        &self,
+        operands: &[CapOperand<'db, DB>],
+        db: &DB,
+    ) -> Result<CapLink, HelperRefusal> {
+        let operands = self.operands(operands, db)?;
+        let reader = operands.columns.iter().find_map(|operand| match operand {
             HeldOperand {
                 joined: Some(joined),
                 own: None,
@@ -3483,18 +3554,11 @@ impl<DB: DatabaseLike> PairedCap<'_, '_, DB> {
         let Some((read_row, reader)) = reader else {
             return Ok(CapLink::Held {
                 reader: CapReader::Arm,
-                columns: columns
-                    .iter()
-                    .filter_map(|operand| {
-                        Some((
-                            operand.position,
-                            ColumnName::from_stored(operand.own?.stored_column_name()),
-                        ))
-                    })
-                    .collect(),
-                literals,
+                columns: operands.own(),
+                literals: operands.literals,
             });
         };
+        let HeldOperands { columns, literals } = operands;
         let mut read = Vec::with_capacity(columns.len());
         for operand in columns {
             let column = if operand.joined.is_some_and(|(row, _)| row == read_row) {
