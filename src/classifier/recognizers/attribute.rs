@@ -1498,6 +1498,8 @@ fn folded_literal(expr: &Expr) -> Option<AttributeLiteral> {
         sql_values::postgres::CastValue::Date(_)
         | sql_values::postgres::CastValue::Timestamp(_)
         | sql_values::postgres::CastValue::TimestampTz(_)
+        | sql_values::postgres::CastValue::Time(_)
+        | sql_values::postgres::CastValue::TimeTz(_)
         | sql_values::postgres::CastValue::Jsonb(_) => None,
     }
 }

@@ -42,7 +42,7 @@ diesel = { version = "2", optional = true, default-features = false, features = 
 url = { version = "2", optional = true }
 thiserror = { version = "2", default-features = false }
 # Policy literals and request zones name IANA zones, which PostgreSQL reads from its tz database.
-sql-values = { version = "0.6", default-features = false, features = ["tzdb"] }
+sql-values = { version = "0.7", default-features = false, features = ["tzdb"] }
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = ["cargo_bench_support"] }
