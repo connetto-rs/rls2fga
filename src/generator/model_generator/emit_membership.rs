@@ -2988,8 +2988,10 @@ fn kept_grant_parts<DB: DatabaseLike>(
     if kept.is_empty() && outside.is_empty() {
         return parts;
     }
-    let Some(granted) = combine_union(parts) else {
-        return Vec::new();
+    // `parts` is not empty, so it unions into one expression.
+    let granted = match <[_; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => UsersetExpr::Union(parts),
     };
     kept.insert(0, granted);
     let mut rule = match <[_; 1]>::try_from(kept) {

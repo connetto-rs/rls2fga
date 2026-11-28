@@ -841,11 +841,11 @@ fn a_pair_exclusion_in_a_helper_arm_returning_no_row_takes_nothing_away() {
     }
 }
 
-/// An exclusion on columns that name neither the level's row nor the arm's own row alone
-/// is read on each row of the arm held as its own object.
-#[test]
-fn a_pair_exclusion_beside_another_object_is_subtracted_from_each_held_row() {
-    let sql = format!(
+/// [`arm_pair_blocks`] without exclusions, with topics read by the authors of their notes
+/// through `authz.noted_topics()`, whose arm keeps only the topic notes outside the pairs
+/// `call` returns.
+fn noted_topics(call: &str) -> String {
+    format!(
         "{}
          CREATE TABLE topics (id TEXT PRIMARY KEY);
          CREATE TABLE topic_notes (topic_id TEXT NOT NULL REFERENCES topics (id),
@@ -864,18 +864,51 @@ fn a_pair_exclusion_beside_another_object_is_subtracted_from_each_held_row() {
          CREATE POLICY topics_noted ON topics FOR SELECT
            USING (id IN (SELECT authz.noted_topics()));",
         arm_pair_blocks(""),
-        ARM_PAIR_EXCLUDED.replace("{row}", "t"),
-    );
+        ARM_PAIR_EXCLUDED
+            .replace("{row}", "t")
+            .replace("authz.blocking_organizations()", call),
+    )
+}
+
+/// The definitions of the relations on each topic note held as its own object, once
+/// `topics_noted` reads at A.
+fn held_topic_notes(sql: &str) -> Vec<(String, String)> {
     let mut helpers = ARM_PAIR_HELPERS.to_vec();
     helpers.push("authz.noted_topics");
-    let read = using_of(&sql, &helpers, "topics_noted");
+    let read = using_of(sql, &helpers, "topics_noted");
     assert_eq!(read.confidence, ConfidenceLevel::A, "{read:?}");
-    let dsl = crate::declared_helper_tests::model(&sql, &helpers);
-    let held = relation_definitions(&dsl, "topic_notes");
+    relation_definitions(
+        &crate::declared_helper_tests::model(sql, &helpers),
+        "topic_notes",
+    )
+}
+
+/// An exclusion on columns that name neither the level's row nor the arm's own row alone
+/// is read on each row of the arm held as its own object.
+#[test]
+fn a_pair_exclusion_beside_another_object_is_subtracted_from_each_held_row() {
+    let held = held_topic_notes(&noted_topics("authz.blocking_organizations()"));
     assert!(
         held.iter()
             .any(|(_, definition)| definition.contains("but not blocking_organizations from ")),
-        "{dsl}"
+        "{held:?}"
+    );
+}
+
+/// A held row's exclusion whose call returns no pair takes nothing away from the row.
+#[test]
+fn a_held_rows_pair_exclusion_returning_no_row_takes_nothing_away() {
+    let held = held_topic_notes(&reasoned_blocks(&noted_topics(
+        "authz.blocking_organizations('ban')",
+    )));
+    assert!(
+        !held.is_empty(),
+        "each topic note is held as its own object"
+    );
+    assert!(
+        held.iter()
+            .all(|(_, definition)| !definition.contains(" but not ")),
+        "{held:?}"
     );
 }
 
