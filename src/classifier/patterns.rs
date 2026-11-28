@@ -840,7 +840,8 @@ impl HelperGrant {
 
 /// `[<lift> IS NULL OR] (<operands>) IN (SELECT * FROM <function>(<arguments>))` in a grant
 /// arm's condition, keeping a row only where the pair its operands name is one the helper
-/// returns, unless the request leaves the lifting value absent.
+/// returns, unless the request leaves the lifting value absent, or `NOT ((<columns>) IN
+/// (SELECT * FROM <function>(<arguments>)))`, keeping a row only where it is none.
 ///
 /// Each row of the level, or each pair an arm of a cap returns, reaches the pair its
 /// operands name.
@@ -854,6 +855,19 @@ pub struct HelperCap {
     /// The declared single value whose absence lifts the cap, `None` where it holds for
     /// every request.
     pub lift: Option<DeclaredSource>,
+    /// Whether the cap keeps the rows whose pair the helper returns or the others.
+    pub keeps: CapKeeps,
+}
+
+/// The rows a cap keeps, by the pair each names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CapKeeps {
+    /// The rows naming a pair the helper returns, from `(<operands>) IN (<pairs>)`.
+    Within,
+    /// The rows naming no pair the helper returns, from `NOT ((<columns>) IN (<pairs>))`.
+    /// Every column compared and every column the helper returns is `NOT NULL`, and the
+    /// cap is never lifted.
+    Outside,
 }
 
 /// The rows one call of a declared helper returning `TABLE (...)` returns, each pair of
@@ -1106,8 +1120,9 @@ pub struct HeldEdges {
     pub caps: Vec<EdgeCap>,
 }
 
-/// `[<lift> IS NULL OR] (<operands>) IN (SELECT * FROM <function>(<arguments>))` on an edge
-/// row, its column operands columns of the edge row itself.
+/// `[<lift> IS NULL OR] (<operands>) IN (SELECT * FROM <function>(<arguments>))` or `NOT
+/// ((<columns>) IN (SELECT * FROM <function>(<arguments>)))` on an edge row, its column
+/// operands columns of the edge row itself.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EdgeCap {
     /// The pairs the cap keeps edge rows by.
@@ -1119,6 +1134,8 @@ pub struct EdgeCap {
     /// The declared single value whose absence lifts the cap, `None` where it holds for
     /// every request.
     pub lift: Option<DeclaredSource>,
+    /// Whether the cap keeps the edge rows whose pair the helper returns or the others.
+    pub keeps: CapKeeps,
 }
 
 /// P29: a row of `table` its own columns flag, named by `column` of the guarded row or

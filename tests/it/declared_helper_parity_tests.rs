@@ -9,8 +9,8 @@ use rls2fga::types::ActionStatement;
 use sqlparser::ast::DataType;
 
 use crate::declared_helper_blocklist_tests::{
-    blocked_units, pair_restricted, BLOCKS, DOCS_UNBLOCKED, PAIR_EXCLUDED, PROJECTS_UNBLOCKED,
-    UNITS_RESELECTED,
+    arm_pair_blocks, blocked_units, pair_restricted, ARM_PAIR_EXCLUDED, BLOCKS, DOCS_UNBLOCKED,
+    PAIR_EXCLUDED, PROJECTS_UNBLOCKED, UNITS_RESELECTED,
 };
 use crate::declared_helper_containment_tests::FOLDERS;
 use crate::declared_helper_exclusion_tests::EXCLUDING;
@@ -3615,6 +3615,84 @@ async fn a_pair_excluded_from_a_helpers_pairs_agrees_with_postgres() {
                 ActionStatement::Select,
                 allowed,
             );
+        }
+        assert_agrees(&case, &run);
+    }
+}
+
+/// `alice` belongs to `(na, O1)`, `(na, O2)` and `(nb, O1)` and is blocked by `(na, O1)`,
+/// `bob` belongs to `(na, O1)` unblocked, and `carol` belongs nowhere and is blocked by
+/// `(na, O2)`. Each note is read by the members of its organization and by its author.
+fn arm_pair_blocks_case(loading_from_rows: bool) -> ParityCase {
+    let mut case = ParityCase::reading(
+        &format!(
+            "declared-helper-arm-pair-blocks{}",
+            if loading_from_rows { "-rows" } else { "" }
+        ),
+        &format!(
+            "{}
+             DROP POLICY memberships_own ON memberships;
+             ALTER TABLE memberships DISABLE ROW LEVEL SECURITY;",
+            arm_pair_blocks(ARM_PAIR_EXCLUDED)
+        ),
+        &[
+            "INSERT INTO organizations VALUES ('na', 'O1'), ('na', 'O2'), ('nb', 'O1');
+             INSERT INTO memberships VALUES ('na', 'O1', 'alice'), ('na', 'O2', 'alice'),
+               ('nb', 'O1', 'alice'), ('na', 'O1', 'bob');
+             INSERT INTO organization_blocks VALUES ('na', 'O1', 'alice'), ('na', 'O2', 'carol');
+             INSERT INTO organization_notes VALUES ('N1', 'na', 'O1', 'bob'),
+               ('N2', 'na', 'O2', 'carol'), ('N3', 'nb', 'O1', 'carol'),
+               ('N4', 'na', 'O1', 'alice')",
+            "CREATE ROLE app_reader LOGIN;
+             GRANT SELECT ON organization_notes TO app_reader;
+             GRANT USAGE ON SCHEMA authz TO app_reader;
+             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA authz FROM PUBLIC;
+             GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA authz TO app_reader",
+        ],
+        vec![
+            caller("alice"),
+            caller("bob"),
+            caller("carol"),
+            Principal::as_role("anonymous", "app_reader"),
+        ],
+    )
+    .with_settings([support::deployment::caller("app.user_id")])
+    .with_registry(
+        r#"{
+            "authz.blocking_organizations": { "kind": "declared_helper" },
+            "authz.member_organizations": { "kind": "declared_helper" },
+            "authz.authored_notes": { "kind": "declared_helper" }
+        }"#,
+    );
+    case.loading_from_rows = loading_from_rows;
+    case
+}
+
+/// A pair a helper's arm stays outside hides the notes of that organization from its
+/// members and its authors alike, and only from the caller it blocks.
+#[tokio::test]
+#[ignore = "requires Docker, postgres:18, and openfga/openfga containers"]
+async fn a_pair_excluded_inside_a_helpers_arm_agrees_with_postgres() {
+    let cluster = Cluster::start().await;
+    for loading_from_rows in [false, true] {
+        let case = arm_pair_blocks_case(loading_from_rows);
+        let run = support::parity::run_before(&cluster, &case, Duration::from_secs(180)).await;
+        for (subject, readable) in [
+            ("alice", ["N2", "N3"].as_slice()),
+            ("bob", &["N1", "N4"]),
+            ("carol", &["N3"]),
+            ("anonymous", &[]),
+        ] {
+            for note in ["N1", "N2", "N3", "N4"] {
+                assert_postgres(
+                    &case,
+                    &run,
+                    subject,
+                    &format!("organization_notes:{note}"),
+                    ActionStatement::Select,
+                    readable.contains(&note),
+                );
+            }
         }
         assert_agrees(&case, &run);
     }

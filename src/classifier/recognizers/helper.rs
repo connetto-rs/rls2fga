@@ -14,7 +14,7 @@ use sqlparser::ast::{
     WildcardAdditionalOptions,
 };
 
-use crate::classifier::exclusion::{nullable_projection, NullableExclusion};
+use crate::classifier::exclusion::{nullable_pairs, nullable_projection, NullableExclusion};
 use crate::classifier::expansion::call_matches_declared;
 use crate::classifier::function_registry::{DeclaredSource, FunctionRegistry};
 use crate::classifier::patterns::*;
@@ -55,7 +55,7 @@ pub(crate) enum HelperRefusal {
         function: String,
         /// Why the answer was refused.
         #[source]
-        source: HelperSetError,
+        source: Box<HelperSetError>,
     },
     /// A helper the body calls was never declared.
     #[error("declared helper '{function}' calls '{called}', which is not declared")]
@@ -1656,7 +1656,7 @@ fn answered_call<'db, DB: DatabaseLike>(
         )
         .map_err(|source| HelperRefusal::Unanswered {
             function: name,
-            source,
+            source: Box::new(source),
         })?;
     Ok((values, set))
 }
@@ -2153,23 +2153,32 @@ fn held_edges<DB: DatabaseLike>(
         })?;
     let time_bounds: Vec<_> = time_bounds.iter().map(time_bound).collect();
     within_condition_limit(&held, &time_bounds)?;
-    let outside = exclusions
+    let mut outside = Vec::with_capacity(exclusions.len());
+    let mut edge_caps = caps
         .iter()
-        .map(|excluded| {
-            declared_exclusion(function, table, excluded, db, registry, || {
-                compared_rows(table, excluded.column(), excluded.set(), db)
-            })
-        })
-        .collect::<Result<_, _>>()?;
-    let caps = caps
-        .iter()
-        .map(|cap| edge_cap(function, table, cap, db, registry))
-        .collect::<Result<_, _>>()?;
+        .map(|cap| edge_cap(function, table, &PairsCall::within(cap), db, registry))
+        .collect::<Result<Vec<_>, _>>()?;
+    for excluded in exclusions {
+        let &[column] = excluded.columns() else {
+            let operands = column_operands(excluded.columns());
+            let call = PairsCall::outside(excluded, &operands);
+            edge_caps.push(edge_cap(function, table, &call, db, registry)?);
+            continue;
+        };
+        outside.push(declared_exclusion(
+            function,
+            (table, column),
+            excluded,
+            db,
+            registry,
+            || compared_rows(table, column, excluded.set(), db),
+        )?);
+    }
     Ok(Some(HeldEdges {
         identity,
         time_bounds,
         outside,
-        caps,
+        caps: edge_caps,
     }))
 }
 
@@ -2245,11 +2254,25 @@ fn helper_grant<DB: DatabaseLike>(
             _ => caps.push(helper_cap(
                 function,
                 (grant.table(), grant.joined_rows()),
-                cap,
+                &PairsCall::within(cap),
                 db,
                 registry,
             )?),
         }
+    }
+    for excluded in grant.exclusions() {
+        // A set of values compared with one column is one `outside_sets` reads.
+        if let [_] = excluded.columns() {
+            continue;
+        }
+        let operands = column_operands(excluded.columns());
+        caps.push(helper_cap(
+            function,
+            (grant.table(), grant.joined_rows()),
+            &PairsCall::outside(excluded, &operands),
+            db,
+            registry,
+        )?);
     }
     let (caps, held) = place_caps(function, grant, objects, caps, held, db)?;
     let grant = HelperGrant {
@@ -2384,19 +2407,23 @@ fn outside_sets<DB: DatabaseLike>(
     let mut on_level = Vec::new();
     let mut on_row = Vec::new();
     for excluded in grant.exclusions() {
-        let column = excluded.column();
+        // A set of pairs is a cap keeping the rows outside it, which `helper_grant` reads.
+        let &[column] = excluded.columns() else {
+            continue;
+        };
         let on_object = object.filter(|(object, _)| same_column::<DB>(object, column));
-        let helper = declared_exclusion(
-            function,
-            table,
-            excluded,
-            db,
-            registry,
-            || match on_object {
-                Some((_, level)) => Ok(level.clone()),
-                None => compared_rows(table, column, excluded.set(), db),
-            },
-        )?;
+        let helper =
+            declared_exclusion(
+                function,
+                (table, column),
+                excluded,
+                db,
+                registry,
+                || match on_object {
+                    Some((_, level)) => Ok(level.clone()),
+                    None => compared_rows(table, column, excluded.set(), db),
+                },
+            )?;
         // An arm of a cap returns its pairs on no level, and every row returning a pair
         // holds the same value in each of the pair's columns.
         let on_pair = level.is_none()
@@ -2412,15 +2439,15 @@ fn outside_sets<DB: DatabaseLike>(
     Ok((on_level, on_row))
 }
 
-/// The set a row of `table` stays outside of, read as the rows of the table `named`
-/// answers the set holds.
+/// The set a row of `table` stays outside of, compared on `column`, read as the rows of
+/// the table `named` answers the set holds.
 ///
 /// A set a helper not declared returns, or one a `NULL` on either side of the comparison
 /// would let a row past, is refused, so no row the body leaves out is kept.
-fn declared_exclusion<DB: DatabaseLike>(
+fn declared_exclusion<'db, DB: DatabaseLike>(
     function: &str,
-    table: &DB::Table,
-    excluded: &sql_traits::structs::ExcludedSet<'_, DB>,
+    (table, column): (&DB::Table, &'db DB::Column),
+    excluded: &sql_traits::structs::ExcludedSet<'db, DB>,
     db: &DB,
     registry: &FunctionRegistry,
     named: impl FnOnce() -> Result<TableId, HelperRefusal>,
@@ -2432,7 +2459,6 @@ fn declared_exclusion<DB: DatabaseLike>(
             called: called.target_name().to_string(),
         });
     }
-    let column = excluded.column();
     let compared = ColumnName::from_stored(column.stored_column_name());
     let nullable = |source| HelperRefusal::NullableExclusion {
         function: function.to_string(),
@@ -2993,9 +3019,11 @@ fn unblocked<DB: DatabaseLike>(
         });
     }
     let uncarried = grant.exclusions().iter().find(|excluded| {
-        !carried
-            .iter()
-            .any(|column| same_column::<DB>(column, excluded.column()))
+        excluded.columns().iter().any(|column| {
+            !carried
+                .iter()
+                .any(|carried| same_column::<DB>(carried, column))
+        })
     });
     match uncarried {
         None => Ok(()),
@@ -3160,33 +3188,90 @@ fn within_call<DB: DatabaseLike>(
     )
 }
 
-/// The cap `cap` puts on the rows of `table`, each joining `joined`, its pairs read from
+/// The call a cap or an exclusion of pairs compares a row's operands with, and the rows it
+/// keeps.
+struct PairsCall<'a, 'db, DB: DatabaseLike> {
+    /// The helper returning the pairs.
+    function: &'db DB::Function,
+    /// The arguments the row's arm passes to it.
+    arguments: &'a [Value],
+    /// What it returns for them.
+    set: &'a HelperSet<'db, DB>,
+    /// The operands naming each row's pair, one per column the helper returns.
+    operands: &'a [CapOperand<'db, DB>],
+    /// The setting whose absence lifts a cap.
+    lift: Option<&'a UnsetSetting<'db>>,
+    /// Whether the rows naming a pair the helper returns are kept or the others.
+    keeps: CapKeeps,
+}
+
+impl<'a, 'db, DB: DatabaseLike> PairsCall<'a, 'db, DB> {
+    /// The call `cap` keeps the rows within.
+    fn within(cap: &'a RowCap<'db, DB>) -> Self {
+        Self {
+            function: cap.function(),
+            arguments: cap.arguments(),
+            set: cap.set(),
+            operands: cap.operands(),
+            lift: cap.lift(),
+            keeps: CapKeeps::Within,
+        }
+    }
+
+    /// The call `excluded` keeps the rows outside, compared with `operands`, its columns.
+    fn outside(
+        excluded: &'a sql_traits::structs::ExcludedSet<'db, DB>,
+        operands: &'a [CapOperand<'db, DB>],
+    ) -> Self {
+        Self {
+            function: excluded.function(),
+            arguments: excluded.arguments(),
+            set: excluded.set(),
+            operands,
+            lift: None,
+            keeps: CapKeeps::Outside,
+        }
+    }
+}
+
+/// `columns`, each an operand of the row's pair.
+fn column_operands<'db, DB: DatabaseLike>(columns: &[&'db DB::Column]) -> Vec<CapOperand<'db, DB>> {
+    columns.iter().copied().map(CapOperand::Column).collect()
+}
+
+/// The cap `call` puts on the rows of `table`, each joining `joined`, its pairs read from
 /// the cap's own arms, linked from each held row until [`place_caps`] moves it to the
 /// level's row.
 fn helper_cap<'db, DB: DatabaseLike>(
     function: &str,
     (table, joined): (&DB::Table, &[JoinedRow<'db, DB>]),
-    cap: &RowCap<'db, DB>,
+    call: &PairsCall<'_, 'db, DB>,
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<HelperCap, HelperRefusal> {
-    let (pairs, link, lift) = paired_cap(function, (table, joined), cap, db, registry, |paired| {
-        paired.held_link(cap.operands(), db)
-    })?;
-    Ok(HelperCap { pairs, link, lift })
+    let (pairs, link, lift) =
+        paired_cap(function, (table, joined), call, db, registry, |paired| {
+            paired.held_link(call.operands, db)
+        })?;
+    Ok(HelperCap {
+        pairs,
+        link,
+        lift,
+        keeps: call.keeps,
+    })
 }
 
-/// The cap `cap` puts on the edge rows of `table`, its operands read on each edge row.
+/// The cap `call` puts on the edge rows of `table`, its operands read on each edge row.
 fn edge_cap<DB: DatabaseLike>(
     function: &str,
     table: &DB::Table,
-    cap: &RowCap<'_, DB>,
+    call: &PairsCall<'_, '_, DB>,
     db: &DB,
     registry: &FunctionRegistry,
 ) -> Result<EdgeCap, HelperRefusal> {
     let (pairs, (columns, literals), lift) =
-        paired_cap(function, (table, &[]), cap, db, registry, |paired| {
-            let operands = paired.operands(cap.operands(), db)?;
+        paired_cap(function, (table, &[]), call, db, registry, |paired| {
+            let operands = paired.operands(call.operands, db)?;
             Ok((operands.own(), operands.literals))
         })?;
     Ok(EdgeCap {
@@ -3194,28 +3279,55 @@ fn edge_cap<DB: DatabaseLike>(
         columns,
         literals,
         lift,
+        keeps: call.keeps,
     })
 }
 
-/// The pairs `cap` on the rows of `table` keeps them by, each row's pair as `link` reads
+/// The pairs `call` on the rows of `table` keeps them by, each row's pair as `link` reads
 /// it, and the value whose absence lifts the cap.
+///
+/// A row holding `NULL` in a column it compares with the pairs it stays outside, or the
+/// pairs holding `NULL` in a column, make the comparison `NULL`, which drops the row where
+/// no tuple names it, so the exclusion is refused unless both sides are proven `NOT NULL`.
 fn paired_cap<'db, DB: DatabaseLike, L>(
     function: &str,
     (table, joined): (&DB::Table, &[JoinedRow<'db, DB>]),
-    cap: &RowCap<'db, DB>,
+    call: &PairsCall<'_, 'db, DB>,
     db: &DB,
     registry: &FunctionRegistry,
     link: impl FnOnce(&PairedCap<'_, 'db, DB>) -> Result<L, HelperRefusal>,
 ) -> Result<(HelperPairs, L, Option<DeclaredSource>), HelperRefusal> {
-    let called = cap.function();
+    let called = call.function;
     if !registry.declares_helper(called) {
         return Err(HelperRefusal::UndeclaredCallee {
             function: function.to_string(),
             called: called.target_name().to_string(),
         });
     }
+    let nullable = |source| HelperRefusal::NullableExclusion {
+        function: function.to_string(),
+        excluded: registry.resolved_target_name(&called.target_name()),
+        source: Box::new(source),
+    };
+    if call.keeps == CapKeeps::Outside {
+        let compared = call.operands.iter().find_map(|operand| match operand {
+            CapOperand::Column(column) if column.is_nullable(db) != Ok(false) => Some(column),
+            CapOperand::Column(_) | CapOperand::Joined { .. } | CapOperand::Value(_) => None,
+        });
+        if let Some(column) = compared {
+            return Err(nullable(NullableExclusion::Compared {
+                table: table_identity(table).to_string(),
+                column: ColumnName::from_stored(column.stored_column_name()),
+            }));
+        }
+    }
     let capped = Capped::Helper(function.to_string());
-    let (pairs, rows) = helper_pairs(&capped, called, cap.arguments(), cap.set(), db, registry)?;
+    let (pairs, rows) = helper_pairs(&capped, called, call.arguments, call.set, db, registry)?;
+    if call.keeps == CapKeeps::Outside {
+        if let Some(source) = nullable_pairs(&pairs, db) {
+            return Err(nullable(source));
+        }
+    }
     let paired = PairedCap {
         function,
         table,
@@ -3227,8 +3339,8 @@ fn paired_cap<'db, DB: DatabaseLike, L>(
         },
     };
     let link = link(&paired)?;
-    let lift = cap
-        .lift()
+    let lift = call
+        .lift
         .map(|lift| {
             absent_source(lift, registry).map_err(|reason| HelperRefusal::Lift {
                 function: function.to_string(),

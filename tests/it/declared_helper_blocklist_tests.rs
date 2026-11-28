@@ -673,6 +673,212 @@ fn a_pair_exclusion_with_a_nullable_side_is_refused() {
     }
 }
 
+/// The exclusion every arm of [`arm_pair_blocks`] writes on its row `m` or `n`.
+pub(crate) const ARM_PAIR_EXCLUDED: &str = "NOT (({row}.organization_namespace_id, \
+     {row}.organization_id) IN (SELECT * FROM authz.blocking_organizations()))";
+
+/// [`PAIR_BLOCKS`] with notes on each organization, which its members read through the
+/// pairs `authz.member_organizations()` returns and their authors through the notes
+/// `authz.authored_notes()` returns, each arm keeping only the rows `excluded` holds for
+/// with `{row}` naming the arm's row, every row where `excluded` is empty.
+pub(crate) fn arm_pair_blocks(excluded: &str) -> String {
+    let kept = |row: &str| {
+        if excluded.is_empty() {
+            String::new()
+        } else {
+            format!(" AND {}", excluded.replace("{row}", row))
+        }
+    };
+    let (member, note) = (kept("m"), kept("n"));
+    format!(
+        "{PAIR_BLOCKS}
+         GRANT SELECT ON memberships TO authz_owner;
+         CREATE TABLE organization_notes (id TEXT PRIMARY KEY,
+           organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+           author_id TEXT NOT NULL,
+           FOREIGN KEY (organization_namespace_id, organization_id)
+             REFERENCES organizations (namespace_id, id));
+         GRANT SELECT ON organization_notes TO authz_owner;
+         CREATE FUNCTION authz.member_organizations()
+         RETURNS TABLE (namespace_id TEXT, id TEXT)
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT m.organization_namespace_id, m.organization_id FROM public.memberships m
+           WHERE m.user_id = current_setting('app.user_id', true){member}
+         $$;
+         CREATE FUNCTION authz.authored_notes() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT n.id FROM public.organization_notes n
+           WHERE n.author_id = current_setting('app.user_id', true){note}
+         $$;
+         ALTER FUNCTION authz.member_organizations() OWNER TO authz_owner;
+         ALTER FUNCTION authz.authored_notes() OWNER TO authz_owner;
+         ALTER TABLE organization_notes ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY organization_notes_members ON organization_notes FOR SELECT
+           USING ((organization_namespace_id, organization_id)
+             IN (SELECT * FROM authz.member_organizations()));
+         CREATE POLICY organization_notes_authors ON organization_notes FOR SELECT
+           USING (id IN (SELECT authz.authored_notes()));"
+    )
+}
+
+pub(crate) const ARM_PAIR_HELPERS: &[&str] = &[
+    "authz.blocking_organizations",
+    "authz.member_organizations",
+    "authz.authored_notes",
+];
+
+fn model_of_arm_pairs(sql: &str) -> String {
+    crate::declared_helper_tests::model(sql, ARM_PAIR_HELPERS)
+}
+
+/// An arm keeping only the rows whose pair another helper does not return subtracts those
+/// pairs, from the pairs a helper returns and from the rows of a level alike, in every
+/// spelling.
+#[test]
+fn a_pair_exclusion_in_a_helper_arm_subtracts_the_helpers_pairs() {
+    let sql = arm_pair_blocks(ARM_PAIR_EXCLUDED);
+    for policy in ["organization_notes_members", "organization_notes_authors"] {
+        let read = using_of(&sql, ARM_PAIR_HELPERS, policy);
+        assert_eq!(read.confidence, ConfidenceLevel::A, "{policy}: {read:?}");
+    }
+    let dsl = model_of_arm_pairs(&sql);
+    assert_eq!(
+        dsl.matches("but not blocking_organizations from ").count(),
+        2,
+        "{dsl}"
+    );
+    for spelling in [
+        "({row}.organization_namespace_id, {row}.organization_id) \
+         NOT IN (SELECT * FROM authz.blocking_organizations())",
+        "({row}.organization_namespace_id, {row}.organization_id) \
+         <> ALL (SELECT * FROM authz.blocking_organizations())",
+    ] {
+        assert_eq!(
+            model_of_arm_pairs(&arm_pair_blocks(spelling)),
+            dsl,
+            "`{spelling}`"
+        );
+    }
+}
+
+/// A column of the arm's row or of the pairs the helper returns that may hold `NULL`
+/// leaves the comparison `NULL`, which drops the row where no tuple names it.
+#[test]
+fn a_pair_exclusion_in_a_helper_arm_with_a_nullable_side_is_refused() {
+    let sql = arm_pair_blocks(ARM_PAIR_EXCLUDED);
+    for (sql, column) in [
+        (
+            sql.replace(
+                "organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,\n           \
+                 author_id",
+                "organization_namespace_id TEXT NOT NULL, organization_id TEXT,\n           \
+                 author_id",
+            ),
+            "'public.organization_notes.organization_id'",
+        ),
+        (
+            sql.replace(
+                "  organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,\n  \
+                 principal_id TEXT NOT NULL,\n  PRIMARY KEY (organization_namespace_id, \
+                 organization_id, principal_id),",
+                "  organization_namespace_id TEXT, organization_id TEXT NOT NULL,\n  \
+                 principal_id TEXT NOT NULL,",
+            ),
+            "organization_blocks.organization_namespace_id",
+        ),
+    ] {
+        assert_ne!(sql, arm_pair_blocks(ARM_PAIR_EXCLUDED), "{column} is made nullable");
+        let reason = refusal_of(&sql, ARM_PAIR_HELPERS, "organization_notes_authors");
+        assert!(
+            reason.contains("excludes the set 'authz.blocking_organizations' returns")
+                && reason.contains(column)
+                && reason.contains("provably non-null"),
+            "{column}: {reason}"
+        );
+    }
+}
+
+/// [`PAIR_BLOCKS`] with `authz.blocking_organizations` returning only the blocks given for
+/// its argument, a reason the `CHECK` admits only `'spam'` for.
+pub(crate) fn reasoned_blocks(sql: &str) -> String {
+    sql.replace(
+        "  principal_id TEXT NOT NULL,\n",
+        "  principal_id TEXT NOT NULL,\n  reason TEXT NOT NULL CHECK (reason IN ('spam')),\n",
+    )
+    .replace(
+        "authz.blocking_organizations() RETURNS",
+        "authz.blocking_organizations(r TEXT) RETURNS",
+    )
+    .replace(
+        "WHERE b.principal_id = current_setting('app.user_id', true)",
+        "WHERE b.principal_id = current_setting('app.user_id', true) AND b.reason = r",
+    )
+    .replace(
+        "ALTER FUNCTION authz.blocking_organizations()",
+        "ALTER FUNCTION authz.blocking_organizations(TEXT)",
+    )
+}
+
+/// `NOT ((x, y) IN (<no row>))` holds for every row, so an arm's exclusion whose call
+/// returns no pair takes nothing away from the notes or the pairs it returns.
+#[test]
+fn a_pair_exclusion_in_a_helper_arm_returning_no_row_takes_nothing_away() {
+    let banned = model_of_arm_pairs(&reasoned_blocks(&arm_pair_blocks(
+        &ARM_PAIR_EXCLUDED.replace(
+            "authz.blocking_organizations()",
+            "authz.blocking_organizations('ban')",
+        ),
+    )));
+    let unexcluded = model_of_arm_pairs(&reasoned_blocks(&arm_pair_blocks("")));
+    for type_name in ["organization_notes", "member_organizations_pair"] {
+        let definitions = relation_definitions(&unexcluded, type_name);
+        assert!(!definitions.is_empty(), "{type_name}: {unexcluded}");
+        assert_eq!(
+            relation_definitions(&banned, type_name),
+            definitions,
+            "{type_name}"
+        );
+    }
+}
+
+/// An exclusion on columns that name neither the level's row nor the arm's own row alone
+/// is read on each row of the arm held as its own object.
+#[test]
+fn a_pair_exclusion_beside_another_object_is_subtracted_from_each_held_row() {
+    let sql = format!(
+        "{}
+         CREATE TABLE topics (id TEXT PRIMARY KEY);
+         CREATE TABLE topic_notes (topic_id TEXT NOT NULL REFERENCES topics (id),
+           note_id TEXT NOT NULL REFERENCES organization_notes (id),
+           organization_namespace_id TEXT NOT NULL, organization_id TEXT NOT NULL,
+           author_id TEXT NOT NULL, PRIMARY KEY (topic_id, note_id));
+         GRANT SELECT ON topic_notes TO authz_owner;
+         CREATE FUNCTION authz.noted_topics() RETURNS SETOF TEXT
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = '' AS $$
+           SELECT t.topic_id FROM public.topic_notes t
+           WHERE t.author_id = current_setting('app.user_id', true)
+             AND {}
+         $$;
+         ALTER FUNCTION authz.noted_topics() OWNER TO authz_owner;
+         ALTER TABLE topics ENABLE ROW LEVEL SECURITY;
+         CREATE POLICY topics_noted ON topics FOR SELECT
+           USING (id IN (SELECT authz.noted_topics()));",
+        arm_pair_blocks(""),
+        ARM_PAIR_EXCLUDED.replace("{row}", "t"),
+    );
+    let mut helpers = ARM_PAIR_HELPERS.to_vec();
+    helpers.push("authz.noted_topics");
+    let read = using_of(&sql, &helpers, "topics_noted");
+    assert_eq!(read.confidence, ConfidenceLevel::A, "{read:?}");
+    let dsl = crate::declared_helper_tests::model(&sql, &helpers);
+    let held = relation_definitions(&dsl, "topic_notes");
+    assert!(
+        held.iter()
+            .any(|(_, definition)| definition.contains("but not blocking_organizations from ")),
+        "{dsl}"
+    );
+}
+
 fn model_of_pairs(sql: &str) -> String {
     crate::declared_helper_tests::model(sql, PAIR_BLOCK_HELPERS)
 }
