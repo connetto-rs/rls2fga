@@ -848,7 +848,10 @@ fn excluded_pairs<DB: DatabaseLike>(
 
 /// The first column an arm or a walk of `pairs` returns without a proof it holds no `NULL`,
 /// as [`nullable_projection`] reads a call's.
-fn nullable_pairs<DB: DatabaseLike>(pairs: &HelperPairs, db: &DB) -> Option<NullableExclusion> {
+pub(crate) fn nullable_pairs<DB: DatabaseLike>(
+    pairs: &HelperPairs,
+    db: &DB,
+) -> Option<NullableExclusion> {
     pairs
         .arms
         .iter()

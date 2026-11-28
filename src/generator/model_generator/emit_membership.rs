@@ -2308,8 +2308,9 @@ impl HeldStep<'_> {
             );
             gates.push(combine_union(parts)?);
         }
+        let mut outside = Vec::with_capacity(held.outside.len());
         for cap in &held.caps {
-            gates.push(cap_expr(
+            let capped = cap_expr(
                 (&cap.pairs, cap.lift.as_ref()),
                 held_reach(edge_table, &held.identity, &cap.columns, &cap.literals),
                 GatedObjects::Rows(edge_table),
@@ -2317,9 +2318,13 @@ impl HeldStep<'_> {
                 ctx,
                 table_plan,
                 all_types,
-            )?);
+            );
+            match cap.keeps {
+                CapKeeps::Within => gates.push(capped?),
+                // A call returning no pair takes nothing away.
+                CapKeeps::Outside => outside.extend(capped),
+            }
         }
-        let mut outside = Vec::with_capacity(held.outside.len());
         for helper in &held.outside {
             outside.extend(outside_expr(
                 &helper.call,
@@ -2897,8 +2902,9 @@ fn outside_expr<DB: DatabaseLike>(
 }
 
 /// The rows of the level a grant arm returns, or the pairs an arm of a cap returns where
-/// `level` is `None`, as [`helper_grant_parts`] reads them, kept by each cap on the arm as
-/// one relation, or as [`held_grant_expr`] reads them where the arm's rows are held.
+/// `level` is `None`, as [`helper_grant_parts`] reads them, kept by each cap keeping the rows
+/// within its pairs and outside of the pairs of each cap keeping the others, as one relation,
+/// or as [`held_grant_expr`] reads them where the arm's rows are held.
 ///
 /// A cap read on the level's row has operands the level's row or the arm's own row where the
 /// level's row keys it, so the rows keeping the pair are the ones granting the level's row.
@@ -2918,13 +2924,11 @@ fn kept_grant_parts<DB: DatabaseLike>(
             .collect();
     }
     let parts = helper_grant_parts(grant, level, level_type, ctx, table_plan, all_types);
-    if grant.caps.is_empty() {
+    if grant.caps.is_empty() || parts.is_empty() {
         return parts;
     }
-    let Some(granted) = combine_union(parts) else {
-        return Vec::new();
-    };
-    let mut kept = vec![granted];
+    let mut kept = Vec::with_capacity(grant.caps.len() + 1);
+    let mut outside = Vec::new();
     let mut name = stored_relation_name(grant.table.name());
     let objects = level.map_or(
         GatedObjects::NamedBy {
@@ -2949,7 +2953,7 @@ fn kept_grant_parts<DB: DatabaseLike>(
             // A cap needing more of a row than the level's row names holds its rows.
             CapLink::Held { .. } => return Vec::new(),
         };
-        let Some(capped) = cap_expr(
+        let capped = cap_expr(
             (&cap.pairs, cap.lift.as_ref()),
             reach,
             objects,
@@ -2957,20 +2961,51 @@ fn kept_grant_parts<DB: DatabaseLike>(
             ctx,
             table_plan,
             all_types,
-        ) else {
-            return Vec::new();
+        );
+        let side = match cap.keeps {
+            CapKeeps::Within => {
+                let Some(capped) = capped else {
+                    return Vec::new();
+                };
+                kept.push(capped);
+                "_within_"
+            }
+            CapKeeps::Outside => {
+                // A call returning no pair takes nothing away.
+                let Some(capped) = capped else {
+                    continue;
+                };
+                outside.push(capped);
+                "_outside_"
+            }
         };
-        name.push_str("_within_");
+        name.push_str(side);
         name.push_str(&helper_call_relation_name(
             &cap.pairs.function,
             &cap.pairs.arguments,
         ));
-        kept.push(capped);
+    }
+    if kept.is_empty() && outside.is_empty() {
+        return parts;
+    }
+    // `parts` is not empty, so it unions into one expression.
+    let granted = match <[_; 1]>::try_from(parts) {
+        Ok([part]) => part,
+        Err(parts) => UsersetExpr::Union(parts),
+    };
+    kept.insert(0, granted);
+    let mut rule = match <[_; 1]>::try_from(kept) {
+        Ok([granted]) => granted,
+        Err(kept) => UsersetExpr::Intersection(kept),
+    };
+    if let Some(subtract) = combine_union(outside) {
+        rule = UsersetExpr::Exclusion {
+            base: Box::new(rule),
+            subtract: Box::new(subtract),
+        };
     }
     let plan = helper_level_plan(level_type, level, table_plan, all_types);
-    vec![UsersetExpr::Computed(
-        plan.ensure_computed(name, UsersetExpr::Intersection(kept)),
-    )]
+    vec![UsersetExpr::Computed(plan.ensure_computed(name, rule))]
 }
 
 /// The rows of the level a grant arm returns, or the pairs an arm of a cap returns where
@@ -3035,10 +3070,22 @@ fn held_grant_expr<DB: DatabaseLike>(
         ));
     }
     for cap in &grant.caps {
-        kept.push(held_cap_expr(
-            cap, grant, held, &row_type, ctx, table_plan, all_types,
-        )?);
-        name.push_str("_within_");
+        let capped = held_cap_expr(cap, grant, held, &row_type, ctx, table_plan, all_types);
+        let side = match cap.keeps {
+            CapKeeps::Within => {
+                kept.push(capped?);
+                "_within_"
+            }
+            CapKeeps::Outside => {
+                // A call returning no pair takes nothing away.
+                let Some(capped) = capped else {
+                    continue;
+                };
+                blocking.push(capped);
+                "_outside_"
+            }
+        };
+        name.push_str(side);
         name.push_str(&helper_call_relation_name(
             &cap.pairs.function,
             &cap.pairs.arguments,

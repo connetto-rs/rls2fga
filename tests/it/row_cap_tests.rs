@@ -6,7 +6,7 @@ use rls2fga::types::{ConfidenceLevel, TranslationNote};
 use sqlparser::ast::DataType;
 
 use crate::support::deployment::{deployment, principal, typed_caller};
-use crate::support::footgun::{db_of, relation_definition, type_names};
+use crate::support::footgun::{db_of, relation_definition, relation_definitions, type_names};
 
 /// Organizations a member reads, and the notes of those organizations, capped by the literal
 /// kind `organization` while an app installation acts for the member, and the resources a
@@ -1571,6 +1571,57 @@ fn a_walk_over_pairs_keyed_by_two_columns_translates() {
             );
         }
     }
+}
+
+/// A walk following only the edges whose parent pair another helper does not return
+/// subtracts those pairs from each edge it follows.
+#[test]
+fn a_walk_over_pairs_skipping_excluded_parents_subtracts_them_from_each_edge() {
+    let schema = format!(
+        "{}
+         CREATE TABLE team_seals (team_namespace_id UUID NOT NULL, team_id UUID NOT NULL,
+           PRIMARY KEY (team_namespace_id, team_id));
+         GRANT SELECT ON team_seals TO authz_owner;
+         CREATE FUNCTION authz.sealed_teams() RETURNS TABLE (namespace_id UUID, id UUID)
+         LANGUAGE sql STABLE SECURITY DEFINER SET search_path = pg_catalog, pg_temp AS $$
+           SELECT seal.team_namespace_id, seal.team_id FROM public.team_seals seal
+         $$;
+         ALTER FUNCTION authz.sealed_teams() OWNER TO authz_owner;",
+        pair_walk(&format!(
+            "{PAIR_WALK_UP}
+    WHERE NOT ((parent.parent_namespace_id, parent.parent_id)
+      IN (SELECT * FROM authz.sealed_teams()))"
+        )),
+    );
+    let mut helpers = PAIR_WALK_HELPERS.to_vec();
+    helpers.push("authz.sealed_teams");
+    let translator =
+        TranslatorBuilder::new(deployment([typed_caller("app.user_id", DataType::Uuid)]))
+            .with_min_confidence(ConfidenceLevel::B)
+            .with_declared_helpers(helpers)
+            .build();
+    let using = translator
+        .classify(&db_of(&schema))
+        .into_iter()
+        .find(|classified| classified.name() == "grantees_select")
+        .expect("grantees_select should classify")
+        .using_classification()
+        .expect("grantees_select USING should classify")
+        .clone();
+    assert_eq!(using.confidence, ConfidenceLevel::A, "{:?}", using.pattern);
+    let dsl = translator
+        .translate(&db_of(&schema))
+        .expect("the schema plans")
+        .outputs()
+        .expect("the schema translates")
+        .model()
+        .clone();
+    assert!(
+        relation_definitions(&dsl, "team_parents")
+            .iter()
+            .any(|(_, definition)| definition.contains("but not sealed_teams from ")),
+        "{dsl}"
+    );
 }
 
 /// A walk over pairs reaches only pairs its seed returns, so a seed keeping a kind the

@@ -132,7 +132,7 @@ impl ClockThreshold {
             ClockReading::Instant => Ok(interval.add_to_timestamptz(request_time, zone)?),
             ClockReading::LocalTimestamp => local(request_time.to_timestamp(zone)?),
             ClockReading::LocalDate => local(
-                PgTimestamp::new(request_time.to_date(zone)?, PgTime::MIDNIGHT)
+                PgTimestamp::new(request_time.to_date(zone), PgTime::MIDNIGHT)
                     .ok_or(DateTimeError::TimestampOutOfRange)?,
             ),
             ClockReading::FixedLocal(written) => local(written),
