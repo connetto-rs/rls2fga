@@ -841,6 +841,33 @@ fn a_pair_exclusion_in_a_helper_arm_returning_no_row_takes_nothing_away() {
     }
 }
 
+/// `(x, y) IN (<no row>)` holds for no row, so an arm kept within the pairs of a call
+/// returning no pair grants nothing, to the members and to the authors alike.
+#[test]
+fn a_helper_arm_kept_within_pairs_returning_no_row_grants_nothing() {
+    let within = |reason: &str| {
+        reasoned_blocks(&arm_pair_blocks(&format!(
+            "(({{row}}.organization_namespace_id, {{row}}.organization_id) \
+             IN (SELECT * FROM authz.blocking_organizations('{reason}')))"
+        )))
+    };
+    let banned = within("ban");
+    for policy in ["organization_notes_members", "organization_notes_authors"] {
+        let read = using_of(&banned, ARM_PAIR_HELPERS, policy);
+        assert_eq!(read.confidence, ConfidenceLevel::A, "{policy}: {read:?}");
+    }
+    let selecting = |sql: &str| {
+        let dsl = model_of_arm_pairs(sql);
+        relation_definition(&dsl, "organization_notes", "can_select")
+            .unwrap_or_else(|| panic!("organization_notes is selectable: {dsl}"))
+    };
+    let granting = ["authored_notes", "member_organizations from "];
+    let spam = selecting(&within("spam"));
+    assert!(granting.iter().all(|arm| spam.contains(arm)), "{spam}");
+    let ban = selecting(&banned);
+    assert!(!granting.iter().any(|arm| ban.contains(arm)), "{ban}");
+}
+
 /// An arm kept while a note has not expired grants by one rule per way the bound holds, and
 /// the pairs it stays outside are taken from all of them.
 #[test]
