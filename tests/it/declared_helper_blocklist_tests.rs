@@ -841,6 +841,33 @@ fn a_pair_exclusion_in_a_helper_arm_returning_no_row_takes_nothing_away() {
     }
 }
 
+/// An arm kept while a note has not expired grants by one rule per way the bound holds, and
+/// the pairs it stays outside are taken from all of them.
+#[test]
+fn a_pair_exclusion_beside_a_time_bound_is_subtracted_from_every_rule() {
+    let plain = arm_pair_blocks(ARM_PAIR_EXCLUDED);
+    let bounded = plain
+        .replace(
+            "author_id TEXT NOT NULL,",
+            "author_id TEXT NOT NULL, expires_at TIMESTAMPTZ,",
+        )
+        .replace(
+            "WHERE n.author_id = current_setting('app.user_id', true)",
+            "WHERE n.author_id = current_setting('app.user_id', true)
+               AND (n.expires_at IS NULL OR n.expires_at > now())",
+        );
+    assert_ne!(bounded, plain, "the bound is written");
+    let read = using_of(&bounded, ARM_PAIR_HELPERS, "organization_notes_authors");
+    assert_eq!(read.confidence, ConfidenceLevel::A, "{read:?}");
+    let dsl = model_of_arm_pairs(&bounded);
+    assert!(
+        dsl.lines()
+            .any(|line| line.contains(" or ")
+                && line.contains("but not blocking_organizations from ")),
+        "{dsl}"
+    );
+}
+
 /// [`arm_pair_blocks`] without exclusions, with topics read by the authors of their notes
 /// through `authz.noted_topics()`, whose arm keeps only the topic notes outside the pairs
 /// `call` returns.
